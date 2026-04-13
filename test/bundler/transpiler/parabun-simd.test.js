@@ -181,6 +181,44 @@ describe("bun:simd", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("exposes isWasmAvailable() reporting whether the v128 fast path is live", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-wasm-available",
+      `
+        import { isWasmAvailable } from "bun:simd";
+        console.log(isWasmAvailable() === true ? "WASM_ON" : "WASM_OFF");
+      `,
+    );
+    // In supported Bun builds, v128 is available and the fast path must load.
+    expect(stdout).toBe("WASM_ON");
+    expect(exitCode).toBe(0);
+  });
+
+  it("mulScalar — WASM SIMD kernel correctness at threshold boundaries", async () => {
+    // Probes the WASM v128 fast path at sizes that exercise: pre-threshold
+    // (scalar path), just over threshold (SIMD + tiny tail), and a large-ish
+    // non-multiple-of-4 size (many SIMD iterations + scalar tail).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-wasm-mulscalar",
+      `
+        import { mulScalar } from "bun:simd";
+        const sizes = [3, 4, 5, 17, 127, 1023, 4097];
+        for (const n of sizes) {
+          const a = new Float32Array(n);
+          for (let i = 0; i < n; i++) a[i] = i + 1;
+          const out = mulScalar(a, 2.5);
+          let ok = out.length === n;
+          for (let i = 0; i < n && ok; i++) {
+            if (Math.abs(out[i] - (i + 1) * 2.5) > 1e-5) ok = false;
+          }
+          console.log(n + ":" + (ok ? "OK" : "FAIL"));
+        }
+      `,
+    );
+    expect(stdout).toBe("3:OK\n4:OK\n5:OK\n17:OK\n127:OK\n1023:OK\n4097:OK");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects mismatched array lengths", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-lenerr",
