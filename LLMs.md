@@ -154,6 +154,36 @@ who prefer not to use `|>`.
 
 Implementation: `src/js/bun/pipeline.ts`.
 
+### `bun:simd` — vector primitives for typed arrays
+
+Combinators over `Float32Array` that exploit SIMD-friendly tight loops. The
+current implementation uses plain typed-array loops — JSC's FTL tier
+auto-vectorizes these on hot paths. A hand-coded WASM v128 fast path for
+large-array ops is tracked as follow-up work.
+
+```
+import { mulScalar, add, dot, simdMap } from "bun:simd";
+const y = mulScalar(new Float32Array([1, 2, 3, 4]), 3);    // [3, 6, 9, 12]
+const z = add(new Float32Array([1, 2]), new Float32Array([10, 20])); // [11, 22]
+const d = dot(new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])); // 32
+```
+
+Exports: `mulScalar(a, c)`, `addScalar(a, c)`, `add(a, b)`, `mul(a, b)`,
+`sum(a)`, `dot(a, b)`, `simdMap(fn, a)`. Element-wise ops throw `RangeError`
+on length mismatch; all ops throw `TypeError` for non-`Float32Array` inputs.
+
+`simdMap(fn, a)` probes the mapping function at three inputs to detect affine
+kernels (`x * k1 + k0`); matched kernels dispatch to a scalar-multiply-plus-add
+fast path. Unmatched kernels fall back to a plain scalar loop. Only sound for
+`pure` functions — the purity contract guarantees the probe calls are
+observably equivalent.
+
+Implementation: `src/js/bun/simd.ts`.
+
 ## Pending Work
 
-- **WebGPU compute dispatch** — GPU-accelerated pure functions
+- **WASM v128 fast path for `bun:simd`** — hand-coded f32x4 kernels for the
+  large-array case, with JS-side copy-in/copy-out plumbing. Current JS-only
+  implementation relies on JIT auto-vectorization, which is best-effort.
+- **Float64Array support in `bun:simd`** — mirrors the Float32Array surface
+  using f64x2 ops when WASM fast path lands.
