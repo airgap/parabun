@@ -182,22 +182,25 @@ Implementation: `src/js/bun/simd.ts`.
 
 Benchmark (`bench/simd.pjs`, release build, N = 100,000, best-of-200):
 
-| op                  | `.map`/`.reduce` | tight loop | `bun:simd` |
-|---------------------|-----------------:|-----------:|-----------:|
-| mulScalar(a, 3)     | 766 µs           | 52 µs      | 54 µs      |
-| add(a, b)           | 864 µs           | 72 µs      | 77 µs      |
-| sum(a)              | 542 µs           | 39 µs      | 40 µs      |
-| dot(a, b)           | 641 µs           | 48 µs      | 47 µs      |
-| simdMap(x*3+7)      | 778 µs           | 72 µs      | 60 µs      |
-| simdMap(sqrt(x²+1)) | 770 µs           | 125 µs     | 319 µs     |
+| op                  | `.map`/`.reduce` | tight loop | `bun:simd` | notes          |
+|---------------------|-----------------:|-----------:|-----------:|----------------|
+| mulScalar(a, 3)     | 832 µs           | 54 µs      | **26 µs**  | WASM v128      |
+| add(a, b)           | 920 µs           | 75 µs      | 76 µs      | JS fallback    |
+| sum(a)              | 583 µs           | 43 µs      | 41 µs      | JS fallback    |
+| dot(a, b)           | 707 µs           | 51 µs      | 50 µs      | JS fallback    |
+| simdMap(x*3+7)      | 828 µs           | 63 µs      | 57 µs      | affine ⇒ WASM  |
+| simdMap(sqrt(x²+1)) | 850 µs           | 138 µs     | 362 µs     | non-affine     |
 
-Versus idiomatic `.map`/`.reduce`: 10–14× faster at N = 100 K, 6–14× at N = 1 M.
-Versus hand-written tight for-loops: within 5 % on primitives. The affine
-`simdMap` fast path wins against inline code because it dispatches through a
-simpler shape JSC's FTL optimizes better. The non-affine `simdMap` fallback
-loses 2–3× because the function-type parameter is a polymorphic call site.
-Below N ≈ 1 K, the per-call overhead (typecheck + function dispatch) dominates
-and `bun:simd` is slower than an inline loop.
+`mulScalar` (hand-coded f32x4 WASM kernel) is **~2× faster than a tight JS
+loop** at N ≥ 100 K and **14–32× faster than idiomatic `.map`/`.reduce`**.
+`simdMap` routes affine kernels through `mulScalar` when the offset is zero,
+inheriting the same fast path. The remaining primitives still use JS tight
+loops and sit within ~5 % of hand-written inline code — follow-up milestones
+wire them to WASM f32x4 kernels using the same assembler harness.
+
+The non-affine `simdMap` fallback is 2–3× slower than inline because the
+function-type parameter is a polymorphic call site and JSC can't inline the
+kernel. Below N ≈ 1 K, per-call overhead dominates regardless of path.
 
 ## Pending Work
 
