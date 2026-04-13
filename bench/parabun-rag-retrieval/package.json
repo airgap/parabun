@@ -1,0 +1,8 @@
+{
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.39"
+  }
+}

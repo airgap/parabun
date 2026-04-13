@@ -1,0 +1,198 @@
+// Drop-in: ParabunVectorStore extends VectorStore from @langchain/core. Same
+// constructor, same addVectors / similaritySearchVectorWithScore signatures,
+// so a user swaps `new MemoryVectorStore(...)` → `new ParabunVectorStore(...)`
+// and nothing else changes.
+//
+// Internals that differ from FakeVectorStore:
+//
+//   - addVectors() packs the input number[][] into a SAB-backed Float32Array
+//     and normalizes each row in place. Cosine similarity is scale-invariant
+//     so this doesn't change any score — but it lets the search path skip
+//     per-row magnitude computation. We also cache |query| once per search,
+//     instead of recomputing it inside every cosine() call like
+//     FakeVectorStore does.
+//
+//   - similaritySearchVectorWithScore() chunks the matrix across a worker
+//     pool via bun:parallel. SharedArrayBuffer means each worker reads the
+//     same physical memory — no ~75 MB structured-clone per call. Workers
+//     return partial top-K (sized by k); main merges, so postMessage
+//     payloads stay small.
+//
+// The returned score is still cosine in the FakeVectorStore sense:
+// dot(query, row) / |query|, which is exactly what FakeVectorStore computes
+// for already-normalized rows (and different by a constant factor for
+// un-normalized rows, but the *ordering* — all that similaritySearch cares
+// about — is preserved).
+
+import parallel from "bun:parallel";
+import { VectorStore } from "@langchain/core/vectorstores";
+import { Document } from "@langchain/core/documents";
+import { Embeddings } from "@langchain/core/embeddings";
+import { generate, N, D, K } from "./gen.ts";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+class NoopEmbeddings extends Embeddings {
+  async embedDocuments(texts) { return texts.map(() => []); }
+  async embedQuery(_t) { return []; }
+}
+
+pure function scoreChunk(chunk) {
+  const emb = chunk.emb;
+  const query = chunk.query;
+  const dim = chunk.dim;
+  const base = chunk.base;
+  const k = chunk.k;
+  const queryNormInv = chunk.queryNormInv;
+  const n = emb.length / dim;
+
+  const topScores = new Float32Array(k);
+  const topIdx = new Int32Array(k);
+  for (let j = 0; j < k; j++) {
+    topScores[j] = -Infinity;
+    topIdx[j] = -1;
+  }
+
+  for (let i = 0; i < n; i++) {
+    const off = i * dim;
+    let s = 0;
+    for (let d = 0; d < dim; d++) s += emb[off + d] * query[d];
+    const score = s * queryNormInv;
+    if (score > topScores[k - 1]) {
+      let j = k - 1;
+      while (j > 0 && topScores[j - 1] < score) {
+        topScores[j] = topScores[j - 1];
+        topIdx[j] = topIdx[j - 1];
+        j--;
+      }
+      topScores[j] = score;
+      topIdx[j] = base + i;
+    }
+  }
+
+  const outScores = new Array(k);
+  const outIdx = new Array(k);
+  for (let j = 0; j < k; j++) {
+    outScores[j] = topScores[j];
+    outIdx[j] = topIdx[j];
+  }
+  return { scores: outScores, idx: outIdx };
+}
+
+class ParabunVectorStore extends VectorStore {
+  _vectorstoreType() { return "parabun-memory"; }
+  constructor(embeddings, opts = {}) {
+    super(embeddings, opts);
+    this.dim = 0;
+    this.count = 0;
+    this.embeddings_ = null;
+    this.docs_ = [];
+  }
+
+  async addVectors(vectors, documents) {
+    const n = vectors.length;
+    if (n === 0) return;
+    const dim = vectors[0].length;
+    if (this.dim !== 0 && dim !== this.dim) {
+      throw new Error(`dimension mismatch: store has ${this.dim}, got ${dim}`);
+    }
+    this.dim = dim;
+
+    const newCount = this.count + n;
+    const buf = new SharedArrayBuffer(newCount * dim * 4);
+    const next = new Float32Array(buf);
+    if (this.embeddings_ !== null) next.set(this.embeddings_);
+    for (let i = 0; i < n; i++) {
+      const row = vectors[i];
+      const off = (this.count + i) * dim;
+      // Pack then normalize — same numeric pass as FakeVectorStore's first
+      // cosine call would do, but amortized once across every future search.
+      let mag2 = 0;
+      for (let d = 0; d < dim; d++) {
+        const v = row[d];
+        next[off + d] = v;
+        mag2 += v * v;
+      }
+      const inv = mag2 > 0 ? 1 / Math.sqrt(mag2) : 0;
+      for (let d = 0; d < dim; d++) next[off + d] *= inv;
+    }
+    this.embeddings_ = next;
+    for (let i = 0; i < n; i++) this.docs_.push(documents[i]);
+    this.count = newCount;
+  }
+
+  async addDocuments(documents) {
+    const texts = documents.map((d) => d.pageContent);
+    return this.addVectors(await this.embeddings.embedDocuments(texts), documents);
+  }
+
+  async similaritySearchVectorWithScore(query, k, _filter) {
+    const dim = this.dim;
+    const total = this.count;
+    if (total === 0 || k <= 0) return [];
+
+    const qbuf = new SharedArrayBuffer(dim * 4);
+    const q = new Float32Array(qbuf);
+    let qmag2 = 0;
+    for (let d = 0; d < dim; d++) {
+      const v = query[d];
+      q[d] = v;
+      qmag2 += v * v;
+    }
+    const queryNormInv = qmag2 > 0 ? 1 / Math.sqrt(qmag2) : 0;
+
+    const chunkN = Math.ceil(total / CONCURRENCY);
+    const chunks = [];
+    for (let c = 0; c < CONCURRENCY; c++) {
+      const start = c * chunkN;
+      if (start >= total) break;
+      const end = Math.min(start + chunkN, total);
+      chunks.push({
+        emb: this.embeddings_.subarray(start * dim, end * dim),
+        query: q,
+        dim,
+        base: start,
+        k,
+        queryNormInv,
+      });
+    }
+
+    const partials = await pmap(scoreChunk, chunks, { concurrency: CONCURRENCY });
+
+    const merged = [];
+    for (const p of partials) {
+      for (let j = 0; j < k; j++) {
+        if (p.idx[j] !== -1) merged.push({ idx: p.idx[j], score: p.scores[j] });
+      }
+    }
+    merged.sort((a, b) => b.score - a.score);
+    const top = merged.slice(0, k);
+    return top.map((t) => [this.docs_[t.idx], t.score]);
+  }
+}
+
+const tGen0 = Bun.nanoseconds();
+const { vectors, queryArr } = generate();
+const docs = vectors.map((_, i) => new Document({ pageContent: `doc-${i}`, metadata: { id: i } }));
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+const tAdd0 = Bun.nanoseconds();
+const store = new ParabunVectorStore(new NoopEmbeddings({}));
+await store.addVectors(vectors, docs);
+const addMs = (Bun.nanoseconds() - tAdd0) / 1e6;
+
+// Warm the pool — first pmap pays spawn cost.
+pure function warmup(x) { return x; }
+await pmap(warmup, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+
+const tScore0 = Bun.nanoseconds();
+const results = await store.similaritySearchVectorWithScore(queryArr, K);
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+const topStr = results.map(([doc, score]) => `${doc.metadata.id}:${score.toFixed(4)}`).join(",");
+console.log(
+  `parabun gen_ms=${genMs.toFixed(2)} add_ms=${addMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} total_ms=${(genMs + addMs + scoreMs).toFixed(2)} top=[${topStr}]`,
+);
+
+parallel.disposeWorkers();
