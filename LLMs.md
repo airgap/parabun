@@ -156,21 +156,24 @@ Implementation: `src/js/bun/pipeline.ts`.
 
 ### `bun:simd` — vector primitives for typed arrays
 
-Combinators over `Float32Array` that exploit SIMD-friendly tight loops. The
-current implementation uses plain typed-array loops — JSC's FTL tier
-auto-vectorizes these on hot paths. A hand-coded WASM v128 fast path for
-large-array ops is tracked as follow-up work.
+Polymorphic vector primitives over `Float32Array` and `Float64Array`,
+designed for use with `pure` functions and the `|>` pipeline operator. Each
+primitive dispatches by element width: `Float32Array` → hand-assembled f32x4
+WASM kernel, `Float64Array` → f64x2 kernel. JS tight-loop fallbacks are kept
+for both widths.
 
 ```
 import { mulScalar, add, dot, simdMap } from "bun:simd";
-const y = mulScalar(new Float32Array([1, 2, 3, 4]), 3);    // [3, 6, 9, 12]
-const z = add(new Float32Array([1, 2]), new Float32Array([10, 20])); // [11, 22]
-const d = dot(new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])); // 32
+const y32 = mulScalar(new Float32Array([1, 2, 3, 4]), 3);             // [3, 6, 9, 12]
+const y64 = mulScalar(new Float64Array([1, 2, 3, 4]), 3);             // same, f64x2 path
+const z   = add(new Float32Array([1, 2]), new Float32Array([10, 20])); // [11, 22]
+const d   = dot(new Float64Array([1, 2, 3]), new Float64Array([4, 5, 6])); // 32
 ```
 
 Exports: `mulScalar(a, c)`, `addScalar(a, c)`, `add(a, b)`, `mul(a, b)`,
 `sum(a)`, `dot(a, b)`, `simdMap(fn, a)`. Element-wise ops throw `RangeError`
-on length mismatch; all ops throw `TypeError` for non-`Float32Array` inputs.
+on length mismatch and `TypeError` when operands mix `Float32Array` and
+`Float64Array`. All ops throw `TypeError` for non-float typed-array inputs.
 
 `simdMap(fn, a)` probes the mapping function at three inputs to detect affine
 kernels (`x * k1 + k0`); matched kernels dispatch to a scalar-multiply-plus-add
@@ -182,33 +185,45 @@ Implementation: `src/js/bun/simd.ts`.
 
 Benchmark (`bench/simd.pjs`, release build, N = 100,000, best-of-200):
 
-| op                  | `.map`/`.reduce` | tight loop | `bun:simd` | notes           |
-|---------------------|-----------------:|-----------:|-----------:|-----------------|
-| mulScalar(a, 3)     | 841 µs           | 100 µs     | **34 µs**  | f32x4 WASM      |
-| add(a, b)           | 920 µs           | 126 µs     | 116 µs     | f32x4 WASM      |
-| sum(a)              | 575 µs           | 81 µs      | **41 µs**  | f32x4 WASM      |
-| dot(a, b)           | 666 µs           | 51 µs      | 50 µs      | f32x4 WASM      |
-| simdMap(x*3+7)      | 846 µs           | 70 µs      | 58 µs      | affine ⇒ WASM   |
-| simdMap(sqrt(x²+1)) | 823 µs           | 127 µs     | 337 µs     | non-affine      |
+| op                  | array | `.map`/`.reduce` | tight loop | `bun:simd` |
+|---------------------|:-----:|-----------------:|-----------:|-----------:|
+| mulScalar(a, 3)     | F32   | 778 µs           | 46 µs      | **23 µs**  |
+| add(a, b)           | F32   | 857 µs           | 67 µs      | **34 µs**  |
+| sum(a)              | F32   | 542 µs           | 37 µs      | **14 µs**  |
+| dot(a, b)           | F32   | 660 µs           | 46 µs      | **21 µs**  |
+| simdMap(x*3+7)      | F32   | 787 µs           | 54 µs      | 59 µs      |
+| simdMap(sqrt(x²+1)) | F32   | 745 µs           | 118 µs     | 309 µs     |
+| mulScalar(a, 3)     | F64   | 732 µs           | 240 µs     | **51 µs**  |
+| add(a, b)           | F64   | 808 µs           | 286 µs     | **103 µs** |
+| sum(a)              | F64   | 504 µs           | 55 µs      | **30 µs**  |
+| dot(a, b)           | F64   | 597 µs           | 100 µs     | **73 µs**  |
+| simdMap(x*3+7)      | F64   | 740 µs           | 245 µs     | **49 µs**  |
+| simdMap(sqrt(x²+1)) | F64   | 734 µs           | 247 µs     | **128 µs** |
 
-All six primitives ship as hand-assembled f32x4 WASM kernels. The clear wins
-are `mulScalar` (**~3× faster than a tight JS loop** at N ≥ 100 K, **25×
-faster than `.map`**) and `sum` (**~2× faster than tight**, via a v128
-accumulator with horizontal reduce). Binary ops (`add`, `mul`, `dot`) are
-memory-bandwidth bound once the copy-in cost is paid — they still beat tight
-JS loops, but only by a few percent on the whole. Sub-~1 K input sizes are
-dominated by per-call overhead regardless of path; JSC's FTL tight loops
-are usually competitive or slightly faster below that threshold.
+Across both widths the WASM kernels deliver 1.5–3× speedups over JS tight
+loops and 10–35× over idiomatic `.map`/`.reduce` at N = 100 K. F64 sees the
+biggest win because JSC's FTL tier auto-vectorizes f32 tight loops more
+aggressively than f64, so the manual f64x2 kernel clears a larger gap. For
+very large arrays (N ≈ 1 M), binary-op speedups shrink because copy-in of
+16 MB dominates; reduce ops (`sum`, `dot`) can even lose to a tight JS loop
+at that size for F64 — the JS loop avoids the copy entirely.
 
+Sub-~1 K input sizes are dominated by per-call overhead regardless of path.
 `simdMap` routes affine kernels through `mulScalar` when the offset is zero,
-inheriting the same fast path. The non-affine fallback is 2–3× slower than
-inline because the function-type parameter is a polymorphic call site and
-JSC can't inline the kernel.
+inheriting the same fast path. The non-affine F32 fallback is 2–3× slower
+than inline because the function-type parameter is a polymorphic call site
+and JSC can't inline the kernel; the F64 fallback still wins over inline
+because the underlying `out[i] = fn(a[i], i)` form survives auto-vectorization
+better than the `Math.sqrt(x*x+1)` tight loop in JS source.
 
 ## Pending Work
 
-- **Float64Array support in `bun:simd`** — mirrors the Float32Array surface
-  using f64x2 kernels and the same assembler harness.
-- **In-place binary ops** — optional `dstOverwrite: "a"` escape hatch that
-  returns the input buffer instead of a fresh one, eliding the copy-out
-  slice. Semantics change, so gated behind an option.
+- **In-place binary ops for `bun:simd`** — optional `dstOverwrite: "a"`
+  escape hatch that mutates and returns the input buffer instead of a fresh
+  one, eliding the copy-out slice. Semantics change, so gated behind an
+  option.
+- **`bun:simd` zero-copy for large arrays** — for very large inputs (N ≳ 1 M)
+  the copy-in cost dominates binary reduce ops (`sum`, `dot`) and can lose
+  to a tight JS loop on `Float64Array`. A zero-copy path that reads directly
+  from the user's `ArrayBuffer` via `WebAssembly.Memory` sharing would
+  reclaim the gap.

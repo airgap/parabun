@@ -235,4 +235,116 @@ describe("bun:simd", () => {
     expect(stdout).toBe("RANGE_ERROR");
     expect(exitCode).toBe(0);
   });
+
+  // --- Float64Array (f64x2) coverage ---
+
+  it("Float64Array mulScalar", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-f64-mul",
+      `
+        import { mulScalar } from "bun:simd";
+        const out = mulScalar(new Float64Array([1, 2, 3, 4, 5, 6, 7]), 3);
+        console.log(out instanceof Float64Array, Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe("true 3,6,9,12,15,18,21");
+    expect(exitCode).toBe(0);
+  });
+
+  it("Float64Array addScalar", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-f64-add-scalar",
+      `
+        import { addScalar } from "bun:simd";
+        const out = addScalar(new Float64Array([1.5, 2.5, 3.5, 4.5, 5.5]), 10);
+        console.log(out instanceof Float64Array, Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe("true 11.5,12.5,13.5,14.5,15.5");
+    expect(exitCode).toBe(0);
+  });
+
+  it("Float64Array add/mul element-wise", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-f64-vec",
+      `
+        import { add, mul } from "bun:simd";
+        const a = new Float64Array([1, 2, 3, 4, 5]);
+        const b = new Float64Array([10, 20, 30, 40, 50]);
+        console.log(Array.from(add(a, b)).join(","));
+        console.log(Array.from(mul(a, b)).join(","));
+      `,
+    );
+    expect(stdout).toBe("11,22,33,44,55\n10,40,90,160,250");
+    expect(exitCode).toBe(0);
+  });
+
+  it("Float64Array sum and dot", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-f64-reduce",
+      `
+        import { sum, dot } from "bun:simd";
+        const a = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        const b = new Float64Array([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        console.log(sum(a), dot(a, b));
+      `,
+    );
+    // sum = 55, dot = 1*2+2*3+...+10*11 = 440
+    expect(stdout).toBe("55 440");
+    expect(exitCode).toBe(0);
+  });
+
+  it("Float64Array simdMap routes affine kernel to mulScalar", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-f64-map",
+      `
+        import { simdMap } from "bun:simd";
+        pure function triple(x) { return x * 3; }
+        const out = simdMap(triple, new Float64Array([1.1, 2.2, 3.3, 4.4, 5.5]));
+        console.log(out instanceof Float64Array, Array.from(out).map(x => x.toFixed(2)).join(","));
+      `,
+    );
+    expect(stdout).toBe("true 3.30,6.60,9.90,13.20,16.50");
+    expect(exitCode).toBe(0);
+  });
+
+  it("Float64Array WASM kernel at threshold boundaries", async () => {
+    // Sizes exercise: pre-SIMD (scalar only), just-over-stride, many SIMD iters + tail.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-f64-boundaries",
+      `
+        import { mulScalar } from "bun:simd";
+        const sizes = [1, 2, 3, 9, 65, 513, 2049];
+        for (const n of sizes) {
+          const a = new Float64Array(n);
+          for (let i = 0; i < n; i++) a[i] = (i + 1) * 0.1;
+          const out = mulScalar(a, 2.5);
+          let ok = out.length === n && out instanceof Float64Array;
+          for (let i = 0; i < n && ok; i++) {
+            if (Math.abs(out[i] - (i + 1) * 0.1 * 2.5) > 1e-12) ok = false;
+          }
+          console.log(n + ":" + (ok ? "OK" : "FAIL"));
+        }
+      `,
+    );
+    expect(stdout).toBe("1:OK\n2:OK\n3:OK\n9:OK\n65:OK\n513:OK\n2049:OK");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects mixing Float32Array and Float64Array in binary ops", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-mixed-types",
+      `
+        import { add } from "bun:simd";
+        try {
+          add(new Float32Array([1, 2, 3]), new Float64Array([4, 5, 6]));
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log(e instanceof TypeError ? "TYPE_ERROR" : "WRONG:" + e.name);
+        }
+      `,
+    );
+    expect(stdout).toBe("TYPE_ERROR");
+    expect(exitCode).toBe(0);
+  });
 });

@@ -38,18 +38,18 @@ function header(sizeLabel) {
   console.log(`${"op".padEnd(26)}\t.map/.reduce\ttight loop\tbun:simd\t(vs naive: tight, simd)`);
 }
 
-function runSize(N) {
-  header(`N = ${N.toLocaleString()}`);
+function runSize(N, Ctor, label) {
+  header(`${label} — N = ${N.toLocaleString()}`);
 
-  const a = new Float32Array(N);
-  const b = new Float32Array(N);
+  const a = new Ctor(N);
+  const b = new Ctor(N);
   for (let i = 0; i < N; i++) { a[i] = Math.sin(i); b[i] = Math.cos(i); }
 
   // --- mulScalar: y = a * 3 ---
   row("mulScalar(a, 3)", [
     bench("arr.map", () => a.map(x => x * 3)),
     bench("tight",   () => {
-      const out = new Float32Array(N);
+      const out = new Ctor(N);
       for (let i = 0; i < N; i++) out[i] = a[i] * 3;
     }),
     bench("simd", () => mulScalar(a, 3)),
@@ -59,7 +59,7 @@ function runSize(N) {
   row("add(a, b)", [
     bench("arr.map", () => a.map((x, i) => x + b[i])),
     bench("tight",   () => {
-      const out = new Float32Array(N);
+      const out = new Ctor(N);
       for (let i = 0; i < N; i++) out[i] = a[i] + b[i];
     }),
     bench("simd", () => add(a, b)),
@@ -83,7 +83,7 @@ function runSize(N) {
   pure function tripleP7(x) { return x * 3 + 7; }
   row("simdMap(x*3+7, a)", [
     bench("arr.map", () => a.map(x => x * 3 + 7)),
-    bench("tight",   () => { const out = new Float32Array(N); for (let i = 0; i < N; i++) out[i] = a[i] * 3 + 7; }),
+    bench("tight",   () => { const out = new Ctor(N); for (let i = 0; i < N; i++) out[i] = a[i] * 3 + 7; }),
     bench("simd",    () => simdMap(tripleP7, a)),
   ]);
 
@@ -92,7 +92,7 @@ function runSize(N) {
   row("simdMap(sqrt(x²+1))", [
     bench("arr.map", () => a.map(x => Math.sqrt(x * x + 1))),
     bench("tight",   () => {
-      const out = new Float32Array(N);
+      const out = new Ctor(N);
       for (let i = 0; i < N; i++) out[i] = Math.sqrt(a[i] * a[i] + 1);
     }),
     bench("simd",    () => simdMap(weird, a)),
@@ -101,6 +101,13 @@ function runSize(N) {
 
 console.log("Bun.version:", Bun.version);
 console.log("WARMUP =", WARMUP, "  ITERS =", ITERS, "  (reporting best-of-N)");
-runSize(1_024);
-runSize(100_000);
-runSize(1_000_000);
+
+console.log("\n######## Float32Array (f32x4 kernels) ########");
+runSize(1_024,     Float32Array, "Float32Array");
+runSize(100_000,   Float32Array, "Float32Array");
+runSize(1_000_000, Float32Array, "Float32Array");
+
+console.log("\n######## Float64Array (f64x2 kernels) ########");
+runSize(1_024,     Float64Array, "Float64Array");
+runSize(100_000,   Float64Array, "Float64Array");
+runSize(1_000_000, Float64Array, "Float64Array");
