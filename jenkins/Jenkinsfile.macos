@@ -1,0 +1,126 @@
+// Parabun macOS CI — builds the debug binary and runs the parabun test
+// suite on a macOS agent via SSH dispatch, mirroring the lyku mac-mini
+// pattern.
+//
+// The "mac-mini" host is an alias defined in the Jenkins controller's
+// ~/.ssh/config (mounted read-only into this container). The SSH config
+// contains the real hostname + user; nothing identifying lives here.
+// The remote workspace is under the remote user's ~, so this file is
+// safe to check into a public repo.
+//
+// Build prereqs installed once by hand on the mac agent: Xcode,
+// homebrew, `brew install cmake ninja bun`.
+
+pipeline {
+    agent {
+        docker {
+            image 'ubuntu:24.04'
+            label 'linux'
+            args '--network host -v /var/lib/jenkins/.ssh:/tmp/.ssh-jenkins:ro'
+        }
+    }
+
+    environment {
+        CI = 'true'
+        // rsync+ssh options: use the mounted jenkins ssh config, no host-key prompts.
+        SSH_OPTS = '-F /tmp/.ssh-jenkins/config -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/.ssh-jenkins/known_hosts'
+    }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    parameters {
+        booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run parabun test suite after build')
+        string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
+               description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    // We rsync with --exclude='.git', so the remote has no git
+                    // metadata. scripts/build/config.ts::getGitRevision() would
+                    // fall back to "unknown", which depVersionsHeader.ts filters
+                    // out — making BUN_VERSION_UWS/USOCKETS undefined and
+                    // breaking BunProcess.cpp compile. Resolve the sha here
+                    // and forward it via env on the ssh commandline.
+                    env.FULL_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    // Stable remote workspace under the mac user's $HOME. We
+                    // keep a single tree so vendor/ (710MB of downloaded
+                    // platform-specific deps) and build/ (incremental cache)
+                    // survive across runs. rsync excludes preserve both.
+                    env.REMOTE_WS = "jenkins/workspace/parabun"
+                }
+            }
+        }
+
+        stage('Install agent deps') {
+            steps {
+                sh 'apt-get update -qq && apt-get install -y -qq --no-install-recommends rsync openssh-client git >/dev/null'
+            }
+        }
+
+        stage('Sync to mac agent') {
+            steps {
+                // --delete keeps the remote tree clean; excludes trim what
+                // the remote will regenerate or what we don't need.
+                sh '''
+                    rsync -az --delete \
+                        -e "ssh ${SSH_OPTS}" \
+                        --exclude='.git' \
+                        --exclude='node_modules' \
+                        --exclude='/build' \
+                        --exclude='/vendor' \
+                        --exclude='/target' \
+                        --exclude='.claude' \
+                        ./ mac-mini:${REMOTE_WS}/
+                '''
+            }
+        }
+
+        stage('Build on mac agent') {
+            steps {
+                sh '''
+                    ssh ${SSH_OPTS} mac-mini "cd ${REMOTE_WS} && chmod +x jenkins/build-macos.sh && GIT_SHA=${FULL_SHA} ./jenkins/build-macos.sh"
+                '''
+            }
+        }
+
+        stage('Run parabun tests') {
+            when { expression { params.RUN_TESTS } }
+            steps {
+                sh '''
+                    ssh ${SSH_OPTS} mac-mini "cd ${REMOTE_WS} && ./build/debug/bun-debug test ${TEST_FILTER}"
+                '''
+            }
+        }
+
+        stage('Fetch artifacts') {
+            steps {
+                sh '''
+                    mkdir -p artifacts/macos-arm64
+                    rsync -az -e "ssh ${SSH_OPTS}" \
+                        mac-mini:${REMOTE_WS}/build/debug/bun-debug \
+                        artifacts/macos-arm64/ || true
+                '''
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'artifacts/macos-arm64/bun-debug', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    // NOTE: no post-cleanup — the remote workspace is stable so vendor/ and
+    // build/ cache survive across runs. rsync --delete on the next invocation
+    // handles stale source files.
+}
