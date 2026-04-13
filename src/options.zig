@@ -822,6 +822,8 @@ pub const Loader = enum(u8) {
         .{ "jsx", .jsx },
         .{ "ts", .ts },
         .{ "tsx", .tsx },
+        .{ "pts", .ts },
+        .{ "pjs", .jsx },
         .{ "css", .css },
         .{ "file", .file },
         .{ "json", .json },
@@ -853,6 +855,8 @@ pub const Loader = enum(u8) {
         .{ "jsx", .jsx },
         .{ "ts", .ts },
         .{ "tsx", .tsx },
+        .{ "pts", .ts },
+        .{ "pjs", .jsx },
         .{ "css", .css },
         .{ "file", .file },
         .{ "json", .json },
@@ -1145,6 +1149,10 @@ const default_loaders_posix = .{
 
     .{ ".mts", .ts },
     .{ ".cts", .ts },
+
+    // Parabun extensions
+    .{ ".pts", .ts },
+    .{ ".pjs", .jsx },
 
     .{ ".toml", .toml },
     .{ ".yaml", .yaml },
@@ -1589,6 +1597,9 @@ const default_loader_ext = [_]string{
     ".ts",    ".tsx",
     ".mts",   ".cts",
 
+    // Parabun extensions
+    ".pts",   ".pjs",
+
     ".toml",  ".yaml",
     ".yml",   ".wasm",
     ".txt",   ".text",
@@ -1608,6 +1619,8 @@ const node_modules_default_loader_ext = [_]string{
     ".mjs",
     ".ts",
     ".mts",
+    ".pts",
+    ".pjs",
     ".toml",
     ".yaml",
     ".yml",
@@ -1999,10 +2012,12 @@ pub const BundleOptions = struct {
         pub const ExtensionOrder = [_]string{
             ".tsx",
             ".ts",
+            ".pts",
             ".jsx",
             ".cts",
             ".cjs",
             ".js",
+            ".pjs",
             ".mjs",
             ".mts",
             ".json",
@@ -2010,10 +2025,12 @@ pub const BundleOptions = struct {
 
         pub const MainFieldExtensionOrder = [_]string{
             ".js",
+            ".pjs",
             ".cjs",
             ".cts",
             ".tsx",
             ".ts",
+            ".pts",
             ".jsx",
             ".json",
         };
@@ -2023,8 +2040,10 @@ pub const BundleOptions = struct {
             ".jsx",
             ".mts",
             ".ts",
+            ".pts",
             ".mjs",
             ".js",
+            ".pjs",
             ".cts",
             ".cjs",
             ".json",
@@ -2039,10 +2058,12 @@ pub const BundleOptions = struct {
                 ".jsx",
                 ".cjs",
                 ".js",
+                ".pjs",
                 ".mjs",
                 ".mts",
                 ".tsx",
                 ".ts",
+                ".pts",
                 ".cts",
                 ".json",
             };
@@ -2052,9 +2073,11 @@ pub const BundleOptions = struct {
                 ".jsx",
                 ".mts",
                 ".js",
+                ".pjs",
                 ".cjs",
                 ".tsx",
                 ".ts",
+                ".pts",
                 ".cts",
                 ".json",
             };

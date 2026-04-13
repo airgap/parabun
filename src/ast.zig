@@ -94,6 +94,7 @@ pub const Flags = struct {
     pub const Function = enum {
         is_async,
         is_generator,
+        is_pure, // Parabun: pure function annotation
         has_rest_arg,
         has_if_scope,
 

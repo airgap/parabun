@@ -34,6 +34,11 @@ pub const T = enum(u8) {
     t_comma,
     t_dot,
     t_dot_dot_dot,
+    // Parabun operators
+    t_dot_dot_equals, // ..=
+    t_dot_dot_exclamation, // ..!
+    t_dot_dot_ampersand, // ..&
+    t_bar_greater_than, // |>
     t_equals_equals,
     t_equals_equals_equals,
     t_equals_greater_than,
@@ -284,6 +289,11 @@ pub const tokenToString = brk: {
     const TComma = "\",\"".*;
     const TDot = "\".\"".*;
     const TDotDotDot = "\"...\"".*;
+    // Parabun operators
+    const TDotDotEquals = "\"..=\"".*;
+    const TDotDotExclamation = "\"..!\"".*;
+    const TDotDotAmpersand = "\"..&\"".*;
+    const TBarGreaterThan = "\"|>\"".*;
     const TEqualsEquals = "\"==\"".*;
     const TEqualsEqualsEquals = "\"===\"".*;
     const TEqualsGreaterThan = "\"=>\"".*;
@@ -408,6 +418,11 @@ pub const tokenToString = brk: {
     tokenEnums.set(T.t_comma, &TComma);
     tokenEnums.set(T.t_dot, &TDot);
     tokenEnums.set(T.t_dot_dot_dot, &TDotDotDot);
+    // Parabun operators
+    tokenEnums.set(T.t_dot_dot_equals, &TDotDotEquals);
+    tokenEnums.set(T.t_dot_dot_exclamation, &TDotDotExclamation);
+    tokenEnums.set(T.t_dot_dot_ampersand, &TDotDotAmpersand);
+    tokenEnums.set(T.t_bar_greater_than, &TBarGreaterThan);
     tokenEnums.set(T.t_equals_equals, &TEqualsEquals);
     tokenEnums.set(T.t_equals_equals_equals, &TEqualsEqualsEquals);
     tokenEnums.set(T.t_equals_greater_than, &TEqualsGreaterThan);

@@ -343,6 +343,42 @@ pub const AsyncPrefixExpression = enum(u2) {
     }
 };
 
+// Parabun: identifiers that are always impure when referenced as free variables.
+// Used by the purity validator in parsePrefix/parseSuffix.
+const impure_global_idents = bun.ComptimeStringMap(void, .{
+    .{ "console", {} },
+    .{ "fetch", {} },
+    .{ "process", {} },
+    .{ "globalThis", {} },
+    .{ "setTimeout", {} },
+    .{ "setInterval", {} },
+    .{ "setImmediate", {} },
+    .{ "queueMicrotask", {} },
+});
+
+pub fn isImpureGlobalIdent(name: string) bool {
+    return impure_global_idents.has(name);
+}
+
+// Parabun: `<target>.<name>` combinations that are impure (non-deterministic or
+// side-effecting) even though the bare target is fine.
+pub fn isImpureMemberAccess(target: string, name: string) bool {
+    if (bun.strings.eqlComptime(target, "Math")) {
+        return bun.strings.eqlComptime(name, "random");
+    }
+    if (bun.strings.eqlComptime(target, "Date")) {
+        return bun.strings.eqlComptime(name, "now");
+    }
+    if (bun.strings.eqlComptime(target, "performance")) {
+        return bun.strings.eqlComptime(name, "now");
+    }
+    if (bun.strings.eqlComptime(target, "crypto")) {
+        return bun.strings.eqlComptime(name, "randomUUID") or
+            bun.strings.eqlComptime(name, "getRandomValues");
+    }
+    return false;
+}
+
 pub const IdentifierOpts = packed struct(u8) {
     assign_target: js_ast.AssignTarget = js_ast.AssignTarget.none,
     is_delete_target: bool = false,
@@ -591,6 +627,7 @@ pub const ScopeOrder = struct {
 pub const ParenExprOpts = struct {
     async_range: logger.Range = logger.Range.None,
     is_async: bool = false,
+    is_pure: bool = false, // Parabun: pure annotation
     force_arrow_fn: bool = false,
 };
 
@@ -621,6 +658,7 @@ pub const FnOrArrowDataParse = struct {
     is_this_disallowed: bool = false,
 
     has_async_range: bool = false,
+    is_pure: bool = false, // Parabun: pure function annotation
     arrow_arg_errors: DeferredArrowArgErrors = DeferredArrowArgErrors{},
     track_arrow_arg_errors: bool = false,
 

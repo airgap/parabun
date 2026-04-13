@@ -455,9 +455,11 @@ pub fn Parse(
                     }
                     var arrow_data = FnOrArrowDataParse{
                         .allow_await = if (opts.is_async) AwaitOrYield.allow_expr else AwaitOrYield.allow_ident,
+                        .is_pure = opts.is_pure,
                     };
                     var arrow = try p.parseArrowBody(args.items, &arrow_data);
                     arrow.is_async = opts.is_async;
+                    arrow.is_pure = opts.is_pure;
                     arrow.has_rest_arg = spread_range.len > 0;
                     p.popScope();
                     return p.newExpr(arrow, loc);
@@ -1024,6 +1026,17 @@ pub fn Parse(
                 if (p.lexer.token == .t_equals) {
                     try p.lexer.next();
                     value = try p.parseExpr(.comma);
+                } else if (p.lexer.token == .t_dot_dot_equals) {
+                    // Parabun: `const x ..= expr` desugars to `const x = await expr`
+                    const dot_dot_eq_range = p.lexer.range();
+                    try p.lexer.next();
+                    const rhs = try p.parseExpr(.comma);
+                    if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
+                        p.log.addRangeError(p.source, dot_dot_eq_range, "\"..=\" can only be used inside an async function or at the top level") catch unreachable;
+                    } else if (p.fn_or_arrow_data_parse.is_top_level) {
+                        p.top_level_await_keyword = dot_dot_eq_range;
+                    }
+                    value = p.newExpr(E.Await{ .value = rhs }, dot_dot_eq_range.loc);
                 }
 
                 decls.append(G.Decl{
@@ -1256,7 +1269,7 @@ pub fn Parse(
         pub fn parseAsyncPrefixExpr(p: *P, async_range: logger.Range, level: Level) !Expr {
             // "async function() {}"
             if (!p.lexer.has_newline_before and p.lexer.token == T.t_function) {
-                return try p.parseFnExpr(async_range.loc, true, async_range);
+                return try p.parseFnExpr(async_range.loc, true, async_range, false);
             }
 
             // Check the precedence level to avoid parsing an arrow function in
@@ -1345,6 +1358,112 @@ pub fn Parse(
             return p.newExpr(
                 E.Identifier{ .ref = try p.storeNameInRef("async") },
                 async_range.loc,
+            );
+        }
+
+        // Parabun: Parse "pure function" / "pure () =>" / "pure x =>" prefix expressions
+        pub fn parsePurePrefixExpr(p: *P, pure_range: logger.Range, level: Level) !Expr {
+            // "pure function() {}"
+            if (!p.lexer.has_newline_before and p.lexer.token == T.t_function) {
+                return try p.parseFnExpr(pure_range.loc, false, logger.Range.None, true);
+            }
+
+            if (!p.lexer.has_newline_before and level.lt(.member)) {
+                switch (p.lexer.token) {
+                    // "pure x => expr"
+                    .t_identifier => {
+                        if (level.lte(.assign)) {
+                            const ref = try p.storeNameInRef(p.lexer.identifier);
+                            var args = try p.allocator.alloc(G.Arg, 1);
+                            args[0] = G.Arg{ .binding = p.b(
+                                B.Identifier{ .ref = ref },
+                                p.lexer.loc(),
+                            ) };
+                            try p.lexer.next();
+
+                            _ = try p.pushScopeForParsePass(.function_args, pure_range.loc);
+                            defer p.popScope();
+
+                            var data = FnOrArrowDataParse{
+                                .needs_async_loc = args[0].binding.loc,
+                                .is_pure = true,
+                            };
+                            var arrow = try p.parseArrowBody(args, &data);
+                            arrow.is_pure = true;
+                            return p.newExpr(arrow, pure_range.loc);
+                        }
+                    },
+
+                    // "pure () => {}" / "pure (x) => expr"
+                    .t_open_paren => {
+                        try p.lexer.next();
+                        return p.parseParenExpr(pure_range.loc, level, ParenExprOpts{ .is_pure = true });
+                    },
+
+                    else => {},
+                }
+            }
+
+            // "pure" as identifier
+            return p.newExpr(
+                E.Identifier{ .ref = try p.storeNameInRef("pure") },
+                pure_range.loc,
+            );
+        }
+
+        // Parabun: Parse "pure async function" / "pure async () =>" prefix expressions
+        pub fn parsePureAsyncPrefixExpr(p: *P, pure_range: logger.Range, async_range: logger.Range, level: Level) !Expr {
+            // "pure async function() {}"
+            if (!p.lexer.has_newline_before and p.lexer.token == T.t_function) {
+                return try p.parseFnExpr(pure_range.loc, true, async_range, true);
+            }
+
+            if (!p.lexer.has_newline_before and level.lt(.member)) {
+                switch (p.lexer.token) {
+                    // "pure async x => expr"
+                    .t_identifier => {
+                        if (level.lte(.assign)) {
+                            const ref = try p.storeNameInRef(p.lexer.identifier);
+                            var args = try p.allocator.alloc(G.Arg, 1);
+                            args[0] = G.Arg{ .binding = p.b(
+                                B.Identifier{ .ref = ref },
+                                p.lexer.loc(),
+                            ) };
+                            try p.lexer.next();
+
+                            _ = try p.pushScopeForParsePass(.function_args, pure_range.loc);
+                            defer p.popScope();
+
+                            var data = FnOrArrowDataParse{
+                                .allow_await = .allow_expr,
+                                .needs_async_loc = args[0].binding.loc,
+                                .is_pure = true,
+                            };
+                            var arrow = try p.parseArrowBody(args, &data);
+                            arrow.is_async = true;
+                            arrow.is_pure = true;
+                            return p.newExpr(arrow, pure_range.loc);
+                        }
+                    },
+
+                    // "pure async () => {}"
+                    .t_open_paren => {
+                        try p.lexer.next();
+                        return p.parseParenExpr(pure_range.loc, level, ParenExprOpts{
+                            .is_async = true,
+                            .is_pure = true,
+                            .async_range = async_range,
+                        });
+                    },
+
+                    else => {},
+                }
+            }
+
+            // "pure async" as identifier expression (fallback)
+            return p.newExpr(
+                E.Identifier{ .ref = try p.storeNameInRef("pure") },
+                pure_range.loc,
             );
         }
     };

@@ -1,28 +1,156 @@
-<p align="center">
-  <a href="https://bun.com"><img src="https://github.com/user-attachments/assets/50282090-adfd-4ddb-9e27-c30753c6b161" alt="Logo" height=170></a>
-</p>
-<h1 align="center">Bun</h1>
+<h1 align="center">Parabun</h1>
 
 <p align="center">
-<a href="https://bun.com/discord" target="_blank"><img height=20 src="https://img.shields.io/discord/876711213126520882" /></a>
-<img src="https://img.shields.io/github/stars/oven-sh/bun" alt="stars">
-<a href="https://twitter.com/jarredsumner/status/1542824445810642946"><img src="https://img.shields.io/static/v1?label=speed&message=fast&color=success" alt="Bun speed" /></a>
+  A fork of <a href="https://bun.com">Bun</a> with language extensions for parallelism, purity, and ergonomics.
 </p>
 
-<div align="center">
-  <a href="https://bun.com/docs">Documentation</a>
-  <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://discord.com/invite/CXdq2DP29u">Discord</a>
-  <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://github.com/oven-sh/bun/issues/new">Issues</a>
-  <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://github.com/oven-sh/bun/issues/159">Roadmap</a>
-  <br />
-</div>
+## What is Parabun?
 
-### [Read the docs →](https://bun.com/docs)
+Parabun is a **Bun fork** that adds syntax sugar to JavaScript/TypeScript. All extensions desugar to standard JS at parse time — no runtime magic, no new semantics. Your code stays fast, your tooling stays compatible, and your functions get honest.
 
-## What is Bun?
+Parabun introduces two new file extensions:
+- **`.pts`** — Parabun TypeScript (superset of TypeScript)
+- **`.pjs`** — Parabun JavaScript (superset of JavaScript)
+
+Standard `.ts`/`.js` files work exactly as they do in Bun.
+
+### Pure Functions
+
+Mark functions as `pure` to make purity visible and enforced. The parser rejects `this` access inside pure functions at compile time.
+
+```pts
+pure function add(a: number, b: number): number {
+  return a + b;
+}
+
+export pure async function fetchUser(id: string) {
+  return await fetch(`/api/users/${id}`);
+}
+
+const double = pure (x: number) => x * 2;
+const delayed = pure async (ms: number) => await Bun.sleep(ms);
+```
+
+Editors with the Parabun LSP highlight `pure` functions with a distinct style, making it immediately obvious which functions are side-effect-free.
+
+### Await-Assign (`..=`)
+
+Desugars `const x ..= expr` to `const x = await expr`. Requires an async context.
+
+```pts
+pure async function getData() {
+  const response ..= fetch('/api/data');
+  const json ..= response.json();
+  return json;
+}
+```
+
+### Error Chaining (`..!` and `..&`)
+
+`..!` desugars to `.catch()`, `..&` desugars to `.finally()`. Chain them naturally:
+
+```pts
+const result ..= fetch('/api')
+  ..! console.error
+  ..& cleanup;
+
+// Equivalent to:
+// const result = await fetch('/api').catch(console.error).finally(cleanup);
+```
+
+### Pipeline (`|>`)
+
+Desugars `x |> f` to `f(x)`. Left-to-right function application:
+
+```pts
+const output = rawData
+  |> JSON.parse
+  |> transform
+  |> JSON.stringify;
+
+// Equivalent to: JSON.stringify(transform(JSON.parse(rawData)))
+```
+
+### Operator Precedence
+
+| Operator | Precedence | Desugars to |
+|----------|-----------|-------------|
+| `\|>` | nullish coalescing | `f(x)` |
+| `..!` | conditional | `.catch(f)` |
+| `..&` | conditional | `.finally(f)` |
+| `..=` | assignment | `await expr` |
+
+Operators bind tighter-to-looser in the order listed, so `data |> transform ..! handler ..& cleanup` parses as `transform(data).catch(handler).finally(cleanup)`.
+
+## Editor Support
+
+### VS Code
+
+Copy `editors/vscode/parabun/` to your VS Code extensions folder, or:
+
+```bash
+cd editors/vscode/parabun && npm install && npm run build
+```
+
+Features: syntax highlighting, LSP diagnostics, completions, hover docs, semantic tokens for `pure`.
+
+### E Editor
+
+Built-in support. Open any `.pts`/`.pjs` file — Parabun syntax decoration and LSP diagnostics work automatically.
+
+### Other Editors (LSP)
+
+The Parabun LSP server works with any LSP-compatible editor:
+
+```bash
+# Start the LSP (requires parabun on PATH)
+parabun run editors/lsp/parabun-lsp.ts --stdio
+```
+
+Provides: diagnostics, completions (`pure`, `..=`, `..!`, `..&`, `|>`), hover documentation, and semantic tokens with a `pure` modifier.
+
+## Building
+
+```bash
+# Build debug
+bun bd
+
+# Run tests
+bun bd test test/bundler/transpiler/parabun-parser.test.js
+bun bd test test/bundler/transpiler/parabun-pure.test.js
+bun bd test test/bundler/transpiler/parabun-purity.test.js
+
+# Symlink for editor integration
+sudo ln -s $(pwd)/build/debug/bun-debug /usr/local/bin/parabun
+```
+
+## Purity Enforcement
+
+The `pure` keyword isn't just a label — it's enforced at compile time:
+
+```pts
+pure function broken() {
+  return this.x;  // Error: Cannot use "this" inside a pure function
+}
+
+pure function valid() {
+  // Nested regular functions have their own `this` — allowed
+  function inner() { return this.x; }
+  // But nested arrows inherit purity (they capture outer `this`)
+  const bad = () => this.x;  // Error
+  return inner;
+}
+```
+
+---
+
+## Bun (upstream)
+
+Parabun is built on top of Bun. Everything below is from the upstream Bun README.
+
+---
+
+### [Read the Bun docs →](https://bun.com/docs)
 
 Bun is an all-in-one toolkit for JavaScript and TypeScript apps. It ships as a single executable called `bun`.
 

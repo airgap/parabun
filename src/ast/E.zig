@@ -266,6 +266,7 @@ pub const Arrow = struct {
     body: G.FnBody,
 
     is_async: bool = false,
+    is_pure: bool = false, // Parabun: pure arrow annotation
     has_rest_arg: bool = false,
     prefer_expr: bool = false, // Use shorthand if true and "Body" is a single return statement
 

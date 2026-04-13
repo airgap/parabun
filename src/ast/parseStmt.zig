@@ -85,6 +85,30 @@ pub fn ParseStmt(
                         }
                     }
 
+                    // Parabun: "export pure function" / "export pure async function"
+                    if (p.lexer.isContextualKeyword("pure")) {
+                        const pure_range = p.lexer.range();
+                        try p.lexer.next();
+                        if (p.lexer.has_newline_before) {
+                            try p.log.addRangeError(p.source, pure_range, "Unexpected newline after \"pure\"");
+                        }
+
+                        if (p.lexer.isContextualKeyword("async")) {
+                            const asyncRange = p.lexer.range();
+                            try p.lexer.next();
+                            if (p.lexer.has_newline_before) {
+                                try p.log.addRangeError(p.source, asyncRange, "Unexpected newline after \"async\"");
+                            }
+                            try p.lexer.expect(T.t_function);
+                            opts.is_export = true;
+                            return try p.parseFnStmt(loc, opts, asyncRange, true);
+                        }
+
+                        try p.lexer.expect(T.t_function);
+                        opts.is_export = true;
+                        return try p.parseFnStmt(loc, opts, null, true);
+                    }
+
                     if (p.lexer.isContextualKeyword("async")) {
                         const asyncRange = p.lexer.range();
                         try p.lexer.next();
@@ -94,7 +118,7 @@ pub fn ParseStmt(
 
                         try p.lexer.expect(T.t_function);
                         opts.is_export = true;
-                        return try p.parseFnStmt(loc, opts, asyncRange);
+                        return try p.parseFnStmt(loc, opts, asyncRange, false);
                     }
 
                     if (is_typescript_enabled) {
@@ -160,7 +184,7 @@ pub fn ParseStmt(
                                 .is_name_optional = true,
                                 .lexical_decl = .allow_all,
                             };
-                            const stmt = try p.parseFnStmt(loc, &stmtOpts, async_range);
+                            const stmt = try p.parseFnStmt(loc, &stmtOpts, async_range, false);
                             if (@as(Stmt.Tag, stmt.data) == .s_type_script) {
                                 // This was just a type annotation
                                 return stmt;
@@ -434,7 +458,7 @@ pub fn ParseStmt(
 
         fn t_function(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             try p.lexer.next();
-            return try p.parseFnStmt(loc, opts, null);
+            return try p.parseFnStmt(loc, opts, null, false);
         }
         fn t_enum(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             if (!is_typescript_enabled) {
@@ -1159,15 +1183,42 @@ pub fn ParseStmt(
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             const is_identifier = p.lexer.token == .t_identifier;
             const name = p.lexer.identifier;
-            // Parse either an async function, an async expression, or a normal expression
+            // Parse either a pure function, an async function, an async expression, or a normal expression
             var expr: Expr = Expr{ .loc = loc, .data = Expr.Data{ .e_missing = .{} } };
-            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "async")) {
+            // Parabun: "pure function" or "pure async function" statements
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
+                const pure_range = p.lexer.range();
+                try p.lexer.next();
+
+                if (p.lexer.token == .t_function and !p.lexer.has_newline_before) {
+                    // "pure function foo() {}"
+                    try p.lexer.next();
+                    return try p.parseFnStmt(pure_range.loc, opts, null, true);
+                }
+
+                if (!p.lexer.has_newline_before and p.lexer.isContextualKeyword("async")) {
+                    const async_range = p.lexer.range();
+                    try p.lexer.next();
+                    if (p.lexer.token == .t_function and !p.lexer.has_newline_before) {
+                        // "pure async function foo() {}"
+                        try p.lexer.next();
+                        return try p.parseFnStmt(pure_range.loc, opts, async_range, true);
+                    }
+                    // "pure async () => {}" — expression statement
+                    expr = try p.parsePureAsyncPrefixExpr(pure_range, async_range, .lowest);
+                    try p.parseSuffix(&expr, .lowest, null, Expr.EFlags.none);
+                } else {
+                    // "pure () => x" or "pure x => x" — expression statement
+                    expr = try p.parsePurePrefixExpr(pure_range, .lowest);
+                    try p.parseSuffix(&expr, .lowest, null, Expr.EFlags.none);
+                }
+            } else if (is_identifier and strings.eqlComptime(p.lexer.raw(), "async")) {
                 const async_range = p.lexer.range();
                 try p.lexer.next();
                 if (p.lexer.token == .t_function and !p.lexer.has_newline_before) {
                     try p.lexer.next();
 
-                    return try p.parseFnStmt(async_range.loc, opts, async_range);
+                    return try p.parseFnStmt(async_range.loc, opts, async_range, false);
                 }
 
                 expr = try p.parseAsyncPrefixExpr(async_range, .lowest);

@@ -1,0 +1,9 @@
+{
+  "name": "parabun-lsp",
+  "version": "0.1.0",
+  "description": "Language Server Protocol implementation for Parabun (.pts/.pjs)",
+  "bin": {
+    "parabun-lsp": "./parabun-lsp.ts"
+  },
+  "type": "module"
+}

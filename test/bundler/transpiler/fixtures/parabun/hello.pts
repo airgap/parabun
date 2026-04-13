@@ -1,0 +1,8 @@
+pure function add(a: number, b: number): number {
+  return a + b;
+}
+
+const cleanup = () => console.log('done');
+const result ..= fetch('/api') ..! console.error ..& cleanup;
+
+export const doubled = [1, 2, 3] |> JSON.stringify;

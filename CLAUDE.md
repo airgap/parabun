@@ -1,4 +1,8 @@
-This is the Bun repository - an all-in-one JavaScript runtime & toolkit designed for speed, with a bundler, test runner, and Node.js-compatible package manager. It's written primarily in Zig with C++ for JavaScriptCore integration, powered by WebKit's JavaScriptCore engine.
+This is **Parabun**, a fork of Bun that adds language extensions for purity, error chaining, and pipelines. All extensions desugar to standard JS at parse time. See `LLMs.md` for the full language spec and architecture.
+
+**Parabun-specific files**: `src/ast/parsePrefix.zig` (pure/this checks), `src/ast/parseSuffix.zig` (..! ..& |> operators), `src/ast/parse.zig` (pure prefix expressions), `src/ast/parseFn.zig` (is_pure threading), `src/options.zig` (.pts/.pjs extensions), `editors/` (LSP + editor extensions). Tests: `test/bundler/transpiler/parabun-*.test.js`.
+
+Upstream Bun is an all-in-one JavaScript runtime & toolkit designed for speed, with a bundler, test runner, and Node.js-compatible package manager. It's written primarily in Zig with C++ for JavaScriptCore integration, powered by WebKit's JavaScriptCore engine.
 
 ## Building and Running Bun
 

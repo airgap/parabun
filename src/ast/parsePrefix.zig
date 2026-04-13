@@ -71,6 +71,10 @@ pub fn ParsePrefix(
             if (p.fn_or_arrow_data_parse.is_this_disallowed) {
                 p.log.addRangeError(p.source, p.lexer.range(), "Cannot use \"this\" here") catch unreachable;
             }
+            // Parabun: pure functions cannot access "this"
+            if (p.fn_or_arrow_data_parse.is_pure) {
+                p.log.addRangeError(p.source, p.lexer.range(), "Cannot use \"this\" inside a pure function") catch unreachable;
+            }
             try p.lexer.next();
             return Expr{ .data = Prefill.Data.This, .loc = loc };
         }
@@ -98,6 +102,17 @@ pub fn ParsePrefix(
             const raw = p.lexer.raw();
 
             try p.lexer.next();
+
+            // Parabun: Handle "pure" prefix expressions
+            if (strings.eqlComptime(name, "pure") and (raw.ptr == name.ptr and raw.len == name.len)) {
+                if (!p.lexer.has_newline_before and p.lexer.isContextualKeyword("async")) {
+                    // "pure async function" or "pure async () =>"
+                    const async_range = p.lexer.range();
+                    try p.lexer.next();
+                    return try p.parsePureAsyncPrefixExpr(name_range, async_range, level);
+                }
+                return try p.parsePurePrefixExpr(name_range, level);
+            }
 
             // Handle async and await expressions
             switch (AsyncPrefixExpression.find(name)) {
@@ -197,6 +212,15 @@ pub fn ParsePrefix(
                 return p.newExpr(try p.parseArrowBody(args, &fn_or_arrow_data), loc);
             }
 
+            // Parabun: pure functions reject `arguments` and known impure globals
+            if (p.fn_or_arrow_data_parse.is_pure) {
+                if (strings.eqlComptime(name, "arguments")) {
+                    p.log.addRangeError(p.source, name_range, "Cannot use \"arguments\" inside a pure function") catch unreachable;
+                } else if (js_parser.isImpureGlobalIdent(name)) {
+                    p.log.addRangeErrorFmt(p.source, name_range, p.allocator, "Cannot reference impure global \"{s}\" inside a pure function", .{name}) catch unreachable;
+                }
+            }
+
             const ref = p.storeNameInRef(name) catch unreachable;
 
             return Expr.initIdentifier(ref, loc);
@@ -275,7 +299,12 @@ pub fn ParsePrefix(
         }
         fn t_delete(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();
+            const delete_range = p.lexer.range();
             try p.lexer.next();
+            // Parabun: `delete` is observable mutation; forbid inside pure functions
+            if (p.fn_or_arrow_data_parse.is_pure) {
+                p.log.addRangeError(p.source, delete_range, "Cannot use \"delete\" inside a pure function") catch unreachable;
+            }
             const value = try p.parseExpr(.prefix);
             if (p.lexer.token == .t_asterisk_asterisk) {
                 try p.lexer.unexpected();
@@ -355,7 +384,7 @@ pub fn ParsePrefix(
         }
         fn t_function(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();
-            return try p.parseFnExpr(loc, false, logger.Range.None);
+            return try p.parseFnExpr(loc, false, logger.Range.None, false);
         }
         fn t_class(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();

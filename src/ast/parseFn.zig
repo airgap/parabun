@@ -8,7 +8,7 @@ pub fn ParseFn(
         const is_typescript_enabled = P.is_typescript_enabled;
 
         /// This assumes the "function" token has already been parsed
-        pub fn parseFnStmt(noalias p: *P, loc: logger.Loc, noalias opts: *ParseStatementOptions, asyncRange: ?logger.Range) !Stmt {
+        pub fn parseFnStmt(noalias p: *P, loc: logger.Loc, noalias opts: *ParseStatementOptions, asyncRange: ?logger.Range, is_pure: bool) !Stmt {
             const is_generator = p.lexer.token == T.t_asterisk;
             const is_async = asyncRange != null;
 
@@ -70,6 +70,7 @@ pub fn ParseFn(
                 .allow_await = if (is_async) AwaitOrYield.allow_expr else AwaitOrYield.allow_ident,
                 .allow_yield = if (is_generator) AwaitOrYield.allow_expr else AwaitOrYield.allow_ident,
                 .is_typescript_declare = opts.is_typescript_declare,
+                .is_pure = is_pure,
 
                 // Only allow omitting the body if we're parsing TypeScript
                 .allow_missing_body_for_type_script = is_typescript_enabled,
@@ -140,6 +141,7 @@ pub fn ParseFn(
                     .has_rest_arg = false,
                     .is_async = opts.allow_await == .allow_expr,
                     .is_generator = opts.allow_yield == .allow_expr,
+                    .is_pure = opts.is_pure,
                 }),
 
                 .arguments_ref = null,
@@ -349,7 +351,7 @@ pub fn ParseFn(
             return func;
         }
 
-        pub fn parseFnExpr(p: *P, loc: logger.Loc, is_async: bool, async_range: logger.Range) !Expr {
+        pub fn parseFnExpr(p: *P, loc: logger.Loc, is_async: bool, async_range: logger.Range, is_pure: bool) !Expr {
             try p.lexer.next();
             const is_generator = p.lexer.token == T.t_asterisk;
             if (is_generator) {
@@ -389,6 +391,7 @@ pub fn ParseFn(
                 .async_range = async_range,
                 .allow_await = if (is_async) .allow_expr else .allow_ident,
                 .allow_yield = if (is_generator) .allow_expr else .allow_ident,
+                .is_pure = is_pure,
             });
             p.fn_or_arrow_data_parse.has_argument_decorators = false;
 
@@ -445,6 +448,8 @@ pub fn ParseFn(
             data.allow_super_call = p.fn_or_arrow_data_parse.allow_super_call;
             data.allow_super_property = p.fn_or_arrow_data_parse.allow_super_property;
             data.is_this_disallowed = p.fn_or_arrow_data_parse.is_this_disallowed;
+            // Parabun: purity is inherited by arrow functions (they capture outer "this")
+            if (p.fn_or_arrow_data_parse.is_pure) data.is_pure = true;
 
             if (p.lexer.token == .t_open_brace) {
                 const body = try p.parseFnBody(data);

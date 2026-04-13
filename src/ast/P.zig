@@ -98,6 +98,8 @@ pub fn NewParser_(
         pub const parsePath = parse_zig.parsePath;
         pub const parseStmtsUpTo = parse_zig.parseStmtsUpTo;
         pub const parseAsyncPrefixExpr = parse_zig.parseAsyncPrefixExpr;
+        pub const parsePurePrefixExpr = parse_zig.parsePurePrefixExpr;
+        pub const parsePureAsyncPrefixExpr = parse_zig.parsePureAsyncPrefixExpr;
         pub const parseTypeScriptDecorators = parse_zig.parseTypeScriptDecorators;
         pub const parseStandardDecorator = parse_zig.parseStandardDecorator;
         pub const parseTypeScriptNamespaceStmt = parse_zig.parseTypeScriptNamespaceStmt;

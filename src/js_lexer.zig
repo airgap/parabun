@@ -1330,9 +1330,14 @@ fn NewLexer_(
                             return lexer.addUnsupportedSyntaxError("Operators are not allowed in JSON");
                         }
 
-                        // '|' or '|=' or '||' or '||='
+                        // '|' or '|=' or '||' or '||=' or '|>' (Parabun pipe)
                         lexer.step();
                         switch (lexer.code_point) {
+                            '>' => {
+                                // Parabun: "|>"
+                                lexer.step();
+                                lexer.token = T.t_bar_greater_than;
+                            },
                             '=' => {
                                 lexer.step();
                                 lexer.token = T.t_bar_equals;
@@ -2707,15 +2712,34 @@ fn NewLexer_(
 
             // Dot without a digit after it;
             if (first == '.' and (lexer.code_point < '0' or lexer.code_point > '9')) {
-                // "..."
-                if ((lexer.code_point == '.' and
-                    lexer.current < lexer.source.contents.len) and
-                    lexer.source.contents[lexer.current] == '.')
-                {
-                    lexer.step();
-                    lexer.step();
-                    lexer.token = T.t_dot_dot_dot;
-                    return;
+                // ".." prefix — check for "...", "..=", "..!", "..&"
+                if (lexer.code_point == '.' and lexer.current < lexer.source.contents.len) {
+                    const third = lexer.source.contents[lexer.current];
+                    if (third == '.') {
+                        // "..."
+                        lexer.step();
+                        lexer.step();
+                        lexer.token = T.t_dot_dot_dot;
+                        return;
+                    } else if (!is_json) {
+                        // Parabun: "..=", "..!", "..&"
+                        if (third == '=') {
+                            lexer.step();
+                            lexer.step();
+                            lexer.token = T.t_dot_dot_equals;
+                            return;
+                        } else if (third == '!') {
+                            lexer.step();
+                            lexer.step();
+                            lexer.token = T.t_dot_dot_exclamation;
+                            return;
+                        } else if (third == '&') {
+                            lexer.step();
+                            lexer.step();
+                            lexer.token = T.t_dot_dot_ampersand;
+                            return;
+                        }
+                    }
                 }
 
                 // "."

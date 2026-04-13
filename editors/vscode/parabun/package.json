@@ -1,0 +1,78 @@
+{
+  "name": "parabun",
+  "displayName": "Parabun",
+  "description": "Language support for Parabun (.pts/.pjs) — Bun fork with pure functions, error chaining, and pipeline operators",
+  "version": "0.1.0",
+  "publisher": "parabun",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:parabun-ts",
+    "onLanguage:parabun-js"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "parabun-ts",
+        "aliases": ["Parabun TypeScript", "pts"],
+        "extensions": [".pts"],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "parabun-js",
+        "aliases": ["Parabun JavaScript", "pjs"],
+        "extensions": [".pjs"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "parabun-ts",
+        "scopeName": "source.pts",
+        "path": "./syntaxes/parabun-ts.tmLanguage.json"
+      },
+      {
+        "language": "parabun-js",
+        "scopeName": "source.pjs",
+        "path": "./syntaxes/parabun-js.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "parabun-ts",
+        "scopes": {
+          "function.pure": ["storage.modifier.pure.parabun"]
+        }
+      },
+      {
+        "language": "parabun-js",
+        "scopes": {
+          "function.pure": ["storage.modifier.pure.parabun"]
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Parabun",
+      "properties": {
+        "parabun.lsp.path": {
+          "type": "string",
+          "default": "parabun-lsp",
+          "description": "Path to the parabun-lsp executable"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

@@ -80,7 +80,18 @@ pub fn ParseSuffix(
 
                 const name = p.lexer.identifier;
                 const name_loc = p.lexer.loc();
+                const name_range = p.lexer.range();
                 try p.lexer.next();
+
+                // Parabun: reject impure member accesses inside pure functions
+                if (p.fn_or_arrow_data_parse.is_pure) {
+                    if (target.data == .e_identifier) {
+                        const target_name = p.loadNameFromRef(target.data.e_identifier.ref);
+                        if (js_parser.isImpureMemberAccess(target_name, name)) {
+                            p.log.addRangeErrorFmt(p.source, name_range, p.allocator, "Cannot reference impure \"{s}.{s}\" inside a pure function", .{ target_name, name }) catch unreachable;
+                        }
+                    }
+                }
 
                 left.* = p.newExpr(
                     E.Dot{
@@ -775,6 +786,97 @@ pub fn ParseSuffix(
             left.* = p.newExpr(E.Binary{ .op = .bin_assign, .left = left.*, .right = try p.parseExpr(Level.assign.sub(1)) }, left.loc);
             return .next;
         }
+        fn t_dot_dot_equals(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            // Parabun: `x ..= expr` desugars to `x = await expr`
+            if (level.gte(.assign)) {
+                return .done;
+            }
+
+            const dot_dot_eq_range = p.lexer.range();
+            try p.lexer.next();
+
+            if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
+                p.log.addRangeError(p.source, dot_dot_eq_range, "\"..=\" can only be used inside an async function or at the top level") catch unreachable;
+            } else if (p.fn_or_arrow_data_parse.is_top_level) {
+                p.top_level_await_keyword = dot_dot_eq_range;
+            }
+
+            const rhs = try p.parseExpr(Level.assign.sub(1));
+            const await_expr = p.newExpr(E.Await{ .value = rhs }, dot_dot_eq_range.loc);
+            left.* = p.newExpr(E.Binary{ .op = .bin_assign, .left = left.*, .right = await_expr }, left.loc);
+            return .next;
+        }
+        fn t_dot_dot_exclamation(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            // Parabun: `expr ..! handler` desugars to `expr.catch(handler)`
+            if (level.gte(.conditional)) {
+                return .done;
+            }
+
+            const op_range = p.lexer.range();
+            try p.lexer.next();
+
+            const rhs = try p.parseExpr(.conditional);
+
+            // Build: left.catch(rhs)
+            const catch_target = p.newExpr(E.Dot{
+                .target = left.*,
+                .name = "catch",
+                .name_loc = op_range.loc,
+            }, left.loc);
+            const args = try ExprNodeList.initOne(p.allocator, rhs);
+            left.* = p.newExpr(E.Call{
+                .target = catch_target,
+                .args = args,
+                .close_paren_loc = p.lexer.loc(),
+            }, left.loc);
+            return .next;
+        }
+        fn t_dot_dot_ampersand(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            // Parabun: `expr ..& cleanup` desugars to `expr.finally(cleanup)`
+            if (level.gte(.conditional)) {
+                return .done;
+            }
+
+            const op_range = p.lexer.range();
+            try p.lexer.next();
+
+            const rhs = try p.parseExpr(.conditional);
+
+            // Build: left.finally(rhs)
+            const finally_target = p.newExpr(E.Dot{
+                .target = left.*,
+                .name = "finally",
+                .name_loc = op_range.loc,
+            }, left.loc);
+            const args = try ExprNodeList.initOne(p.allocator, rhs);
+            left.* = p.newExpr(E.Call{
+                .target = finally_target,
+                .args = args,
+                .close_paren_loc = p.lexer.loc(),
+            }, left.loc);
+            return .next;
+        }
+        fn t_bar_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            // Parabun: `expr |> fn` desugars to `fn(expr)`
+            // Binds tighter than ..! and ..& (conditional), so:
+            //   data |> transform ..! handler → transform(data).catch(handler)
+            if (level.gte(.nullish_coalescing)) {
+                return .done;
+            }
+
+            try p.lexer.next();
+
+            const rhs = try p.parseExpr(.nullish_coalescing);
+
+            // Build: rhs(left)
+            const args = try ExprNodeList.initOne(p.allocator, left.*);
+            left.* = p.newExpr(E.Call{
+                .target = rhs,
+                .args = args,
+                .close_paren_loc = p.lexer.loc(),
+            }, left.loc);
+            return .next;
+        }
         fn t_in(p: *P, level: Level, left: *Expr) anyerror!Continuation {
             if (level.gte(.compare) or !p.allow_in) {
                 return .done;
@@ -880,6 +982,10 @@ pub fn ParseSuffix(
                     .t_caret,
                     .t_caret_equals,
                     .t_comma,
+                    .t_dot_dot_equals,
+                    .t_dot_dot_exclamation,
+                    .t_dot_dot_ampersand,
+                    .t_bar_greater_than,
                     .t_equals,
                     .t_equals_equals,
                     .t_equals_equals_equals,
@@ -941,6 +1047,7 @@ const bun = @import("bun");
 const js_ast = bun.ast;
 const E = js_ast.E;
 const Expr = js_ast.Expr;
+const ExprNodeList = js_ast.ExprNodeList;
 const OptionalChain = js_ast.OptionalChain;
 
 const Op = js_ast.Op;
