@@ -182,30 +182,33 @@ Implementation: `src/js/bun/simd.ts`.
 
 Benchmark (`bench/simd.pjs`, release build, N = 100,000, best-of-200):
 
-| op                  | `.map`/`.reduce` | tight loop | `bun:simd` | notes          |
-|---------------------|-----------------:|-----------:|-----------:|----------------|
-| mulScalar(a, 3)     | 832 µs           | 54 µs      | **26 µs**  | WASM v128      |
-| add(a, b)           | 920 µs           | 75 µs      | 76 µs      | JS fallback    |
-| sum(a)              | 583 µs           | 43 µs      | 41 µs      | JS fallback    |
-| dot(a, b)           | 707 µs           | 51 µs      | 50 µs      | JS fallback    |
-| simdMap(x*3+7)      | 828 µs           | 63 µs      | 57 µs      | affine ⇒ WASM  |
-| simdMap(sqrt(x²+1)) | 850 µs           | 138 µs     | 362 µs     | non-affine     |
+| op                  | `.map`/`.reduce` | tight loop | `bun:simd` | notes           |
+|---------------------|-----------------:|-----------:|-----------:|-----------------|
+| mulScalar(a, 3)     | 841 µs           | 100 µs     | **34 µs**  | f32x4 WASM      |
+| add(a, b)           | 920 µs           | 126 µs     | 116 µs     | f32x4 WASM      |
+| sum(a)              | 575 µs           | 81 µs      | **41 µs**  | f32x4 WASM      |
+| dot(a, b)           | 666 µs           | 51 µs      | 50 µs      | f32x4 WASM      |
+| simdMap(x*3+7)      | 846 µs           | 70 µs      | 58 µs      | affine ⇒ WASM   |
+| simdMap(sqrt(x²+1)) | 823 µs           | 127 µs     | 337 µs     | non-affine      |
 
-`mulScalar` (hand-coded f32x4 WASM kernel) is **~2× faster than a tight JS
-loop** at N ≥ 100 K and **14–32× faster than idiomatic `.map`/`.reduce`**.
+All six primitives ship as hand-assembled f32x4 WASM kernels. The clear wins
+are `mulScalar` (**~3× faster than a tight JS loop** at N ≥ 100 K, **25×
+faster than `.map`**) and `sum` (**~2× faster than tight**, via a v128
+accumulator with horizontal reduce). Binary ops (`add`, `mul`, `dot`) are
+memory-bandwidth bound once the copy-in cost is paid — they still beat tight
+JS loops, but only by a few percent on the whole. Sub-~1 K input sizes are
+dominated by per-call overhead regardless of path; JSC's FTL tight loops
+are usually competitive or slightly faster below that threshold.
+
 `simdMap` routes affine kernels through `mulScalar` when the offset is zero,
-inheriting the same fast path. The remaining primitives still use JS tight
-loops and sit within ~5 % of hand-written inline code — follow-up milestones
-wire them to WASM f32x4 kernels using the same assembler harness.
-
-The non-affine `simdMap` fallback is 2–3× slower than inline because the
-function-type parameter is a polymorphic call site and JSC can't inline the
-kernel. Below N ≈ 1 K, per-call overhead dominates regardless of path.
+inheriting the same fast path. The non-affine fallback is 2–3× slower than
+inline because the function-type parameter is a polymorphic call site and
+JSC can't inline the kernel.
 
 ## Pending Work
 
-- **WASM v128 fast path for `bun:simd`** — hand-coded f32x4 kernels for the
-  large-array case, with JS-side copy-in/copy-out plumbing. Current JS-only
-  implementation relies on JIT auto-vectorization, which is best-effort.
 - **Float64Array support in `bun:simd`** — mirrors the Float32Array surface
-  using f64x2 ops when WASM fast path lands.
+  using f64x2 kernels and the same assembler harness.
+- **In-place binary ops** — optional `dstOverwrite: "a"` escape hatch that
+  returns the input buffer instead of a fresh one, eliding the copy-out
+  slice. Semantics change, so gated behind an option.

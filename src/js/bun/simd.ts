@@ -7,18 +7,18 @@
 //   const y = mulScalar(new Float32Array([1, 2, 3, 4]), 3); // → [3, 6, 9, 12]
 //
 // Fast paths:
-//   - `mulScalar` uses a hand-assembled WASM v128 (f32x4) kernel when available
-//     (gated via `isWasmAvailable()`). All other primitives use tight
-//     typed-array JS loops for now — JSC's FTL tier auto-vectorizes them.
-//     More WASM kernels are tracked in LLMs.md pending work.
+//   - All primitives (mulScalar, addScalar, add, mul, sum, dot) use a
+//     hand-assembled WASM v128 (f32x4) kernel when available (gated via
+//     `isWasmAvailable()`). JS tight typed-array loops are kept as a fallback.
+//     Float64Array support is tracked in LLMs.md pending work.
 
 type F32 = Float32Array;
 
 // --- WASM v128 module builder ---
 //
-// Hand-assembles a tiny module exporting a linear memory and one f32x4 kernel
-// (`mulScalar`). Composed from byte-level helpers so each instruction is
-// visible next to its WAT form.
+// Hand-assembles a tiny module exporting a linear memory plus one f32x4
+// kernel per primitive. Composed from byte-level helpers so each instruction
+// is visible next to its WAT form.
 
 function uleb(n: number): number[] {
   const out: number[] = [];
@@ -87,45 +87,51 @@ const op = {
   i32GeS: () => [0x4e],
   f32Load: () => [0x2a, 0x00, 0x00],
   f32Store: () => [0x38, 0x00, 0x00],
+  f32Add: () => [0x92],
   f32Mul: () => [0x94],
   v128Load: () => [0xfd, 0x00, 0x00, 0x00],
   v128Store: () => [0xfd, 0x0b, 0x00, 0x00],
   f32x4Splat: () => [0xfd, 0x13],
+  f32x4ExtractLane: (lane: number) => [0xfd, 0x1f, lane],
+  f32x4Add: () => [0xfd, 0xe4, 0x01],
   f32x4Mul: () => [0xfd, 0xe6, 0x01],
 };
 
-// mulScalar(len: i32, c: f32) — multiplies Float32Array at memory[0..len*4) by c.
+// --- Kernel bodies ---
+//
+// Memory layout:
+//   - unary/scalar ops (mulScalar, addScalar, sum): a @ memory[0 .. len*4)
+//   - binary ops (add, mul, dot):                   a @ memory[0 .. len*4),
+//                                                   b @ memory[len*4 .. 2*len*4)
+//
+// JS wrappers copy inputs into memory before each kernel call and slice
+// outputs out afterwards; kernels operate in place.
+
+// mulScalar(len: i32, c: f32) — scales a in place by scalar c.
 // Locals: $i (i32, idx 2), $addr (i32, idx 3), $k (v128, idx 4).
 function mulScalarBody(): number[] {
   return [
-    // k = f32x4.splat(c)
     ...op.localGet(1),
     ...op.f32x4Splat(),
     ...op.localSet(4),
-
-    // SIMD loop: while (i + 4 <= len) { ... i += 4 }
     ...op.block(),
     ...op.loop(),
-    // guard: (i + 4) > len -> break
     ...op.localGet(2),
     ...op.i32Const(4),
     ...op.i32Add(),
     ...op.localGet(0),
     ...op.i32GtS(),
     ...op.brIf(1),
-    // addr = i << 2
     ...op.localGet(2),
     ...op.i32Const(2),
     ...op.i32Shl(),
     ...op.localSet(3),
-    // v128.store(addr, f32x4.mul(v128.load(addr), k))
     ...op.localGet(3),
     ...op.localGet(3),
     ...op.v128Load(),
     ...op.localGet(4),
     ...op.f32x4Mul(),
     ...op.v128Store(),
-    // i += 4
     ...op.localGet(2),
     ...op.i32Const(4),
     ...op.i32Add(),
@@ -133,8 +139,6 @@ function mulScalarBody(): number[] {
     ...op.br(0),
     ...op.end(),
     ...op.end(),
-
-    // Scalar tail: while (i < len) { ... i += 1 }
     ...op.block(),
     ...op.loop(),
     ...op.localGet(2),
@@ -158,18 +162,374 @@ function mulScalarBody(): number[] {
     ...op.br(0),
     ...op.end(),
     ...op.end(),
+    ...op.end(),
+  ];
+}
 
-    ...op.end(), // function end
+// addScalar(len: i32, c: f32) — offsets a in place by scalar c.
+// Same shape as mulScalarBody with add instead of mul.
+function addScalarBody(): number[] {
+  return [
+    ...op.localGet(1),
+    ...op.f32x4Splat(),
+    ...op.localSet(4),
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(2),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localGet(0),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    ...op.localGet(2),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(3),
+    ...op.localGet(3),
+    ...op.localGet(3),
+    ...op.v128Load(),
+    ...op.localGet(4),
+    ...op.f32x4Add(),
+    ...op.v128Store(),
+    ...op.localGet(2),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localSet(2),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(2),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(2),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(3),
+    ...op.localGet(3),
+    ...op.localGet(3),
+    ...op.f32Load(),
+    ...op.localGet(1),
+    ...op.f32Add(),
+    ...op.f32Store(),
+    ...op.localGet(2),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(2),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.end(),
+  ];
+}
+
+// Binary vec body: a[i] = op(a[i], b[i]).
+// Param: $len (0). Locals: $i (1), $addr_a (2), $addr_b (3), $len_bytes (4).
+function binaryVecBody(vecOp: number[], scalarOp: number[]): number[] {
+  return [
+    ...op.localGet(0),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(4),
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(1),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localGet(0),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(2),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Add(),
+    ...op.localSet(3),
+    ...op.localGet(2),
+    ...op.localGet(2),
+    ...op.v128Load(),
+    ...op.localGet(3),
+    ...op.v128Load(),
+    ...vecOp,
+    ...op.v128Store(),
+    ...op.localGet(1),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localSet(1),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(1),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(2),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Add(),
+    ...op.localSet(3),
+    ...op.localGet(2),
+    ...op.localGet(2),
+    ...op.f32Load(),
+    ...op.localGet(3),
+    ...op.f32Load(),
+    ...scalarOp,
+    ...op.f32Store(),
+    ...op.localGet(1),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(1),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.end(),
+  ];
+}
+
+// sum(len: i32) -> f32 — horizontal sum of a @ memory[0..len*4).
+// Param: $len (0). Locals: $i (1), $addr (2), $acc_v (v128, 3), $acc_s (f32, 4).
+function sumBody(): number[] {
+  return [
+    ...op.f32Const(0),
+    ...op.f32x4Splat(),
+    ...op.localSet(3),
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(1),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localGet(0),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(2),
+    ...op.localGet(3),
+    ...op.localGet(2),
+    ...op.v128Load(),
+    ...op.f32x4Add(),
+    ...op.localSet(3),
+    ...op.localGet(1),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localSet(1),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    // Horizontal reduce of acc_v into acc_s.
+    ...op.localGet(3),
+    ...op.f32x4ExtractLane(0),
+    ...op.localGet(3),
+    ...op.f32x4ExtractLane(1),
+    ...op.f32Add(),
+    ...op.localGet(3),
+    ...op.f32x4ExtractLane(2),
+    ...op.f32Add(),
+    ...op.localGet(3),
+    ...op.f32x4ExtractLane(3),
+    ...op.f32Add(),
+    ...op.localSet(4),
+    // Scalar tail adds to acc_s.
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(1),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(2),
+    ...op.localGet(4),
+    ...op.localGet(2),
+    ...op.f32Load(),
+    ...op.f32Add(),
+    ...op.localSet(4),
+    ...op.localGet(1),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(1),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.localGet(4),
+    ...op.end(),
+  ];
+}
+
+// dot(len: i32) -> f32 — sum of a[i]*b[i]. a @ memory[0..len*4), b @ memory[len*4..2*len*4).
+// Param: $len (0). Locals: $i (1), $addr_a (2), $addr_b (3), $len_bytes (4),
+//                          $acc_v (v128, 5), $acc_s (f32, 6).
+function dotBody(): number[] {
+  return [
+    ...op.localGet(0),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(4),
+    ...op.f32Const(0),
+    ...op.f32x4Splat(),
+    ...op.localSet(5),
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(1),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localGet(0),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(2),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Add(),
+    ...op.localSet(3),
+    ...op.localGet(5),
+    ...op.localGet(2),
+    ...op.v128Load(),
+    ...op.localGet(3),
+    ...op.v128Load(),
+    ...op.f32x4Mul(),
+    ...op.f32x4Add(),
+    ...op.localSet(5),
+    ...op.localGet(1),
+    ...op.i32Const(4),
+    ...op.i32Add(),
+    ...op.localSet(1),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    // Horizontal reduce.
+    ...op.localGet(5),
+    ...op.f32x4ExtractLane(0),
+    ...op.localGet(5),
+    ...op.f32x4ExtractLane(1),
+    ...op.f32Add(),
+    ...op.localGet(5),
+    ...op.f32x4ExtractLane(2),
+    ...op.f32Add(),
+    ...op.localGet(5),
+    ...op.f32x4ExtractLane(3),
+    ...op.f32Add(),
+    ...op.localSet(6),
+    // Scalar tail.
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(1),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.i32Const(2),
+    ...op.i32Shl(),
+    ...op.localSet(2),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Add(),
+    ...op.localSet(3),
+    ...op.localGet(6),
+    ...op.localGet(2),
+    ...op.f32Load(),
+    ...op.localGet(3),
+    ...op.f32Load(),
+    ...op.f32Mul(),
+    ...op.f32Add(),
+    ...op.localSet(6),
+    ...op.localGet(1),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(1),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.localGet(6),
+    ...op.end(),
   ];
 }
 
 function buildModule(): Uint8Array {
-  // Locals declaration: (count, type) groups. 2 × i32, 1 × v128.
-  const locals = [0x02, ...uleb(2), I32, ...uleb(1), V128];
-  const body = [...locals, ...mulScalarBody()];
+  // Type 0: (i32, f32) -> ()    — mulScalar, addScalar
+  // Type 1: (i32)      -> ()    — add, mul
+  // Type 2: (i32)      -> (f32) — sum, dot
+  const typeSection = section(1, [
+    ...uleb(3),
+    0x60,
+    ...vec([I32, F32]),
+    ...vec([]),
+    0x60,
+    ...vec([I32]),
+    ...vec([]),
+    0x60,
+    ...vec([I32]),
+    ...vec([F32]),
+  ]);
 
-  const bytes: number[] = [
-    // magic + version
+  // Functions: 0=mulScalar, 1=addScalar, 2=add, 3=mul, 4=sum, 5=dot.
+  const funcSection = section(3, [...uleb(6), ...uleb(0), ...uleb(0), ...uleb(1), ...uleb(1), ...uleb(2), ...uleb(2)]);
+
+  // Memory: 1 page initial (64 KiB), grows in JS as needed.
+  const memSection = section(5, [...uleb(1), 0x00, ...uleb(1)]);
+
+  const exportSection = section(7, [
+    ...uleb(7),
+    ...str("mem"),
+    0x02,
+    ...uleb(0),
+    ...str("mulScalar"),
+    0x00,
+    ...uleb(0),
+    ...str("addScalar"),
+    0x00,
+    ...uleb(1),
+    ...str("add"),
+    0x00,
+    ...uleb(2),
+    ...str("mul"),
+    0x00,
+    ...uleb(3),
+    ...str("sum"),
+    0x00,
+    ...uleb(4),
+    ...str("dot"),
+    0x00,
+    ...uleb(5),
+  ]);
+
+  // Locals declarations per function: (groupCount, count, type)*.
+  const mulScalarLocals = [0x02, ...uleb(2), I32, ...uleb(1), V128];
+  const addScalarLocals = [0x02, ...uleb(2), I32, ...uleb(1), V128];
+  const addVecLocals = [0x01, ...uleb(4), I32];
+  const mulVecLocals = [0x01, ...uleb(4), I32];
+  const sumLocals = [0x03, ...uleb(2), I32, ...uleb(1), V128, ...uleb(1), F32];
+  const dotLocals = [0x03, ...uleb(4), I32, ...uleb(1), V128, ...uleb(1), F32];
+
+  const bodies = [
+    [...mulScalarLocals, ...mulScalarBody()],
+    [...addScalarLocals, ...addScalarBody()],
+    [...addVecLocals, ...binaryVecBody(op.f32x4Add(), op.f32Add())],
+    [...mulVecLocals, ...binaryVecBody(op.f32x4Mul(), op.f32Mul())],
+    [...sumLocals, ...sumBody()],
+    [...dotLocals, ...dotBody()],
+  ];
+
+  const codePayload: number[] = [...uleb(bodies.length)];
+  for (const body of bodies) {
+    codePayload.push(...uleb(body.length), ...body);
+  }
+  const codeSection = section(10, codePayload);
+
+  return new Uint8Array([
     0x00,
     0x61,
     0x73,
@@ -178,23 +538,12 @@ function buildModule(): Uint8Array {
     0x00,
     0x00,
     0x00,
-    // Type section: type 0 = (i32, f32) -> ()
-    ...section(1, [
-      ...uleb(1), // 1 type
-      0x60, // func
-      ...vec([I32, F32]), // params
-      ...vec([]), // results
-    ]),
-    // Function section: 1 function of type 0
-    ...section(3, [...uleb(1), ...uleb(0)]),
-    // Memory section: 1 page initial (64KB), no max
-    ...section(5, [...uleb(1), 0x00, ...uleb(1)]),
-    // Export section: memory "mem" + func "mulScalar"
-    ...section(7, [...uleb(2), ...str("mem"), 0x02, ...uleb(0), ...str("mulScalar"), 0x00, ...uleb(0)]),
-    // Code section: one function body
-    ...section(10, [...uleb(1), ...uleb(body.length), ...body]),
-  ];
-  return new Uint8Array(bytes);
+    ...typeSection,
+    ...funcSection,
+    ...memSection,
+    ...exportSection,
+    ...codeSection,
+  ]);
 }
 
 // --- Instantiate ---
@@ -202,6 +551,11 @@ function buildModule(): Uint8Array {
 type WasmExports = {
   mem: WebAssembly.Memory;
   mulScalar: (len: number, c: number) => void;
+  addScalar: (len: number, c: number) => void;
+  add: (len: number) => void;
+  mul: (len: number) => void;
+  sum: (len: number) => number;
+  dot: (len: number) => number;
 };
 
 let wasm: WasmExports | null = null;
@@ -262,6 +616,13 @@ function mulScalar(a: F32, c: number): F32 {
 function addScalar(a: F32, c: number): F32 {
   requireF32(a, "a");
   const n = a.length;
+  if (n === 0) return new Float32Array(0);
+  if (wasm !== null) {
+    const view = ensureCapacity(n * 4);
+    view.set(a, 0);
+    wasm.addScalar(n, c);
+    return view.slice(0, n);
+  }
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = a[i] + c;
   return out;
@@ -272,6 +633,14 @@ function add(a: F32, b: F32): F32 {
   requireF32(b, "b");
   requireSameLen(a, b);
   const n = a.length;
+  if (n === 0) return new Float32Array(0);
+  if (wasm !== null) {
+    const view = ensureCapacity(n * 8);
+    view.set(a, 0);
+    view.set(b, n);
+    wasm.add(n);
+    return view.slice(0, n);
+  }
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = a[i] + b[i];
   return out;
@@ -282,6 +651,14 @@ function mul(a: F32, b: F32): F32 {
   requireF32(b, "b");
   requireSameLen(a, b);
   const n = a.length;
+  if (n === 0) return new Float32Array(0);
+  if (wasm !== null) {
+    const view = ensureCapacity(n * 8);
+    view.set(a, 0);
+    view.set(b, n);
+    wasm.mul(n);
+    return view.slice(0, n);
+  }
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = a[i] * b[i];
   return out;
@@ -290,6 +667,12 @@ function mul(a: F32, b: F32): F32 {
 function sum(a: F32): number {
   requireF32(a, "a");
   const n = a.length;
+  if (n === 0) return 0;
+  if (wasm !== null) {
+    const view = ensureCapacity(n * 4);
+    view.set(a, 0);
+    return wasm.sum(n);
+  }
   let s = 0;
   for (let i = 0; i < n; i++) s += a[i];
   return s;
@@ -300,6 +683,13 @@ function dot(a: F32, b: F32): number {
   requireF32(b, "b");
   requireSameLen(a, b);
   const n = a.length;
+  if (n === 0) return 0;
+  if (wasm !== null) {
+    const view = ensureCapacity(n * 8);
+    view.set(a, 0);
+    view.set(b, n);
+    return wasm.dot(n);
+  }
   let s = 0;
   for (let i = 0; i < n; i++) s += a[i] * b[i];
   return s;
@@ -334,8 +724,6 @@ function simdMap(fn: (x: number, i: number) => number, a: F32): F32 {
     const aff = tryAffineKernel(fn as (x: number) => number);
     if (aff) {
       const { k1, k0 } = aff;
-      // Scaled + offset: use the SIMD mulScalar if it's a pure multiply,
-      // otherwise inline the affine form.
       if (k0 === 0) return mulScalar(a, k1);
       for (let i = 0; i < n; i++) out[i] = a[i] * k1 + k0;
       return out;
