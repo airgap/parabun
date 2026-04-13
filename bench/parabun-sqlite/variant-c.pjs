@@ -1,0 +1,92 @@
+// Variant C: parabun-optimized. Uses bun:simd primitives and a pure function
+// to demonstrate practical speedup on the analytical step once data has
+// been extracted from SQLite.
+//
+// Key differences from variants A/B:
+//   - `loadSensor` copies the query column into a Float64Array (columnar
+//     view). That copy is paid in the load phase, so the analyze phase
+//     operates on a contiguous typed array.
+//   - `simd.sum` / `simd.dot` replace the scalar loops.
+//   - `dot(values, values)` = sum(vᵢ²), reused as the variance input.
+//   - Weights are precomputed once, shared across all sensors (same N per
+//     sensor in this workload).
+//   - Anomaly count stays a tight JS loop — Math.abs + branching isn't a
+//     SIMD win.
+
+import { Database } from "bun:sqlite";
+import { sum as simdSum, dot as simdDot } from "bun:simd";
+
+const DB_PATH = new URL("./bench.db", import.meta.url).pathname;
+const N_SENSORS = 8;
+
+const db = new Database(DB_PATH, { readonly: true });
+
+function loadSensor(sid) {
+  const rows = db.query("SELECT value FROM readings WHERE sensor_id = ? ORDER BY timestamp").values(sid);
+  const n = rows.length;
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) out[i] = rows[i][0];
+  return out;
+}
+
+function expDecayWeights(n) {
+  const w = new Float64Array(n);
+  const invN = 1 / n;
+  for (let i = 0; i < n; i++) w[i] = Math.exp(-i * invN);
+  return w;
+}
+
+pure function countAnomalies(values, mean, thresh) {
+  let c = 0;
+  const n = values.length;
+  for (let i = 0; i < n; i++) {
+    if (Math.abs(values[i] - mean) > thresh) c++;
+  }
+  return c;
+}
+
+function analyzeSensor(sid, values, weights) {
+  const n = values.length;
+
+  const s = simdSum(values);
+  const sumSq = simdDot(values, values);
+  const mean = s / n;
+  const variance = sumSq / n - mean * mean;
+  const stddev = Math.sqrt(variance);
+
+  const weightedDot = simdDot(values, weights);
+
+  const thresh = 3 * stddev;
+  const anomalies = countAnomalies(values, mean, thresh);
+
+  return { sid, n, mean, stddev, dot: weightedDot, anomalies };
+}
+
+// Phase 1: load — includes the columnar copy into Float64Array so we pay
+// for it honestly. Variants A/B keep the raw row-array-of-arrays.
+const tLoad0 = Bun.nanoseconds();
+const sensorCols = [];
+for (let sid = 0; sid < N_SENSORS; sid++) {
+  sensorCols.push(loadSensor(sid));
+}
+const loadMs = (Bun.nanoseconds() - tLoad0) / 1e6;
+
+const N_PER_SENSOR = sensorCols[0].length;
+const weights = expDecayWeights(N_PER_SENSOR);
+
+const tAnalyze0 = Bun.nanoseconds();
+const results = [];
+for (let sid = 0; sid < N_SENSORS; sid++) {
+  results.push(analyzeSensor(sid, sensorCols[sid], weights));
+}
+const analyzeMs = (Bun.nanoseconds() - tAnalyze0) / 1e6;
+
+for (const r of results) {
+  console.log(
+    `sensor ${r.sid}: n=${r.n.toLocaleString()} mean=${r.mean.toFixed(6)} ` +
+      `stddev=${r.stddev.toFixed(6)} dot=${r.dot.toFixed(4)} anomalies=${r.anomalies}`,
+  );
+}
+console.log(`variant C load_ms=${loadMs.toFixed(2)} analyze_ms=${analyzeMs.toFixed(2)} total_ms=${(loadMs + analyzeMs).toFixed(2)}`);
+
+db.close();

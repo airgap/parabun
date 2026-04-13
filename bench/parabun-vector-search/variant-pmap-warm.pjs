@@ -1,0 +1,96 @@
+// Variant: parallel scoring via bun:parallel.pmap, with the worker pool
+// warmed up before timing. This mirrors the realistic RAG-style pattern
+// where the pool is spawned once at startup and reused across many queries.
+//
+// Contrast with variant-pmap.pjs which times the first (cold) call and so
+// pays Worker spawn + Blob URL + structured-clone-of-embeddings on every
+// invocation. Here we do a trivial warm-up pmap to pay those costs up front,
+// then time the real scoring pass.
+
+import parallel from "bun:parallel";
+import { generate, N, D, K } from "./gen.js";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+pure function scoreChunk(chunk) {
+  const emb = chunk.emb;
+  const query = chunk.query;
+  const dim = chunk.dim;
+  const base = chunk.base;
+  const k = chunk.k;
+  const n = emb.length / dim;
+
+  const topScores = new Float32Array(k);
+  const topIdx = new Int32Array(k);
+  for (let j = 0; j < k; j++) {
+    topScores[j] = -Infinity;
+    topIdx[j] = -1;
+  }
+
+  for (let i = 0; i < n; i++) {
+    const off = i * dim;
+    let s = 0;
+    for (let d = 0; d < dim; d++) s += emb[off + d] * query[d];
+    if (s > topScores[k - 1]) {
+      let j = k - 1;
+      while (j > 0 && topScores[j - 1] < s) {
+        topScores[j] = topScores[j - 1];
+        topIdx[j] = topIdx[j - 1];
+        j--;
+      }
+      topScores[j] = s;
+      topIdx[j] = base + i;
+    }
+  }
+
+  const outScores = new Array(k);
+  const outIdx = new Array(k);
+  for (let j = 0; j < k; j++) {
+    outScores[j] = topScores[j];
+    outIdx[j] = topIdx[j];
+  }
+  return { scores: outScores, idx: outIdx };
+}
+
+const tGen0 = Bun.nanoseconds();
+const { embeddings, query } = generate();
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+// Warm the pool: spawn workers and force them to receive the fn source once.
+// Uses a small dummy array so clone cost is negligible.
+pure function warmup(x) { return x; }
+await pmap(warmup, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+
+const tScore0 = Bun.nanoseconds();
+
+const chunkN = Math.ceil(N / CONCURRENCY);
+const chunks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const start = c * chunkN;
+  if (start >= N) break;
+  const end = Math.min(start + chunkN, N);
+  chunks.push({
+    emb: embeddings.subarray(start * D, end * D),
+    query,
+    dim: D,
+    base: start,
+    k: K,
+  });
+}
+
+const partials = await pmap(scoreChunk, chunks, { concurrency: CONCURRENCY });
+
+const merged = [];
+for (const p of partials) {
+  for (let j = 0; j < K; j++) merged.push({ idx: p.idx[j], score: p.scores[j] });
+}
+merged.sort((a, b) => b.score - a.score);
+const top = merged.slice(0, K);
+
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+const topStr = top.map((t) => `${t.idx}:${t.score.toFixed(4)}`).join(",");
+console.log(
+  `pmap-warm gen_ms=${genMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} total_ms=${(genMs + scoreMs).toFixed(2)} top=[${topStr}]`,
+);

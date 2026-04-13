@@ -4,6 +4,14 @@
 // must be pure (no closures, no `this`, no impure globals). We ship it to the
 // worker by calling `.toString()`, which is only sound because the function
 // is pure by contract.
+//
+// Pool lifecycle:
+//   The pool is lazy and persistent — workers are spawned on the first
+//   `pmap` call that needs them, then kept alive for reuse across subsequent
+//   calls. Each worker caches compiled kernels by source string, so repeat
+//   invocations with the same function skip the `eval` step. Call
+//   `disposeWorkers()` to tear the pool down explicitly (e.g. in tests or
+//   before process exit).
 
 type MapFn<T, U> = (value: T, index: number) => U | Promise<U>;
 
@@ -20,26 +28,88 @@ function defaultConcurrency(): number {
   return 4;
 }
 
-function buildWorkerSource(fnSrc: string): string {
-  // The worker evaluates the user function once, then services chunk jobs.
-  // Errors are forwarded back with a sentinel so the main thread can reject.
-  return (
-    "const __pfn = (" +
-    fnSrc +
-    ");\n" +
-    "self.onmessage = async ({ data }) => {\n" +
-    "  const { id, items, baseIndex } = data;\n" +
-    "  try {\n" +
-    "    const out = new Array(items.length);\n" +
-    "    for (let i = 0; i < items.length; i++) {\n" +
-    "      out[i] = await __pfn(items[i], baseIndex + i);\n" +
-    "    }\n" +
-    "    self.postMessage({ id, ok: true, out });\n" +
-    "  } catch (err) {\n" +
-    "    self.postMessage({ id, ok: false, err: err && err.message ? String(err.message) : String(err) });\n" +
-    "  }\n" +
-    "};\n"
-  );
+// Worker source. The worker caches compiled fns by source string so that
+// repeated pmap() calls with the same fn skip the eval() step entirely.
+const WORKER_SRC = `
+const __cache = new Map();
+self.onmessage = async ({ data }) => {
+  const { id, fnSrc, items, baseIndex } = data;
+  let fn = __cache.get(fnSrc);
+  if (!fn) {
+    fn = (0, eval)("(" + fnSrc + ")");
+    __cache.set(fnSrc, fn);
+  }
+  try {
+    const out = new Array(items.length);
+    for (let i = 0; i < items.length; i++) {
+      out[i] = await fn(items[i], baseIndex + i);
+    }
+    self.postMessage({ id, ok: true, out });
+  } catch (err) {
+    self.postMessage({ id, ok: false, err: err && err.message ? String(err.message) : String(err) });
+  }
+};
+`;
+
+type PoolWorker = {
+  w: Worker;
+  busy: boolean;
+  resolve: ((data: any) => void) | null;
+  reject: ((err: Error) => void) | null;
+};
+
+let pool: PoolWorker[] = [];
+let poolUrl: string | null = null;
+
+function ensurePool(size: number): PoolWorker[] {
+  if (poolUrl === null) {
+    const blob = new Blob([WORKER_SRC], { type: "application/javascript" });
+    poolUrl = URL.createObjectURL(blob);
+  }
+  while (pool.length < size) {
+    const w = new Worker(poolUrl);
+    // Unref so an idle pool doesn't keep the event loop alive — Bun would
+    // otherwise wait forever for "live" workers after the user's last pmap()
+    // resolves. Re-ref while a job is in flight so the process won't exit
+    // mid-task.
+    if (typeof w.unref === "function") w.unref();
+    const entry: PoolWorker = {
+      w,
+      busy: false,
+      resolve: null,
+      reject: null,
+    };
+    entry.w.onmessage = (ev: MessageEvent) => {
+      const { data } = ev;
+      const resolve = entry.resolve;
+      const reject = entry.reject;
+      entry.busy = false;
+      entry.resolve = null;
+      entry.reject = null;
+      if (typeof entry.w.unref === "function") entry.w.unref();
+      if (data && data.ok) resolve?.(data);
+      else reject?.(new Error(data?.err ?? "pmap worker failed"));
+    };
+    entry.w.onerror = (ev: ErrorEvent) => {
+      const reject = entry.reject;
+      entry.busy = false;
+      entry.resolve = null;
+      entry.reject = null;
+      if (typeof entry.w.unref === "function") entry.w.unref();
+      reject?.(new Error(ev.message || "pmap worker error"));
+    };
+    pool.push(entry);
+  }
+  return pool;
+}
+
+function disposeWorkers(): void {
+  for (const p of pool) p.w.terminate();
+  pool = [];
+  if (poolUrl !== null) {
+    URL.revokeObjectURL(poolUrl);
+    poolUrl = null;
+  }
 }
 
 async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOptions): Promise<U[]> {
@@ -60,56 +130,34 @@ async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOp
   );
 
   const fnSrc = fn.toString();
-  const src = buildWorkerSource(fnSrc);
-  const blob = new Blob([src], { type: "application/javascript" });
-  const url = URL.createObjectURL(blob);
+  const workers = ensurePool(concurrency);
+  const chunkSize = Math.ceil(len / concurrency);
 
-  const workers: Worker[] = new Array(concurrency);
-  try {
-    for (let i = 0; i < concurrency; i++) {
-      workers[i] = new Worker(url);
-    }
-
-    const chunkSize = Math.ceil(len / concurrency);
-    const pending: Promise<{ id: number; out: U[] }>[] = [];
-
-    for (let w = 0; w < concurrency; w++) {
-      const start = w * chunkSize;
-      if (start >= len) break;
-      const end = Math.min(start + chunkSize, len);
-      const items = array.slice(start, end);
-      const worker = workers[w];
-      pending.push(
-        new Promise((resolve, reject) => {
-          worker.onmessage = (ev: MessageEvent) => {
-            const { data } = ev;
-            if (data && data.ok) {
-              resolve({ id: w, out: data.out });
-            } else {
-              reject(new Error(data?.err ?? "pmap worker failed"));
-            }
-          };
-          worker.onerror = (ev: ErrorEvent) => {
-            reject(new Error(ev.message || "pmap worker error"));
-          };
-          worker.postMessage({ id: w, items, baseIndex: start });
-        }),
-      );
-    }
-
-    const chunks = await Promise.all(pending);
-    const result: U[] = new Array(len);
-    for (const { id, out } of chunks) {
-      const start = id * chunkSize;
-      for (let i = 0; i < out.length; i++) result[start + i] = out[i];
-    }
-    return result;
-  } finally {
-    for (const w of workers) {
-      if (w) w.terminate();
-    }
-    URL.revokeObjectURL(url);
+  const pending: Promise<{ id: number; out: U[] }>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    const start = w * chunkSize;
+    if (start >= len) break;
+    const end = Math.min(start + chunkSize, len);
+    const items = array.slice(start, end);
+    const entry = workers[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    pending.push(
+      new Promise((resolve, reject) => {
+        entry.resolve = (data: any) => resolve({ id: w, out: data.out });
+        entry.reject = reject;
+        entry.w.postMessage({ id: w, fnSrc, items, baseIndex: start });
+      }),
+    );
   }
+
+  const chunks = await Promise.all(pending);
+  const result: U[] = new Array(len);
+  for (const { id, out } of chunks) {
+    const start = id * chunkSize;
+    for (let i = 0; i < out.length; i++) result[start + i] = out[i];
+  }
+  return result;
 }
 
-export default { pmap };
+export default { pmap, disposeWorkers };

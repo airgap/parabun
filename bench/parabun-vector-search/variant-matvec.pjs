@@ -1,0 +1,32 @@
+// Variant: single bun:simd.matVec call. The whole scoring pass becomes one
+// WASM kernel invocation — the matrix is copied into WASM linear memory
+// once, the kernel does N × D fused multiply-adds using f32x4 lanes, and
+// the N scores come back as a Float32Array.
+//
+// Contrast with variant-simd.pjs which calls bun:simd.dot once per row —
+// each call pays WASM-boundary overhead that erases the f32x4 win at D=384.
+// matVec amortizes that overhead across the whole matrix.
+
+import { matVec } from "bun:simd";
+import { generate, N, D, K } from "./gen.js";
+
+function topK(scores) {
+  const ranked = new Array(N);
+  for (let i = 0; i < N; i++) ranked[i] = { idx: i, score: scores[i] };
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, K);
+}
+
+const tGen0 = Bun.nanoseconds();
+const { embeddings, query } = generate();
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+const tScore0 = Bun.nanoseconds();
+const scores = matVec(embeddings, query, N, D);
+const top = topK(scores);
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+const topStr = top.map((t) => `${t.idx}:${t.score.toFixed(4)}`).join(",");
+console.log(
+  `matvec gen_ms=${genMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} total_ms=${(genMs + scoreMs).toFixed(2)} top=[${topStr}]`,
+);

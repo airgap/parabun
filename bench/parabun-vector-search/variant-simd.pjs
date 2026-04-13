@@ -1,0 +1,40 @@
+// Variant: single-threaded but uses bun:simd.dot for the inner product.
+// Same top-K logic as baseline; only the per-pair scoring changes.
+//
+// What this shows: bun:simd.dot calls into f32x4 WASM kernels, so each dot
+// product runs through SIMD lanes instead of the JS scalar loop.
+
+import { dot as simdDot } from "bun:simd";
+import { generate, N, D, K } from "./gen.js";
+
+function scoreAll(embeddings, query) {
+  const scores = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const off = i * D;
+    // subarray is a view — no copy, just a new typed-array header.
+    const row = embeddings.subarray(off, off + D);
+    scores[i] = simdDot(row, query);
+  }
+  return scores;
+}
+
+function topK(scores) {
+  const ranked = new Array(N);
+  for (let i = 0; i < N; i++) ranked[i] = { idx: i, score: scores[i] };
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, K);
+}
+
+const tGen0 = Bun.nanoseconds();
+const { embeddings, query } = generate();
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+const tScore0 = Bun.nanoseconds();
+const scores = scoreAll(embeddings, query);
+const top = topK(scores);
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+const topStr = top.map((t) => `${t.idx}:${t.score.toFixed(4)}`).join(",");
+console.log(
+  `simd gen_ms=${genMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} total_ms=${(genMs + scoreMs).toFixed(2)} top=[${topStr}]`,
+);

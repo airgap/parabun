@@ -148,9 +148,27 @@ const out = await (range(100) |> map(sq) |> filter(gt10) |> take(3) |> collect);
 
 Transformations: `map`, `filter`, `take`, `drop`, `takeWhile`, `dropWhile`,
 `flat`, `flatMap`, `chunk`, `tap`. Terminals: `collect`, `reduce`, `forEach`,
-`count`. Sources: `range(stop)`, `range(start, stop, step?)`, plus any sync or
-async iterable. A call-form `pipe(source, ...transforms)` is exposed for users
-who prefer not to use `|>`.
+`count`, `sum`, `toFloat32Array`, `toFloat64Array`. Sources: `range(stop)`,
+`range(start, stop, step?)`, plus any sync or async iterable. A call-form
+`pipe(source, ...transforms)` is exposed for users who prefer not to use `|>`.
+
+**Fusion (Tier 2 auto-accel):** when the source is a `Float32Array` or
+`Float64Array` and the chain is a run of `map`s, each `map` extends a
+`FusedChain` descriptor instead of wrapping the previous layer in another
+async generator. Fusion-aware terminals (`collect`, `sum`,
+`toFloat32Array`, `toFloat64Array`) walk the chain and:
+- probe each map fn for affine shape (`x*k+c`) via three-point evaluation,
+- if all affine, collapse the chain to a single `(K, C)` and dispatch to
+  `bun:simd` (`mulScalar`/`addScalar`) — one pass over the array,
+- on any non-affine fn, fall back to `simdMap(composed_fn, source)` — one
+  pass, no intermediate arrays.
+
+For reductions, `sum` over an all-affine chain becomes
+`K * simd.sum(source) + C * n` — a single SIMD pass + two scalar ops,
+regardless of chain length. Non-fusion-aware combinators (`filter`,
+`take`, etc.) still accept a `FusedChain` via its `Symbol.asyncIterator`,
+which realizes the chain on demand and proceeds on the existing
+async-generator path.
 
 Implementation: `src/js/bun/pipeline.ts`.
 
@@ -183,30 +201,49 @@ observably equivalent.
 
 Implementation: `src/js/bun/simd.ts`.
 
-Benchmark (`bench/simd.pjs`, release build, N = 100,000, best-of-200):
+Reduce ops (`sum`, `dot`) skip the WASM copy-in for inputs whose byte
+footprint exceeds `REDUCE_WASM_MAX_BYTES` (4 MiB). At that size the copy
+dominates the vector reduction, so `sum`/`dot` fall through to
+per-type monomorphic tight loops (`sumTightF32`/`sumTightF64`,
+`dotTightF32`/`dotTightF64`). Monomorphism matters: a union-typed loop
+body would fail JSC's typed-array specialization and cost ~30%.
+
+Benchmark (`bench/simd.pjs`, release build, best-of-200):
+
+N = 100,000:
 
 | op                  | array | `.map`/`.reduce` | tight loop | `bun:simd` |
 |---------------------|:-----:|-----------------:|-----------:|-----------:|
-| mulScalar(a, 3)     | F32   | 778 µs           | 46 µs      | **23 µs**  |
-| add(a, b)           | F32   | 857 µs           | 67 µs      | **34 µs**  |
-| sum(a)              | F32   | 542 µs           | 37 µs      | **14 µs**  |
-| dot(a, b)           | F32   | 660 µs           | 46 µs      | **21 µs**  |
-| simdMap(x*3+7)      | F32   | 787 µs           | 54 µs      | 59 µs      |
-| simdMap(sqrt(x²+1)) | F32   | 745 µs           | 118 µs     | 309 µs     |
-| mulScalar(a, 3)     | F64   | 732 µs           | 240 µs     | **51 µs**  |
-| add(a, b)           | F64   | 808 µs           | 286 µs     | **103 µs** |
-| sum(a)              | F64   | 504 µs           | 55 µs      | **30 µs**  |
-| dot(a, b)           | F64   | 597 µs           | 100 µs     | **73 µs**  |
-| simdMap(x*3+7)      | F64   | 740 µs           | 245 µs     | **49 µs**  |
-| simdMap(sqrt(x²+1)) | F64   | 734 µs           | 247 µs     | **128 µs** |
+| mulScalar(a, 3)     | F32   | 808 µs           | 60 µs      | **30 µs**  |
+| add(a, b)           | F32   | 884 µs           | 73 µs      | **40 µs**  |
+| sum(a)              | F32   | 574 µs           | 43 µs      | **17 µs**  |
+| dot(a, b)           | F32   | 716 µs           | 51 µs      | **24 µs**  |
+| simdMap(x*3+7)      | F32   | 848 µs           | 66 µs      | 63 µs      |
+| simdMap(sqrt(x²+1)) | F32   | 868 µs           | 136 µs     | 380 µs     |
+| mulScalar(a, 3)     | F64   | 736 µs           | 241 µs     | **55 µs**  |
+| add(a, b)           | F64   | 810 µs           | 296 µs     | **102 µs** |
+| sum(a)              | F64   | 508 µs           | 56 µs      | **30 µs**  |
+| dot(a, b)           | F64   | 600 µs           | 101 µs     | **59 µs**  |
+| simdMap(x*3+7)      | F64   | 732 µs           | 239 µs     | **50 µs**  |
+| simdMap(sqrt(x²+1)) | F64   | 738 µs           | 247 µs     | **348 µs** |
+
+N = 1,000,000 (reduce ops take the threshold fallback):
+
+| op                  | array | `.map`/`.reduce` | tight loop | `bun:simd` |
+|---------------------|:-----:|-----------------:|-----------:|-----------:|
+| sum(a)              | F32   | 5.82 ms          | 388 µs     | **296 µs** |
+| dot(a, b)           | F32   | 6.51 ms          | 483 µs     | **462 µs** |
+| sum(a)              | F64   | 5.25 ms          | 606 µs     | **407 µs** |
+| dot(a, b)           | F64   | 6.16 ms          | 1.07 ms    | **537 µs** |
 
 Across both widths the WASM kernels deliver 1.5–3× speedups over JS tight
 loops and 10–35× over idiomatic `.map`/`.reduce` at N = 100 K. F64 sees the
 biggest win because JSC's FTL tier auto-vectorizes f32 tight loops more
-aggressively than f64, so the manual f64x2 kernel clears a larger gap. For
-very large arrays (N ≈ 1 M), binary-op speedups shrink because copy-in of
-16 MB dominates; reduce ops (`sum`, `dot`) can even lose to a tight JS loop
-at that size for F64 — the JS loop avoids the copy entirely.
+aggressively than f64, so the manual f64x2 kernel clears a larger gap. At
+N = 1 M the reduce-op threshold keeps `sum`/`dot` competitive by falling
+back to the monomorphic tight loops — those loops even beat the bench's
+inline tight loop (a closure that captures its array) because the per-type
+exported helpers sit on a cleaner inline-cache path.
 
 Sub-~1 K input sizes are dominated by per-call overhead regardless of path.
 `simdMap` routes affine kernels through `mulScalar` when the offset is zero,
@@ -216,14 +253,64 @@ and JSC can't inline the kernel; the F64 fallback still wins over inline
 because the underlying `out[i] = fn(a[i], i)` form survives auto-vectorization
 better than the `Math.sqrt(x*x+1)` tight loop in JS source.
 
+## Real-world benchmark: SQLite analytical workload
+
+`bench/parabun-sqlite/` compares three variants of the same workload —
+post-query analytical processing of 1 M rows of time-series sensor data
+across 8 sensors — to answer two questions: does Parabun add overhead on
+unchanged code, and does deliberate use of its features deliver a real
+speedup?
+
+- **Variant A** (`variant-a.js`): idiomatic `bun:sqlite` + plain JS loops.
+- **Variant B** (`variant-b.pjs`): same code, `.pjs` extension. Zero
+  Parabun features used; just confirms the parser imposes no overhead.
+- **Variant C** (`variant-c.pjs`): columnar extraction into
+  `Float64Array`, `bun:simd` `sum`/`dot` for mean/stddev/weighted-dot,
+  pure anomaly-count kernel, shared weights across sensors.
+
+Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
+
+| variant                          | load_ms (min/med) | analyze_ms (min/med) | total_ms (med) |
+|----------------------------------|------------------:|---------------------:|---------------:|
+| A — `.js`, idiomatic bun         | 306 / 318         | **19.4** / 22.7      | 339            |
+| B — `.pjs`, same code            | 294 / 339         | 16.5 / 20.3          | 359            |
+| C — `.pjs`, parabun-optimized    | 280 / 296         | **7.0** / 9.5        | 306            |
+
+- **Parabun imposes no overhead.** Variant B's timings overlap A's in all
+  phases within run-to-run noise.
+- **Analytical work is ~2× faster in variant C** (7.0 ms min vs 19.4 ms
+  min). The whole chain of `simd.sum`, two `simd.dot` calls, and a pure
+  anomaly-count loop — across 8 sensors — fits in single-digit
+  milliseconds.
+- Total time is dominated by SQLite row extraction (~300 ms for 1 M
+  rows), so the end-to-end win is smaller (~10%). The 2× analytical
+  speedup is the relevant number for workloads where extraction is
+  amortized (cached query results, streaming from network, etc.).
+
 ## Pending Work
 
 - **In-place binary ops for `bun:simd`** — optional `dstOverwrite: "a"`
   escape hatch that mutates and returns the input buffer instead of a fresh
   one, eliding the copy-out slice. Semantics change, so gated behind an
   option.
-- **`bun:simd` zero-copy for large arrays** — for very large inputs (N ≳ 1 M)
-  the copy-in cost dominates binary reduce ops (`sum`, `dot`) and can lose
-  to a tight JS loop on `Float64Array`. A zero-copy path that reads directly
-  from the user's `ArrayBuffer` via `WebAssembly.Memory` sharing would
-  reclaim the gap.
+- **`bun:simd` zero-copy path for binary ops** — element-wise `add`/`mul`
+  at N ≳ 1 M still pay 8–16 MB of copy-in per call. Sharing the user's
+  `ArrayBuffer` with the WASM instance via `WebAssembly.Memory` would let
+  the binary ops match the gains the reduce-op threshold fallback already
+  captures.
+- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — transpile the
+  AST of a `pure` function to MSL (for Metal/MPS) and/or WGSL (for WebGPU
+  via wgpu/dawn). The purity contract already forbids most constructs that
+  would fail (closures, `this`, side effects, stateful globals). Scope:
+  scalar-in/scalar-out numeric kernels, subset of `Math.*` mapped to
+  shader intrinsics, `if/else/loop` → shader control flow, with CPU
+  fallback on unsupported ops. Unlocks user-written `simdMap` kernels on
+  GPU.
+- **Auto-accel dispatch, Tier 4 (cross-call buffer residency)** — deciding
+  to keep a typed array GPU-resident between user calls so a one-shot
+  `dot(a, b)` on a discrete GPU isn't bottlenecked by PCIe. Either needs
+  escape analysis over the user's code or an explicit opt-in (e.g.
+  `holdOnGpu(arr)` / `GpuFloat32Array`). For discrete GPUs this is the
+  make-or-break; without it, transparent dispatch to discrete GPU always
+  loses to CPU SIMD. Tier 2 pipeline fusion partly hides the need by
+  amortizing the copy across multiple ops within one pipeline.

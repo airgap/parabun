@@ -185,4 +185,99 @@ describe("bun:pipeline", () => {
     expect(stdout).toBe("[1,2,3]");
     expect(exitCode).toBe(0);
   });
+
+  it("fusion: Float32Array |> map(affine) |> sum", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-sum",
+      `
+        import { map, sum } from "bun:pipeline";
+        pure function k(x) { return x * 3 + 7; }
+        const arr = new Float32Array([1, 2, 3, 4, 5]);
+        const out = await (arr |> map(k) |> sum);
+        console.log(out);
+      `,
+    );
+    // (1*3+7) + (2*3+7) + (3*3+7) + (4*3+7) + (5*3+7) = 80
+    expect(stdout).toBe("80");
+    expect(exitCode).toBe(0);
+  });
+
+  it("fusion: Float64Array |> map(affine) |> map(affine) |> toFloat64Array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-compose",
+      `
+        import { map, toFloat64Array } from "bun:pipeline";
+        pure function f(x) { return x * 2 + 1; }
+        pure function g(x) { return x * 10 - 5; }
+        const arr = new Float64Array([1, 2, 3]);
+        const out = await (arr |> map(f) |> map(g) |> toFloat64Array);
+        console.log(JSON.stringify(Array.from(out)));
+      `,
+    );
+    // g(f(1)) = g(3) = 25; g(f(2)) = g(5) = 45; g(f(3)) = g(7) = 65
+    expect(stdout).toBe("[25,45,65]");
+    expect(exitCode).toBe(0);
+  });
+
+  it("fusion: non-affine map uses simdMap fallback", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-nonaffine",
+      `
+        import { map, toFloat64Array } from "bun:pipeline";
+        pure function sq(x) { return x * x; }
+        const arr = new Float64Array([1, 2, 3, 4]);
+        const out = await (arr |> map(sq) |> toFloat64Array);
+        console.log(JSON.stringify(Array.from(out)));
+      `,
+    );
+    expect(stdout).toBe("[1,4,9,16]");
+    expect(exitCode).toBe(0);
+  });
+
+  it("fusion: chain + filter falls back correctly", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-filter-fallback",
+      `
+        import { map, filter, collect } from "bun:pipeline";
+        pure function double(x) { return x * 2; }
+        pure function gt5(x) { return x > 5; }
+        const arr = new Float32Array([1, 2, 3, 4, 5]);
+        const out = await (arr |> map(double) |> filter(gt5) |> collect);
+        console.log(JSON.stringify(out));
+      `,
+    );
+    // doubles: [2,4,6,8,10]; filter > 5: [6,8,10]
+    expect(stdout).toBe("[6,8,10]");
+    expect(exitCode).toBe(0);
+  });
+
+  it("fusion: collect on a typed array source works", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-collect-fa",
+      `
+        import { map, collect } from "bun:pipeline";
+        pure function inc(x) { return x + 1; }
+        const arr = new Float32Array([10, 20, 30]);
+        const out = await (arr |> map(inc) |> collect);
+        console.log(JSON.stringify(out));
+      `,
+    );
+    expect(stdout).toBe("[11,21,31]");
+    expect(exitCode).toBe(0);
+  });
+
+  it("fusion: empty chain on typed array is identity", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-empty",
+      `
+        import { collect, sum } from "bun:pipeline";
+        const arr = new Float32Array([1.5, 2.5, 3]);
+        const s = await sum(arr);
+        const c = await collect(arr);
+        console.log(s, JSON.stringify(c));
+      `,
+    );
+    expect(stdout).toBe("7 [1.5,2.5,3]");
+    expect(exitCode).toBe(0);
+  });
 });

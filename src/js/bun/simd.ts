@@ -92,6 +92,7 @@ const op = {
   f32Const: (x: number) => [0x43, ...f32le(x)],
   f64Const: (x: number) => [0x44, ...f64le(x)],
   i32Add: () => [0x6a],
+  i32Mul: () => [0x6c],
   i32Shl: () => [0x74],
   i32GtS: () => [0x4a],
   i32GeS: () => [0x4e],
@@ -449,14 +450,149 @@ function dotBody(cfg: NumCfg): number[] {
   ];
 }
 
+// matVec(nRows, nCols, matOffset, vecOffset, outOffset) -> ()
+// out[i] = sum_j matrix[i*nCols + j] * vector[j], for i in [0, nRows).
+// Matrix is row-major at matOffset; vector at vecOffset; output at outOffset.
+// Locals:
+//  5: row (i32)           10: rowByteStart (i32)
+//  6: j (i32)             11: nColBytes (i32)       — nCols << shift, invariant
+//  7: jBytes (i32)        12: acc_v (v128)
+//  8: aAddr (i32)         13: acc_s (f32/f64)
+//  9: bAddr (i32)
+function matVecBody(cfg: NumCfg): number[] {
+  return [
+    // nColBytes = nCols << shift
+    ...op.localGet(1),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.localSet(11),
+    // outer row loop
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(5),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    // rowByteStart = matOffset + row * nColBytes
+    ...op.localGet(2),
+    ...op.localGet(5),
+    ...op.localGet(11),
+    ...op.i32Mul(),
+    ...op.i32Add(),
+    ...op.localSet(10),
+    // acc_v = splat(0)
+    ...cfg.scalarZero,
+    ...cfg.vecSplat,
+    ...op.localSet(12),
+    // j = 0
+    ...op.i32Const(0),
+    ...op.localSet(6),
+    // SIMD col loop
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(6),
+    ...op.i32Const(cfg.stride),
+    ...op.i32Add(),
+    ...op.localGet(1),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    // jBytes = j << shift
+    ...op.localGet(6),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.localSet(7),
+    // aAddr = rowByteStart + jBytes
+    ...op.localGet(10),
+    ...op.localGet(7),
+    ...op.i32Add(),
+    ...op.localSet(8),
+    // bAddr = vecOffset + jBytes
+    ...op.localGet(3),
+    ...op.localGet(7),
+    ...op.i32Add(),
+    ...op.localSet(9),
+    // acc_v += v128(aAddr) * v128(bAddr)
+    ...op.localGet(12),
+    ...op.localGet(8),
+    ...op.v128Load(),
+    ...op.localGet(9),
+    ...op.v128Load(),
+    ...cfg.vecMul,
+    ...cfg.vecAdd,
+    ...op.localSet(12),
+    // j += stride
+    ...op.localGet(6),
+    ...op.i32Const(cfg.stride),
+    ...op.i32Add(),
+    ...op.localSet(6),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    // horiz reduce acc_v -> acc_s
+    ...horizReduce(cfg, 12, 13),
+    // scalar col tail
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(6),
+    ...op.localGet(1),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(6),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.localSet(7),
+    ...op.localGet(10),
+    ...op.localGet(7),
+    ...op.i32Add(),
+    ...op.localSet(8),
+    ...op.localGet(3),
+    ...op.localGet(7),
+    ...op.i32Add(),
+    ...op.localSet(9),
+    ...op.localGet(13),
+    ...op.localGet(8),
+    ...cfg.scalarLoad,
+    ...op.localGet(9),
+    ...cfg.scalarLoad,
+    ...cfg.scalarMul,
+    ...cfg.scalarAdd,
+    ...op.localSet(13),
+    ...op.localGet(6),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(6),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    // out[outOffset + row*elemBytes] = acc_s
+    ...op.localGet(4),
+    ...op.localGet(5),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localGet(13),
+    ...cfg.scalarStore,
+    // row += 1
+    ...op.localGet(5),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(5),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.end(),
+  ];
+}
+
 function buildModule(): Uint8Array {
   // Type 0: (i32, f32) -> ()   — mulScalar, addScalar (F32)
   // Type 1: (i32)      -> ()   — add, mul (F32 and F64)
   // Type 2: (i32)      -> f32  — sum, dot (F32)
   // Type 3: (i32, f64) -> ()   — mulScalar, addScalar (F64)
   // Type 4: (i32)      -> f64  — sum, dot (F64)
+  // Type 5: (i32, i32, i32, i32, i32) -> ()  — matVec (F32 and F64)
   const typeSection = section(1, [
-    ...uleb(5),
+    ...uleb(6),
     0x60,
     ...vec([I32, F32]),
     ...vec([]),
@@ -472,6 +608,9 @@ function buildModule(): Uint8Array {
     0x60,
     ...vec([I32]),
     ...vec([F64]),
+    0x60,
+    ...vec([I32, I32, I32, I32, I32]),
+    ...vec([]),
   ]);
 
   // Function types, in this order:
@@ -481,7 +620,8 @@ function buildModule(): Uint8Array {
   //  3: mul         (t1)    9:  mulF64       (t1)
   //  4: sum         (t2)   10:  sumF64       (t4)
   //  5: dot         (t2)   11:  dotF64       (t4)
-  const funcTypes = [0, 0, 1, 1, 2, 2, 3, 3, 1, 1, 4, 4];
+  // 12: matVec      (t5)   13:  matVecF64    (t5)
+  const funcTypes = [0, 0, 1, 1, 2, 2, 3, 3, 1, 1, 4, 4, 5, 5];
   const funcSection = section(3, [...uleb(funcTypes.length), ...funcTypes.flatMap(t => uleb(t))]);
 
   // Memory: 1 page initial (64 KiB), grows in JS as needed.
@@ -500,6 +640,8 @@ function buildModule(): Uint8Array {
     ["mulF64", 9],
     ["sumF64", 10],
     ["dotF64", 11],
+    ["matVec", 12],
+    ["matVecF64", 13],
   ];
   const exportPayload: number[] = [...uleb(exports.length + 1), ...str("mem"), 0x02, ...uleb(0)];
   for (const [name, idx] of exports) {
@@ -514,6 +656,11 @@ function buildModule(): Uint8Array {
   const sumLocalsF64 = [0x03, ...uleb(2), I32, ...uleb(1), V128, ...uleb(1), F64];
   const dotLocalsF32 = [0x03, ...uleb(4), I32, ...uleb(1), V128, ...uleb(1), F32];
   const dotLocalsF64 = [0x03, ...uleb(4), I32, ...uleb(1), V128, ...uleb(1), F64];
+  // matVec locals: 7 i32 (row, j, jBytes, aAddr, bAddr, rowByteStart, nColBytes),
+  // 1 v128 (acc_v), 1 scalar (acc_s). Params 0..4 are (nRows, nCols, matOffset,
+  // vecOffset, outOffset), so declared locals start at index 5.
+  const matVecLocalsF32 = [0x03, ...uleb(7), I32, ...uleb(1), V128, ...uleb(1), F32];
+  const matVecLocalsF64 = [0x03, ...uleb(7), I32, ...uleb(1), V128, ...uleb(1), F64];
 
   const bodies: number[][] = [
     [...scalarOpLocals, ...scalarOpBody(F32Cfg, op.f32x4Mul(), op.f32Mul())],
@@ -528,6 +675,8 @@ function buildModule(): Uint8Array {
     [...binaryVecLocals, ...binaryVecBody(F64Cfg, op.f64x2Mul(), op.f64Mul())],
     [...sumLocalsF64, ...sumBody(F64Cfg)],
     [...dotLocalsF64, ...dotBody(F64Cfg)],
+    [...matVecLocalsF32, ...matVecBody(F32Cfg)],
+    [...matVecLocalsF64, ...matVecBody(F64Cfg)],
   ];
 
   const codePayload: number[] = [...uleb(bodies.length)];
@@ -569,6 +718,8 @@ type WasmExports = {
   mulF64: (len: number) => void;
   sumF64: (len: number) => number;
   dotF64: (len: number) => number;
+  matVec: (nRows: number, nCols: number, matOffset: number, vecOffset: number, outOffset: number) => void;
+  matVecF64: (nRows: number, nCols: number, matOffset: number, vecOffset: number, outOffset: number) => void;
 };
 
 let wasm: WasmExports | null = null;
@@ -737,11 +888,51 @@ function mul(a: FArray, b: FArray): FArray {
   return out;
 }
 
+// Reduce ops (sum, dot) copy the entire input into WASM memory and return a
+// single scalar. At large sizes that copy-in cost dominates, and a JS tight
+// loop — which reads the user's buffer directly — becomes faster than any
+// SIMD win. The threshold below is total bytes-to-copy; anything above it
+// takes the JS fallback. Tuned from `bench/simd.pjs`:
+//   - F32 sum crosses around N ≈ 2 M (8 MB)
+//   - F32 dot / F64 sum cross around N ≈ 512 K (4–8 MB)
+//   - F64 dot crosses around N ≈ 256 K (4 MB)
+// 4 MiB stays on the WASM side below each crossover and flips to JS above.
+const REDUCE_WASM_MAX_BYTES = 4 * 1024 * 1024;
+
+// Monomorphic tight-loop helpers for the reduce fallback. Each helper only
+// ever sees one typed-array shape, so JSC's FTL tier can specialize +
+// vectorize the body without a polymorphic-site bailout.
+function sumTightF32(a: Float32Array): number {
+  const n = a.length;
+  let s = 0;
+  for (let i = 0; i < n; i++) s += a[i];
+  return s;
+}
+function sumTightF64(a: Float64Array): number {
+  const n = a.length;
+  let s = 0;
+  for (let i = 0; i < n; i++) s += a[i];
+  return s;
+}
+function dotTightF32(a: Float32Array, b: Float32Array): number {
+  const n = a.length;
+  let s = 0;
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+function dotTightF64(a: Float64Array, b: Float64Array): number {
+  const n = a.length;
+  let s = 0;
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
 function sum(a: FArray): number {
   const arr = requireFArray(a, "a");
   const n = arr.length;
   if (n === 0) return 0;
-  if (wasm !== null) {
+  const elemBytes = arr.BYTES_PER_ELEMENT;
+  if (wasm !== null && n * elemBytes <= REDUCE_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       f32View().set(arr, 0);
@@ -751,9 +942,7 @@ function sum(a: FArray): number {
     f64View().set(arr, 0);
     return wasm.sumF64(n);
   }
-  let s = 0;
-  for (let i = 0; i < n; i++) s += arr[i];
-  return s;
+  return arr instanceof Float32Array ? sumTightF32(arr) : sumTightF64(arr);
 }
 
 function dot(a: FArray, b: FArray): number {
@@ -762,7 +951,8 @@ function dot(a: FArray, b: FArray): number {
   requireSameTypeAndLen(ax, bx);
   const n = ax.length;
   if (n === 0) return 0;
-  if (wasm !== null) {
+  const elemBytes = ax.BYTES_PER_ELEMENT;
+  if (wasm !== null && n * elemBytes * 2 <= REDUCE_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
       const view = f32View();
@@ -776,9 +966,88 @@ function dot(a: FArray, b: FArray): number {
     view.set(bx as Float64Array, n);
     return wasm.dotF64(n);
   }
-  let s = 0;
-  for (let i = 0; i < n; i++) s += ax[i] * bx[i];
-  return s;
+  return ax instanceof Float32Array
+    ? dotTightF32(ax, bx as Float32Array)
+    : dotTightF64(ax as Float64Array, bx as Float64Array);
+}
+
+// --- matVec ---
+//
+// Single-call matrix-vector product: out[i] = dot(matrix[i], vector).
+// Dispatches to one WASM kernel invocation for the entire matrix, amortizing
+// boundary-crossing overhead that makes per-row `dot()` calls lose to a plain
+// JSC FTL-vectorized scalar loop at small column counts (D ≲ 1024).
+
+function matVecTightF32(m: Float32Array, v: Float32Array, nRows: number, nCols: number, out: Float32Array): void {
+  for (let i = 0; i < nRows; i++) {
+    const off = i * nCols;
+    let s = 0;
+    for (let j = 0; j < nCols; j++) s += m[off + j] * v[j];
+    out[i] = s;
+  }
+}
+function matVecTightF64(m: Float64Array, v: Float64Array, nRows: number, nCols: number, out: Float64Array): void {
+  for (let i = 0; i < nRows; i++) {
+    const off = i * nCols;
+    let s = 0;
+    for (let j = 0; j < nCols; j++) s += m[off + j] * v[j];
+    out[i] = s;
+  }
+}
+
+function matVec(matrix: Float32Array, vector: Float32Array, nRows: number, nCols: number): Float32Array;
+function matVec(matrix: Float64Array, vector: Float64Array, nRows: number, nCols: number): Float64Array;
+function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray {
+  const mx = requireFArray(matrix, "matrix");
+  const vx = requireFArray(vector, "vector");
+  if (mx.constructor !== vx.constructor) {
+    throw new TypeError(
+      `matrix and vector must both be Float32Array or both be Float64Array; got ${mx.constructor.name} and ${vx.constructor.name}`,
+    );
+  }
+  if (!Number.isInteger(nRows) || nRows < 0) throw new RangeError("nRows must be a non-negative integer");
+  if (!Number.isInteger(nCols) || nCols < 0) throw new RangeError("nCols must be a non-negative integer");
+  if (mx.length !== nRows * nCols) {
+    throw new RangeError(`matrix length ${mx.length} != nRows * nCols (${nRows} * ${nCols} = ${nRows * nCols})`);
+  }
+  if (vx.length !== nCols) {
+    throw new RangeError(`vector length ${vx.length} != nCols ${nCols}`);
+  }
+  if (nRows === 0) return emptyLike(mx);
+  if (nCols === 0) return outLike(mx, nRows);
+
+  if (wasm !== null) {
+    if (mx instanceof Float32Array) {
+      const totalBytes = (nRows * nCols + nCols + nRows) * 4;
+      ensureCapacity(totalBytes);
+      const view = f32View();
+      const matOffset = 0;
+      const vecOffsetEl = nRows * nCols;
+      const outOffsetEl = vecOffsetEl + nCols;
+      view.set(mx, matOffset);
+      view.set(vx as Float32Array, vecOffsetEl);
+      wasm.matVec(nRows, nCols, matOffset * 4, vecOffsetEl * 4, outOffsetEl * 4);
+      return view.slice(outOffsetEl, outOffsetEl + nRows);
+    }
+    const totalBytes = (nRows * nCols + nCols + nRows) * 8;
+    ensureCapacity(totalBytes);
+    const view = f64View();
+    const matOffset = 0;
+    const vecOffsetEl = nRows * nCols;
+    const outOffsetEl = vecOffsetEl + nCols;
+    view.set(mx, matOffset);
+    view.set(vx as Float64Array, vecOffsetEl);
+    wasm.matVecF64(nRows, nCols, matOffset * 8, vecOffsetEl * 8, outOffsetEl * 8);
+    return view.slice(outOffsetEl, outOffsetEl + nRows);
+  }
+
+  const out = outLike(mx, nRows);
+  if (mx instanceof Float32Array) {
+    matVecTightF32(mx, vx as Float32Array, nRows, nCols, out as Float32Array);
+  } else {
+    matVecTightF64(mx as Float64Array, vx as Float64Array, nRows, nCols, out as Float64Array);
+  }
+  return out;
 }
 
 // --- simdMap ---
@@ -826,6 +1095,46 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
   return out;
 }
 
+// --- Auto-accel dispatch (Tier 1) ---
+//
+// Other bun: modules (notably bun:pipeline) need to know whether dispatching
+// to our WASM kernels will pay off at a given size. `wasmWinsForSize` is the
+// centralized query; it encapsulates:
+//   - WASM availability (module compiled successfully at boot)
+//   - Reduce-op copy-in threshold (the REDUCE_WASM_MAX_BYTES cutoff)
+//   - A minimum element count below which the WASM call overhead (~µs)
+//     dominates any parallelism win.
+// Future GPU backends (Metal/MPS on unified-memory hardware; WebGPU
+// otherwise) will plug in here. `hasUnifiedMemoryGPU` and `hasDiscreteGPU`
+// are stubs that return false today; when Tier 3/4 land they'll gate
+// backend selection without changing the query surface.
+
+const MIN_WASM_ELEMENTS = 64;
+
+type SimdOpKind = "map" | "scalar" | "binary" | "reduce";
+
+function wasmWinsForSize(op: SimdOpKind, n: number, elemBytes: number): boolean {
+  if (wasm === null) return false;
+  if (n < MIN_WASM_ELEMENTS) return false;
+  if (op === "reduce") {
+    if (n * elemBytes > REDUCE_WASM_MAX_BYTES) return false;
+  } else if (op === "binary") {
+    // Binary ops copy both operands in; same byte budget as reduce applies,
+    // but output ops still win above the threshold because they return an
+    // array (not a scalar) so copy-out is part of the work regardless.
+    // Leaving this permissive — measured in bench/simd.pjs.
+  }
+  return true;
+}
+
+function hasUnifiedMemoryGPU(): boolean {
+  return false;
+}
+
+function hasDiscreteGPU(): boolean {
+  return false;
+}
+
 export default {
   mulScalar,
   addScalar,
@@ -833,6 +1142,10 @@ export default {
   mul,
   sum,
   dot,
+  matVec,
   simdMap,
   isWasmAvailable,
+  wasmWinsForSize,
+  hasUnifiedMemoryGPU,
+  hasDiscreteGPU,
 };
