@@ -71,6 +71,73 @@ const output = rawData
 // Equivalent to: JSON.stringify(transform(JSON.parse(rawData)))
 ```
 
+### Pipeline Fusion (`bun:pipeline`)
+
+The `|>` operator is a parser-level desugar. `bun:pipeline` is the runtime that makes it efficient on typed arrays — affine `map` chains over `Float32Array`/`Float64Array` compile down to a single SIMD pass, with no intermediate arrays and no per-element function calls.
+
+```pts
+import { map, sum } from "bun:pipeline";
+
+pure function scale(x) { return x * 1000; }
+pure function drift(x) { return x + 2.5; }
+pure function calib(x) { return x * 0.998; }
+
+const data = new Float32Array(10_000_000);
+const total = await (data |> map(scale) |> map(drift) |> map(calib) |> sum);
+```
+
+Each `map` extends a `FusedChain` descriptor instead of wrapping another async generator. On a terminal (`sum`, `collect`, `toFloat32Array`, …), the runtime probes each map with three points: if the whole chain is affine it collapses to a single `(K, C)` and dispatches to `bun:simd` as one pass — `sum` becomes `K · simd.sum(data) + C · n`. Non-affine chains still fuse into a single `simd.simdMap(composed_fn, data)` call.
+
+### Parallel Execution (`bun:parallel`)
+
+`bun:parallel.pmap` spreads CPU-bound work across a persistent worker pool. The `pure function` contract is what makes this safe to ship across workers:
+
+```pts
+import parallel from "bun:parallel";
+
+pure function scoreChunk(chunk) {
+  const { emb, query, dim, base, k } = chunk;
+  // ... tight loop, no closures, no `this`, no module refs
+  return { scores, idx };
+}
+
+const results = await parallel.pmap(scoreChunk, chunks, { concurrency: 8 });
+```
+
+- **Pure function contract, enforced at parse time.** No closures, no `this`, no module-level references — exactly the things that would silently break when the worker runtime re-evaluates `fn.toString()` in an isolated context. The kernel carries everything it needs on the input chunk.
+- **Persistent worker pool.** Workers are spawned lazily, kept alive across calls, and cache compiled function sources so repeat `pmap()` invocations skip the `eval()` step. `unref`/`ref` lifecycle keeps an idle pool from pinning the event loop.
+- **Zero-copy via `SharedArrayBuffer`.** A `postMessage` of a typed-array view over a SAB ships only a handle. 150 MB of embeddings or a 64 MB pixel buffer becomes <1 ms of per-call overhead instead of 17 ms × N-chunks of structured clone.
+- **Implicit barriers via `await`.** Two sequential `await pmap(...)` calls form a natural barrier — every worker has flushed its slab before the next pass starts reading. No atomics, no locks, no explicit halo exchange; row-major SAB layout plus `await` is enough synchronization for separable convolutions, gradient-then-solve, horizontal-then-vertical, etc.
+
+### SIMD Primitives (`bun:simd`)
+
+`bun:simd` exposes WASM-backed `f32x4` and `f64x2` kernels for `Float32Array` and `Float64Array`:
+
+```pts
+import { dot, sum, mulScalar, matVec } from "bun:simd";
+
+const embeddings = new Float32Array(N * D);
+const query = new Float32Array(D);
+const scores = matVec(embeddings, query, N, D);   // one WASM call, f32x4 internally
+```
+
+Primitives include element-wise ops (`mulScalar`, `addScalar`, `simdMap`), reductions (`sum`, `dot`), and bulk operations (`matVec`). Above a ~4 MiB byte-footprint threshold the runtime falls back to monomorphic tight loops (`sumTightF32`/`F64`, `dotTightF32`/`F64`) because at that size the WASM copy-in dominates the reduction.
+
+## Benchmarks
+
+See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfolio with per-bench workload, methodology, and analysis. Headline numbers (best-of-N medians on release builds, verified bit-identical or within-tolerance against each baseline):
+
+| workload                                                | speedup                                     | primitive(s)                  |
+|---------------------------------------------------------|--------------------------------------------:|-------------------------------|
+| Sobel edge detection (8192² grayscale, 64 MB)           | **5.94×**                                   | `pmap` + SAB, heavy kernel    |
+| Monte Carlo option pricing (50 M samples)               | **5.56×**                                   | `pmap` alone (no SIMD/SAB)    |
+| Separable Gaussian blur (8192² grayscale, 64 MB)        | **4.75×**                                   | `pmap` + SAB, light kernel    |
+| LangChain MemoryVectorStore drop-in (100k × 384)        | **2.83×** per search                        | `pmap` + SAB + pre-normalize  |
+| SQLite analytical post-processing (1 M rows × 8)        | **2.71×** on analytical (~10% end-to-end)   | `bun:simd` on columnar F64    |
+| Lucas-Kanade optical flow (2048² two-frame)             | **2.63×**                                   | `pmap` + SAB, temporal        |
+| Vector-search layered diagnosis (100k × 384)            | **2.03×** (only the SAB+warm-pool tier wins)| `pmap` + SAB                  |
+| Streaming ETL (10 M Float32, 4-stage affine → fused)    | **50×** vs `.map` chain · **1.24×** vs tight loop | `bun:pipeline` fusion   |
+
 ### Operator Precedence
 
 | Operator | Precedence | Desugars to |
