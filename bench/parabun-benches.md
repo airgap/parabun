@@ -1,6 +1,6 @@
 # Parabun benchmarks
 
-Six end-to-end benchmarks that exercise Parabun's language features
+Eight end-to-end benchmarks that exercise Parabun's language features
 (`pure function`, `|>` pipelines) and runtime modules (`bun:simd`,
 `bun:parallel`, `bun:pipeline`) on real-world shaped workloads.
 
@@ -8,13 +8,15 @@ Each bench lives in its own directory with a README that covers the
 workload, results (best-of-N medians), why the Parabun version wins (or
 loses, in the layered diagnosis), running instructions, and a file list.
 
-| bench                                                                | primitive proved                          | speedup |
-|----------------------------------------------------------------------|-------------------------------------------|--------:|
-| [parabun-vector-search](./parabun-vector-search/README.md)           | layered diagnosis: SIMD + SAB + pmap      |  2.03×  |
-| [parabun-rag-retrieval](./parabun-rag-retrieval/README.md)           | drop-in vs real LangChain `VectorStore`   |  2.83×  |
-| [parabun-monte-carlo](./parabun-monte-carlo/README.md)               | `bun:parallel.pmap` alone (no SIMD/SAB)   |  5.56×  |
-| [parabun-streaming-etl](./parabun-streaming-etl/README.md)           | `bun:pipeline` fusion (affine → SIMD)     | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
-| [parabun-image-convolution](./parabun-image-convolution/README.md)   | `pmap + SAB` on `Uint8Array`              |  4.75×  |
+| bench                                                                | primitive proved                             | speedup |
+|----------------------------------------------------------------------|----------------------------------------------|--------:|
+| [parabun-vector-search](./parabun-vector-search/README.md)           | layered diagnosis: SIMD + SAB + pmap         |  2.03×  |
+| [parabun-rag-retrieval](./parabun-rag-retrieval/README.md)           | drop-in vs real LangChain `VectorStore`      |  2.83×  |
+| [parabun-monte-carlo](./parabun-monte-carlo/README.md)               | `bun:parallel.pmap` alone (no SIMD/SAB)      |  5.56×  |
+| [parabun-streaming-etl](./parabun-streaming-etl/README.md)           | `bun:pipeline` fusion (affine → SIMD)        | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
+| [parabun-image-convolution](./parabun-image-convolution/README.md)   | `pmap + SAB` on `Uint8Array` (light kernel)  |  4.75×  |
+| [parabun-image-sobel](./parabun-image-sobel/README.md)               | `pmap + SAB` on `Uint8Array` (heavier CV kernel) | 5.94× |
+| [parabun-optical-flow](./parabun-optical-flow/README.md)             | two-frame temporal: both frames in SAB       |  2.63×  |
 | [parabun-sqlite](./parabun-sqlite/README.md)                         | end-to-end analytical + zero-overhead `.pjs` |  2.71× on analytical (10% end-to-end) |
 
 All benches are best-of-N (N ∈ {3, 5}) on release builds. Each bench
@@ -42,6 +44,16 @@ noise elsewhere.
   same primitives as vector-search, but on a different dtype and with
   two sequential `await pmap()` calls forming an implicit barrier
   between horizontal and vertical Gaussian passes.
+- **image-sobel** extends the same pattern to a heavier per-pixel kernel
+  (12 mults + 10 adds + `sqrt` + clamp). The classical CV edge detector,
+  proving `pmap + SAB` scales up as per-pixel compute grows: 5.94× vs
+  image-convolution's 4.75× on the same image size with the same 8
+  workers, because the compute-to-dispatch ratio improves.
+- **optical-flow** is the first temporal bench — Lucas-Kanade on two
+  frames, both SAB-backed, plus three Float32 gradient planes and two
+  Float32 flow planes also in SAB. Two `await pmap()` passes (gradient
+  then solve). This is the pattern a live video pipeline needs: streaming
+  decoder → SAB ringbuffer → worker pool consuming consecutive frames.
 - **sqlite** is the end-to-end "does Parabun matter on real app code"
   bench: 1 M sensor rows out of SQLite, per-sensor analytics downstream.
   Variant B (byte-identical code as `.pjs`) proves the parser adds no

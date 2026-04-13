@@ -1,0 +1,128 @@
+// Parabun: same Lucas-Kanade, both frames + all intermediates in
+// SharedArrayBuffers, two pmap passes across CONCURRENCY workers.
+//
+// Pass 1 (gradient): each worker writes its row slab of Ix, Iy, It.
+// Pass 2 (window sum + solve): each worker reads gradients in its
+// slab plus a 2-row halo above and below (clamped at image edges), and
+// writes flowU/flowV for its slab. The halo reads work cleanly because
+// gradients live in SAB — no explicit halo exchange.
+//
+// The `await` between the two pmap calls is the implicit barrier: every
+// worker has flushed its gradient slab before any window-sum read
+// starts.
+
+import parallel from "bun:parallel";
+import { generate, W, H, SIZE, WIN, DET_EPS, SHIFT_X, SHIFT_Y, fnv1a } from "./gen.js";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+pure function gradSlab(task) {
+  const { frameA, frameB, Ix, Iy, It, w, h, yStart, yEnd } = task;
+  for (let y = yStart; y < yEnd; y++) {
+    const yoff = y * w;
+    const ym = (y - 1 < 0 ? 0 : y - 1) * w;
+    const yp = (y + 1 >= h ? h - 1 : y + 1) * w;
+    for (let x = 0; x < w; x++) {
+      const xm = x - 1 < 0 ? 0 : x - 1;
+      const xp = x + 1 >= w ? w - 1 : x + 1;
+      Ix[yoff + x] = (frameB[yoff + xp] - frameB[yoff + xm]) * 0.5;
+      Iy[yoff + x] = (frameB[yp + x] - frameB[ym + x]) * 0.5;
+      It[yoff + x] = frameB[yoff + x] - frameA[yoff + x];
+    }
+  }
+  return yEnd - yStart;
+}
+
+pure function lkSlab(task) {
+  const { Ix, Iy, It, flowU, flowV, w, h, win, detEps, yStart, yEnd } = task;
+  for (let y = yStart; y < yEnd; y++) {
+    for (let x = 0; x < w; x++) {
+      let Axx = 0, Axy = 0, Ayy = 0, bx = 0, by = 0;
+      for (let wy = -win; wy <= win; wy++) {
+        const yy = y + wy < 0 ? 0 : y + wy >= h ? h - 1 : y + wy;
+        const yoff = yy * w;
+        for (let wx = -win; wx <= win; wx++) {
+          const xx = x + wx < 0 ? 0 : x + wx >= w ? w - 1 : x + wx;
+          const ix = Ix[yoff + xx];
+          const iy = Iy[yoff + xx];
+          const it = It[yoff + xx];
+          Axx += ix * ix;
+          Axy += ix * iy;
+          Ayy += iy * iy;
+          bx += ix * it;
+          by += iy * it;
+        }
+      }
+      const det = Axx * Ayy - Axy * Axy;
+      let u = 0, v = 0;
+      if (det > detEps || det < -detEps) {
+        u = -(Ayy * bx - Axy * by) / det;
+        v = -(-Axy * bx + Axx * by) / det;
+      }
+      flowU[y * w + x] = u;
+      flowV[y * w + x] = v;
+    }
+  }
+  return yEnd - yStart;
+}
+
+const { frameA, frameB } = generate({ shared: true });
+const IxBuf = new SharedArrayBuffer(SIZE * 4);
+const IyBuf = new SharedArrayBuffer(SIZE * 4);
+const ItBuf = new SharedArrayBuffer(SIZE * 4);
+const Ix = new Float32Array(IxBuf);
+const Iy = new Float32Array(IyBuf);
+const It = new Float32Array(ItBuf);
+const flowUBuf = new SharedArrayBuffer(SIZE * 4);
+const flowVBuf = new SharedArrayBuffer(SIZE * 4);
+const flowU = new Float32Array(flowUBuf);
+const flowV = new Float32Array(flowVBuf);
+
+pure function warmup(x) { return x; }
+await pmap(warmup, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+
+const t0 = Bun.nanoseconds();
+
+const rowsPerSlab = Math.ceil(H / CONCURRENCY);
+const gradTasks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const yStart = c * rowsPerSlab;
+  if (yStart >= H) break;
+  const yEnd = Math.min(yStart + rowsPerSlab, H);
+  gradTasks.push({ frameA, frameB, Ix, Iy, It, w: W, h: H, yStart, yEnd });
+}
+await pmap(gradSlab, gradTasks, { concurrency: CONCURRENCY });
+
+const lkTasks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const yStart = c * rowsPerSlab;
+  if (yStart >= H) break;
+  const yEnd = Math.min(yStart + rowsPerSlab, H);
+  lkTasks.push({ Ix, Iy, It, flowU, flowV, w: W, h: H, win: WIN, detEps: DET_EPS, yStart, yEnd });
+}
+await pmap(lkSlab, lkTasks, { concurrency: CONCURRENCY });
+
+const ms = (Bun.nanoseconds() - t0) / 1e6;
+
+let sumU = 0, sumV = 0, n = 0;
+for (let i = 0; i < SIZE; i++) {
+  if (flowU[i] !== 0 || flowV[i] !== 0) {
+    sumU += flowU[i];
+    sumV += flowV[i];
+    n++;
+  }
+}
+const meanU = n > 0 ? sumU / n : 0;
+const meanV = n > 0 ? sumV / n : 0;
+
+const hashU = fnv1a(new Uint8Array(flowU.buffer));
+const hashV = fnv1a(new Uint8Array(flowV.buffer));
+
+console.log(
+  `parabun score_ms=${ms.toFixed(2)} hash=${hashU}${hashV} ` +
+    `u_mean=${meanU.toFixed(3)} v_mean=${meanV.toFixed(3)} ` +
+    `expected=(${SHIFT_X},${SHIFT_Y}) size=${W}x${H}`,
+);
+
+parallel.disposeWorkers();

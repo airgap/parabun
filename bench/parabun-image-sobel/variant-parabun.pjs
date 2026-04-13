@@ -1,0 +1,63 @@
+// Parabun: same Sobel, tiled across CONCURRENCY workers. One pmap pass —
+// Sobel is single-pass (Gx and Gy are computed together per pixel), so
+// unlike the separable Gaussian there's no intermediate buffer and no
+// mid-pass barrier.
+//
+// Input + output both live in SharedArrayBuffers, so postMessage of a
+// Uint8Array view ships only a handle: no 64 MB clone per call.
+
+import parallel from "bun:parallel";
+import { generate, W, H, SIZE, fnv1a } from "./gen.js";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+pure function sobelSlab(task) {
+  const { src, dst, w, h, yStart, yEnd } = task;
+  for (let y = yStart; y < yEnd; y++) {
+    const ym = (y - 1 < 0 ? 0 : y - 1) * w;
+    const yc = y * w;
+    const yp = (y + 1 >= h ? h - 1 : y + 1) * w;
+    for (let x = 0; x < w; x++) {
+      const xm = x - 1 < 0 ? 0 : x - 1;
+      const xp = x + 1 >= w ? w - 1 : x + 1;
+
+      const a00 = src[ym + xm], a01 = src[ym + x], a02 = src[ym + xp];
+      const a10 = src[yc + xm], a12 = src[yc + xp];
+      const a20 = src[yp + xm], a21 = src[yp + x], a22 = src[yp + xp];
+
+      const gx = -a00 + a02 - 2 * a10 + 2 * a12 - a20 + a22;
+      const gy = -a00 - 2 * a01 - a02 + a20 + 2 * a21 + a22;
+
+      const mag = Math.sqrt(gx * gx + gy * gy);
+      dst[yc + x] = mag > 255 ? 255 : mag | 0;
+    }
+  }
+  return yEnd - yStart;
+}
+
+const img = generate({ shared: true });
+
+const outBuf = new SharedArrayBuffer(SIZE);
+const out = new Uint8Array(outBuf);
+
+pure function warmup(x) { return x; }
+await pmap(warmup, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+
+const t0 = Bun.nanoseconds();
+
+const rowsPerSlab = Math.ceil(H / CONCURRENCY);
+const tasks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const yStart = c * rowsPerSlab;
+  if (yStart >= H) break;
+  const yEnd = Math.min(yStart + rowsPerSlab, H);
+  tasks.push({ src: img, dst: out, w: W, h: H, yStart, yEnd });
+}
+await pmap(sobelSlab, tasks, { concurrency: CONCURRENCY });
+
+const ms = (Bun.nanoseconds() - t0) / 1e6;
+
+console.log(`parabun score_ms=${ms.toFixed(2)} hash=${fnv1a(out)} size=${W}x${H}`);
+
+parallel.disposeWorkers();
