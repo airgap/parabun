@@ -1,0 +1,80 @@
+// Parabun: same MC option pricing, chunked across a worker pool via
+// bun:parallel. No SIMD — this bench is purely about parallelism. Each
+// worker samples N/CONCURRENCY paths from an independent PRNG stream
+// (seeded from BASE_SEED + c * Weyl constant) and returns a partial sum.
+// Main thread merges.
+//
+// The pure kernel has no closures, no imports, no `this` — everything it
+// needs rides in on `chunk`. That contract is what makes fn.toString()
+// shipping sound, and it's enforced by the `pure function` keyword at
+// parse time.
+
+import parallel from "bun:parallel";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+const N = 50_000_000;
+const S0 = 100, K = 100, T = 1, r = 0.05, sigma = 0.2;
+const BASE_SEED = 0xc0ffee;
+
+pure function mcChunk(chunk) {
+  const { seed, nSamples, S0, K, T, r, sigma } = chunk;
+  let s = seed >>> 0;
+  const sqrtT = Math.sqrt(T);
+  const drift = (r - 0.5 * sigma * sigma) * T;
+  let sum = 0;
+
+  for (let i = 0; i < nSamples; i++) {
+    // mulberry32 sample #1 (u)
+    s = (s + 0x6d2b79f7) >>> 0;
+    let t1 = s;
+    t1 = Math.imul(t1 ^ (t1 >>> 15), t1 | 1);
+    t1 ^= t1 + Math.imul(t1 ^ (t1 >>> 7), t1 | 61);
+    let u = ((t1 ^ (t1 >>> 14)) >>> 0) / 4294967296;
+    if (u === 0) {
+      i--;
+      continue;
+    }
+
+    // mulberry32 sample #2 (v)
+    s = (s + 0x6d2b79f7) >>> 0;
+    let t2 = s;
+    t2 = Math.imul(t2 ^ (t2 >>> 15), t2 | 1);
+    t2 ^= t2 + Math.imul(t2 ^ (t2 >>> 7), t2 | 61);
+    const v = ((t2 ^ (t2 >>> 14)) >>> 0) / 4294967296;
+
+    const Z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    const ST = S0 * Math.exp(drift + sigma * sqrtT * Z);
+    if (ST > K) sum += ST - K;
+  }
+  return sum;
+}
+
+// Warm the pool so spawn cost isn't in the timed window.
+pure function warmup(x) { return x; }
+await pmap(warmup, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+
+const t0 = Bun.nanoseconds();
+
+const base = Math.floor(N / CONCURRENCY);
+const rem = N - base * CONCURRENCY;
+const chunks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const nSamples = base + (c < rem ? 1 : 0);
+  chunks.push({
+    seed: (BASE_SEED + c * 0x9e3779b9) >>> 0,
+    nSamples,
+    S0, K, T, r, sigma,
+  });
+}
+
+const partials = await pmap(mcChunk, chunks, { concurrency: CONCURRENCY });
+let sum = 0;
+for (const s of partials) sum += s;
+const price = (Math.exp(-r * T) * sum) / N;
+
+const ms = (Bun.nanoseconds() - t0) / 1e6;
+console.log(`parabun score_ms=${ms.toFixed(2)} price=${price.toFixed(6)} samples=${N}`);
+
+parallel.disposeWorkers();

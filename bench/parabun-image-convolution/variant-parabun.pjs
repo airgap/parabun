@@ -1,0 +1,104 @@
+// Parabun: same separable 5-tap Gaussian blur, but tiled across
+// CONCURRENCY workers. Two pmap passes (horizontal then vertical), each
+// worker handling its own row slab. Input/intermediate/output all live in
+// SharedArrayBuffers — postMessage of a Uint8Array view over a SAB ships
+// only a handle, so workers read and write the same physical memory with
+// no 4 MB copy per call.
+//
+// Between the two passes we rely on the implicit barrier of `await`
+// pmap(...) — every worker finishes its horizontal slab before any
+// vertical work starts. That's enough synchronization because the
+// vertical pass only ever reads from intermediate and writes to output;
+// there is no write-after-write hazard on intermediate.
+
+import parallel from "bun:parallel";
+import { generate, KERNEL, W, H, SIZE, fnv1a } from "./gen.js";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+pure function blurHSlab(task) {
+  const { src, dst, w, yStart, yEnd, k0, k1, k2, k3, k4 } = task;
+  for (let y = yStart; y < yEnd; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const x0 = x - 2 < 0 ? 0 : x - 2;
+      const x1 = x - 1 < 0 ? 0 : x - 1;
+      const x3 = x + 1 >= w ? w - 1 : x + 1;
+      const x4 = x + 2 >= w ? w - 1 : x + 2;
+      const v =
+        src[row + x0] * k0 + src[row + x1] * k1 + src[row + x] * k2 + src[row + x3] * k3 + src[row + x4] * k4;
+      dst[row + x] = v < 0 ? 0 : v > 255 ? 255 : v | 0;
+    }
+  }
+  return yEnd - yStart;
+}
+
+pure function blurVSlab(task) {
+  const { src, dst, w, h, yStart, yEnd, k0, k1, k2, k3, k4 } = task;
+  for (let y = yStart; y < yEnd; y++) {
+    const y0 = (y - 2 < 0 ? 0 : y - 2) * w;
+    const y1 = (y - 1 < 0 ? 0 : y - 1) * w;
+    const y2 = y * w;
+    const y3 = (y + 1 >= h ? h - 1 : y + 1) * w;
+    const y4 = (y + 2 >= h ? h - 1 : y + 2) * w;
+    for (let x = 0; x < w; x++) {
+      const v = src[y0 + x] * k0 + src[y1 + x] * k1 + src[y2 + x] * k2 + src[y3 + x] * k3 + src[y4 + x] * k4;
+      dst[y2 + x] = v < 0 ? 0 : v > 255 ? 255 : v | 0;
+    }
+  }
+  return yEnd - yStart;
+}
+
+const img = generate({ shared: true });
+
+const intermediateBuf = new SharedArrayBuffer(SIZE);
+const intermediate = new Uint8Array(intermediateBuf);
+const outBuf = new SharedArrayBuffer(SIZE);
+const out = new Uint8Array(outBuf);
+
+// Warm the pool.
+pure function warmup(x) { return x; }
+await pmap(warmup, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+
+const t0 = Bun.nanoseconds();
+
+const rowsPerSlab = Math.ceil(H / CONCURRENCY);
+const hTasks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const yStart = c * rowsPerSlab;
+  if (yStart >= H) break;
+  const yEnd = Math.min(yStart + rowsPerSlab, H);
+  hTasks.push({
+    src: img,
+    dst: intermediate,
+    w: W,
+    yStart,
+    yEnd,
+    k0: KERNEL[0], k1: KERNEL[1], k2: KERNEL[2], k3: KERNEL[3], k4: KERNEL[4],
+  });
+}
+await pmap(blurHSlab, hTasks, { concurrency: CONCURRENCY });
+
+const vTasks = [];
+for (let c = 0; c < CONCURRENCY; c++) {
+  const yStart = c * rowsPerSlab;
+  if (yStart >= H) break;
+  const yEnd = Math.min(yStart + rowsPerSlab, H);
+  vTasks.push({
+    src: intermediate,
+    dst: out,
+    w: W,
+    h: H,
+    yStart,
+    yEnd,
+    k0: KERNEL[0], k1: KERNEL[1], k2: KERNEL[2], k3: KERNEL[3], k4: KERNEL[4],
+  });
+}
+await pmap(blurVSlab, vTasks, { concurrency: CONCURRENCY });
+
+const ms = (Bun.nanoseconds() - t0) / 1e6;
+
+console.log(`parabun score_ms=${ms.toFixed(2)} hash=${fnv1a(out)} size=${W}x${H}`);
+
+parallel.disposeWorkers();

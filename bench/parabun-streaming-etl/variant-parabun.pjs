@@ -1,0 +1,21 @@
+// Parabun: same ETL written as a |> chain on bun:pipeline. The three
+// affine map fns + `sum` terminal triggers Tier 2 fusion — the chain
+// collapses to K * simd.sum(source) + C * n (K=998, C=2.495) and
+// dispatches to bun:simd.sum in one SIMD pass, no intermediate arrays.
+//
+// If any map were non-affine (e.g. Math.sqrt), fusion would fall back to
+// simdMap with the composed fn — still one pass, still no intermediates.
+
+import { map, sum } from "bun:pipeline";
+import { generate, N } from "./gen.js";
+
+const data = generate();
+
+const t0 = Bun.nanoseconds();
+pure function scale(x) { return x * 1000; }
+pure function drift(x) { return x + 2.5; }
+pure function calib(x) { return x * 0.998; }
+const total = await (data |> map(scale) |> map(drift) |> map(calib) |> sum);
+const ms = (Bun.nanoseconds() - t0) / 1e6;
+
+console.log(`parabun score_ms=${ms.toFixed(2)} total=${total.toFixed(4)} n=${N}`);
