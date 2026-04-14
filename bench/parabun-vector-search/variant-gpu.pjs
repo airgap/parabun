@@ -8,14 +8,8 @@
 // and the row degenerates to the same numbers as variant-matvec.
 
 import { hold, release, matVec } from "bun:gpu";
+import { topK as simdTopK } from "bun:simd";
 import { generate, N, D, K } from "./gen.js";
-
-function topK(scores) {
-  const ranked = new Array(N);
-  for (let i = 0; i < N; i++) ranked[i] = { idx: i, score: scores[i] };
-  ranked.sort((a, b) => b.score - a.score);
-  return ranked.slice(0, K);
-}
 
 const tGen0 = Bun.nanoseconds();
 const { embeddings, query } = generate();
@@ -28,7 +22,8 @@ const h = hold(embeddings);
 
 const tScore0 = Bun.nanoseconds();
 const scores = matVec(h, query, N, D);
-const top = topK(scores);
+const topIdx = simdTopK(scores, K);
+const top = Array.from(topIdx, idx => ({ idx, score: scores[idx] }));
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
 
 release(h);

@@ -189,9 +189,18 @@ const d   = dot(new Float64Array([1, 2, 3]), new Float64Array([4, 5, 6])); // 32
 ```
 
 Exports: `mulScalar(a, c)`, `addScalar(a, c)`, `add(a, b)`, `mul(a, b)`,
-`sum(a)`, `dot(a, b)`, `simdMap(fn, a)`. Element-wise ops throw `RangeError`
-on length mismatch and `TypeError` when operands mix `Float32Array` and
-`Float64Array`. All ops throw `TypeError` for non-float typed-array inputs.
+`sum(a)`, `dot(a, b)`, `matVec(m, v, rows, cols)`, `topK(scores, k)`,
+`simdMap(fn, a)`. Element-wise ops throw `RangeError` on length mismatch
+and `TypeError` when operands mix `Float32Array` and `Float64Array`. All
+ops throw `TypeError` for non-float typed-array inputs.
+
+`topK(scores, k)` returns an `Int32Array` of length `min(k, scores.length)`
+holding the indices of the k largest scores, in descending score order.
+Ties resolve by earlier index (stable). NaN scores are never selected.
+Pure scalar — the O(N·k) fixed-size-sorted-array insertion beats both
+object-sort (O(N log N) + allocation) and binary-heap (O(N log k)) for
+the common `k ≪ N` shape because the "no-displace" branch predicts
+perfectly after the first k iterations.
 
 `mulScalar`/`addScalar`/`add`/`mul` accept an optional final
 `{ dstOverwrite }` or `{ dst }` argument. `dstOverwrite: "a"` (or `"b"`

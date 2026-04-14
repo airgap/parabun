@@ -4,7 +4,7 @@
 // What this shows: bun:simd.dot calls into f32x4 WASM kernels, so each dot
 // product runs through SIMD lanes instead of the JS scalar loop.
 
-import { dot as simdDot } from "bun:simd";
+import { dot as simdDot, topK as simdTopK } from "bun:simd";
 import { generate, N, D, K } from "./gen.js";
 
 function scoreAll(embeddings, query) {
@@ -18,20 +18,14 @@ function scoreAll(embeddings, query) {
   return scores;
 }
 
-function topK(scores) {
-  const ranked = new Array(N);
-  for (let i = 0; i < N; i++) ranked[i] = { idx: i, score: scores[i] };
-  ranked.sort((a, b) => b.score - a.score);
-  return ranked.slice(0, K);
-}
-
 const tGen0 = Bun.nanoseconds();
 const { embeddings, query } = generate();
 const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
 
 const tScore0 = Bun.nanoseconds();
 const scores = scoreAll(embeddings, query);
-const top = topK(scores);
+const topIdx = simdTopK(scores, K);
+const top = Array.from(topIdx, (idx) => ({ idx, score: scores[idx] }));
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
 
 const topStr = top.map((t) => `${t.idx}:${t.score.toFixed(4)}`).join(",");

@@ -7,15 +7,8 @@
 // each call pays WASM-boundary overhead that erases the f32x4 win at D=384.
 // matVec amortizes that overhead across the whole matrix.
 
-import { matVec } from "bun:simd";
+import { matVec, topK as simdTopK } from "bun:simd";
 import { generate, N, D, K } from "./gen.js";
-
-function topK(scores) {
-  const ranked = new Array(N);
-  for (let i = 0; i < N; i++) ranked[i] = { idx: i, score: scores[i] };
-  ranked.sort((a, b) => b.score - a.score);
-  return ranked.slice(0, K);
-}
 
 const tGen0 = Bun.nanoseconds();
 const { embeddings, query } = generate();
@@ -23,7 +16,8 @@ const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
 
 const tScore0 = Bun.nanoseconds();
 const scores = matVec(embeddings, query, N, D);
-const top = topK(scores);
+const topIdx = simdTopK(scores, K);
+const top = Array.from(topIdx, (idx) => ({ idx, score: scores[idx] }));
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
 
 const topStr = top.map((t) => `${t.idx}:${t.score.toFixed(4)}`).join(",");

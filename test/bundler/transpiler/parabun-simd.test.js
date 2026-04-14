@@ -703,6 +703,109 @@ describe("bun:simd", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("topK — Float32Array basic", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-f32",
+      `
+        import { topK } from "bun:simd";
+        const a = new Float32Array([0.1, 0.9, 0.3, 0.7, 0.5, 0.95, 0.05, 0.8]);
+        const idx = topK(a, 3);
+        console.log(idx.constructor.name, Array.from(idx).join(","));
+      `,
+    );
+    expect(stdout).toBe("Int32Array 5,1,7");
+    expect(exitCode).toBe(0);
+  });
+
+  it("topK — Float64Array basic", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-f64",
+      `
+        import { topK } from "bun:simd";
+        const a = new Float64Array([3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]);
+        const idx = topK(a, 4);
+        console.log(Array.from(idx).join(","));
+      `,
+    );
+    expect(stdout).toBe("5,7,4,8");
+    expect(exitCode).toBe(0);
+  });
+
+  it("topK — ties resolved by earlier index", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-ties",
+      `
+        import { topK } from "bun:simd";
+        const a = new Float32Array([1, 2, 2, 2, 1, 2]);
+        const idx = topK(a, 3);
+        console.log(Array.from(idx).join(","));
+      `,
+    );
+    expect(stdout).toBe("1,2,3");
+    expect(exitCode).toBe(0);
+  });
+
+  it("topK — k=0 returns empty Int32Array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-zero",
+      `
+        import { topK } from "bun:simd";
+        const a = new Float32Array([1, 2, 3]);
+        const idx = topK(a, 0);
+        console.log(idx.constructor.name, idx.length);
+      `,
+    );
+    expect(stdout).toBe("Int32Array 0");
+    expect(exitCode).toBe(0);
+  });
+
+  it("topK — k > length is clamped to length", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-overflow",
+      `
+        import { topK } from "bun:simd";
+        const a = new Float32Array([1, 3, 2]);
+        const idx = topK(a, 10);
+        console.log(idx.length, Array.from(idx).join(","));
+      `,
+    );
+    expect(stdout).toBe("3 1,2,0");
+    expect(exitCode).toBe(0);
+  });
+
+  it("topK — NaN values are never selected", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-nan",
+      `
+        import { topK } from "bun:simd";
+        const a = new Float32Array([1, NaN, 3, NaN, 2]);
+        const idx = topK(a, 3);
+        console.log(Array.from(idx).join(","));
+      `,
+    );
+    expect(stdout).toBe("2,4,0");
+    expect(exitCode).toBe(0);
+  });
+
+  it("topK — rejects non-typed-array input and negative k", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-topk-invalid",
+      `
+        import { topK } from "bun:simd";
+        const msgs = [];
+        try { topK([1, 2, 3], 2); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE" : "WRONG:" + e.name); }
+        try { topK(new Float32Array([1, 2, 3]), -1); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof RangeError ? "RANGE" : "WRONG:" + e.name); }
+        try { topK(new Float32Array([1, 2, 3]), 1.5); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof RangeError ? "RANGE" : "WRONG:" + e.name); }
+        console.log(msgs.join(" "));
+      `,
+    );
+    expect(stdout).toBe("TYPE RANGE RANGE");
+    expect(exitCode).toBe(0);
+  });
+
   it("dst — validates type and length; mutual exclusion with dstOverwrite", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-dst-invalid",

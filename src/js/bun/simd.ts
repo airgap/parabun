@@ -1551,6 +1551,54 @@ function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): F
   return out;
 }
 
+// --- topK ---
+//
+// Selects the indices of the k largest values in `scores`, in descending order
+// of score. Returned as an Int32Array of length min(k, scores.length).
+//
+// Implementation: fixed-size sorted-array insertion. O(N * k) worst-case but
+// in practice the "doesn't displace" branch is taken ~(1 - k/N) of iterations
+// and is cheap (one compare + taken-not-taken branch), so this beats a binary
+// heap for small k on modern branch predictors. We intentionally don't go
+// through WASM — per-row copy-in would dwarf the work for the typical shape
+// (N = 10^5, k = 10).
+//
+// NaN scores are never selected (all comparisons with NaN return false).
+// Ties are broken by earlier index: strict `>` when displacing and strict `>`
+// when sliding up, so the first occurrence of a given score stays ahead.
+
+function topK(scores: Float32Array, k: number): Int32Array;
+function topK(scores: Float64Array, k: number): Int32Array;
+function topK(scores: FArray, k: number): Int32Array {
+  const arr = requireFArray(scores, "scores");
+  if (!Number.isInteger(k) || k < 0) throw new RangeError("k must be a non-negative integer");
+  const n = arr.length;
+  const effK = k > n ? n : k;
+  if (effK === 0) return new Int32Array(0);
+
+  const outIdx = new Int32Array(effK);
+  const outScores = arr instanceof Float32Array ? new Float32Array(effK) : new Float64Array(effK);
+  outIdx.fill(-1);
+  outScores.fill(-Infinity);
+
+  const lastIdx = effK - 1;
+  for (let i = 0; i < n; i++) {
+    const s = arr[i];
+    if (s > outScores[lastIdx]) {
+      let j = lastIdx;
+      while (j > 0 && s > outScores[j - 1]) {
+        outScores[j] = outScores[j - 1];
+        outIdx[j] = outIdx[j - 1];
+        j--;
+      }
+      outScores[j] = s;
+      outIdx[j] = i;
+    }
+  }
+
+  return outIdx;
+}
+
 // --- simdMap ---
 
 const AFFINE_TOL = 1e-5;
@@ -1644,6 +1692,7 @@ export default {
   sum,
   dot,
   matVec,
+  topK,
   simdMap,
   alloc,
   isWasmAvailable,
