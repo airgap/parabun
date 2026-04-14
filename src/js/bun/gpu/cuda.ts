@@ -15,9 +15,14 @@
 // bun, cuInit returns CUDA_ERROR_OUT_OF_MEMORY (2). Use
 // `bun bd --asan=off` for CUDA testing; release builds are unaffected.
 //
-// Scope today: simdMap-affine (y = k1*x + k0) on Float32Array — the one
-// kernel proven end-to-end against cuCtxSynchronize. dot / matVec / matmul
-// fall back to bun:simd; GPU tilings land in follow-up commits.
+// Scope today:
+//   - simdMap-affine (y = k1*x + k0) on Float32Array — proven end-to-end
+//     against cuCtxSynchronize on RTX hosts.
+//   - matVec f32 — warp-reduced MSL-equivalent kernel (one warp per row,
+//     stride-32 partial dot, shfl.bfly reduction). Correct but currently
+//     dispatched past a hard "wins" threshold at Infinity, matching
+//     metal.ts, until we have benchmark data from a real RTX host.
+// dot / matmul still fall back to bun:simd.
 
 const simd = require("../simd.ts");
 
@@ -107,6 +112,15 @@ function tryLoadCuda(): boolean {
 // One module with all kernels; cuModuleLoadData parses once. Add kernels
 // here as the backend grows.
 //   simdMapAffineF32 — out[i] = fma(k1, in[i], k0), one thread per element.
+//   matVecF32        — M×K · K → M, one warp per row, stride-32 partial dot
+//                      followed by shfl.sync.bfly butterfly reduction. Matches
+//                      the Metal simdgroup-reduction kernel; kernel is correct
+//                      but dispatched past a hard "wins" threshold at Infinity
+//                      until we have a real RTX benchmark.
+//
+// PTX 7.0 is the floor — the non-sync shfl.bfly was removed in PTX 6.0, so
+// we use shfl.sync.bfly.b32 with a full 0xffffffff membermask (the warp is
+// fully active by construction — block size is exactly 32).
 
 const PTX_MODULE = `
 .version 7.0
@@ -154,6 +168,93 @@ const PTX_MODULE = `
 DONE:
     ret;
 }
+
+.visible .entry matVecF32(
+    .param .u64 matPtr,
+    .param .u64 vecPtr,
+    .param .u64 outPtr,
+    .param .u32 m,
+    .param .u32 k
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b32   %r<10>;
+    .reg .f32   %f<6>;
+    .reg .b64   %rd<14>;
+
+    ld.param.u64  %rd1, [matPtr];
+    ld.param.u64  %rd2, [vecPtr];
+    ld.param.u64  %rd3, [outPtr];
+    ld.param.u32  %r1,  [m];
+    ld.param.u32  %r2,  [k];
+
+    mov.u32       %r3, %ctaid.x;
+    mov.u32       %r4, %tid.x;
+
+    setp.ge.u32   %p1, %r3, %r1;
+    @%p1 bra      MVDONE;
+
+    mul.wide.u32  %rd4, %r3, %r2;
+    shl.b64       %rd4, %rd4, 2;
+    cvta.to.global.u64 %rd5, %rd1;
+    add.s64       %rd6, %rd5, %rd4;
+
+    cvta.to.global.u64 %rd7, %rd2;
+
+    mov.f32       %f1, 0f00000000;
+    mov.u32       %r6, %r4;
+
+MVLOOP:
+    setp.ge.u32   %p2, %r6, %r2;
+    @%p2 bra      MVREDUCE;
+
+    mul.wide.u32  %rd8, %r6, 4;
+    add.s64       %rd9, %rd6, %rd8;
+    add.s64       %rd10, %rd7, %rd8;
+    ld.global.f32 %f2, [%rd9];
+    ld.global.f32 %f3, [%rd10];
+    fma.rn.f32    %f1, %f2, %f3, %f1;
+
+    add.u32       %r6, %r6, 32;
+    bra           MVLOOP;
+
+MVREDUCE:
+    mov.b32       %r7, %f1;
+    shfl.sync.bfly.b32 %r8, %r7, 16, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r8;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r7, %f1;
+    shfl.sync.bfly.b32 %r8, %r7, 8, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r8;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r7, %f1;
+    shfl.sync.bfly.b32 %r8, %r7, 4, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r8;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r7, %f1;
+    shfl.sync.bfly.b32 %r8, %r7, 2, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r8;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r7, %f1;
+    shfl.sync.bfly.b32 %r8, %r7, 1, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r8;
+    add.f32       %f1, %f1, %f4;
+
+    setp.ne.u32   %p3, %r4, 0;
+    @%p3 bra      MVDONE;
+
+    mul.wide.u32  %rd11, %r3, 4;
+    cvta.to.global.u64 %rd12, %rd3;
+    add.s64       %rd13, %rd12, %rd11;
+    st.global.f32 [%rd13], %f1;
+
+MVDONE:
+    ret;
+}
 `;
 
 // ─── State ────────────────────────────────────────────────────────────────
@@ -165,6 +266,7 @@ let probeResult = false;
 let ctx: bigint | null = null;
 let mod: bigint | null = null;
 let fnAffineF32: bigint | null = null;
+let fnMatVecF32: bigint | null = null;
 let deviceName: string = "";
 
 function probe(): boolean {
@@ -202,16 +304,28 @@ function probe(): boolean {
   }
   mod = modBuf[0];
 
-  const fnName = new TextEncoder().encode("simdMapAffineF32\0");
-  const fnBuf = new BigUint64Array(1);
-  if (s.cuModuleGetFunction(ptr(fnBuf), mod, ptr(fnName)) !== 0) {
+  const affineName = new TextEncoder().encode("simdMapAffineF32\0");
+  const affineBuf = new BigUint64Array(1);
+  if (s.cuModuleGetFunction(ptr(affineBuf), mod, ptr(affineName)) !== 0) {
     s.cuModuleUnload(mod);
     s.cuCtxDestroy_v2(ctx);
     mod = null;
     ctx = null;
     return false;
   }
-  fnAffineF32 = fnBuf[0];
+  fnAffineF32 = affineBuf[0];
+
+  const matVecName = new TextEncoder().encode("matVecF32\0");
+  const matVecBuf = new BigUint64Array(1);
+  if (s.cuModuleGetFunction(ptr(matVecBuf), mod, ptr(matVecName)) !== 0) {
+    s.cuModuleUnload(mod);
+    s.cuCtxDestroy_v2(ctx);
+    fnAffineF32 = null;
+    mod = null;
+    ctx = null;
+    return false;
+  }
+  fnMatVecF32 = matVecBuf[0];
 
   probeResult = true;
   return true;
@@ -294,6 +408,71 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
   }
 }
 
+// ─── Kernel launch: matVecF32 ─────────────────────────────────────────────
+//
+// M×K · K → M. Three device buffers (mat, vec, out). Grid = M blocks of
+// 32 threads each — one warp per row. Matches the Metal simdgroup kernel's
+// reduction shape so correctness reasoning transfers. try/finally guarantees
+// cuMemFree on every path.
+
+function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: number): Float32Array {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const matBytes = BigInt(m * k * 4);
+  const vecBytes = BigInt(k * 4);
+  const outBytes = BigInt(m * 4);
+
+  const dMatBuf = new BigUint64Array(1);
+  const dVecBuf = new BigUint64Array(1);
+  const dOutBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dMatBuf), matBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(mat) failed");
+  if (s.cuMemAlloc_v2(ptr(dVecBuf), vecBytes) !== 0) {
+    s.cuMemFree_v2(dMatBuf[0]);
+    throw new Error("bun:gpu cuda: cuMemAlloc(vec) failed");
+  }
+  if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) {
+    s.cuMemFree_v2(dMatBuf[0]);
+    s.cuMemFree_v2(dVecBuf[0]);
+    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+  }
+  const dMat = dMatBuf[0];
+  const dVec = dVecBuf[0];
+  const dOut = dOutBuf[0];
+
+  try {
+    if (s.cuMemcpyHtoD_v2(dMat, ptr(mat), matBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD(mat) failed");
+    if (s.cuMemcpyHtoD_v2(dVec, ptr(vec), vecBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD(vec) failed");
+
+    const pMatBuf = new BigUint64Array([dMat]);
+    const pVecBuf = new BigUint64Array([dVec]);
+    const pOutBuf = new BigUint64Array([dOut]);
+    const pM = new Uint32Array([m]);
+    const pK = new Uint32Array([k]);
+    const paramPtrs = new BigUint64Array([
+      BigInt(ptr(pMatBuf)),
+      BigInt(ptr(pVecBuf)),
+      BigInt(ptr(pOutBuf)),
+      BigInt(ptr(pM)),
+      BigInt(ptr(pK)),
+    ]);
+
+    // gridDim = (m, 1, 1); blockDim = (32, 1, 1). One warp per row —
+    // warp reduction via shfl.sync.bfly with a full membermask works
+    // because the block is exactly one warp and always fully active.
+    const r = s.cuLaunchKernel(fnMatVecF32!, m, 1, 1, 32, 1, 1, 0, 0n, ptr(paramPtrs), null);
+    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matVec) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+
+    const out = new Float32Array(m);
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH failed");
+    return out;
+  } finally {
+    s.cuMemFree_v2(dMat);
+    s.cuMemFree_v2(dVec);
+    s.cuMemFree_v2(dOut);
+  }
+}
+
 // ─── Size threshold ───────────────────────────────────────────────────────
 //
 // GPU dispatch has a fixed round-trip cost (~2 cuMemAlloc + HtoD + DtoH +
@@ -303,10 +482,27 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
 
 const MIN_SIMDMAP_ELEMS = 1 << 18; // 256k f32 = 1 MB
 
+// matVec uses a split threshold (same reasoning as metal.ts):
+//
+//   - MIN_MATVEC_DISPATCH_ELEMS: above this, `matVec` runs the PTX kernel
+//     when the caller hands us Float32 inputs. Lets tests and benchmarks
+//     exercise the real GPU path.
+//   - MIN_MATVEC_WINS_ELEMS:     above this, `winsForSize("matVec", ...)`
+//     returns true — pipeline-style callers use this to decide whether to
+//     route the op to bun:gpu at all.
+//
+// The warp-reduced kernel is correct but we don't have RTX benchmark
+// data yet, so the "wins" side is parked at Infinity (mirrors Metal —
+// where the per-call HtoD copy dominates, not the kernel). When we have
+// numbers that show it beats bun:simd, collapse these into one constant.
+const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
+const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
+
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
   if (op === "simdMap") return elemBytes === 4 && n >= MIN_SIMDMAP_ELEMS;
+  if (op === "matVec") return elemBytes === 4 && n >= MIN_MATVEC_WINS_ELEMS;
   return false;
 }
 
@@ -317,6 +513,14 @@ function dot(a: FArray, b: FArray): number {
 }
 
 function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray {
+  if (
+    matrix instanceof Float32Array &&
+    vector instanceof Float32Array &&
+    probe() &&
+    nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS
+  ) {
+    return launchMatVecF32(matrix, vector, nRows, nCols);
+  }
   return simd.matVec(matrix as any, vector as any, nRows, nCols);
 }
 
@@ -359,6 +563,7 @@ function dispose(): void {
     ctx = null;
   }
   fnAffineF32 = null;
+  fnMatVecF32 = null;
   probed = false;
   probeResult = false;
 }

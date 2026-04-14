@@ -285,9 +285,12 @@ Two thresholds, not one:
 
 They're decoupled because a compiled-and-correct kernel isn't always a
 *winning* kernel. Today `simdMap` wins at ≥ 1<<18 f32 elems; `matVec`'s
-wins threshold is parked at `Infinity` because the naive MSL kernel is
-~2× slower than `bun:simd` on M1/M2 (memory-bandwidth-bound, no
-threadgroup tiling). The dispatch threshold still lets the kernel run.
+wins threshold is parked at `Infinity` even though the tuned
+simdgroup-reduction kernel is live on both Metal and CUDA. On Apple
+Silicon the bottleneck is the per-call `newBufferWithBytes:` copy into
+a shared `MTLBuffer` (~4 MB for a 1024² f32 mat), not the kernel; on
+CUDA we haven't benchmarked yet. The dispatch threshold still lets the
+kernel run for regression coverage.
 
 Backend implementations:
 
@@ -296,10 +299,11 @@ Backend implementations:
   `newLibraryWithSource:options:error:`, pipeline state cached per
   kernel. Unified memory + `MTLResourceStorageModeShared` gives
   zero-copy buffers, so dispatch cost is encoder setup + GPU wait.
-- **CUDA** (`src/js/bun/gpu/cuda.ts`) — PTX kernel (`simdMapAffineF32`)
-  loaded via the CUDA driver API. `dot`/`matVec`/`matmul` currently
-  forward to `bun:simd` pending kernel work; the interface is already
-  wired.
+- **CUDA** (`src/js/bun/gpu/cuda.ts`) — PTX kernels (`simdMapAffineF32`,
+  `matVecF32` — warp-reduced via `shfl.sync.bfly.b32`) loaded via the
+  CUDA driver API. `dot`/`matmul` still forward to `bun:simd`; `matVec`
+  dispatches to the PTX kernel past `MIN_MATVEC_DISPATCH_ELEMS` but
+  `winsForSize` stays parked at Infinity pending RTX benchmarks.
 - **CPU** (`src/js/bun/gpu/cpu.ts`) — every op forwards to `bun:simd`.
 
 Pipeline integration: when a fused affine chain on a `Float32Array` is
@@ -362,12 +366,14 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   transpile (closures, `this`, side effects, stateful globals); scope
   is scalar-in/scalar-out numeric kernels with `Math.*` → shader
   intrinsics and `if/else/loop` → shader control flow.
-- **Tuned `matVec` MSL kernel** — current naive one-thread-per-row
-  kernel is ~2× slower than `bun:simd` on M1/M2 (bandwidth-bound).
-  Simdgroup-reduced variant (32 threads per row, stride-32 partial dot,
-  `simd_sum` reduction) should close the gap and let
-  `MIN_MATVEC_WINS_ELEMS` move off Infinity. CUDA matVec PTX is also
-  pending — currently forwards to `bun:simd`.
+- **Zero-copy `matVec` input staging** — tuned simdgroup / warp-reduced
+  kernels (Metal `simd_sum`, CUDA `shfl.sync.bfly`) are live on both
+  backends, but on Apple Silicon the per-call `newBufferWithBytes:`
+  copy of the matrix into a shared `MTLBuffer` dominates. Moving to
+  `newBufferWithBytesNoCopy:` with page-aligned inputs (or cross-call
+  GPU residency — Tier 4) is what would let `MIN_MATVEC_WINS_ELEMS`
+  move off Infinity. On CUDA the limit is still unmeasured —
+  benchmarks on a real RTX host are the next gating step.
 - **Auto-accel dispatch, Tier 4 (cross-call buffer residency)** — deciding
   to keep a typed array GPU-resident between user calls so a one-shot
   `dot(a, b)` on a discrete GPU isn't bottlenecked by PCIe. Either needs
