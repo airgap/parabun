@@ -425,6 +425,28 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   speedup is the relevant number for workloads where extraction is
   amortized (cached query results, streaming from network, etc.).
 
+## Real-world benchmark: vector search (cosine top-K)
+
+`bench/parabun-vector-search/` layers seven variants of cosine top-K
+over a 100 000 × 384 Float32 embedding matrix (~150 MB), each exposing a
+different bottleneck: per-row `simd.dot` boundary cost, bulk `simd.matVec`
+copy-in, Worker spawn, structured-clone, SAB residency, and finally
+`gpu.matVec` on held embeddings. Every tier teaches which cost dominates
+until it's removed; the GPU row lands at ~10× baseline once
+`bun:simd.topK` replaces the idiomatic `map → sort → slice` that was
+masking the CUDA kernel's real compute win.
+
+Batched retrieval (Q = 32 queries, one `gpu.matmul` call against the held
+D×N transposed index) collapses Q `matVec` round-trips into one kernel
+launch and drops per-query latency to **0.72 ms — 54× over the plain JS
+batched baseline**. A batch-size sweep across Q ∈ {1, 4, 16, 64, 256}
+shows a clean inflection at Q = 64 (0.30 ms/query), past which the
+matmul saturates GPU compute and CPU-side `simd.topK` grows linearly
+without amortization left to claim.
+
+See `bench/parabun-vector-search/README.md` for the full per-tier
+breakdown and the sweep curve.
+
 ## Pending Work
 
 - **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `bun:gpu`
