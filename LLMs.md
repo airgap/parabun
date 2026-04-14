@@ -194,11 +194,32 @@ on length mismatch and `TypeError` when operands mix `Float32Array` and
 `Float64Array`. All ops throw `TypeError` for non-float typed-array inputs.
 
 `mulScalar`/`addScalar`/`add`/`mul` accept an optional final
-`{ dstOverwrite }` argument: `"a"` (or `"b"` for binary ops) tells the
-primitive to mutate that input in-place and return it, skipping the
-copy-out `slice()`. Scope is the allocation elision only — the WASM
-kernels still copy in; true zero-copy is the separate
-`WebAssembly.Memory` binding work.
+`{ dstOverwrite }` or `{ dst }` argument. `dstOverwrite: "a"` (or `"b"`
+for binary ops) mutates that input in-place and returns it, skipping
+the copy-out `slice()`. `dst: preAllocd` writes results into a
+caller-provided typed array (same element type and length as the
+inputs). The two options are mutually exclusive.
+
+**True zero-copy via `alloc()`**: `alloc(length, "f32" | "f64")` returns
+a typed array backed by the `bun:simd` WASM instance's linear memory.
+When every input and the destination of an output op is wasm-backed
+(detectable via `isWasmBacked(arr)`), the op dispatches to an
+offset-parameterized `*At` kernel that reads and writes the alloc pool
+directly — no copy-in, no copy-out, staying fully vectorized above the
+4 MiB threshold. First `alloc()` call commits the pool to 128 MiB of
+WASM memory (112 MiB alloc region + 16 MiB kernel scratch) and pins it
+— non-shared memory + detach-on-grow means we can't grow afterward
+without invalidating existing views, so ops past the commit point
+either fit in pool-adjacent scratch or fall back to the JS tight loop.
+
+```js
+import { alloc, mulScalar } from "bun:simd";
+const a = alloc(2_000_000, "f32");           // backed by WASM memory
+const out = alloc(2_000_000, "f32");         // also backed
+// ... fill `a` ...
+mulScalar(a, 3, { dst: out });               // zero-copy: *At kernel writes into `out`
+mulScalar(a, 3, { dstOverwrite: "a" });      // zero-copy in-place
+```
 
 `simdMap(fn, a)` probes the mapping function at three inputs to detect affine
 kernels (`x * k1 + k0`); matched kernels dispatch to a scalar-multiply-plus-add
@@ -361,14 +382,6 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
 
 ## Pending Work
 
-- **True zero-copy for `bun:simd` output ops (WASM-memory-backed alloc)**
-  — output ops now take the JS-tight-loop fallback above the 4 MiB
-  copy-in threshold, which matches the reduce-op pattern but still
-  loses to a hypothetical zero-copy WASM path that stays vectorized at
-  large N. Real zero-copy requires exposing an `alloc()` that returns
-  typed arrays backed by the WASM instance's memory (shared memory, to
-  avoid detach-on-grow). API change and a bigger lift than the
-  threshold shortcut, which is why it's split out.
 - **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `bun:gpu`
   ships the affine special case (Metal MSL kernel for `x*K + C` on
   Float32Array; pipeline fusion promotes matching chains automatically).

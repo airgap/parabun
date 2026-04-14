@@ -450,6 +450,178 @@ function dotBody(cfg: NumCfg): number[] {
   ];
 }
 
+// Offset-parameterized scalar-op body: out[outOff + i*e] = op(a[aOff + i*e], c).
+// Used by the zero-copy alloc path, where inputs/outputs live in the alloc
+// pool at arbitrary offsets. Params: $len (0), $c (1), $aOff (2), $outOff (3).
+// Locals: $i (4), $aAddr (5), $outAddr (6), $k (v128, 7).
+function scalarOpAtBody(cfg: NumCfg, vecOp: number[], scalarOp: number[]): number[] {
+  return [
+    ...op.localGet(1),
+    ...cfg.vecSplat,
+    ...op.localSet(7),
+    // SIMD loop
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.stride),
+    ...op.i32Add(),
+    ...op.localGet(0),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    // aAddr = aOff + (i << shift)
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(5),
+    // outAddr = outOff + (i << shift)
+    ...op.localGet(3),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(6),
+    // v128[outAddr] = vecOp(v128[aAddr], k)
+    ...op.localGet(6),
+    ...op.localGet(5),
+    ...op.v128Load(),
+    ...op.localGet(7),
+    ...vecOp,
+    ...op.v128Store(),
+    // i += stride
+    ...op.localGet(4),
+    ...op.i32Const(cfg.stride),
+    ...op.i32Add(),
+    ...op.localSet(4),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    // Scalar tail
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(4),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(5),
+    ...op.localGet(3),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(6),
+    ...op.localGet(6),
+    ...op.localGet(5),
+    ...cfg.scalarLoad,
+    ...op.localGet(1),
+    ...scalarOp,
+    ...cfg.scalarStore,
+    ...op.localGet(4),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(4),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.end(),
+  ];
+}
+
+// Offset-parameterized binary body: out[outOff + i*e] = op(a[aOff+i*e], b[bOff+i*e]).
+// Params: $len (0), $aOff (1), $bOff (2), $outOff (3).
+// Locals: $i (4), $aAddr (5), $bAddr (6), $outAddr (7).
+function binaryOpAtBody(cfg: NumCfg, vecOp: number[], scalarOp: number[]): number[] {
+  return [
+    // SIMD loop
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.stride),
+    ...op.i32Add(),
+    ...op.localGet(0),
+    ...op.i32GtS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(5),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(6),
+    ...op.localGet(3),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(7),
+    ...op.localGet(7),
+    ...op.localGet(5),
+    ...op.v128Load(),
+    ...op.localGet(6),
+    ...op.v128Load(),
+    ...vecOp,
+    ...op.v128Store(),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.stride),
+    ...op.i32Add(),
+    ...op.localSet(4),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    // Scalar tail
+    ...op.block(),
+    ...op.loop(),
+    ...op.localGet(4),
+    ...op.localGet(0),
+    ...op.i32GeS(),
+    ...op.brIf(1),
+    ...op.localGet(1),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(5),
+    ...op.localGet(2),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(6),
+    ...op.localGet(3),
+    ...op.localGet(4),
+    ...op.i32Const(cfg.shift),
+    ...op.i32Shl(),
+    ...op.i32Add(),
+    ...op.localSet(7),
+    ...op.localGet(7),
+    ...op.localGet(5),
+    ...cfg.scalarLoad,
+    ...op.localGet(6),
+    ...cfg.scalarLoad,
+    ...scalarOp,
+    ...cfg.scalarStore,
+    ...op.localGet(4),
+    ...op.i32Const(1),
+    ...op.i32Add(),
+    ...op.localSet(4),
+    ...op.br(0),
+    ...op.end(),
+    ...op.end(),
+    ...op.end(),
+  ];
+}
+
 // matVec(nRows, nCols, matOffset, vecOffset, outOffset) -> ()
 // out[i] = sum_j matrix[i*nCols + j] * vector[j], for i in [0, nRows).
 // Matrix is row-major at matOffset; vector at vecOffset; output at outOffset.
@@ -585,14 +757,17 @@ function matVecBody(cfg: NumCfg): number[] {
 }
 
 function buildModule(): Uint8Array {
-  // Type 0: (i32, f32) -> ()   — mulScalar, addScalar (F32)
-  // Type 1: (i32)      -> ()   — add, mul (F32 and F64)
-  // Type 2: (i32)      -> f32  — sum, dot (F32)
-  // Type 3: (i32, f64) -> ()   — mulScalar, addScalar (F64)
-  // Type 4: (i32)      -> f64  — sum, dot (F64)
-  // Type 5: (i32, i32, i32, i32, i32) -> ()  — matVec (F32 and F64)
+  // Type 0: (i32, f32) -> ()                  — mulScalar, addScalar (F32)
+  // Type 1: (i32)      -> ()                  — add, mul (F32 and F64)
+  // Type 2: (i32)      -> f32                 — sum, dot (F32)
+  // Type 3: (i32, f64) -> ()                  — mulScalar, addScalar (F64)
+  // Type 4: (i32)      -> f64                 — sum, dot (F64)
+  // Type 5: (i32, i32, i32, i32, i32) -> ()   — matVec (F32 and F64)
+  // Type 6: (i32, f32, i32, i32) -> ()        — mulScalarAt, addScalarAt (F32)
+  // Type 7: (i32, i32, i32, i32) -> ()        — addAt, mulAt (F32 and F64)
+  // Type 8: (i32, f64, i32, i32) -> ()        — mulScalarAt, addScalarAt (F64)
   const typeSection = section(1, [
-    ...uleb(6),
+    ...uleb(9),
     0x60,
     ...vec([I32, F32]),
     ...vec([]),
@@ -611,20 +786,38 @@ function buildModule(): Uint8Array {
     0x60,
     ...vec([I32, I32, I32, I32, I32]),
     ...vec([]),
+    0x60,
+    ...vec([I32, F32, I32, I32]),
+    ...vec([]),
+    0x60,
+    ...vec([I32, I32, I32, I32]),
+    ...vec([]),
+    0x60,
+    ...vec([I32, F64, I32, I32]),
+    ...vec([]),
   ]);
 
   // Function types, in this order:
-  //  0: mulScalar   (t0)    6:  mulScalarF64 (t3)
-  //  1: addScalar   (t0)    7:  addScalarF64 (t3)
-  //  2: add         (t1)    8:  addF64       (t1)
-  //  3: mul         (t1)    9:  mulF64       (t1)
-  //  4: sum         (t2)   10:  sumF64       (t4)
-  //  5: dot         (t2)   11:  dotF64       (t4)
-  // 12: matVec      (t5)   13:  matVecF64    (t5)
-  const funcTypes = [0, 0, 1, 1, 2, 2, 3, 3, 1, 1, 4, 4, 5, 5];
+  //  0: mulScalar     (t0)   11: dotF64         (t4)
+  //  1: addScalar     (t0)   12: matVec         (t5)
+  //  2: add           (t1)   13: matVecF64      (t5)
+  //  3: mul           (t1)   14: mulScalarAt    (t6)
+  //  4: sum           (t2)   15: addScalarAt    (t6)
+  //  5: dot           (t2)   16: addAt          (t7)
+  //  6: mulScalarF64  (t3)   17: mulAt          (t7)
+  //  7: addScalarF64  (t3)   18: mulScalarAtF64 (t8)
+  //  8: addF64        (t1)   19: addScalarAtF64 (t8)
+  //  9: mulF64        (t1)   20: addAtF64       (t7)
+  // 10: sumF64        (t4)   21: mulAtF64       (t7)
+  const funcTypes = [0, 0, 1, 1, 2, 2, 3, 3, 1, 1, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 7, 7];
   const funcSection = section(3, [...uleb(funcTypes.length), ...funcTypes.flatMap(t => uleb(t))]);
 
-  // Memory: 1 page initial (64 KiB), grows in JS as needed.
+  // Memory: non-shared, 1 page initial, grows in JS as needed.
+  // Shared memory would prevent detach-on-grow but requires WASM fault signal
+  // handler — disabled under ASAN. Instead, `alloc()` pre-grows memory to a
+  // fixed size once ("commits" the pool); ops requiring more scratch after
+  // commit fall back to JS tight loops instead of growing and detaching the
+  // user's alloc'd views.
   const memSection = section(5, [...uleb(1), 0x00, ...uleb(1)]);
 
   const exports: Array<[string, number]> = [
@@ -642,6 +835,14 @@ function buildModule(): Uint8Array {
     ["dotF64", 11],
     ["matVec", 12],
     ["matVecF64", 13],
+    ["mulScalarAt", 14],
+    ["addScalarAt", 15],
+    ["addAt", 16],
+    ["mulAt", 17],
+    ["mulScalarAtF64", 18],
+    ["addScalarAtF64", 19],
+    ["addAtF64", 20],
+    ["mulAtF64", 21],
   ];
   const exportPayload: number[] = [...uleb(exports.length + 1), ...str("mem"), 0x02, ...uleb(0)];
   for (const [name, idx] of exports) {
@@ -661,6 +862,12 @@ function buildModule(): Uint8Array {
   // vecOffset, outOffset), so declared locals start at index 5.
   const matVecLocalsF32 = [0x03, ...uleb(7), I32, ...uleb(1), V128, ...uleb(1), F32];
   const matVecLocalsF64 = [0x03, ...uleb(7), I32, ...uleb(1), V128, ...uleb(1), F64];
+  // scalarOpAt locals: 3 i32 (i, aAddr, outAddr), 1 v128 (k).
+  // Params 0..3 are (len, c, aOff, outOff), declared locals start at 4.
+  const scalarOpAtLocals = [0x02, ...uleb(3), I32, ...uleb(1), V128];
+  // binaryOpAt locals: 4 i32 (i, aAddr, bAddr, outAddr).
+  // Params 0..3 are (len, aOff, bOff, outOff), declared locals start at 4.
+  const binaryOpAtLocals = [0x01, ...uleb(4), I32];
 
   const bodies: number[][] = [
     [...scalarOpLocals, ...scalarOpBody(F32Cfg, op.f32x4Mul(), op.f32Mul())],
@@ -677,6 +884,14 @@ function buildModule(): Uint8Array {
     [...dotLocalsF64, ...dotBody(F64Cfg)],
     [...matVecLocalsF32, ...matVecBody(F32Cfg)],
     [...matVecLocalsF64, ...matVecBody(F64Cfg)],
+    [...scalarOpAtLocals, ...scalarOpAtBody(F32Cfg, op.f32x4Mul(), op.f32Mul())],
+    [...scalarOpAtLocals, ...scalarOpAtBody(F32Cfg, op.f32x4Add(), op.f32Add())],
+    [...binaryOpAtLocals, ...binaryOpAtBody(F32Cfg, op.f32x4Add(), op.f32Add())],
+    [...binaryOpAtLocals, ...binaryOpAtBody(F32Cfg, op.f32x4Mul(), op.f32Mul())],
+    [...scalarOpAtLocals, ...scalarOpAtBody(F64Cfg, op.f64x2Mul(), op.f64Mul())],
+    [...scalarOpAtLocals, ...scalarOpAtBody(F64Cfg, op.f64x2Add(), op.f64Add())],
+    [...binaryOpAtLocals, ...binaryOpAtBody(F64Cfg, op.f64x2Add(), op.f64Add())],
+    [...binaryOpAtLocals, ...binaryOpAtBody(F64Cfg, op.f64x2Mul(), op.f64Mul())],
   ];
 
   const codePayload: number[] = [...uleb(bodies.length)];
@@ -704,6 +919,9 @@ function buildModule(): Uint8Array {
 
 // --- Instantiate ---
 
+type ScalarAtFn = (len: number, c: number, aOff: number, outOff: number) => void;
+type BinaryAtFn = (len: number, aOff: number, bOff: number, outOff: number) => void;
+
 type WasmExports = {
   mem: WebAssembly.Memory;
   mulScalar: (len: number, c: number) => void;
@@ -720,6 +938,14 @@ type WasmExports = {
   dotF64: (len: number) => number;
   matVec: (nRows: number, nCols: number, matOffset: number, vecOffset: number, outOffset: number) => void;
   matVecF64: (nRows: number, nCols: number, matOffset: number, vecOffset: number, outOffset: number) => void;
+  mulScalarAt: ScalarAtFn;
+  addScalarAt: ScalarAtFn;
+  addAt: BinaryAtFn;
+  mulAt: BinaryAtFn;
+  mulScalarAtF64: ScalarAtFn;
+  addScalarAtF64: ScalarAtFn;
+  addAtF64: BinaryAtFn;
+  mulAtF64: BinaryAtFn;
 };
 
 let wasm: WasmExports | null = null;
@@ -736,12 +962,16 @@ function isWasmAvailable(): boolean {
   return wasm !== null;
 }
 
-function ensureCapacity(bytesNeeded: number): void {
+// Return true iff the kernel memory has enough room for bytesNeeded. Before
+// the alloc pool is committed, grows freely. After commit, never grows —
+// caller must fall back to a non-WASM path if the request doesn't fit.
+function ensureCapacity(bytesNeeded: number): boolean {
   const mem = wasm!.mem;
-  if (mem.buffer.byteLength < bytesNeeded) {
-    const need = Math.ceil((bytesNeeded - mem.buffer.byteLength) / 65536);
-    mem.grow(need);
-  }
+  if (mem.buffer.byteLength >= bytesNeeded) return true;
+  if (allocCommitted) return false;
+  const need = Math.ceil((bytesNeeded - mem.buffer.byteLength) / 65536);
+  mem.grow(need);
+  return true;
 }
 
 function f32View(): Float32Array {
@@ -750,6 +980,73 @@ function f32View(): Float32Array {
 
 function f64View(): Float64Array {
   return new Float64Array(wasm!.mem.buffer);
+}
+
+// --- Zero-copy alloc pool ---
+//
+// User-facing `alloc(length, type)` returns a typed array view backed by the
+// WASM instance's linear memory. When the same view is later passed back into
+// an output op (mulScalar, addScalar, add, mul), the op invokes the
+// offset-parameterized `*At` kernel variant directly on the buffer — no
+// copy-in/out — staying vectorized at any N.
+//
+// Layout:
+//   [0, ALLOC_BASE)        — scratch for copy-in kernels (≤ 8 MiB; see
+//                            REDUCE/OUTPUT_WASM_MAX_BYTES × 2).
+//   [ALLOC_BASE, allocTop) — bump-allocated pool; alloc() advances upward.
+//   [allocTop, ...)        — matVec per-call scratch, above the pool so its
+//                            arbitrarily large scratch never stomps allocs.
+//
+// The first alloc() call commits the pool by pre-growing memory once, then
+// sets `allocCommitted = true`. After commit, `ensureCapacity()` never calls
+// `mem.grow()` — a subsequent grow would detach the user's typed-array views
+// against this buffer. Ops that would need more scratch fall back to JS.
+const ALLOC_BASE = 16 * 1024 * 1024;
+const ALLOC_POOL_MAX_BYTES = 112 * 1024 * 1024; // alloc pool budget
+const ALLOC_COMMIT_BYTES = ALLOC_BASE + ALLOC_POOL_MAX_BYTES;
+const ALLOC_ALIGN = 16; // v128 alignment; also satisfies 8-byte f64 alignment
+let allocTop = ALLOC_BASE;
+let allocCommitted = false;
+
+function alignUp(x: number, a: number): number {
+  return (x + a - 1) & ~(a - 1);
+}
+
+function isWasmBacked(arr: FArray): boolean {
+  return wasm !== null && arr.buffer === wasm.mem.buffer;
+}
+
+function commitAllocPool(): void {
+  if (allocCommitted || wasm === null) return;
+  const mem = wasm.mem;
+  if (mem.buffer.byteLength < ALLOC_COMMIT_BYTES) {
+    const need = Math.ceil((ALLOC_COMMIT_BYTES - mem.buffer.byteLength) / 65536);
+    mem.grow(need);
+  }
+  allocCommitted = true;
+}
+
+function alloc(length: number, type: "f32" | "f64"): FArray {
+  if (wasm === null) throw new Error("bun:simd alloc requires the WASM backend");
+  if (!Number.isInteger(length) || length < 0) {
+    throw new RangeError("length must be a non-negative integer");
+  }
+  if (type !== "f32" && type !== "f64") {
+    throw new TypeError(`type must be "f32" or "f64"; got ${JSON.stringify(type)}`);
+  }
+  commitAllocPool();
+  const elemBytes = type === "f32" ? 4 : 8;
+  const byteLen = length * elemBytes;
+  const base = alignUp(allocTop, ALLOC_ALIGN);
+  const nextTop = base + byteLen;
+  if (nextTop > ALLOC_COMMIT_BYTES) {
+    throw new RangeError(
+      `bun:simd alloc pool exhausted: requested ${byteLen} bytes at offset ${base}, pool ends at ${ALLOC_COMMIT_BYTES}`,
+    );
+  }
+  allocTop = nextTop;
+  const buf = wasm.mem.buffer;
+  return type === "f32" ? new Float32Array(buf, base, length) : new Float64Array(buf, base, length);
 }
 
 // --- Validators ---
@@ -778,13 +1075,15 @@ function outLike(a: FArray, n: number): FArray {
   return a instanceof Float32Array ? new Float32Array(n) : new Float64Array(n);
 }
 
-// Opt-in escape hatch: `dstOverwrite: "a"` (or "b" for binary ops) tells
-// the primitive to mutate that input in-place and return it, instead of
-// allocating a fresh output buffer. Eliminates the final copy-out slice.
-// Semantics change — caller's `a` (or `b`) holds the result — so it's
-// gated behind an option, not the default.
-type ScalarOpts = { dstOverwrite?: "a" };
-type BinaryOpts = { dstOverwrite?: "a" | "b" };
+// Opt-in escape hatches for eliminating output allocation:
+//   - `dstOverwrite: "a"` (or "b") mutates that input in place and returns it.
+//   - `dst: preAlloced` writes the result into a caller-provided array and
+//     returns it. Must match the input type and length. Pair with `alloc()`
+//     for the fully zero-copy path: alloc'd input + alloc'd dst go through
+//     offset-parameterized *At kernels with no copy-in/out.
+// Both are gated (not the default) because they change observable semantics.
+type ScalarOpts = { dstOverwrite?: "a"; dst?: Float32Array | Float64Array };
+type BinaryOpts = { dstOverwrite?: "a" | "b"; dst?: Float32Array | Float64Array };
 
 function requireDstOverwrite(opts: { dstOverwrite?: string } | undefined, allowed: readonly string[]): string | null {
   const v = opts?.dstOverwrite;
@@ -797,82 +1096,148 @@ function requireDstOverwrite(opts: { dstOverwrite?: string } | undefined, allowe
   return v;
 }
 
+function requireDst(opts: { dst?: FArray } | undefined, a: FArray, n: number): FArray | null {
+  const d = opts?.dst;
+  if (d === undefined) return null;
+  if (d.constructor !== a.constructor) {
+    throw new TypeError(`dst must be ${a.constructor.name}; got ${d.constructor.name}`);
+  }
+  if (d.length !== n) {
+    throw new RangeError(`dst length ${d.length} != input length ${n}`);
+  }
+  return d;
+}
+
 // --- Primitives ---
+
+// Resolve the effective output array for a scalar op, given dstOverwrite/dst
+// options. Returns the output FArray and whether it's wasm-backed (same SAB
+// as the input). Validates mutual exclusion and type/length of dst.
+function resolveScalarDst(
+  arr: FArray,
+  n: number,
+  opts: ScalarOpts | undefined,
+): { out: FArray; outWasm: boolean; aliasesA: boolean } {
+  const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
+  const dstArg = requireDst(opts, arr, n);
+  if (inPlace && dstArg !== null) {
+    throw new TypeError("cannot specify both dstOverwrite and dst");
+  }
+  if (inPlace) return { out: arr, outWasm: isWasmBacked(arr), aliasesA: true };
+  if (dstArg !== null) return { out: dstArg, outWasm: isWasmBacked(dstArg), aliasesA: dstArg === arr };
+  const out = outLike(arr, n);
+  return { out, outWasm: false, aliasesA: false };
+}
+
+function resolveBinaryDst(
+  ax: FArray,
+  bx: FArray,
+  n: number,
+  opts: BinaryOpts | undefined,
+): { out: FArray; outWasm: boolean } {
+  const dstKey = requireDstOverwrite(opts, ["a", "b"]);
+  const dstArg = requireDst(opts, ax, n);
+  if (dstKey !== null && dstArg !== null) {
+    throw new TypeError("cannot specify both dstOverwrite and dst");
+  }
+  if (dstKey === "a") return { out: ax, outWasm: isWasmBacked(ax) };
+  if (dstKey === "b") return { out: bx, outWasm: isWasmBacked(bx) };
+  if (dstArg !== null) return { out: dstArg, outWasm: isWasmBacked(dstArg) };
+  const out = outLike(ax, n);
+  return { out, outWasm: false };
+}
 
 function mulScalar(a: Float32Array, c: number, opts?: ScalarOpts): Float32Array;
 function mulScalar(a: Float64Array, c: number, opts?: ScalarOpts): Float64Array;
 function mulScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const arr = requireFArray(a, "a");
-  const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
   const n = arr.length;
-  if (n === 0) return inPlace ? arr : emptyLike(arr);
+  if (n === 0) {
+    const { out } = resolveScalarDst(arr, n, opts);
+    return out;
+  }
+  const { out, outWasm } = resolveScalarDst(arr, n, opts);
+  const aWasm = isWasmBacked(arr);
   const elemBytes = arr.BYTES_PER_ELEMENT;
+
+  // Zero-copy fast path: both input and output live in WASM memory. Call the
+  // offset-parameterized kernel with the actual byteOffsets — no copy-in/out,
+  // vectorized at any N.
+  if (wasm !== null && aWasm && outWasm) {
+    if (arr instanceof Float32Array) {
+      wasm.mulScalarAt(n, c, arr.byteOffset, out.byteOffset);
+    } else {
+      wasm.mulScalarAtF64(n, c, arr.byteOffset, out.byteOffset);
+    }
+    return out;
+  }
+
+  // Below-threshold copy-in WASM path.
   if (wasm !== null && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
       view.set(arr, 0);
       wasm.mulScalar(n, c);
-      if (inPlace) {
-        arr.set(view.subarray(0, n));
-        return arr;
-      }
-      return view.slice(0, n);
+      (out as Float32Array).set(view.subarray(0, n));
+      return out;
     }
     ensureCapacity(n * 8);
     const view = f64View();
     view.set(arr, 0);
     wasm.mulScalarF64(n, c);
-    if (inPlace) {
-      arr.set(view.subarray(0, n));
-      return arr;
-    }
-    return view.slice(0, n);
+    (out as Float64Array).set(view.subarray(0, n));
+    return out;
   }
-  if (arr instanceof Float32Array) {
-    const out = inPlace ? arr : (outLike(arr, n) as Float32Array);
-    return mulScalarTightF32(arr, c, out);
-  }
-  const out = inPlace ? (arr as Float64Array) : (outLike(arr, n) as Float64Array);
-  return mulScalarTightF64(arr as Float64Array, c, out);
+
+  // Above-threshold JS tight-loop fallback.
+  return arr instanceof Float32Array
+    ? mulScalarTightF32(arr, c, out as Float32Array)
+    : mulScalarTightF64(arr as Float64Array, c, out as Float64Array);
 }
 
 function addScalar(a: Float32Array, c: number, opts?: ScalarOpts): Float32Array;
 function addScalar(a: Float64Array, c: number, opts?: ScalarOpts): Float64Array;
 function addScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const arr = requireFArray(a, "a");
-  const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
   const n = arr.length;
-  if (n === 0) return inPlace ? arr : emptyLike(arr);
+  if (n === 0) {
+    const { out } = resolveScalarDst(arr, n, opts);
+    return out;
+  }
+  const { out, outWasm } = resolveScalarDst(arr, n, opts);
+  const aWasm = isWasmBacked(arr);
   const elemBytes = arr.BYTES_PER_ELEMENT;
+
+  if (wasm !== null && aWasm && outWasm) {
+    if (arr instanceof Float32Array) {
+      wasm.addScalarAt(n, c, arr.byteOffset, out.byteOffset);
+    } else {
+      wasm.addScalarAtF64(n, c, arr.byteOffset, out.byteOffset);
+    }
+    return out;
+  }
+
   if (wasm !== null && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
       view.set(arr, 0);
       wasm.addScalar(n, c);
-      if (inPlace) {
-        arr.set(view.subarray(0, n));
-        return arr;
-      }
-      return view.slice(0, n);
+      (out as Float32Array).set(view.subarray(0, n));
+      return out;
     }
     ensureCapacity(n * 8);
     const view = f64View();
     view.set(arr, 0);
     wasm.addScalarF64(n, c);
-    if (inPlace) {
-      arr.set(view.subarray(0, n));
-      return arr;
-    }
-    return view.slice(0, n);
+    (out as Float64Array).set(view.subarray(0, n));
+    return out;
   }
-  if (arr instanceof Float32Array) {
-    const out = inPlace ? arr : (outLike(arr, n) as Float32Array);
-    return addScalarTightF32(arr, c, out);
-  }
-  const out = inPlace ? (arr as Float64Array) : (outLike(arr, n) as Float64Array);
-  return addScalarTightF64(arr as Float64Array, c, out);
+
+  return arr instanceof Float32Array
+    ? addScalarTightF32(arr, c, out as Float32Array)
+    : addScalarTightF64(arr as Float64Array, c, out as Float64Array);
 }
 
 function add(a: Float32Array, b: Float32Array, opts?: BinaryOpts): Float32Array;
@@ -881,11 +1246,26 @@ function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const ax = requireFArray(a, "a");
   const bx = requireFArray(b, "b");
   requireSameTypeAndLen(ax, bx);
-  const dst = requireDstOverwrite(opts, ["a", "b"]);
   const n = ax.length;
-  if (n === 0) return dst === "a" ? ax : dst === "b" ? bx : emptyLike(ax);
+  if (n === 0) {
+    const { out } = resolveBinaryDst(ax, bx, n, opts);
+    return out;
+  }
+  const { out, outWasm } = resolveBinaryDst(ax, bx, n, opts);
+  const aWasm = isWasmBacked(ax);
+  const bWasm = isWasmBacked(bx);
   const elemBytes = ax.BYTES_PER_ELEMENT;
-  // Binary ops pay 2× copy-in; use the same budget as scalar ops.
+
+  // Zero-copy fast path: all of a, b, out share the SAB — call addAt directly.
+  if (wasm !== null && aWasm && bWasm && outWasm) {
+    if (ax instanceof Float32Array) {
+      wasm.addAt(n, ax.byteOffset, (bx as Float32Array).byteOffset, out.byteOffset);
+    } else {
+      wasm.addAtF64(n, ax.byteOffset, (bx as Float64Array).byteOffset, out.byteOffset);
+    }
+    return out;
+  }
+
   if (wasm !== null && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
@@ -893,40 +1273,21 @@ function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
       view.set(ax, 0);
       view.set(bx as Float32Array, n);
       wasm.add(n);
-      if (dst === "a") {
-        ax.set(view.subarray(0, n));
-        return ax;
-      }
-      if (dst === "b") {
-        (bx as Float32Array).set(view.subarray(0, n));
-        return bx;
-      }
-      return view.slice(0, n);
+      (out as Float32Array).set(view.subarray(0, n));
+      return out;
     }
     ensureCapacity(n * 16);
     const view = f64View();
     view.set(ax, 0);
     view.set(bx as Float64Array, n);
     wasm.addF64(n);
-    if (dst === "a") {
-      ax.set(view.subarray(0, n));
-      return ax;
-    }
-    if (dst === "b") {
-      (bx as Float64Array).set(view.subarray(0, n));
-      return bx;
-    }
-    return view.slice(0, n);
+    (out as Float64Array).set(view.subarray(0, n));
+    return out;
   }
-  if (ax instanceof Float32Array) {
-    const bf32 = bx as Float32Array;
-    const out = dst === "a" ? ax : dst === "b" ? bf32 : (outLike(ax, n) as Float32Array);
-    return addTightF32(ax, bf32, out);
-  }
-  const af64 = ax as Float64Array;
-  const bf64 = bx as Float64Array;
-  const out = dst === "a" ? af64 : dst === "b" ? bf64 : (outLike(af64, n) as Float64Array);
-  return addTightF64(af64, bf64, out);
+
+  return ax instanceof Float32Array
+    ? addTightF32(ax, bx as Float32Array, out as Float32Array)
+    : addTightF64(ax as Float64Array, bx as Float64Array, out as Float64Array);
 }
 
 function mul(a: Float32Array, b: Float32Array, opts?: BinaryOpts): Float32Array;
@@ -935,10 +1296,25 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const ax = requireFArray(a, "a");
   const bx = requireFArray(b, "b");
   requireSameTypeAndLen(ax, bx);
-  const dst = requireDstOverwrite(opts, ["a", "b"]);
   const n = ax.length;
-  if (n === 0) return dst === "a" ? ax : dst === "b" ? bx : emptyLike(ax);
+  if (n === 0) {
+    const { out } = resolveBinaryDst(ax, bx, n, opts);
+    return out;
+  }
+  const { out, outWasm } = resolveBinaryDst(ax, bx, n, opts);
+  const aWasm = isWasmBacked(ax);
+  const bWasm = isWasmBacked(bx);
   const elemBytes = ax.BYTES_PER_ELEMENT;
+
+  if (wasm !== null && aWasm && bWasm && outWasm) {
+    if (ax instanceof Float32Array) {
+      wasm.mulAt(n, ax.byteOffset, (bx as Float32Array).byteOffset, out.byteOffset);
+    } else {
+      wasm.mulAtF64(n, ax.byteOffset, (bx as Float64Array).byteOffset, out.byteOffset);
+    }
+    return out;
+  }
+
   if (wasm !== null && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
@@ -946,40 +1322,21 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
       view.set(ax, 0);
       view.set(bx as Float32Array, n);
       wasm.mul(n);
-      if (dst === "a") {
-        ax.set(view.subarray(0, n));
-        return ax;
-      }
-      if (dst === "b") {
-        (bx as Float32Array).set(view.subarray(0, n));
-        return bx;
-      }
-      return view.slice(0, n);
+      (out as Float32Array).set(view.subarray(0, n));
+      return out;
     }
     ensureCapacity(n * 16);
     const view = f64View();
     view.set(ax, 0);
     view.set(bx as Float64Array, n);
     wasm.mulF64(n);
-    if (dst === "a") {
-      ax.set(view.subarray(0, n));
-      return ax;
-    }
-    if (dst === "b") {
-      (bx as Float64Array).set(view.subarray(0, n));
-      return bx;
-    }
-    return view.slice(0, n);
+    (out as Float64Array).set(view.subarray(0, n));
+    return out;
   }
-  if (ax instanceof Float32Array) {
-    const bf32 = bx as Float32Array;
-    const out = dst === "a" ? ax : dst === "b" ? bf32 : (outLike(ax, n) as Float32Array);
-    return mulTightF32(ax, bf32, out);
-  }
-  const af64 = ax as Float64Array;
-  const bf64 = bx as Float64Array;
-  const out = dst === "a" ? af64 : dst === "b" ? bf64 : (outLike(af64, n) as Float64Array);
-  return mulTightF64(af64, bf64, out);
+
+  return ax instanceof Float32Array
+    ? mulTightF32(ax, bx as Float32Array, out as Float32Array)
+    : mulTightF64(ax as Float64Array, bx as Float64Array, out as Float64Array);
 }
 
 // Copy-in thresholds — both reduce and output ops hit an inflection where
@@ -1157,29 +1514,32 @@ function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): F
   if (nRows === 0) return emptyLike(mx);
   if (nCols === 0) return outLike(mx, nRows);
 
+  // matVec scratch (matrix + vec + out) lives above the alloc pool — its
+  // total size has no hard cap, so placing it relative to allocTop keeps it
+  // from ever overwriting user alloc'd buffers. After the alloc pool is
+  // committed, ensureCapacity won't grow, so a too-large matVec falls back
+  // to the JS tight loop below.
   if (wasm !== null) {
-    if (mx instanceof Float32Array) {
-      const totalBytes = (nRows * nCols + nCols + nRows) * 4;
-      ensureCapacity(totalBytes);
-      const view = f32View();
-      const matOffset = 0;
-      const vecOffsetEl = nRows * nCols;
-      const outOffsetEl = vecOffsetEl + nCols;
-      view.set(mx, matOffset);
-      view.set(vx as Float32Array, vecOffsetEl);
-      wasm.matVec(nRows, nCols, matOffset * 4, vecOffsetEl * 4, outOffsetEl * 4);
-      return view.slice(outOffsetEl, outOffsetEl + nRows);
+    const elemBytes = mx.BYTES_PER_ELEMENT;
+    const scratchBase = alignUp(allocTop, ALLOC_ALIGN);
+    const matByteOffset = scratchBase;
+    const vecByteOffset = matByteOffset + nRows * nCols * elemBytes;
+    const outByteOffset = vecByteOffset + nCols * elemBytes;
+    const totalBytes = outByteOffset + nRows * elemBytes;
+    if (ensureCapacity(totalBytes)) {
+      if (mx instanceof Float32Array) {
+        const view = f32View();
+        view.set(mx, matByteOffset / 4);
+        view.set(vx as Float32Array, vecByteOffset / 4);
+        wasm.matVec(nRows, nCols, matByteOffset, vecByteOffset, outByteOffset);
+        return view.slice(outByteOffset / 4, outByteOffset / 4 + nRows);
+      }
+      const view = f64View();
+      view.set(mx, matByteOffset / 8);
+      view.set(vx as Float64Array, vecByteOffset / 8);
+      wasm.matVecF64(nRows, nCols, matByteOffset, vecByteOffset, outByteOffset);
+      return view.slice(outByteOffset / 8, outByteOffset / 8 + nRows);
     }
-    const totalBytes = (nRows * nCols + nCols + nRows) * 8;
-    ensureCapacity(totalBytes);
-    const view = f64View();
-    const matOffset = 0;
-    const vecOffsetEl = nRows * nCols;
-    const outOffsetEl = vecOffsetEl + nCols;
-    view.set(mx, matOffset);
-    view.set(vx as Float64Array, vecOffsetEl);
-    wasm.matVecF64(nRows, nCols, matOffset * 8, vecOffsetEl * 8, outOffsetEl * 8);
-    return view.slice(outOffsetEl, outOffsetEl + nRows);
   }
 
   const out = outLike(mx, nRows);
@@ -1285,7 +1645,9 @@ export default {
   dot,
   matVec,
   simdMap,
+  alloc,
   isWasmAvailable,
+  isWasmBacked,
   wasmWinsForSize,
   hasUnifiedMemoryGPU,
   hasDiscreteGPU,

@@ -510,4 +510,216 @@ describe("bun:simd", () => {
     expect(stdout).toBe("TYPE_ERROR TYPE_ERROR");
     expect(exitCode).toBe(0);
   });
+
+  it("alloc — returns wasm-backed typed arrays of correct type and length", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-alloc-basic",
+      `
+        import simd from "bun:simd";
+        const a = simd.alloc(7, "f32");
+        const b = simd.alloc(5, "f64");
+        const plain = new Float32Array(4);
+        const msgs = [];
+        msgs.push("f32:" + (a instanceof Float32Array) + ":" + a.length);
+        msgs.push("f64:" + (b instanceof Float64Array) + ":" + b.length);
+        msgs.push("backed-a:" + simd.isWasmBacked(a));
+        msgs.push("backed-b:" + simd.isWasmBacked(b));
+        msgs.push("backed-plain:" + simd.isWasmBacked(plain));
+        // Writes persist across calls and do not affect other alloc'd buffers.
+        for (let i = 0; i < 7; i++) a[i] = i + 1;
+        for (let i = 0; i < 5; i++) b[i] = i * 0.25;
+        msgs.push("a:" + Array.from(a).join(","));
+        msgs.push("b:" + Array.from(b).join(","));
+        console.log(msgs.join("\\n"));
+      `,
+    );
+    expect(stdout).toBe(
+      [
+        "f32:true:7",
+        "f64:true:5",
+        "backed-a:true",
+        "backed-b:true",
+        "backed-plain:false",
+        "a:1,2,3,4,5,6,7",
+        "b:0,0.25,0.5,0.75,1",
+      ].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("alloc — invalid args throw", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-alloc-invalid",
+      `
+        import simd from "bun:simd";
+        const msgs = [];
+        try { simd.alloc(-1, "f32"); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof RangeError ? "RANGE" : "WRONG:" + e.name); }
+        try { simd.alloc(1.5, "f32"); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof RangeError ? "RANGE" : "WRONG:" + e.name); }
+        try { simd.alloc(8, "f16"); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE" : "WRONG:" + e.name); }
+        console.log(msgs.join(" "));
+      `,
+    );
+    expect(stdout).toBe("RANGE RANGE TYPE");
+    expect(exitCode).toBe(0);
+  });
+
+  it("zero-copy — scalar ops on alloc'd inputs with dstOverwrite stay vectorized at large N", async () => {
+    // N=2M (8MB) — above the OUTPUT_WASM_MAX_BYTES copy-in threshold. The
+    // non-alloc path falls back to JS tight loops at this size; the alloc
+    // path goes through the At kernels directly (zero-copy). Use integer
+    // values (exact in f32 up to 2^24) so we can assert equality with
+    // reference values rather than tolerance-based comparison.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-zerocopy-scalar",
+      `
+        import simd from "bun:simd";
+        const N = 2_000_000;
+        const a = simd.alloc(N, "f32");
+        for (let i = 0; i < N; i++) a[i] = i & 0xffff;
+        simd.mulScalar(a, 3, { dstOverwrite: "a" });
+        const ok1 = a[0] === 0 && a[1] === 3 && a[N - 1] === ((N - 1) & 0xffff) * 3;
+        simd.addScalar(a, 7, { dstOverwrite: "a" });
+        const ok2 = a[0] === 7 && a[1] === 10 && a[N - 1] === ((N - 1) & 0xffff) * 3 + 7;
+        console.log("mulScalar:" + (ok1 ? "OK" : "FAIL") + " addScalar:" + (ok2 ? "OK" : "FAIL"));
+      `,
+    );
+    expect(stdout).toBe("mulScalar:OK addScalar:OK");
+    expect(exitCode).toBe(0);
+  });
+
+  it("zero-copy — binary ops with alloc'd dst write results into the pool", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-zerocopy-binary",
+      `
+        import simd from "bun:simd";
+        const N = 2_000_000; // above copy-in threshold
+        const a = simd.alloc(N, "f32");
+        const b = simd.alloc(N, "f32");
+        const out = simd.alloc(N, "f32");
+        for (let i = 0; i < N; i++) { a[i] = i & 0xffff; b[i] = (i * 2) & 0xffff; }
+        const r = simd.add(a, b, { dst: out });
+        const ok1 = r === out && out[0] === 0 && out[1] === 3 && out[100] === (100 & 0xffff) + (200 & 0xffff);
+        simd.mul(a, b, { dst: out });
+        const ok2 = out[0] === 0 && out[1] === 2 && out[5] === 5 * 10;
+        console.log("add:" + (ok1 ? "OK" : "FAIL") + " mul:" + (ok2 ? "OK" : "FAIL"));
+      `,
+    );
+    expect(stdout).toBe("add:OK mul:OK");
+    expect(exitCode).toBe(0);
+  });
+
+  it("zero-copy — f64 alloc'd inputs and outputs", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-zerocopy-f64",
+      `
+        import simd from "bun:simd";
+        const a = simd.alloc(1000, "f64");
+        const b = simd.alloc(1000, "f64");
+        for (let i = 0; i < 1000; i++) { a[i] = i * 0.5; b[i] = i * 0.25; }
+        simd.mulScalar(a, 2, { dstOverwrite: "a" });
+        simd.add(a, b, { dstOverwrite: "a" });
+        // a[i] = (i*0.5 * 2) + i*0.25 = i + 0.25*i = 1.25*i
+        const ok = Math.abs(a[0]) < 1e-12 && Math.abs(a[10] - 12.5) < 1e-12 && Math.abs(a[999] - 1248.75) < 1e-12;
+        console.log(ok ? "OK" : "FAIL:" + a[0] + "," + a[10] + "," + a[999]);
+      `,
+    );
+    expect(stdout).toBe("OK");
+    expect(exitCode).toBe(0);
+  });
+
+  it("zero-copy — results match the copy-in path element-for-element", async () => {
+    // Cross-check: run the same op via (non-alloc, copy-in) and (alloc,
+    // zero-copy At kernel) paths on identical inputs. They must produce
+    // bit-identical f32 output.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-zerocopy-equiv",
+      `
+        import simd from "bun:simd";
+        const N = 4096; // small — forces the copy-in path on the plain array
+        const plain = new Float32Array(N);
+        const alloc = simd.alloc(N, "f32");
+        for (let i = 0; i < N; i++) { plain[i] = (i * 0.125) % 7; alloc[i] = plain[i]; }
+        // mulScalar
+        const r1 = simd.mulScalar(plain, 3.5);
+        simd.mulScalar(alloc, 3.5, { dstOverwrite: "a" });
+        let diffs = 0;
+        for (let i = 0; i < N; i++) if (r1[i] !== alloc[i]) diffs++;
+        console.log("mulScalar diffs:" + diffs);
+        // addScalar
+        for (let i = 0; i < N; i++) alloc[i] = plain[i];
+        const r2 = simd.addScalar(plain, -1.25);
+        simd.addScalar(alloc, -1.25, { dstOverwrite: "a" });
+        diffs = 0;
+        for (let i = 0; i < N; i++) if (r2[i] !== alloc[i]) diffs++;
+        console.log("addScalar diffs:" + diffs);
+        // binary add
+        const plainB = new Float32Array(N);
+        const allocB = simd.alloc(N, "f32");
+        for (let i = 0; i < N; i++) { plainB[i] = (i * 0.5) % 3; allocB[i] = plainB[i]; }
+        for (let i = 0; i < N; i++) alloc[i] = plain[i];
+        const r3 = simd.add(plain, plainB);
+        simd.add(alloc, allocB, { dstOverwrite: "a" });
+        diffs = 0;
+        for (let i = 0; i < N; i++) if (r3[i] !== alloc[i]) diffs++;
+        console.log("add diffs:" + diffs);
+      `,
+    );
+    expect(stdout).toBe(["mulScalar diffs:0", "addScalar diffs:0", "add diffs:0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("zero-copy — alloc'd arrays coexist with non-alloc'd ops after commit", async () => {
+    // Regression guard: once the alloc pool is committed, ops on regular
+    // (non-alloc'd) typed arrays must still work. Below-threshold uses the
+    // low-address scratch region (safe); above-threshold falls to JS tight
+    // loops (safe). matVec scratch goes above allocTop.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-zerocopy-coexist",
+      `
+        import simd from "bun:simd";
+        const held = simd.alloc(1024, "f32");
+        for (let i = 0; i < 1024; i++) held[i] = i;
+        // Non-alloc ops after commit still work
+        const plain = new Float32Array([1, 2, 3, 4, 5]);
+        const r1 = simd.mulScalar(plain, 2);
+        const r2 = simd.sum(plain);
+        const m = new Float32Array([1, 2, 3, 4, 5, 6]);
+        const v = new Float32Array([1, 1]);
+        const r3 = simd.matVec(m, v, 3, 2);
+        // held alloc'd data still intact
+        const heldOk = held[0] === 0 && held[512] === 512 && held[1023] === 1023;
+        console.log([
+          "mulScalar:" + Array.from(r1).join(","),
+          "sum:" + r2,
+          "matVec:" + Array.from(r3).join(","),
+          "held:" + (heldOk ? "OK" : "CORRUPT"),
+        ].join("\\n"));
+      `,
+    );
+    expect(stdout).toBe(["mulScalar:2,4,6,8,10", "sum:15", "matVec:3,7,11", "held:OK"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("dst — validates type and length; mutual exclusion with dstOverwrite", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-dst-invalid",
+      `
+        import simd from "bun:simd";
+        const a = new Float32Array([1, 2, 3]);
+        const msgs = [];
+        try { simd.mulScalar(a, 2, { dst: new Float64Array(3) }); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE" : "WRONG:" + e.name); }
+        try { simd.mulScalar(a, 2, { dst: new Float32Array(5) }); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof RangeError ? "RANGE" : "WRONG:" + e.name); }
+        try { simd.mulScalar(a, 2, { dst: new Float32Array(3), dstOverwrite: "a" }); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE" : "WRONG:" + e.name); }
+        console.log(msgs.join(" "));
+      `,
+    );
+    expect(stdout).toBe("TYPE RANGE TYPE");
+    expect(exitCode).toBe(0);
+  });
 });
