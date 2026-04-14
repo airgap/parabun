@@ -208,12 +208,18 @@ observably equivalent.
 
 Implementation: `src/js/bun/simd.ts`.
 
-Reduce ops (`sum`, `dot`) skip the WASM copy-in for inputs whose byte
-footprint exceeds `REDUCE_WASM_MAX_BYTES` (4 MiB). At that size the copy
-dominates the vector reduction, so `sum`/`dot` fall through to
-per-type monomorphic tight loops (`sumTightF32`/`sumTightF64`,
-`dotTightF32`/`dotTightF64`). Monomorphism matters: a union-typed loop
-body would fail JSC's typed-array specialization and cost ~30%.
+Both reduce ops (`sum`, `dot`) and output ops (`mulScalar`, `addScalar`,
+`add`, `mul`) skip the WASM copy-in for inputs whose byte footprint
+exceeds a 4 MiB copy-in threshold (`REDUCE_WASM_MAX_BYTES` /
+`OUTPUT_WASM_MAX_BYTES` — same value today, separate names so they can
+be tuned independently). Above that, the ops fall through to per-type
+monomorphic tight loops (`sumTightF32`/`sumTightF64`,
+`dotTightF32`/`dotTightF64`, `mulScalarTightF32`/`F64`,
+`addScalarTightF32`/`F64`, `addTightF32`/`F64`, `mulTightF32`/`F64`).
+Monomorphism matters: a union-typed loop body would fail JSC's
+typed-array specialization and cost ~30%. Output-op helpers take an
+`out` parameter so the same helper serves both fresh-allocation and
+`dstOverwrite` paths without branching.
 
 Benchmark (`bench/simd.pjs`, release build, best-of-200):
 
@@ -355,11 +361,14 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
 
 ## Pending Work
 
-- **`bun:simd` zero-copy path for binary ops** — element-wise `add`/`mul`
-  at N ≳ 1 M still pay 8–16 MB of copy-in per call. Sharing the user's
-  `ArrayBuffer` with the WASM instance via `WebAssembly.Memory` would let
-  the binary ops match the gains the reduce-op threshold fallback already
-  captures.
+- **True zero-copy for `bun:simd` output ops (WASM-memory-backed alloc)**
+  — output ops now take the JS-tight-loop fallback above the 4 MiB
+  copy-in threshold, which matches the reduce-op pattern but still
+  loses to a hypothetical zero-copy WASM path that stays vectorized at
+  large N. Real zero-copy requires exposing an `alloc()` that returns
+  typed arrays backed by the WASM instance's memory (shared memory, to
+  avoid detach-on-grow). API change and a bigger lift than the
+  threshold shortcut, which is why it's split out.
 - **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `bun:gpu`
   ships the affine special case (Metal MSL kernel for `x*K + C` on
   Float32Array; pipeline fusion promotes matching chains automatically).

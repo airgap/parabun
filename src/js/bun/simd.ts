@@ -806,7 +806,8 @@ function mulScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
   const n = arr.length;
   if (n === 0) return inPlace ? arr : emptyLike(arr);
-  if (wasm !== null) {
+  const elemBytes = arr.BYTES_PER_ELEMENT;
+  if (wasm !== null && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
@@ -828,13 +829,12 @@ function mulScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
     }
     return view.slice(0, n);
   }
-  if (inPlace) {
-    for (let i = 0; i < n; i++) arr[i] = arr[i] * c;
-    return arr;
+  if (arr instanceof Float32Array) {
+    const out = inPlace ? arr : (outLike(arr, n) as Float32Array);
+    return mulScalarTightF32(arr, c, out);
   }
-  const out = outLike(arr, n);
-  for (let i = 0; i < n; i++) out[i] = arr[i] * c;
-  return out;
+  const out = inPlace ? (arr as Float64Array) : (outLike(arr, n) as Float64Array);
+  return mulScalarTightF64(arr as Float64Array, c, out);
 }
 
 function addScalar(a: Float32Array, c: number, opts?: ScalarOpts): Float32Array;
@@ -844,7 +844,8 @@ function addScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
   const n = arr.length;
   if (n === 0) return inPlace ? arr : emptyLike(arr);
-  if (wasm !== null) {
+  const elemBytes = arr.BYTES_PER_ELEMENT;
+  if (wasm !== null && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
@@ -866,13 +867,12 @@ function addScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
     }
     return view.slice(0, n);
   }
-  if (inPlace) {
-    for (let i = 0; i < n; i++) arr[i] = arr[i] + c;
-    return arr;
+  if (arr instanceof Float32Array) {
+    const out = inPlace ? arr : (outLike(arr, n) as Float32Array);
+    return addScalarTightF32(arr, c, out);
   }
-  const out = outLike(arr, n);
-  for (let i = 0; i < n; i++) out[i] = arr[i] + c;
-  return out;
+  const out = inPlace ? (arr as Float64Array) : (outLike(arr, n) as Float64Array);
+  return addScalarTightF64(arr as Float64Array, c, out);
 }
 
 function add(a: Float32Array, b: Float32Array, opts?: BinaryOpts): Float32Array;
@@ -884,7 +884,9 @@ function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const dst = requireDstOverwrite(opts, ["a", "b"]);
   const n = ax.length;
   if (n === 0) return dst === "a" ? ax : dst === "b" ? bx : emptyLike(ax);
-  if (wasm !== null) {
+  const elemBytes = ax.BYTES_PER_ELEMENT;
+  // Binary ops pay 2× copy-in; use the same budget as scalar ops.
+  if (wasm !== null && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
       const view = f32View();
@@ -916,17 +918,15 @@ function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
     }
     return view.slice(0, n);
   }
-  if (dst === "a") {
-    for (let i = 0; i < n; i++) ax[i] = ax[i] + bx[i];
-    return ax;
+  if (ax instanceof Float32Array) {
+    const bf32 = bx as Float32Array;
+    const out = dst === "a" ? ax : dst === "b" ? bf32 : (outLike(ax, n) as Float32Array);
+    return addTightF32(ax, bf32, out);
   }
-  if (dst === "b") {
-    for (let i = 0; i < n; i++) bx[i] = ax[i] + bx[i];
-    return bx;
-  }
-  const out = outLike(ax, n);
-  for (let i = 0; i < n; i++) out[i] = ax[i] + bx[i];
-  return out;
+  const af64 = ax as Float64Array;
+  const bf64 = bx as Float64Array;
+  const out = dst === "a" ? af64 : dst === "b" ? bf64 : (outLike(af64, n) as Float64Array);
+  return addTightF64(af64, bf64, out);
 }
 
 function mul(a: Float32Array, b: Float32Array, opts?: BinaryOpts): Float32Array;
@@ -938,7 +938,8 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const dst = requireDstOverwrite(opts, ["a", "b"]);
   const n = ax.length;
   if (n === 0) return dst === "a" ? ax : dst === "b" ? bx : emptyLike(ax);
-  if (wasm !== null) {
+  const elemBytes = ax.BYTES_PER_ELEMENT;
+  if (wasm !== null && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
       const view = f32View();
@@ -970,33 +971,38 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
     }
     return view.slice(0, n);
   }
-  if (dst === "a") {
-    for (let i = 0; i < n; i++) ax[i] = ax[i] * bx[i];
-    return ax;
+  if (ax instanceof Float32Array) {
+    const bf32 = bx as Float32Array;
+    const out = dst === "a" ? ax : dst === "b" ? bf32 : (outLike(ax, n) as Float32Array);
+    return mulTightF32(ax, bf32, out);
   }
-  if (dst === "b") {
-    for (let i = 0; i < n; i++) bx[i] = ax[i] * bx[i];
-    return bx;
-  }
-  const out = outLike(ax, n);
-  for (let i = 0; i < n; i++) out[i] = ax[i] * bx[i];
-  return out;
+  const af64 = ax as Float64Array;
+  const bf64 = bx as Float64Array;
+  const out = dst === "a" ? af64 : dst === "b" ? bf64 : (outLike(af64, n) as Float64Array);
+  return mulTightF64(af64, bf64, out);
 }
 
-// Reduce ops (sum, dot) copy the entire input into WASM memory and return a
-// single scalar. At large sizes that copy-in cost dominates, and a JS tight
-// loop — which reads the user's buffer directly — becomes faster than any
-// SIMD win. The threshold below is total bytes-to-copy; anything above it
-// takes the JS fallback. Tuned from `bench/simd.pjs`:
-//   - F32 sum crosses around N ≈ 2 M (8 MB)
-//   - F32 dot / F64 sum cross around N ≈ 512 K (4–8 MB)
-//   - F64 dot crosses around N ≈ 256 K (4 MB)
+// Copy-in thresholds — both reduce and output ops hit an inflection where
+// the WASM copy-in cost eats the SIMD win. Tuned from `bench/simd.pjs`:
+//   Reduce ops:
+//     - F32 sum crosses around N ≈ 2 M (8 MB)
+//     - F32 dot / F64 sum cross around N ≈ 512 K (4–8 MB)
+//     - F64 dot crosses around N ≈ 256 K (4 MB)
+//   Output ops (mulScalar/addScalar/add/mul):
+//     - At 4 MiB copy-in, JS tight loops on the caller's buffer beat the
+//       WASM kernel + copy-in + copy-out / alloc path.
 // 4 MiB stays on the WASM side below each crossover and flips to JS above.
+// Both thresholds share the same value today; keep the names separate so
+// they can be tuned independently when bench data says so.
 const REDUCE_WASM_MAX_BYTES = 4 * 1024 * 1024;
+const OUTPUT_WASM_MAX_BYTES = 4 * 1024 * 1024;
 
-// Monomorphic tight-loop helpers for the reduce fallback. Each helper only
-// ever sees one typed-array shape, so JSC's FTL tier can specialize +
-// vectorize the body without a polymorphic-site bailout.
+// Monomorphic tight-loop helpers for the reduce and output-op fallbacks.
+// Each helper only ever sees one typed-array shape, so JSC's FTL tier can
+// specialize + vectorize the body without a polymorphic-site bailout.
+// Output-op helpers take an `out` parameter so the same helper serves the
+// fresh-allocation path and the dstOverwrite path (where out aliases one
+// of the inputs — the read-then-write loop body is still monomorphic).
 function sumTightF32(a: Float32Array): number {
   const n = a.length;
   let s = 0;
@@ -1020,6 +1026,46 @@ function dotTightF64(a: Float64Array, b: Float64Array): number {
   let s = 0;
   for (let i = 0; i < n; i++) s += a[i] * b[i];
   return s;
+}
+function mulScalarTightF32(a: Float32Array, c: number, out: Float32Array): Float32Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] * c;
+  return out;
+}
+function mulScalarTightF64(a: Float64Array, c: number, out: Float64Array): Float64Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] * c;
+  return out;
+}
+function addScalarTightF32(a: Float32Array, c: number, out: Float32Array): Float32Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] + c;
+  return out;
+}
+function addScalarTightF64(a: Float64Array, c: number, out: Float64Array): Float64Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] + c;
+  return out;
+}
+function addTightF32(a: Float32Array, b: Float32Array, out: Float32Array): Float32Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] + b[i];
+  return out;
+}
+function addTightF64(a: Float64Array, b: Float64Array, out: Float64Array): Float64Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] + b[i];
+  return out;
+}
+function mulTightF32(a: Float32Array, b: Float32Array, out: Float32Array): Float32Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] * b[i];
+  return out;
+}
+function mulTightF64(a: Float64Array, b: Float64Array, out: Float64Array): Float64Array {
+  const n = a.length;
+  for (let i = 0; i < n; i++) out[i] = a[i] * b[i];
+  return out;
 }
 
 function sum(a: FArray): number {

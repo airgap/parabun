@@ -436,6 +436,64 @@ describe("bun:simd", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("output ops fall through to monomorphic tight loops above copy-in threshold", async () => {
+    // At N above the 4-MiB copy-in threshold, mulScalar/addScalar/add/mul
+    // must stop dispatching to WASM and still return correct results. This
+    // exercises the tight-loop fallback at sizes large enough to trip the
+    // gate (N = 1.5 M f32 = 6 MB copy-in, N = 300 K f64 binary = 4.8 MB).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-output-threshold",
+      `
+        import { mulScalar, addScalar, add, mul } from "bun:simd";
+        function check(label, arr, expected) {
+          let ok = arr.length === expected.length;
+          for (let i = 0; i < arr.length && ok; i++) {
+            if (Math.abs(arr[i] - expected[i]) > 1e-4) ok = false;
+          }
+          console.log(label + ":" + (ok ? "OK" : "FAIL"));
+        }
+        {
+          // Use integer values: exact in f32 up to 2^24 = 16.7 M
+          const n = 1_500_000;
+          const a = new Float32Array(n);
+          for (let i = 0; i < n; i++) a[i] = i;
+          const r = mulScalar(a, 2);
+          check("f32-mulScalar-1.5M", [r[0], r[1], r[n-1]], [0, 2, (n-1) * 2]);
+          const s = addScalar(a, 5);
+          check("f32-addScalar-1.5M", [s[0], s[n-1]], [5, (n-1) + 5]);
+        }
+        {
+          const n = 800_000;
+          const a = new Float32Array(n);
+          const b = new Float32Array(n);
+          for (let i = 0; i < n; i++) { a[i] = i; b[i] = 1; }
+          const r = add(a, b);
+          check("f32-add-800K", [r[0], r[n-1]], [1, n]);
+          const ra = add(a, b, { dstOverwrite: "a" });
+          check("f32-add-inplace-800K", [ra === a, ra[0], ra[n-1]], [true, 1, n]);
+        }
+        {
+          const n = 300_000;
+          const a = new Float64Array(n);
+          const b = new Float64Array(n);
+          for (let i = 0; i < n; i++) { a[i] = i * 0.1; b[i] = 2; }
+          const r = mul(a, b);
+          check("f64-mul-300K", [r[0], r[n-1]], [0, (n-1) * 0.1 * 2]);
+        }
+      `,
+    );
+    expect(stdout).toBe(
+      [
+        "f32-mulScalar-1.5M:OK",
+        "f32-addScalar-1.5M:OK",
+        "f32-add-800K:OK",
+        "f32-add-inplace-800K:OK",
+        "f64-mul-300K:OK",
+      ].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
   it("invalid dstOverwrite value throws TypeError", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-dstoverwrite-invalid",
