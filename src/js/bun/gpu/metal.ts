@@ -28,6 +28,24 @@ const simd = require("../simd.ts");
 
 type FArray = Float32Array | Float64Array;
 
+// Opaque handle returned by `hold(arr)`. Carries a resident MTLBuffer so
+// that subsequent matVec calls skip both the memcpy and the MTLBuffer
+// allocation. The brand property lets gpu.ts pass handles through
+// `FArray | GpuHandle` union sites and detect them cheaply.
+type GpuHandle = {
+  __bunGpuHandle: true;
+  backend: "metal" | "cuda" | "cpu";
+  type: "f32" | "f64";
+  length: number;
+  buffer: bigint; // MTLBuffer id (0n once released or on non-Metal hosts)
+  view: FArray; // Original typed array — kept alive so the NOCOPY pointer stays valid
+  released: boolean;
+};
+
+function isGpuHandle(x: unknown): x is GpuHandle {
+  return typeof x === "object" && x !== null && (x as any).__bunGpuHandle === true;
+}
+
 const LIBOBJC = "/usr/lib/libobjc.A.dylib";
 const METAL_FRAMEWORK = "/System/Library/Frameworks/Metal.framework/Metal";
 
@@ -279,7 +297,7 @@ function nsstring(text: string): bigint {
   return msgSend_3_id!(allocated, sel("initWithUTF8String:"), BigInt(ffiPtr!(bytes)));
 }
 
-function release(obj: bigint): void {
+function objcRelease(obj: bigint): void {
   if (obj !== 0n) msgSend_2!(obj, sel("release"));
 }
 
@@ -313,7 +331,7 @@ function probe(): boolean {
   const source = nsstring(MSL_SOURCE);
   if (source === 0n) return false;
   const lib = msgSend_5_id_id_ptr!(dev, sel("newLibraryWithSource:options:error:"), source, 0n, null);
-  release(source);
+  objcRelease(source);
   if (lib === 0n) return false;
   metalLibraryObj = lib;
 
@@ -321,7 +339,7 @@ function probe(): boolean {
   // pipeline unwinds everything — we either have both kernels or neither.
   const sm = compileKernel(lib, "simdMapAffineF32");
   if (sm === null) {
-    release(lib);
+    objcRelease(lib);
     metalLibraryObj = 0n;
     return false;
   }
@@ -331,9 +349,9 @@ function probe(): boolean {
 
   const mv = compileKernel(lib, "matVecF32");
   if (mv === null) {
-    release(simdMapPipeline);
-    release(simdMapFn);
-    release(lib);
+    objcRelease(simdMapPipeline);
+    objcRelease(simdMapFn);
+    objcRelease(lib);
     simdMapPipeline = 0n;
     simdMapFn = 0n;
     metalLibraryObj = 0n;
@@ -344,11 +362,11 @@ function probe(): boolean {
 
   const queue = msgSend_2!(dev, sel("newCommandQueue"));
   if (queue === 0n) {
-    release(matVecPipeline);
-    release(matVecFn);
-    release(simdMapPipeline);
-    release(simdMapFn);
-    release(lib);
+    objcRelease(matVecPipeline);
+    objcRelease(matVecFn);
+    objcRelease(simdMapPipeline);
+    objcRelease(simdMapFn);
+    objcRelease(lib);
     matVecPipeline = 0n;
     matVecFn = 0n;
     simdMapPipeline = 0n;
@@ -366,11 +384,11 @@ function compileKernel(lib: bigint, name: string): { fn: bigint; pipe: bigint; m
   const nsName = nsstring(name);
   if (nsName === 0n) return null;
   const fn = msgSend_3_id!(lib, sel("newFunctionWithName:"), nsName);
-  release(nsName);
+  objcRelease(nsName);
   if (fn === 0n) return null;
   const pipe = msgSend_4_id_ptr!(device, sel("newComputePipelineStateWithFunction:error:"), fn, null);
   if (pipe === 0n) {
-    release(fn);
+    objcRelease(fn);
     return null;
   }
   let maxTg = 1024;
@@ -472,8 +490,8 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
     // encoder is auto-released on endEncoding; command buffer is
     // auto-released by the queue when complete. Buffers we created with
     // `new…` need explicit release.
-    release(inBuf);
-    if (outBuf !== 0n) release(outBuf);
+    objcRelease(inBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
   }
 }
 
@@ -547,22 +565,84 @@ function isAligned(arr: FArray): boolean {
   return isPageAlignedAddr(ffiPtr!(arr));
 }
 
+// ─── hold / releaseHandle ──────────────────────────────────────────────────
+// `hold(arr)` creates one MTLBuffer pointing at the array's memory (NOCOPY
+// if the array is page-aligned, COPY into an MTLBuffer-owned region if not)
+// and returns a handle the caller passes back into matVec. The handle's
+// MTLBuffer is reused across dispatches — the bench/parabun-metal-zerocopy
+// RESIDENT row (30-150% faster than NOCOPY) is what this API exposes.
+//
+// Only Float32Array is wired through the MTLBuffer today because matVec on
+// f64 still forwards to bun:simd. f64 handles allocate no buffer and just
+// wrap the view, so `release` is a no-op; matVec sees `view` and falls
+// through to simd.
+//
+// The handle holds a reference to `view` so the backing pointer stays live
+// as long as the handle does — critical for NOCOPY where Metal reads
+// directly from the user's memory.
+
+function hold(arr: FArray): GpuHandle {
+  if (!(arr instanceof Float32Array) && !(arr instanceof Float64Array)) {
+    throw new TypeError(
+      `hold requires Float32Array or Float64Array; got ${(arr as any)?.constructor?.name ?? typeof arr}`,
+    );
+  }
+  if (!probe()) throw new Error("bun:gpu metal: backend unavailable");
+  const type: "f32" | "f64" = arr instanceof Float32Array ? "f32" : "f64";
+  let buffer: bigint = 0n;
+  if (arr instanceof Float32Array && arr.byteLength > 0) {
+    buffer = newBufferFromF32(arr, BigInt(arr.byteLength));
+    if (buffer === 0n) throw new Error("bun:gpu metal: newBuffer failed in hold");
+  }
+  return {
+    __bunGpuHandle: true,
+    backend: "metal",
+    type,
+    length: arr.length,
+    buffer,
+    view: arr,
+    released: false,
+  };
+}
+
+function releaseHandle(handle: GpuHandle): void {
+  if (!isGpuHandle(handle)) {
+    throw new TypeError(`release expected a GpuHandle; got ${typeof handle}`);
+  }
+  if (handle.released) return;
+  if (handle.buffer !== 0n) {
+    objcRelease(handle.buffer);
+    handle.buffer = 0n;
+  }
+  handle.released = true;
+}
+
 // ─── Kernel launch: matVecF32 ──────────────────────────────────────────────
 // M×K matrix · K-vector → M-vector, one thread per row. Same buffer/encoder
 // choreography as launchAffineF32, different pipeline + buffer layout.
 
-function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: number): Float32Array {
+function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: number, k: number): Float32Array {
   const matBytes = BigInt(m * k * 4);
   const vecBytes = BigInt(k * 4);
   const outBytes = BigInt(m * 4);
 
-  // If the caller's matrix is page-aligned (typically because it came from
-  // gpu.alloc), hand it to Metal zero-copy — newBufferWithBytesNoCopy skips
-  // the MTLBuffer-internal memcpy that dominates matVec time at large sizes.
-  // See bench/parabun-metal-zerocopy/README.md — at 4096² (64 MiB) this is
-  // a ~5× end-to-end win over the copy path.
-  const matBuf = newBufferFromF32(mat, matBytes);
-  if (matBuf === 0n) throw new Error("bun:gpu metal: newBuffer (mat) failed");
+  // If the caller passed a GpuHandle, reuse its MTLBuffer (Tier 4 residency).
+  // Otherwise, stage the typed array: page-aligned inputs take NOCOPY,
+  // everything else falls back to newBufferWithBytes: (one memcpy per call).
+  // See bench/parabun-metal-zerocopy/README.md — RESIDENT is 30-150% faster
+  // than NOCOPY and 2-10× faster than COPY at >= 4 MiB.
+  let matBuf: bigint;
+  let matBufOwned: boolean;
+  if (isGpuHandle(mat)) {
+    if (mat.released) throw new Error("bun:gpu: matVec called on released handle");
+    if (mat.buffer === 0n) throw new Error("bun:gpu metal: handle has no MTLBuffer (f64?)");
+    matBuf = mat.buffer;
+    matBufOwned = false;
+  } else {
+    matBuf = newBufferFromF32(mat, matBytes);
+    if (matBuf === 0n) throw new Error("bun:gpu metal: newBuffer (mat) failed");
+    matBufOwned = true;
+  }
 
   let vecBuf: bigint = 0n;
   let outBuf: bigint = 0n;
@@ -615,9 +695,9 @@ function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: num
     out.set(view);
     return out;
   } finally {
-    release(matBuf);
-    if (vecBuf !== 0n) release(vecBuf);
-    if (outBuf !== 0n) release(outBuf);
+    if (matBufOwned) objcRelease(matBuf);
+    if (vecBuf !== 0n) objcRelease(vecBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
   }
 }
 
@@ -664,16 +744,23 @@ function dot(a: FArray, b: FArray): number {
   return simd.dot(a, b);
 }
 
-function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray {
+function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
+  const matIsHandle = isGpuHandle(matrix);
+  if (matIsHandle && matrix.released) {
+    throw new Error("bun:gpu: matVec called on released handle");
+  }
+  const matView = matIsHandle ? matrix.view : (matrix as FArray);
   if (
-    matrix instanceof Float32Array &&
+    matView instanceof Float32Array &&
     vector instanceof Float32Array &&
     probe() &&
-    nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS
+    nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS &&
+    // f64 handles can't take the MSL kernel; matIsHandle with f64 → simd path.
+    (!matIsHandle || matrix.type === "f32")
   ) {
-    return launchMatVecF32(matrix, vector, nRows, nCols);
+    return launchMatVecF32(matIsHandle ? matrix : matView, vector, nRows, nCols);
   }
-  return simd.matVec(matrix as any, vector as any, nRows, nCols);
+  return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
 
 function matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray {
@@ -707,27 +794,27 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
 
 function dispose(): void {
   if (commandQueue !== 0n) {
-    release(commandQueue);
+    objcRelease(commandQueue);
     commandQueue = 0n;
   }
   if (matVecPipeline !== 0n) {
-    release(matVecPipeline);
+    objcRelease(matVecPipeline);
     matVecPipeline = 0n;
   }
   if (matVecFn !== 0n) {
-    release(matVecFn);
+    objcRelease(matVecFn);
     matVecFn = 0n;
   }
   if (simdMapPipeline !== 0n) {
-    release(simdMapPipeline);
+    objcRelease(simdMapPipeline);
     simdMapPipeline = 0n;
   }
   if (simdMapFn !== 0n) {
-    release(simdMapFn);
+    objcRelease(simdMapFn);
     simdMapFn = 0n;
   }
   if (metalLibraryObj !== 0n) {
-    release(metalLibraryObj);
+    objcRelease(metalLibraryObj);
     metalLibraryObj = 0n;
   }
   device = 0n;
@@ -751,6 +838,8 @@ export default {
   simdMap,
   alloc,
   isAligned,
+  hold,
+  releaseHandle,
   dispose,
   getDeviceName,
 };

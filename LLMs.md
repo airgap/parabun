@@ -308,9 +308,9 @@ gpu.isAligned(mat);        // true on metal for alloc'd, false otherwise
 ```
 
 Exports: `dot`, `matVec`, `matmul`, `simdMap`, `alloc`, `isAligned`,
-`activeBackend`, `hasBackend`, `setBackend`, `winsForSize`, `describe`,
-`dispose`. `setBackend("cpu")` forces the fallback for testing;
-`setBackend("auto")` re-runs the probe.
+`hold`, `release`, `activeBackend`, `hasBackend`, `setBackend`,
+`winsForSize`, `describe`, `dispose`. `setBackend("cpu")` forces the
+fallback for testing; `setBackend("auto")` re-runs the probe.
 
 `alloc(length, "f32"|"f64")` returns a typed array whose backing pointer
 is a multiple of the system page size (16 KiB on Apple Silicon, 4 KiB on
@@ -321,6 +321,18 @@ large sizes. Callers that don't use `alloc` still work; they just take
 the COPY path. Alloc'd memory is held for the backend's lifetime (same
 commit-for-lifetime model as `bun:simd.alloc`). On CPU/CUDA, `alloc`
 returns a plain typed array.
+
+`hold(arr) → GpuHandle` / `release(handle)` lets callers keep a typed
+array GPU-resident across `matVec` calls. On Metal, `hold` allocates
+one `MTLBuffer` up front (NOCOPY if `arr` is page-aligned, COPY
+otherwise) and reuses it across every matVec dispatch; `matVec` accepts
+either a `Float32Array` or a `GpuHandle` as the matrix argument. The
+bench `bench/parabun-metal-zerocopy/` shows the resident path is
+30–150% faster than NOCOPY (which is itself 2–10× faster than COPY) —
+so `hold` is worth it whenever the same matrix is used more than
+twice. On CPU/CUDA, `hold` returns a no-op wrapper so the call site
+stays portable. Using a released handle throws; `release` is
+idempotent. Scope today: handles are only consumed by `matVec`.
 
 Two thresholds, not one:
 
@@ -407,11 +419,13 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   transpile (closures, `this`, side effects, stateful globals); scope
   is scalar-in/scalar-out numeric kernels with `Math.*` → shader
   intrinsics and `if/else/loop` → shader control flow.
-- **Auto-accel dispatch, Tier 4 (cross-call buffer residency)** — deciding
-  to keep a typed array GPU-resident between user calls so a one-shot
-  `dot(a, b)` on a discrete GPU isn't bottlenecked by PCIe. Either needs
-  escape analysis over the user's code or an explicit opt-in (e.g.
-  `holdOnGpu(arr)` / `GpuFloat32Array`). For discrete GPUs this is the
-  make-or-break; without it, transparent dispatch to discrete GPU always
-  loses to CPU SIMD. Tier 2 pipeline fusion partly hides the need by
-  amortizing the copy across multiple ops within one pipeline.
+- **Auto-accel dispatch, Tier 4 (implicit cross-call residency)** — the
+  explicit opt-in (`gpu.hold`/`release` on Float32Array matrices for
+  `matVec`) is live on Metal. Still pending: (a) CUDA residency
+  (cuMemAlloc + cuMemcpyHtoD once, then reuse device pointer — gated on
+  RTX benchmark data); (b) implicit residency via escape analysis or a
+  `GpuFloat32Array` wrapper so common code doesn't have to call `hold`
+  manually; (c) handle support for `dot`, `simdMap`, and `matmul` (today
+  only `matVec` consumes handles). For discrete GPUs implicit residency
+  is make-or-break; on Apple Silicon the explicit API already captures
+  most of the win thanks to unified memory.

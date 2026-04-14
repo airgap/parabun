@@ -27,6 +27,8 @@ describe("bun:gpu scaffold", () => {
           simdMap: typeof gpu.simdMap,
           alloc: typeof gpu.alloc,
           isAligned: typeof gpu.isAligned,
+          hold: typeof gpu.hold,
+          release: typeof gpu.release,
           activeBackend: typeof gpu.activeBackend,
           hasBackend: typeof gpu.hasBackend,
           setBackend: typeof gpu.setBackend,
@@ -43,6 +45,8 @@ describe("bun:gpu scaffold", () => {
       simdMap: "function",
       alloc: "function",
       isAligned: "function",
+      hold: "function",
+      release: "function",
       activeBackend: "function",
       hasBackend: "function",
       setBackend: "function",
@@ -385,6 +389,135 @@ describe("bun:gpu scaffold", () => {
     );
     // Must be exactly 0 — same kernel, same inputs, just different staging.
     expect(stdout).toMatch(/^mismatches=0 active=(metal|cuda|cpu)$/);
+    expect(exitCode).toBe(0);
+  });
+
+  it("hold returns a GpuHandle wrapping the array; release marks it released", async () => {
+    // The handle surface is contractual across backends: brand + backend +
+    // type + length + released. Internal fields (buffer pointer, view ref)
+    // are not part of the public API and aren't inspected here.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-shape",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const h = gpu.hold(a);
+        const beforeRelease = {
+          brand: h.__bunGpuHandle,
+          backend: h.backend,
+          type: h.type,
+          length: h.length,
+          released: h.released,
+        };
+        gpu.release(h);
+        const afterRelease = { released: h.released };
+        console.log(JSON.stringify({ beforeRelease, afterRelease, active: gpu.activeBackend() }));
+      `,
+    );
+    const r = JSON.parse(stdout);
+    expect(r.beforeRelease).toEqual({
+      brand: true,
+      backend: r.active,
+      type: "f32",
+      length: 4,
+      released: false,
+    });
+    expect(r.afterRelease).toEqual({ released: true });
+    expect(exitCode).toBe(0);
+  });
+
+  it("hold rejects non-typed-array inputs; release rejects non-handles", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-invalid",
+      `
+        import gpu from "bun:gpu";
+        const results = [];
+        for (const fn of [
+          () => gpu.hold([1, 2, 3]),
+          () => gpu.hold("not a typed array"),
+          () => gpu.hold(null),
+          () => gpu.release({ not: "a handle" }),
+          () => gpu.release(new Float32Array(8)),
+        ]) {
+          try { fn(); results.push("NO_THROW"); } catch (e) { results.push(e.constructor.name); }
+        }
+        console.log(results.join(","));
+      `,
+    );
+    expect(stdout).toBe("TypeError,TypeError,TypeError,TypeError,TypeError");
+    expect(exitCode).toBe(0);
+  });
+
+  it("matVec on a released handle throws; release is idempotent", async () => {
+    // After release, the handle's MTLBuffer (on metal) is freed. Using it
+    // for another matVec would be a use-after-free — we refuse explicitly.
+    // Calling release twice on the same handle is safe (second call is a
+    // no-op) so cleanup code can be defensive.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-use-after-release",
+      `
+        import gpu from "bun:gpu";
+        const mat = new Float32Array(3 * 4);
+        for (let i = 0; i < mat.length; i++) mat[i] = i + 1;
+        const vec = new Float32Array([1, 1, 1, 1]);
+        const h = gpu.hold(mat);
+        gpu.release(h);
+        let firstReleaseOk = false, secondReleaseOk = false, matVecThrew = false;
+        try { gpu.release(h); secondReleaseOk = true; } catch (e) {}
+        try { gpu.matVec(h, vec, 3, 4); } catch (e) { matVecThrew = /released handle/.test(e.message); }
+        // A fresh handle still works after the first one is freed.
+        const h2 = gpu.hold(mat);
+        const ok = gpu.matVec(h2, vec, 3, 4);
+        gpu.release(h2);
+        firstReleaseOk = ok.length === 3;
+        console.log(JSON.stringify({ firstReleaseOk, secondReleaseOk, matVecThrew, out: Array.from(ok) }));
+      `,
+    );
+    const r = JSON.parse(stdout);
+    expect(r).toEqual({
+      firstReleaseOk: true,
+      secondReleaseOk: true,
+      matVecThrew: true,
+      // Matches the existing "matVec matches bun:simd on cpu fallback" test.
+      out: [10, 26, 42],
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matVec over a held matrix is bit-identical to matVec over the same array", async () => {
+    // On Metal, the held path reuses one MTLBuffer and the non-held path
+    // creates a new one per call (COPY or NOCOPY depending on alignment).
+    // Both run the same MSL kernel so outputs must match exactly. On CPU
+    // both paths collapse to the same bun:simd call — still must match.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-matvec-equiv",
+      `
+        import gpu from "bun:gpu";
+        const M = 1024, K = 1024;
+        const mat = gpu.alloc(M * K, "f32"); // alloc so the non-held path takes NOCOPY too
+        const vec = new Float32Array(K);
+        let seed = 0x5EED;
+        const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed / 0xFFFFFFFF) * 2 - 1; };
+        for (let i = 0; i < mat.length; i++) mat[i] = rand();
+        for (let j = 0; j < K; j++) vec[j] = rand();
+
+        const plain = gpu.matVec(mat, vec, M, K);
+        const h = gpu.hold(mat);
+        const held1 = gpu.matVec(h, vec, M, K);
+        const held2 = gpu.matVec(h, vec, M, K); // same handle, second dispatch
+        gpu.release(h);
+
+        let d1 = 0, d2 = 0;
+        for (let i = 0; i < M; i++) {
+          if (plain[i] !== held1[i]) d1++;
+          if (held1[i] !== held2[i]) d2++;
+        }
+        console.log(JSON.stringify({ plainVsHeld: d1, heldVsHeld: d2, active: gpu.activeBackend() }));
+      `,
+    );
+    // Both deltas must be zero — residency is a performance detail, not
+    // a correctness boundary.
+    expect(JSON.parse(stdout)).toEqual({ plainVsHeld: 0, heldVsHeld: 0, active: expect.any(String) });
     expect(exitCode).toBe(0);
   });
 

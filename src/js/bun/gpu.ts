@@ -37,6 +37,25 @@ export type BackendChoice = BackendName | "auto";
 
 export type OpKind = "dot" | "matVec" | "matmul" | "simdMap";
 
+// Opaque handle returned by `hold(arr)`. Kept resident across matVec calls
+// on backends that benefit (Metal: reused MTLBuffer); a no-op wrapper on
+// backends that don't (CPU, CUDA today). The brand property lets every
+// backend's matVec distinguish `handle` from `Float32Array` cheaply.
+export type GpuHandle = {
+  readonly __bunGpuHandle: true;
+  readonly backend: BackendName;
+  readonly type: "f32" | "f64";
+  readonly length: number;
+  // Backend-internal fields (not part of the public contract):
+  buffer: bigint;
+  view: FArray;
+  released: boolean;
+};
+
+function isGpuHandle(x: unknown): x is GpuHandle {
+  return typeof x === "object" && x !== null && (x as any).__bunGpuHandle === true;
+}
+
 // ─── Backend protocol ──────────────────────────────────────────────────────
 //
 // Every backend implements this interface. The `cpu` backend is an alias
@@ -52,11 +71,13 @@ interface Backend {
   probe(): boolean;
   winsForSize(op: OpKind, n: number, elemBytes: number): boolean;
   dot(a: FArray, b: FArray): number;
-  matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray;
+  matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
   matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray;
   simdMap(fn: (x: number, i: number) => number, a: FArray): FArray;
   alloc(length: number, type: "f32" | "f64"): FArray;
   isAligned(arr: FArray): boolean;
+  hold(arr: FArray): GpuHandle;
+  releaseHandle(handle: GpuHandle): void;
   dispose(): void;
 }
 
@@ -74,7 +95,11 @@ const cpuBackend: Backend = {
     return simd.dot(a, b);
   },
   matVec(matrix, vector, nRows, nCols) {
-    return simd.matVec(matrix as any, vector as any, nRows, nCols);
+    if (isGpuHandle(matrix) && matrix.released) {
+      throw new Error("bun:gpu: matVec called on released handle");
+    }
+    const matView = isGpuHandle(matrix) ? matrix.view : matrix;
+    return simd.matVec(matView as any, vector as any, nRows, nCols);
   },
   matmul(a, b, m, k, n) {
     if (a.constructor !== b.constructor) {
@@ -112,6 +137,28 @@ const cpuBackend: Backend = {
   },
   isAligned(_arr) {
     return false;
+  },
+  hold(arr) {
+    if (!(arr instanceof Float32Array) && !(arr instanceof Float64Array)) {
+      throw new TypeError(
+        `hold requires Float32Array or Float64Array; got ${(arr as any)?.constructor?.name ?? typeof arr}`,
+      );
+    }
+    return {
+      __bunGpuHandle: true as const,
+      backend: "cpu" as const,
+      type: arr instanceof Float32Array ? "f32" : "f64",
+      length: arr.length,
+      buffer: 0n,
+      view: arr,
+      released: false,
+    };
+  },
+  releaseHandle(handle) {
+    if (!isGpuHandle(handle)) {
+      throw new TypeError(`release expected a GpuHandle; got ${typeof handle}`);
+    }
+    handle.released = true;
   },
   dispose() {},
 };
@@ -197,7 +244,8 @@ function dot(a: FArray, b: FArray): number {
 
 function matVec(matrix: Float32Array, vector: Float32Array, nRows: number, nCols: number): Float32Array;
 function matVec(matrix: Float64Array, vector: Float64Array, nRows: number, nCols: number): Float64Array;
-function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray {
+function matVec(matrix: GpuHandle, vector: Float32Array, nRows: number, nCols: number): Float32Array;
+function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
   return resolveActive().matVec(matrix, vector, nRows, nCols);
 }
 
@@ -231,6 +279,32 @@ function alloc(length: number, type: "f32" | "f64"): FArray {
 
 function isAligned(arr: FArray): boolean {
   return resolveActive().isAligned(arr);
+}
+
+// hold(arr) keeps a typed array GPU-resident across matVec calls. On Metal
+// this creates one MTLBuffer up front (NOCOPY if `arr` is page-aligned, else
+// a COPY into an MTLBuffer-owned region) and reuses it per dispatch; the
+// bench/parabun-metal-zerocopy RESIDENT row (30-150% faster than NOCOPY) is
+// what this API exposes. On CPU and today's CUDA, `hold` is a no-op wrapper
+// so user code is portable — same call site, same handle, just no residency
+// win.
+//
+// Lifetime: caller MUST call `release(handle)` when done. Re-using a
+// released handle (matVec or release) throws. The handle holds a reference
+// to the original typed array so its backing memory can't be GC'd while
+// Metal still points at it.
+function hold(arr: Float32Array): GpuHandle;
+function hold(arr: Float64Array): GpuHandle;
+function hold(arr: FArray): GpuHandle {
+  return resolveActive().hold(arr);
+}
+
+function release(handle: GpuHandle): void {
+  // Route to the handle's origin backend rather than the active one — if
+  // the user switched backends after `hold`, the MTLBuffer we need to free
+  // lives on the metal backend regardless of what's active now.
+  const origin = backends[handle.backend] ?? resolveActive();
+  origin.releaseHandle(handle);
 }
 
 function dispose(): void {
@@ -268,6 +342,8 @@ export default {
   simdMap,
   alloc,
   isAligned,
+  hold,
+  release,
   activeBackend,
   hasBackend,
   setBackend,

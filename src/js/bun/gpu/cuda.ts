@@ -261,6 +261,23 @@ MVDONE:
 
 type FArray = Float32Array | Float64Array;
 
+// GpuHandle stub — CUDA's matVec path reallocates device memory per call,
+// so a "held" handle just wraps the view and matVec reads via view. When a
+// real cuMemAlloc+persist path lands, buffer will carry the device pointer.
+type GpuHandle = {
+  __bunGpuHandle: true;
+  backend: "metal" | "cuda" | "cpu";
+  type: "f32" | "f64";
+  length: number;
+  buffer: bigint;
+  view: FArray;
+  released: boolean;
+};
+
+function isGpuHandle(x: unknown): x is GpuHandle {
+  return typeof x === "object" && x !== null && (x as any).__bunGpuHandle === true;
+}
+
 let probed = false;
 let probeResult = false;
 let ctx: bigint | null = null;
@@ -512,16 +529,20 @@ function dot(a: FArray, b: FArray): number {
   return simd.dot(a, b);
 }
 
-function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray {
+function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
+  if (isGpuHandle(matrix) && matrix.released) {
+    throw new Error("bun:gpu: matVec called on released handle");
+  }
+  const matView = isGpuHandle(matrix) ? matrix.view : (matrix as FArray);
   if (
-    matrix instanceof Float32Array &&
+    matView instanceof Float32Array &&
     vector instanceof Float32Array &&
     probe() &&
     nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS
   ) {
-    return launchMatVecF32(matrix, vector, nRows, nCols);
+    return launchMatVecF32(matView, vector, nRows, nCols);
   }
-  return simd.matVec(matrix as any, vector as any, nRows, nCols);
+  return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
 
 function matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray {
@@ -592,6 +613,31 @@ function isAligned(_arr: FArray): boolean {
   return false;
 }
 
+// hold/release stubs — CUDA backend has no residency yet (TODO: cuMemAlloc +
+// cuMemcpyHtoD once so matVec reuses device memory across calls).
+function hold(arr: FArray): GpuHandle {
+  if (!(arr instanceof Float32Array) && !(arr instanceof Float64Array)) {
+    throw new TypeError(
+      `hold requires Float32Array or Float64Array; got ${(arr as any)?.constructor?.name ?? typeof arr}`,
+    );
+  }
+  return {
+    __bunGpuHandle: true,
+    backend: "cuda",
+    type: arr instanceof Float32Array ? "f32" : "f64",
+    length: arr.length,
+    buffer: 0n,
+    view: arr,
+    released: false,
+  };
+}
+function releaseHandle(handle: GpuHandle): void {
+  if (!isGpuHandle(handle)) {
+    throw new TypeError(`release expected a GpuHandle; got ${typeof handle}`);
+  }
+  handle.released = true;
+}
+
 export default {
   name: "cuda" as const,
   probe,
@@ -602,6 +648,8 @@ export default {
   simdMap,
   alloc,
   isAligned,
+  hold,
+  releaseHandle,
   dispose,
   getDeviceName,
 };
