@@ -140,6 +140,8 @@ routes through the CPU backend transparently.
 - `run.ts` — best-of-5 harness, top-K cross-check.
 - `batched-baseline.js`, `batched-gpu-loop.pjs`, `batched-gpu-matmul.pjs`,
   `batched-run.ts` — batched harness for Q = 32 queries (see below).
+- `sweep-run.ts` — in-process batch-size sweep across Q ∈ {1, 4, 16, 64, 256}
+  for the `gpu.matmul` path; reports per-query latency curve.
 
 ## Batched queries (Q = 32)
 
@@ -189,3 +191,39 @@ dispatched with far less wrapper work around it.
 ```sh
 bun run build:release bench/parabun-vector-search/batched-run.ts
 ```
+
+### Batch-size sweep
+
+`sweep-run.ts` runs the `gpu.matmul` path in-process across
+Q ∈ {1, 4, 16, 64, 256} so the one-time index prep (embed generate,
+transpose, hold) amortizes across every batch size. The totals include
+both the matmul dispatch and the CPU-side `simd.topK` over every row.
+
+| Q   | per_query_ms (min/med) | matmul_ms (min/med) | topK_ms (min/med) | notes                          |
+|-----|-----------------------:|--------------------:|------------------:|:-------------------------------|
+|   1 |            0.81 / 0.92 |        0.76 / 0.78  |      0.04 / 0.14  | overhead-dominated             |
+|   4 |            0.42 / 0.42 |        1.52 / 1.53  |      0.14 / 0.15  | amortizing fixed cost          |
+|  16 |            0.33 / 0.38 |        4.64 / 5.37  |      0.56 / 0.72  | still amortizing               |
+| **64** |        **0.29 / 0.30** |    **16.31 / 16.59** |   **2.26 / 2.31** | **sweet spot**                |
+| 256 |            0.42 / 0.54 |      97.05 / 128.50 |      8.95 / 9.12  | compute-saturated, per-Q rises |
+
+The curve has a clean inflection: per-query latency drops from 0.92 ms
+at Q = 1 to 0.30 ms at Q = 64 (3.1× improvement), then rises back to
+0.54 ms at Q = 256.
+
+**Why it turns over**: below Q = 64, each dispatch is dominated by
+fixed per-call cost (kernel launch + `cuCtxSynchronize` + small DtoH),
+and batching more queries amortizes it. Past Q = 64, the matmul kernel
+is compute-saturated on this workload (N = 100 000, D = 384) so the
+GPU-side cost becomes linear in Q. At the same time, the CPU-side
+`simd.topK` sort also scales linearly with Q, so you're paying 2× cost
+(compute on GPU, selection on CPU) per extra query with no amortization
+left to claim. Q = 256 in particular pays a ~100 MB DtoH and a 9 ms
+serial top-K loop.
+
+**What this unlocks**: Q = 64 looks like the right default for this
+kernel shape. The natural next tier is parallelizing top-K across
+queries (`pmap × 8` with SAB-backed scores), which would drop the
+CPU-side cost roughly linearly with worker count — but the matmul
+itself is already the larger fraction at this point, so the returns
+there are bounded.
