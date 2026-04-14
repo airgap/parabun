@@ -2,25 +2,27 @@
 //
 // Loaded by src/js/bun/gpu.ts — exposes a `Backend`-conforming object that
 // drives Apple Silicon (and Intel Mac) GPUs via Metal. We reach Metal
-// through two C entry points:
-//   - MTLCreateSystemDefaultDevice from
-//       /System/Library/Frameworks/Metal.framework/Metal
-//   - objc_msgSend / sel_registerName from /usr/lib/libobjc.A.dylib
+// through C entry points from:
+//   - /System/Library/Frameworks/Metal.framework/Metal (MTLCreateSystemDefaultDevice)
+//   - /usr/lib/libobjc.A.dylib (objc_getClass, sel_registerName, objc_msgSend)
 //
-// Every non-bootstrap Metal call (name, newCommandQueue,
+// Every non-bootstrap Metal call (newCommandQueue,
 // newLibraryWithSource:options:error:, …) is an Obj-C message send
-// dispatched through objc_msgSend.
+// dispatched through objc_msgSend. arm64 uses a single objc_msgSend
+// symbol for all message signatures — the ABI is dictated by the call
+// site — so we dlopen libobjc once per distinct `(args, returns)` shape
+// we need; each opens the same underlying function with a different
+// bun:ffi wrapper.
 //
-// Phase 1 (this file): device detection + name. dot / matVec / matmul /
-// simdMap fall back to bun:simd. MSL kernel for simdMapAffineF32 lands
-// next — parallel to the PTX kernel in ./cuda.ts.
+// Scope today: simdMap-affine (y = k1*x + k0) on Float32Array — the one
+// kernel proven end-to-end against the MSL compiler + a roundtrip. dot,
+// matVec, matmul fall back to bun:simd, matching the CUDA backend's
+// Phase-1 shape.
 //
-// Why Obj-C-from-FFI vs a C shim: Apple's Metal has exactly one C entry
-// (MTLCreateSystemDefaultDevice); the rest is Obj-C. A C shim would need
-// to be built + shipped per Mac arch, whereas libobjc is on every mac
-// and the calling convention is stable. arm64 uses the same objc_msgSend
-// symbol for all message signatures, so we just declare it once with the
-// widest-typed signature we need and cast pointers at call sites.
+// Memory: the MSL source is compiled in probe(). The resulting library,
+// function, pipeline, and queue are held for the backend's lifetime.
+// Per-dispatch MTLBuffers are allocated + released inside launchAffineF32
+// with try/finally. dispose() releases all retained Obj-C objects.
 
 const simd = require("../simd.ts");
 
@@ -29,61 +31,182 @@ type FArray = Float32Array | Float64Array;
 const LIBOBJC = "/usr/lib/libobjc.A.dylib";
 const METAL_FRAMEWORK = "/System/Library/Frameworks/Metal.framework/Metal";
 
+// ─── MSL kernel ───────────────────────────────────────────────────────────
+// Mirrors the PTX kernel in ./cuda.ts — one thread per element, guarded
+// by a bounds check. fma matches the numeric behavior of CUDA's fma.rn.f32
+// within rounding (Metal's default fp math is precise on Apple GPUs).
+
+const MSL_SOURCE = `
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void simdMapAffineF32(
+    device const float *inPtr     [[buffer(0)]],
+    device       float *outPtr    [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    constant     float &k1        [[buffer(3)]],
+    constant     float &k0        [[buffer(4)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    outPtr[gid] = fma(k1, inPtr[gid], k0);
+}
+`;
+
+// ─── FFI: base symbols ─────────────────────────────────────────────────────
+// Anything not requiring objc_msgSend lives here. We use separate dlopen
+// calls below for each objc_msgSend signature we need.
+
 type MetalSymbols = {
-  MTLCreateSystemDefaultDevice: () => bigint; // id<MTLDevice>
+  MTLCreateSystemDefaultDevice: () => bigint;
 };
 
-type ObjcSymbols = {
-  sel_registerName: (name: number) => bigint; // SEL
-  objc_msgSend: (self: bigint, op: bigint) => bigint;
+type ObjcBaseSymbols = {
+  sel_registerName: (name: number) => bigint;
+  objc_getClass: (name: number) => bigint;
 };
+
+type MsgSend_id_SEL = (self: bigint, op: bigint) => bigint;
+type MsgSend_id_SEL_id = (self: bigint, op: bigint, a1: bigint) => bigint;
+type MsgSend_id_SEL_id_id_ptr = (self: bigint, op: bigint, a1: bigint, a2: bigint, a3: number | null) => bigint;
+type MsgSend_id_SEL_id_ptr = (self: bigint, op: bigint, a1: bigint, a2: number | null) => bigint;
+type MsgSend_id_SEL_id_u64_u64 = (self: bigint, op: bigint, a1: bigint, a2: bigint, a3: bigint) => bigint;
+type MsgSend_id_SEL_ptr_u64_u64 = (self: bigint, op: bigint, a1: number, a2: bigint, a3: bigint) => void;
+type MsgSend_id_SEL_ptr_u64_u64_ret = (self: bigint, op: bigint, a1: number, a2: bigint, a3: bigint) => bigint;
+type MsgSend_id_SEL_u64_u64 = (self: bigint, op: bigint, a1: bigint, a2: bigint) => bigint;
+type MsgSend_id_SEL_ptr_ptr = (self: bigint, op: bigint, a1: number, a2: number) => void;
 
 let metalLib: { symbols: MetalSymbols; close: () => void } | null = null;
-let objcLib: { symbols: ObjcSymbols; close: () => void } | null = null;
+let objcBase: { symbols: ObjcBaseSymbols; close: () => void } | null = null;
 let ffiPtr: ((x: any) => number) | null = null;
+let ffiToArrayBuffer: ((ptr: number, off: number, len: number) => ArrayBuffer) | null = null;
 let CStringCtor: any = null;
+
+// Typed objc_msgSend variants. Each is the SAME underlying libobjc symbol
+// loaded under a different bun:ffi type signature — arm64's objc_msgSend
+// has no vararg runtime dispatch, so this is safe.
+let msgSend_2: MsgSend_id_SEL | null = null; // (id, SEL) -> id
+let msgSend_3_id: MsgSend_id_SEL_id | null = null; // (id, SEL, id) -> id
+let msgSend_4_id_ptr: MsgSend_id_SEL_id_ptr | null = null; // (id, SEL, id, ptr) -> id
+let msgSend_5_id_id_ptr: MsgSend_id_SEL_id_id_ptr | null = null; // (id, SEL, id, id, ptr) -> id
+let msgSend_5_id_u64_u64: MsgSend_id_SEL_id_u64_u64 | null = null; // (id, SEL, id, u64, u64) -> void
+let msgSend_5_ptr_u64_u64: MsgSend_id_SEL_ptr_u64_u64 | null = null; // (id, SEL, ptr, u64, u64) -> void (setBytes:length:atIndex:)
+let msgSend_5_ptr_u64_u64_ret: MsgSend_id_SEL_ptr_u64_u64_ret | null = null; // same shape, but id return (newBufferWithBytes:length:options:)
+let msgSend_4_u64_u64: MsgSend_id_SEL_u64_u64 | null = null; // (id, SEL, u64, u64) -> id
+let msgSend_4_ptr_ptr: MsgSend_id_SEL_ptr_ptr | null = null; // (id, SEL, ptr, ptr) -> void
+
+// ─── State ────────────────────────────────────────────────────────────────
 
 let probed = false;
 let probeResult = false;
 let device: bigint = 0n;
 let deviceName = "";
+let commandQueue: bigint = 0n;
+let metalLibraryObj: bigint = 0n;
+let metalFunctionObj: bigint = 0n;
+let computePipeline: bigint = 0n;
+let maxThreadsPerThreadgroup = 1024;
 
 function tryLoad(): boolean {
-  if (metalLib !== null && objcLib !== null) return true;
+  if (metalLib !== null && objcBase !== null) return true;
   try {
-    const { dlopen, FFIType, ptr, CString } = require("../ffi.ts");
+    const { dlopen, FFIType, ptr, CString, toArrayBuffer } = require("../ffi.ts");
     ffiPtr = ptr;
     CStringCtor = CString;
+    ffiToArrayBuffer = toArrayBuffer;
+
     metalLib = dlopen(METAL_FRAMEWORK, {
       MTLCreateSystemDefaultDevice: { args: [], returns: FFIType.u64 },
     }) as any;
-    objcLib = dlopen(LIBOBJC, {
+
+    objcBase = dlopen(LIBOBJC, {
       sel_registerName: { args: [FFIType.ptr], returns: FFIType.u64 },
-      // All message sends we need in phase 1 are (id, SEL) -> id, so
-      // one declaration suffices. Phase 2 will add linkSymbols entries
-      // for typed variants (with f32/u32/ptr args) using the same
-      // underlying address — arm64 has a unified objc_msgSend.
-      objc_msgSend: { args: [FFIType.u64, FFIType.u64], returns: FFIType.u64 },
+      objc_getClass: { args: [FFIType.ptr], returns: FFIType.u64 },
     }) as any;
+
+    // Per-signature objc_msgSend wrappers — same underlying symbol,
+    // different bun:ffi marshaling. arm64 has one objc_msgSend address;
+    // each dlopen produces an independent JIT wrapper.
+    msgSend_2 = dlopen(LIBOBJC, {
+      objc_msgSend: { args: [FFIType.u64, FFIType.u64], returns: FFIType.u64 },
+    }).symbols.objc_msgSend as any;
+    msgSend_3_id = dlopen(LIBOBJC, {
+      objc_msgSend: { args: [FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.u64 },
+    }).symbols.objc_msgSend as any;
+    msgSend_4_id_ptr = dlopen(LIBOBJC, {
+      objc_msgSend: { args: [FFIType.u64, FFIType.u64, FFIType.u64, FFIType.ptr], returns: FFIType.u64 },
+    }).symbols.objc_msgSend as any;
+    msgSend_5_id_id_ptr = dlopen(LIBOBJC, {
+      objc_msgSend: {
+        args: [FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.ptr],
+        returns: FFIType.u64,
+      },
+    }).symbols.objc_msgSend as any;
+    msgSend_5_id_u64_u64 = dlopen(LIBOBJC, {
+      objc_msgSend: {
+        args: [FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
+        returns: FFIType.void,
+      },
+    }).symbols.objc_msgSend as any;
+    msgSend_5_ptr_u64_u64 = dlopen(LIBOBJC, {
+      objc_msgSend: {
+        args: [FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.u64],
+        returns: FFIType.void,
+      },
+    }).symbols.objc_msgSend as any;
+    msgSend_5_ptr_u64_u64_ret = dlopen(LIBOBJC, {
+      objc_msgSend: {
+        args: [FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.u64],
+        returns: FFIType.u64,
+      },
+    }).symbols.objc_msgSend as any;
+    msgSend_4_u64_u64 = dlopen(LIBOBJC, {
+      objc_msgSend: { args: [FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.u64 },
+    }).symbols.objc_msgSend as any;
+    msgSend_4_ptr_ptr = dlopen(LIBOBJC, {
+      objc_msgSend: { args: [FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.ptr], returns: FFIType.void },
+    }).symbols.objc_msgSend as any;
+
     return true;
   } catch {
     metalLib = null;
-    objcLib = null;
+    objcBase = null;
     return false;
   }
 }
 
-// sel_registerName canonicalizes — second call returns the same pointer —
-// but we still save an FFI round-trip per dispatch by caching JS-side.
+// ─── Selector cache ────────────────────────────────────────────────────────
+
 const selCache = new Map<string, bigint>();
 function sel(name: string): bigint {
   const hit = selCache.get(name);
   if (hit !== undefined) return hit;
   const bytes = new TextEncoder().encode(name + "\0");
-  const s = objcLib!.symbols.sel_registerName(ffiPtr!(bytes));
+  const s = objcBase!.symbols.sel_registerName(ffiPtr!(bytes));
   selCache.set(name, s);
   return s;
 }
+
+function cls(name: string): bigint {
+  const bytes = new TextEncoder().encode(name + "\0");
+  return objcBase!.symbols.objc_getClass(ffiPtr!(bytes));
+}
+
+// NSString from a UTF-8 buffer: [[NSString alloc] initWithUTF8String:]
+function nsstring(text: string): bigint {
+  const nsStringCls = cls("NSString");
+  if (nsStringCls === 0n) return 0n;
+  const allocated = msgSend_2!(nsStringCls, sel("alloc"));
+  if (allocated === 0n) return 0n;
+  const bytes = new TextEncoder().encode(text + "\0");
+  return msgSend_3_id!(allocated, sel("initWithUTF8String:"), BigInt(ffiPtr!(bytes)));
+}
+
+function release(obj: bigint): void {
+  if (obj !== 0n) msgSend_2!(obj, sel("release"));
+}
+
+// ─── Probe + one-time kernel compile ───────────────────────────────────────
 
 function probe(): boolean {
   if (probed) return probeResult;
@@ -95,12 +218,10 @@ function probe(): boolean {
   if (dev === 0n) return false;
   device = dev;
 
-  // [[device name] UTF8String] → const char*. Any step returning nil
-  // just leaves deviceName empty — probe still succeeds since we have
-  // a device.
-  const nsstr = objcLib!.symbols.objc_msgSend(dev, sel("name"));
+  // [[device name] UTF8String] → const char*
+  const nsstr = msgSend_2!(dev, sel("name"));
   if (nsstr !== 0n) {
-    const cstr = objcLib!.symbols.objc_msgSend(nsstr, sel("UTF8String"));
+    const cstr = msgSend_2!(nsstr, sel("UTF8String"));
     if (cstr !== 0n) {
       try {
         deviceName = String(new CStringCtor(Number(cstr)));
@@ -110,16 +231,174 @@ function probe(): boolean {
     }
   }
 
+  // Compile MSL: [device newLibraryWithSource:source options:nil error:&err]
+  // `error` is an NSError** out-param — we pass null and inspect the return.
+  const source = nsstring(MSL_SOURCE);
+  if (source === 0n) return false;
+  const lib = msgSend_5_id_id_ptr!(dev, sel("newLibraryWithSource:options:error:"), source, 0n, null);
+  release(source);
+  if (lib === 0n) return false;
+  metalLibraryObj = lib;
+
+  const fnName = nsstring("simdMapAffineF32");
+  if (fnName === 0n) {
+    release(lib);
+    metalLibraryObj = 0n;
+    return false;
+  }
+  const fn = msgSend_3_id!(lib, sel("newFunctionWithName:"), fnName);
+  release(fnName);
+  if (fn === 0n) {
+    release(lib);
+    metalLibraryObj = 0n;
+    return false;
+  }
+  metalFunctionObj = fn;
+
+  // [device newComputePipelineStateWithFunction:fn error:&err]
+  const pipe = msgSend_4_id_ptr!(dev, sel("newComputePipelineStateWithFunction:error:"), fn, null);
+  if (pipe === 0n) {
+    release(fn);
+    release(lib);
+    metalFunctionObj = 0n;
+    metalLibraryObj = 0n;
+    return false;
+  }
+  computePipeline = pipe;
+
+  // Query pipeline's preferred threadgroup size (returns NSUInteger);
+  // falls back to 1024 (Apple's conservative historical max) on failure.
+  try {
+    const t = msgSend_2!(pipe, sel("maxTotalThreadsPerThreadgroup"));
+    if (t !== 0n) maxThreadsPerThreadgroup = Number(t);
+  } catch {}
+
+  const queue = msgSend_2!(dev, sel("newCommandQueue"));
+  if (queue === 0n) {
+    release(pipe);
+    release(fn);
+    release(lib);
+    computePipeline = 0n;
+    metalFunctionObj = 0n;
+    metalLibraryObj = 0n;
+    return false;
+  }
+  commandQueue = queue;
+
   probeResult = true;
   return true;
 }
 
-function winsForSize(_op: string, _n: number, _elemBytes: number): boolean {
-  // Phase 1: no kernel shipped yet, so the CPU path is always at least
-  // as fast. Returning false keeps simdMap/matVec callers on bun:simd
-  // without a second guard.
+// ─── Affine detector (mirrors cuda.ts) ─────────────────────────────────────
+
+const AFFINE_TOL = 1e-5;
+
+function tryAffineKernel(fn: (x: number) => number): { k1: number; k0: number } | null {
+  try {
+    const y0 = fn(0);
+    const y1 = fn(1);
+    const y2 = fn(2);
+    if (!Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+    const k1 = y1 - y0;
+    const k0 = y0;
+    if (Math.abs(y2 - (2 * k1 + k0)) > AFFINE_TOL * (1 + Math.abs(y2))) return null;
+    return { k1, k0 };
+  } catch {
+    return null;
+  }
+}
+
+// MTLResourceOptions flags. StorageModeShared (0) makes the buffer CPU- and
+// GPU-accessible on Apple Silicon with zero-copy — no explicit synchronize
+// needed for the sizes we're working with. (Old AMD Macs would prefer
+// Managed, but this backend's primary target is Apple Silicon.)
+const MTL_STORAGE_MODE_SHARED = 0;
+
+// ─── Kernel launch: simdMapAffineF32 ───────────────────────────────────────
+
+function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array {
+  const n = a.length;
+  const bytes = BigInt(n * 4);
+
+  // newBufferWithBytes:length:options: — copies `a` into GPU-visible memory.
+  const inBuf = msgSend_5_ptr_u64_u64_ret!(
+    device,
+    sel("newBufferWithBytes:length:options:"),
+    ffiPtr!(a),
+    bytes,
+    BigInt(MTL_STORAGE_MODE_SHARED),
+  );
+  if (inBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes failed");
+
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    // setComputePipelineState:
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), computePipeline);
+    // setBuffer:offset:atIndex: for in=0, out=1
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 1n);
+    // setBytes:length:atIndex: for n, k1, k0 at buffer indices 2/3/4
+    const pN = new Uint32Array([n]);
+    const pK1 = new Float32Array([k1]);
+    const pK0 = new Float32Array([k0]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pK1), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pK0), 4n, 4n);
+
+    // dispatchThreads:threadsPerThreadgroup: takes two MTLSize (3× u64)
+    // structs by value. On arm64, aggregates >16 bytes are passed via
+    // indirect reference — we hand over the address of our packed
+    // BigUint64Array and the ABI treats that as the by-value struct.
+    const tgSize = Math.min(maxThreadsPerThreadgroup, 256);
+    const grid = new BigUint64Array([BigInt(n), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(tgSize), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(grid), ffiPtr!(threads));
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    // Copy out: [outBuf contents] → void*, then read n*4 bytes.
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: outBuf contents is null");
+    const out = new Float32Array(n);
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, n * 4));
+    out.set(view);
+    return out;
+  } finally {
+    // encoder is auto-released on endEncoding; command buffer is
+    // auto-released by the queue when complete. Buffers we created with
+    // `new…` need explicit release.
+    release(inBuf);
+    if (outBuf !== 0n) release(outBuf);
+  }
+}
+
+// ─── Size threshold ────────────────────────────────────────────────────────
+// Matches cuda.ts — the fixed per-dispatch cost (buffer alloc + pipeline
+// binding + GPU/CPU round-trip) makes the CPU path faster under ~256k f32.
+
+const MIN_SIMDMAP_ELEMS = 1 << 18;
+
+function winsForSize(op: string, n: number, elemBytes: number): boolean {
+  if (!probed && !probe()) return false;
+  if (!probeResult) return false;
+  if (op === "simdMap") return elemBytes === 4 && n >= MIN_SIMDMAP_ELEMS;
   return false;
 }
+
+// ─── Backend methods ───────────────────────────────────────────────────────
 
 function dot(a: FArray, b: FArray): number {
   return simd.dot(a, b);
@@ -150,13 +429,31 @@ function matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray {
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
+  if (typeof fn !== "function") throw new TypeError("fn must be a function");
+  if (a instanceof Float32Array && fn.length <= 1 && probe() && a.length >= MIN_SIMDMAP_ELEMS) {
+    const aff = tryAffineKernel(fn as (x: number) => number);
+    if (aff) return launchAffineF32(a, aff.k1, aff.k0);
+  }
   return simd.simdMap(fn, a as any);
 }
 
 function dispose(): void {
-  // The MTLDevice returned by MTLCreateSystemDefaultDevice is owned by
-  // the runtime — it's a cached singleton, not a retained reference.
-  // We just clear our probe cache so setBackend("auto") can re-probe.
+  if (commandQueue !== 0n) {
+    release(commandQueue);
+    commandQueue = 0n;
+  }
+  if (computePipeline !== 0n) {
+    release(computePipeline);
+    computePipeline = 0n;
+  }
+  if (metalFunctionObj !== 0n) {
+    release(metalFunctionObj);
+    metalFunctionObj = 0n;
+  }
+  if (metalLibraryObj !== 0n) {
+    release(metalLibraryObj);
+    metalLibraryObj = 0n;
+  }
   device = 0n;
   selCache.clear();
   probed = false;
