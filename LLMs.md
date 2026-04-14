@@ -253,6 +253,61 @@ and JSC can't inline the kernel; the F64 fallback still wins over inline
 because the underlying `out[i] = fn(a[i], i)` form survives auto-vectorization
 better than the `Math.sqrt(x*x+1)` tight loop in JS source.
 
+### `bun:gpu` — GPU compute for vector/matrix primitives
+
+Compute-only GPU surface (no graphics) that mirrors a subset of `bun:simd`.
+Probes a backend chain — Metal on darwin, CUDA on Linux/Windows, always
+falling back to a CPU path that just forwards to `bun:simd`. All callers
+see the same contract regardless of host; the kernel that runs underneath
+is the host's fastest option.
+
+```
+import gpu from "bun:gpu";
+gpu.describe();           // { active: "metal", available: ["metal","cpu"], platform: "darwin" }
+gpu.dot(a, b);            // number
+gpu.matVec(mat, vec, M, K); // Float32Array of length M
+gpu.matmul(a, b, M, K, N);  // Float32Array of length M*N
+gpu.simdMap(fn, a);         // Float32Array — affine fn detected
+gpu.winsForSize(op, n, elemBytes); // size-gated routing hint
+```
+
+Exports: `dot`, `matVec`, `matmul`, `simdMap`, `activeBackend`, `hasBackend`,
+`setBackend`, `winsForSize`, `describe`, `dispose`. `setBackend("cpu")`
+forces the fallback for testing; `setBackend("auto")` re-runs the probe.
+
+Two thresholds, not one:
+
+- **Dispatch threshold** — above this size, the op hits the real GPU
+  kernel. Exists so the kernel gets exercised in tests.
+- **Wins threshold** (`winsForSize`) — above this size, *callers* should
+  route to `bun:gpu` rather than `bun:simd`. `bun:pipeline`'s fusion tier
+  reads this when deciding whether to promote a fused affine chain.
+
+They're decoupled because a compiled-and-correct kernel isn't always a
+*winning* kernel. Today `simdMap` wins at ≥ 1<<18 f32 elems; `matVec`'s
+wins threshold is parked at `Infinity` because the naive MSL kernel is
+~2× slower than `bun:simd` on M1/M2 (memory-bandwidth-bound, no
+threadgroup tiling). The dispatch threshold still lets the kernel run.
+
+Backend implementations:
+
+- **Metal** (`src/js/bun/gpu/metal.ts`) — Obj-C runtime via `bun:ffi`
+  against `libobjc.A.dylib`. MSL kernels are compiled at load time with
+  `newLibraryWithSource:options:error:`, pipeline state cached per
+  kernel. Unified memory + `MTLResourceStorageModeShared` gives
+  zero-copy buffers, so dispatch cost is encoder setup + GPU wait.
+- **CUDA** (`src/js/bun/gpu/cuda.ts`) — PTX kernel (`simdMapAffineF32`)
+  loaded via the CUDA driver API. `dot`/`matVec`/`matmul` currently
+  forward to `bun:simd` pending kernel work; the interface is already
+  wired.
+- **CPU** (`src/js/bun/gpu/cpu.ts`) — every op forwards to `bun:simd`.
+
+Pipeline integration: when a fused affine chain on a `Float32Array` is
+large enough (`winsForSize("simdMap", n, 4)`), `bun:pipeline`'s
+`realizeChain` dispatches to `gpu.simdMap` instead of stacking
+`simd.mulScalar`+`simd.addScalar`. Transparent fallback on hosts
+without a real GPU backend — same code path, CPU kernels at the end.
+
 ## Real-world benchmark: SQLite analytical workload
 
 `bench/parabun-sqlite/` compares three variants of the same workload —
@@ -298,14 +353,21 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   `ArrayBuffer` with the WASM instance via `WebAssembly.Memory` would let
   the binary ops match the gains the reduce-op threshold fallback already
   captures.
-- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — transpile the
-  AST of a `pure` function to MSL (for Metal/MPS) and/or WGSL (for WebGPU
-  via wgpu/dawn). The purity contract already forbids most constructs that
-  would fail (closures, `this`, side effects, stateful globals). Scope:
-  scalar-in/scalar-out numeric kernels, subset of `Math.*` mapped to
-  shader intrinsics, `if/else/loop` → shader control flow, with CPU
-  fallback on unsupported ops. Unlocks user-written `simdMap` kernels on
-  GPU.
+- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `bun:gpu`
+  ships the affine special case (Metal MSL kernel for `x*K + C` on
+  Float32Array; pipeline fusion promotes matching chains automatically).
+  Still pending: full AST-to-MSL/WGSL transpile so non-affine `pure`
+  functions (polynomials, tanh, sqrt-based kernels) also run on GPU.
+  The purity contract forbids the constructs that would fail the
+  transpile (closures, `this`, side effects, stateful globals); scope
+  is scalar-in/scalar-out numeric kernels with `Math.*` → shader
+  intrinsics and `if/else/loop` → shader control flow.
+- **Tuned `matVec` MSL kernel** — current naive one-thread-per-row
+  kernel is ~2× slower than `bun:simd` on M1/M2 (bandwidth-bound).
+  Simdgroup-reduced variant (32 threads per row, stride-32 partial dot,
+  `simd_sum` reduction) should close the gap and let
+  `MIN_MATVEC_WINS_ELEMS` move off Infinity. CUDA matVec PTX is also
+  pending — currently forwards to `bun:simd`.
 - **Auto-accel dispatch, Tier 4 (cross-call buffer residency)** — deciding
   to keep a typed array GPU-resident between user calls so a one-shot
   `dot(a, b)` on a discrete GPU isn't bottlenecked by PCIe. Either needs

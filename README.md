@@ -123,6 +123,22 @@ const scores = matVec(embeddings, query, N, D);   // one WASM call, f32x4 intern
 
 Primitives include element-wise ops (`mulScalar`, `addScalar`, `simdMap`), reductions (`sum`, `dot`), and bulk operations (`matVec`). Above a ~4 MiB byte-footprint threshold the runtime falls back to monomorphic tight loops (`sumTightF32`/`F64`, `dotTightF32`/`F64`) because at that size the WASM copy-in dominates the reduction.
 
+### GPU Compute (`bun:gpu`)
+
+`bun:gpu` is a compute-only GPU surface (not graphics) that mirrors the hot parts of `bun:simd`. It probes a backend chain — Metal on darwin, CUDA on Linux/Windows, CPU fallback always available — and picks the first one whose runtime loads.
+
+```pts
+import gpu from "bun:gpu";
+
+gpu.describe();              // { active: "metal", available: ["metal","cpu"], ... }
+const scores = gpu.matVec(embeddings, query, N, D);  // MSL kernel on Apple Silicon
+const out    = gpu.simdMap(x => x * 3 + 7, big);     // affine — dispatched to GPU if large enough
+```
+
+Two thresholds, not one: a **dispatch** threshold lets the GPU kernel run (so tests exercise the real path), and a **wins** threshold (`gpu.winsForSize(op, n, elemBytes)`) tells callers when routing through `bun:gpu` actually beats `bun:simd`. Today `simdMap` wins at ≥ 1<<18 f32 elements; `matVec` is compiled and correct but not yet winning (the naive MSL kernel is bandwidth-bound on M1/M2).
+
+`bun:pipeline`'s fusion tier reads `winsForSize` automatically — a fused affine chain over a large enough `Float32Array` promotes from stacked `simd.mulScalar`+`simd.addScalar` to `gpu.simdMap` without user code changes.
+
 ## Benchmarks
 
 See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfolio with per-bench workload, methodology, and analysis. Headline numbers (best-of-N medians on release builds, verified bit-identical or within-tolerance against each baseline):
