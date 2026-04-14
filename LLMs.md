@@ -421,13 +421,13 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   intrinsics and `if/else/loop` → shader control flow.
 - **Auto-accel dispatch, Tier 4 (implicit cross-call residency)** — the
   explicit opt-in (`gpu.hold`/`release` on Float32Array matrices) is live
-  on Metal and accepted by every op (`dot`, `matVec`, `matmul`,
-  `simdMap`). Still pending: (a) CUDA residency (cuMemAlloc +
-  cuMemcpyHtoD once, then reuse device pointer — benchmarked on an RTX
-  4070 Ti and confirmed to be the bottleneck: the non-resident path
-  loses 3–10× to bun:simd at 1M–8M elems because per-call HtoD +
-  cuCtxSynchronize dominate, see bench/parabun-gpu-matvec); (b) implicit
+  on **both** Metal and CUDA, and accepted by every op (`dot`, `matVec`,
+  `matmul`, `simdMap`). On an RTX 4070 Ti the held path beats `bun:simd`
+  1.4–17× across 4–32 MiB matrices (see `bench/parabun-cuda-residency`);
+  held-vs-cold is 25–220× because the cold path's per-call HtoD +
+  `cuCtxSynchronize` round-trip is eliminated. Still pending: implicit
   residency via escape analysis or a `GpuFloat32Array` wrapper so common
-  code doesn't have to call `hold` manually. For discrete GPUs
-  residency is make-or-break; on Apple Silicon the explicit API already
-  captures most of the win thanks to unified memory.
+  code doesn't have to call `hold` manually. For discrete GPUs that
+  implicit step is the difference between "fast if you know" and "fast by
+  default"; on Apple Silicon the explicit API already captures most of
+  the win thanks to unified memory.

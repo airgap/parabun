@@ -264,9 +264,13 @@ MVDONE:
 
 type FArray = Float32Array | Float64Array;
 
-// GpuHandle stub — CUDA's matVec path reallocates device memory per call,
-// so a "held" handle just wraps the view and matVec reads via view. When a
-// real cuMemAlloc+persist path lands, buffer will carry the device pointer.
+// Opaque handle returned by `hold(arr)`. On CUDA, `buffer` carries the
+// device pointer returned by cuMemAlloc_v2; a held Float32Array pays the
+// HtoD cost once at hold() time and every subsequent matVec reuses the
+// resident device memory. `view` stays pinned so the user can read back
+// from it and so release() knows what was wrapped. f64 arrays don't get a
+// device pointer today because no CUDA kernel consumes them yet — those
+// handles pass through to simd with a cheap view wrap.
 type GpuHandle = {
   __bunGpuHandle: true;
   backend: "metal" | "cuda" | "cpu";
@@ -443,32 +447,46 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
 // reduction shape so correctness reasoning transfers. try/finally guarantees
 // cuMemFree on every path.
 
-function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: number): Float32Array {
+function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: number, k: number): Float32Array {
   const s = cudaLib!.symbols;
   const ptr = ffiPtr!;
   const matBytes = BigInt(m * k * 4);
   const vecBytes = BigInt(k * 4);
   const outBytes = BigInt(m * 4);
 
-  const dMatBuf = new BigUint64Array(1);
-  const dVecBuf = new BigUint64Array(1);
-  const dOutBuf = new BigUint64Array(1);
-  if (s.cuMemAlloc_v2(ptr(dMatBuf), matBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(mat) failed");
-  if (s.cuMemAlloc_v2(ptr(dVecBuf), vecBytes) !== 0) {
-    s.cuMemFree_v2(dMatBuf[0]);
-    throw new Error("bun:gpu cuda: cuMemAlloc(vec) failed");
+  // Held mat (Tier 4 residency): cuMemAlloc + cuMemcpyHtoD already ran in
+  // hold(); we just reuse the resident device pointer and skip the free.
+  // Unheld mat: alloc + HtoD here, free in the finally block.
+  let dMat: bigint;
+  let matOwned: boolean;
+  if (isGpuHandle(mat)) {
+    if (mat.released) throw new Error("bun:gpu: matVec called on released handle");
+    if (mat.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dMat = mat.buffer;
+    matOwned = false;
+  } else {
+    const dMatBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dMatBuf), matBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(mat) failed");
+    dMat = dMatBuf[0];
+    matOwned = true;
   }
-  if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) {
-    s.cuMemFree_v2(dMatBuf[0]);
-    s.cuMemFree_v2(dVecBuf[0]);
-    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
-  }
-  const dMat = dMatBuf[0];
-  const dVec = dVecBuf[0];
-  const dOut = dOutBuf[0];
 
+  let dVec: bigint = 0n;
+  let dOut: bigint = 0n;
   try {
-    if (s.cuMemcpyHtoD_v2(dMat, ptr(mat), matBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD(mat) failed");
+    const dVecBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dVecBuf), vecBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(vec) failed");
+    dVec = dVecBuf[0];
+
+    const dOutBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+    dOut = dOutBuf[0];
+
+    if (matOwned) {
+      if (s.cuMemcpyHtoD_v2(dMat, ptr(mat as Float32Array), matBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(mat) failed");
+      }
+    }
     if (s.cuMemcpyHtoD_v2(dVec, ptr(vec), vecBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD(vec) failed");
 
     const pMatBuf = new BigUint64Array([dMat]);
@@ -495,9 +513,9 @@ function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: num
     if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH failed");
     return out;
   } finally {
-    s.cuMemFree_v2(dMat);
-    s.cuMemFree_v2(dVec);
-    s.cuMemFree_v2(dOut);
+    if (matOwned && dMat !== 0n) s.cuMemFree_v2(dMat);
+    if (dVec !== 0n) s.cuMemFree_v2(dVec);
+    if (dOut !== 0n) s.cuMemFree_v2(dOut);
   }
 }
 
@@ -543,17 +561,22 @@ function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
 }
 
 function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
-  if (isGpuHandle(matrix) && matrix.released) {
+  const matIsHandle = isGpuHandle(matrix);
+  if (matIsHandle && matrix.released) {
     throw new Error("bun:gpu: matVec called on released handle");
   }
-  const matView = isGpuHandle(matrix) ? matrix.view : (matrix as FArray);
+  const matView = matIsHandle ? matrix.view : (matrix as FArray);
+  // Held F32 handles keep their resident device pointer — dispatch even if
+  // the size is below the dispatch threshold, since the HtoD copy that
+  // gates "is GPU worthwhile" already happened at hold() time.
+  const residentF32 = matIsHandle && matrix.type === "f32" && matrix.buffer !== 0n;
   if (
     matView instanceof Float32Array &&
     vector instanceof Float32Array &&
     probe() &&
-    nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS
+    (residentF32 || nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS)
   ) {
-    return launchMatVecF32(matView, vector, nRows, nCols);
+    return launchMatVecF32(matIsHandle ? matrix : matView, vector, nRows, nCols);
   }
   return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
@@ -629,20 +652,42 @@ function isAligned(_arr: FArray): boolean {
   return false;
 }
 
-// hold/release stubs — CUDA backend has no residency yet (TODO: cuMemAlloc +
-// cuMemcpyHtoD once so matVec reuses device memory across calls).
+// Tier 4 residency: hold(arr) on an f32 array does the cuMemAlloc +
+// cuMemcpyHtoD once, so subsequent matVec calls against the handle skip
+// the per-call copy. f64 handles aren't wired to a CUDA kernel yet, so
+// those just wrap the view and matVec falls through to bun:simd.
+//
+// Lifetime: caller MUST call release(handle). releaseHandle is
+// idempotent, and after it runs any op that dereferences the handle
+// throws a "released handle" error.
 function hold(arr: FArray): GpuHandle {
   if (!(arr instanceof Float32Array) && !(arr instanceof Float64Array)) {
     throw new TypeError(
       `hold requires Float32Array or Float64Array; got ${(arr as any)?.constructor?.name ?? typeof arr}`,
     );
   }
+  let buffer: bigint = 0n;
+  if (arr instanceof Float32Array && arr.byteLength > 0 && probe()) {
+    const s = cudaLib!.symbols;
+    const p = ffiPtr!;
+    const bytes = BigInt(arr.byteLength);
+    const dPtrBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAlloc failed in hold");
+    }
+    const dPtr = dPtrBuf[0];
+    if (s.cuMemcpyHtoD_v2(dPtr, p(arr), bytes) !== 0) {
+      s.cuMemFree_v2(dPtr);
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in hold");
+    }
+    buffer = dPtr;
+  }
   return {
     __bunGpuHandle: true,
     backend: "cuda",
     type: arr instanceof Float32Array ? "f32" : "f64",
     length: arr.length,
-    buffer: 0n,
+    buffer,
     view: arr,
     released: false,
   };
@@ -650,6 +695,11 @@ function hold(arr: FArray): GpuHandle {
 function releaseHandle(handle: GpuHandle): void {
   if (!isGpuHandle(handle)) {
     throw new TypeError(`release expected a GpuHandle; got ${typeof handle}`);
+  }
+  if (handle.released) return;
+  if (handle.buffer !== 0n && cudaLib) {
+    cudaLib.symbols.cuMemFree_v2(handle.buffer);
+    handle.buffer = 0n;
   }
   handle.released = true;
 }
