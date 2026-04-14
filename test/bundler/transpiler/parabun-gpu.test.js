@@ -35,6 +35,7 @@ describe("bun:gpu scaffold", () => {
           winsForSize: typeof gpu.winsForSize,
           dispose: typeof gpu.dispose,
           describe: typeof gpu.describe,
+          GpuFloat32Array: typeof gpu.GpuFloat32Array,
         }));
       `,
     );
@@ -53,6 +54,7 @@ describe("bun:gpu scaffold", () => {
       winsForSize: "function",
       dispose: "function",
       describe: "function",
+      GpuFloat32Array: "function",
     });
     expect(exitCode).toBe(0);
   });
@@ -633,6 +635,156 @@ describe("bun:gpu scaffold", () => {
     expect(d.available).toContain(d.active);
     expect(["metal", "cuda", "cpu"]).toContain(d.active);
     expect(d.hasPlatform).toBe(true);
+    expect(exitCode).toBe(0);
+  });
+});
+
+describe("bun:gpu GpuFloat32Array wrapper", () => {
+  it("constructs from an existing Float32Array and exposes the same view", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-from-array",
+      `
+        import gpu from "bun:gpu";
+        const src = new Float32Array([1, 2, 3, 4]);
+        const w = new gpu.GpuFloat32Array(src);
+        const sameView = w.view === src;
+        const lenOk = w.length === 4;
+        w.release();
+        console.log(JSON.stringify({ sameView, lenOk }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ sameView: true, lenOk: true });
+    expect(exitCode).toBe(0);
+  });
+
+  it("constructs from a length and zero-fills the allocation", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-from-length",
+      `
+        import gpu from "bun:gpu";
+        const w = new gpu.GpuFloat32Array(8);
+        const view = w.view;
+        const isF32 = view instanceof Float32Array;
+        const allZero = Array.from(view).every(x => x === 0);
+        const lenOk = w.length === 8 && view.length === 8;
+        w.release();
+        console.log(JSON.stringify({ isF32, allZero, lenOk }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ isF32: true, allZero: true, lenOk: true });
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects non-Float32Array / non-number sources at construction", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-bad-arg",
+      `
+        import gpu from "bun:gpu";
+        let threw = false;
+        let msg = "";
+        try {
+          new gpu.GpuFloat32Array(new Float64Array([1, 2]));
+        } catch (e) {
+          threw = true;
+          msg = e.message;
+        }
+        console.log(JSON.stringify({ threw, tag: /GpuFloat32Array/.test(msg) }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ threw: true, tag: true });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matmul accepts wrappers and produces the same result as raw Float32Array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-matmul",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const wa = new gpu.GpuFloat32Array(a);
+        const wb = new gpu.GpuFloat32Array(b);
+        const out = gpu.matmul(wa, wb, 2, 2, 2);
+        wa.release();
+        wb.release();
+        console.log(JSON.stringify(Array.from(out)));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual([19, 22, 43, 50]);
+    expect(exitCode).toBe(0);
+  });
+
+  it("dot and simdMap accept wrappers", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-dot-simdmap",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const wa = new gpu.GpuFloat32Array(a);
+        const wb = new gpu.GpuFloat32Array(b);
+        const dot = gpu.dot(wa, wb);
+        const squared = Array.from(gpu.simdMap(x => x * x, wa));
+        wa.release();
+        wb.release();
+        console.log(JSON.stringify({ dot, squared }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ dot: 70, squared: [1, 4, 9, 16] });
+    expect(exitCode).toBe(0);
+  });
+
+  it("explicit release prevents further use; double release is a no-op", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-release",
+      `
+        import gpu from "bun:gpu";
+        const w = new gpu.GpuFloat32Array(new Float32Array([1, 2, 3, 4]));
+        w.release();
+        let viewThrew = false, viewMsg = "";
+        try { void w.view; } catch (e) { viewThrew = true; viewMsg = e.message; }
+        let opThrew = false;
+        try { gpu.simdMap(x => x, w); } catch (e) { opThrew = true; }
+        let doubleThrew = false;
+        try { w.release(); } catch (e) { doubleThrew = true; }
+        console.log(JSON.stringify({
+          viewThrew,
+          viewTag: /already disposed/.test(viewMsg),
+          opThrew,
+          doubleThrew,
+        }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      viewThrew: true,
+      viewTag: true,
+      opThrew: true,
+      doubleThrew: false,
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it("Symbol.dispose auto-releases at scope exit (via `using`)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-wrapper-using",
+      `
+        import gpu from "bun:gpu";
+        let after;
+        {
+          using w = new gpu.GpuFloat32Array(new Float32Array([9, 9, 9, 9]));
+          // Stash the wrapper out so we can probe it after scope exit.
+          after = w;
+          const inScope = w.view.length === 4;
+          console.log(JSON.stringify({ inScope }));
+        }
+        let postThrew = false;
+        try { void after.view; } catch (e) { postThrew = /already disposed/.test(e.message); }
+        console.log(JSON.stringify({ postThrew }));
+      `,
+    );
+    const lines = stdout.split("\n");
+    expect(JSON.parse(lines[0])).toEqual({ inScope: true });
+    expect(JSON.parse(lines[1])).toEqual({ postThrew: true });
     expect(exitCode).toBe(0);
   });
 });

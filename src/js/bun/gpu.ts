@@ -56,6 +56,97 @@ function isGpuHandle(x: unknown): x is GpuHandle {
   return typeof x === "object" && x !== null && (x as any).__bunGpuHandle === true;
 }
 
+// ─── Auto-residency wrapper ────────────────────────────────────────────────
+//
+// GpuFloat32Array wraps a Float32Array + GpuHandle so callers don't have to
+// thread `hold()` / `release()` through their code. Construction auto-holds;
+// disposal (explicit via `using`, or falling out of scope for the GC safety
+// net) auto-releases. Every op that takes a GpuHandle also accepts one of
+// these — they unwrap to the underlying handle at the dispatch site.
+//
+//   using index = new GpuFloat32Array(embeddings);
+//   const scores = gpu.matmul(queries, index, Q, D, N);
+//   // released here when `index` falls out of scope
+//
+// The GC safety net (FinalizationRegistry) is a fallback only — non-
+// deterministic and may run arbitrarily late, so don't rely on it to
+// bound device memory. Always prefer `using` or an explicit `.release()`.
+//
+// On backends where `hold()` is a no-op (CPU today, and CUDA for f64),
+// the wrapper is effectively a thin view; the API stays uniform.
+
+const gpuFinalizer = new FinalizationRegistry<{ handle: GpuHandle }>(cell => {
+  if (!cell.handle.released) {
+    const origin = backends[cell.handle.backend] ?? cpuBackend;
+    origin.releaseHandle(cell.handle);
+  }
+});
+
+class GpuFloat32Array {
+  readonly #handle: GpuHandle;
+  readonly #view: Float32Array;
+  #disposed: boolean;
+
+  constructor(source: Float32Array | number) {
+    let arr: Float32Array;
+    if (typeof source === "number") {
+      arr = resolveActive().alloc(source, "f32") as Float32Array;
+    } else if (source instanceof Float32Array) {
+      arr = source;
+    } else {
+      throw new TypeError(
+        `GpuFloat32Array: expected Float32Array or length (number); got ${
+          (source as any)?.constructor?.name ?? typeof source
+        }`,
+      );
+    }
+    this.#view = arr;
+    this.#handle = resolveActive().hold(arr);
+    this.#disposed = false;
+    gpuFinalizer.register(this, { handle: this.#handle }, this);
+  }
+
+  get length(): number {
+    return this.#view.length;
+  }
+
+  get view(): Float32Array {
+    if (this.#disposed) throw new Error("GpuFloat32Array: already disposed");
+    return this.#view;
+  }
+
+  // Internal accessor used by unwrapGpuArg at dispatch sites. Not exposed on
+  // the public surface — callers should pass the wrapper itself to ops.
+  get __handle(): GpuHandle {
+    if (this.#disposed) throw new Error("GpuFloat32Array: already disposed");
+    return this.#handle;
+  }
+
+  release(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    gpuFinalizer.unregister(this);
+    const origin = backends[this.#handle.backend] ?? resolveActive();
+    origin.releaseHandle(this.#handle);
+  }
+
+  [Symbol.dispose](): void {
+    this.release();
+  }
+}
+
+function isGpuFloat32Array(x: unknown): x is GpuFloat32Array {
+  return x instanceof GpuFloat32Array;
+}
+
+// Normalize any accepted input shape to the raw FArray/GpuHandle the
+// backend ops expect. Wrappers unwrap to their inner handle; handles pass
+// through untouched; typed arrays pass through untouched.
+function unwrapGpuArg<T extends FArray>(x: T | GpuHandle | GpuFloat32Array): T | GpuHandle {
+  if (isGpuFloat32Array(x)) return x.__handle;
+  return x;
+}
+
 // ─── Backend protocol ──────────────────────────────────────────────────────
 //
 // Every backend implements this interface. The `cpu` backend is an alias
@@ -245,34 +336,47 @@ function winsForSize(op: OpKind, n: number, elemBytes: number): boolean {
 
 // ─── Public ops ────────────────────────────────────────────────────────────
 
-function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
-  return resolveActive().dot(a, b);
+function dot(a: FArray | GpuHandle | GpuFloat32Array, b: FArray | GpuHandle | GpuFloat32Array): number {
+  return resolveActive().dot(unwrapGpuArg(a), unwrapGpuArg(b));
 }
 
 function matVec(matrix: Float32Array, vector: Float32Array, nRows: number, nCols: number): Float32Array;
 function matVec(matrix: Float64Array, vector: Float64Array, nRows: number, nCols: number): Float64Array;
 function matVec(matrix: GpuHandle, vector: Float32Array, nRows: number, nCols: number): Float32Array;
-function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
-  return resolveActive().matVec(matrix, vector, nRows, nCols);
+function matVec(matrix: GpuFloat32Array, vector: Float32Array, nRows: number, nCols: number): Float32Array;
+function matVec(matrix: FArray | GpuHandle | GpuFloat32Array, vector: FArray, nRows: number, nCols: number): FArray {
+  return resolveActive().matVec(unwrapGpuArg(matrix), vector, nRows, nCols);
 }
 
 function matmul(a: Float32Array, b: Float32Array, m: number, k: number, n: number): Float32Array;
 function matmul(a: Float64Array, b: Float64Array, m: number, k: number, n: number): Float64Array;
-function matmul(a: GpuHandle, b: GpuHandle, m: number, k: number, n: number): FArray;
-function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray {
+function matmul(
+  a: GpuHandle | GpuFloat32Array,
+  b: GpuHandle | GpuFloat32Array,
+  m: number,
+  k: number,
+  n: number,
+): FArray;
+function matmul(
+  a: FArray | GpuHandle | GpuFloat32Array,
+  b: FArray | GpuHandle | GpuFloat32Array,
+  m: number,
+  k: number,
+  n: number,
+): FArray {
   if (!Number.isInteger(m) || m < 0) throw new RangeError("m must be a non-negative integer");
   if (!Number.isInteger(k) || k < 0) throw new RangeError("k must be a non-negative integer");
   if (!Number.isInteger(n) || n < 0) throw new RangeError("n must be a non-negative integer");
   if (a.length !== m * k) throw new RangeError(`a length ${a.length} != m * k (${m} * ${k} = ${m * k})`);
   if (b.length !== k * n) throw new RangeError(`b length ${b.length} != k * n (${k} * ${n} = ${k * n})`);
-  return resolveActive().matmul(a, b, m, k, n);
+  return resolveActive().matmul(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n);
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: Float32Array): Float32Array;
 function simdMap(fn: (x: number, i: number) => number, a: Float64Array): Float64Array;
-function simdMap(fn: (x: number, i: number) => number, a: GpuHandle): FArray;
-function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
-  return resolveActive().simdMap(fn, a);
+function simdMap(fn: (x: number, i: number) => number, a: GpuHandle | GpuFloat32Array): FArray;
+function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle | GpuFloat32Array): FArray {
+  return resolveActive().simdMap(fn, unwrapGpuArg(a));
 }
 
 // Page-aligned typed array suitable for zero-copy staging into the active
@@ -353,6 +457,7 @@ export default {
   isAligned,
   hold,
   release,
+  GpuFloat32Array,
   activeBackend,
   hasBackend,
   setBackend,
