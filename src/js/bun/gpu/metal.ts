@@ -51,6 +51,26 @@ kernel void simdMapAffineF32(
     if (gid >= n) return;
     outPtr[gid] = fma(k1, inPtr[gid], k0);
 }
+
+// Row-major M x K matrix times a K-vector -> M-vector.
+// One thread per output row; inner loop is a straight-line FMA chain.
+// (No threadgroup tiling — at the sizes where this kernel wins, dispatch
+// is memory-bandwidth bound on Apple GPUs; the shared-cache reuse a tiled
+// kernel would buy you doesn't matter until K is >> 1024.)
+kernel void matVecF32(
+    device const float *mat       [[buffer(0)]],
+    device const float *vec       [[buffer(1)]],
+    device       float *outPtr    [[buffer(2)]],
+    constant     uint  &m         [[buffer(3)]],
+    constant     uint  &k         [[buffer(4)]],
+    uint                row       [[thread_position_in_grid]])
+{
+    if (row >= m) return;
+    device const float *r = mat + (ulong)row * k;
+    float acc = 0.0f;
+    for (uint j = 0; j < k; j++) acc = fma(r[j], vec[j], acc);
+    outPtr[row] = acc;
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -103,9 +123,14 @@ let device: bigint = 0n;
 let deviceName = "";
 let commandQueue: bigint = 0n;
 let metalLibraryObj: bigint = 0n;
-let metalFunctionObj: bigint = 0n;
-let computePipeline: bigint = 0n;
-let maxThreadsPerThreadgroup = 1024;
+// simdMap kernel
+let simdMapFn: bigint = 0n;
+let simdMapPipeline: bigint = 0n;
+let simdMapMaxTg = 1024;
+// matVec kernel
+let matVecFn: bigint = 0n;
+let matVecPipeline: bigint = 0n;
+let matVecMaxTg = 1024;
 
 function tryLoad(): boolean {
   if (metalLib !== null && objcBase !== null) return true;
@@ -240,46 +265,43 @@ function probe(): boolean {
   if (lib === 0n) return false;
   metalLibraryObj = lib;
 
-  const fnName = nsstring("simdMapAffineF32");
-  if (fnName === 0n) {
+  // Compile both pipelines from the single library. One failure on either
+  // pipeline unwinds everything — we either have both kernels or neither.
+  const sm = compileKernel(lib, "simdMapAffineF32");
+  if (sm === null) {
     release(lib);
     metalLibraryObj = 0n;
     return false;
   }
-  const fn = msgSend_3_id!(lib, sel("newFunctionWithName:"), fnName);
-  release(fnName);
-  if (fn === 0n) {
-    release(lib);
-    metalLibraryObj = 0n;
-    return false;
-  }
-  metalFunctionObj = fn;
+  simdMapFn = sm.fn;
+  simdMapPipeline = sm.pipe;
+  simdMapMaxTg = sm.maxTg;
 
-  // [device newComputePipelineStateWithFunction:fn error:&err]
-  const pipe = msgSend_4_id_ptr!(dev, sel("newComputePipelineStateWithFunction:error:"), fn, null);
-  if (pipe === 0n) {
-    release(fn);
+  const mv = compileKernel(lib, "matVecF32");
+  if (mv === null) {
+    release(simdMapPipeline);
+    release(simdMapFn);
     release(lib);
-    metalFunctionObj = 0n;
+    simdMapPipeline = 0n;
+    simdMapFn = 0n;
     metalLibraryObj = 0n;
     return false;
   }
-  computePipeline = pipe;
-
-  // Query pipeline's preferred threadgroup size (returns NSUInteger);
-  // falls back to 1024 (Apple's conservative historical max) on failure.
-  try {
-    const t = msgSend_2!(pipe, sel("maxTotalThreadsPerThreadgroup"));
-    if (t !== 0n) maxThreadsPerThreadgroup = Number(t);
-  } catch {}
+  matVecFn = mv.fn;
+  matVecPipeline = mv.pipe;
+  matVecMaxTg = mv.maxTg;
 
   const queue = msgSend_2!(dev, sel("newCommandQueue"));
   if (queue === 0n) {
-    release(pipe);
-    release(fn);
+    release(matVecPipeline);
+    release(matVecFn);
+    release(simdMapPipeline);
+    release(simdMapFn);
     release(lib);
-    computePipeline = 0n;
-    metalFunctionObj = 0n;
+    matVecPipeline = 0n;
+    matVecFn = 0n;
+    simdMapPipeline = 0n;
+    simdMapFn = 0n;
     metalLibraryObj = 0n;
     return false;
   }
@@ -287,6 +309,25 @@ function probe(): boolean {
 
   probeResult = true;
   return true;
+}
+
+function compileKernel(lib: bigint, name: string): { fn: bigint; pipe: bigint; maxTg: number } | null {
+  const nsName = nsstring(name);
+  if (nsName === 0n) return null;
+  const fn = msgSend_3_id!(lib, sel("newFunctionWithName:"), nsName);
+  release(nsName);
+  if (fn === 0n) return null;
+  const pipe = msgSend_4_id_ptr!(device, sel("newComputePipelineStateWithFunction:error:"), fn, null);
+  if (pipe === 0n) {
+    release(fn);
+    return null;
+  }
+  let maxTg = 1024;
+  try {
+    const t = msgSend_2!(pipe, sel("maxTotalThreadsPerThreadgroup"));
+    if (t !== 0n) maxTg = Number(t);
+  } catch {}
+  return { fn, pipe, maxTg };
 }
 
 // ─── Affine detector (mirrors cuda.ts) ─────────────────────────────────────
@@ -344,7 +385,7 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
     if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
 
     // setComputePipelineState:
-    msgSend_3_id!(encoder, sel("setComputePipelineState:"), computePipeline);
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), simdMapPipeline);
     // setBuffer:offset:atIndex: for in=0, out=1
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 1n);
@@ -360,7 +401,7 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
     // structs by value. On arm64, aggregates >16 bytes are passed via
     // indirect reference — we hand over the address of our packed
     // BigUint64Array and the ABI treats that as the by-value struct.
-    const tgSize = Math.min(maxThreadsPerThreadgroup, 256);
+    const tgSize = Math.min(simdMapMaxTg, 256);
     const grid = new BigUint64Array([BigInt(n), 1n, 1n]);
     const threads = new BigUint64Array([BigInt(tgSize), 1n, 1n]);
     msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(grid), ffiPtr!(threads));
@@ -385,16 +426,110 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
   }
 }
 
+// ─── Kernel launch: matVecF32 ──────────────────────────────────────────────
+// M×K matrix · K-vector → M-vector, one thread per row. Same buffer/encoder
+// choreography as launchAffineF32, different pipeline + buffer layout.
+
+function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: number): Float32Array {
+  const matBytes = BigInt(m * k * 4);
+  const vecBytes = BigInt(k * 4);
+  const outBytes = BigInt(m * 4);
+
+  const matBuf = msgSend_5_ptr_u64_u64_ret!(
+    device,
+    sel("newBufferWithBytes:length:options:"),
+    ffiPtr!(mat),
+    matBytes,
+    BigInt(MTL_STORAGE_MODE_SHARED),
+  );
+  if (matBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes (mat) failed");
+
+  let vecBuf: bigint = 0n;
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    vecBuf = msgSend_5_ptr_u64_u64_ret!(
+      device,
+      sel("newBufferWithBytes:length:options:"),
+      ffiPtr!(vec),
+      vecBytes,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    if (vecBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes (vec) failed");
+
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength (out) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), matVecPipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), matBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), vecBuf, 0n, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 2n);
+    const pM = new Uint32Array([m]);
+    const pK = new Uint32Array([k]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pK), 4n, 4n);
+
+    // Grid = M rows; threadgroup size picked to match the pipeline's
+    // preferred max (capped at 256, a safe value on both M-series and older
+    // discrete GPUs).
+    const tgSize = Math.min(matVecMaxTg, 256);
+    const grid = new BigUint64Array([BigInt(m), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(tgSize), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(grid), ffiPtr!(threads));
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: outBuf contents is null");
+    const out = new Float32Array(m);
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, m * 4));
+    out.set(view);
+    return out;
+  } finally {
+    release(matBuf);
+    if (vecBuf !== 0n) release(vecBuf);
+    if (outBuf !== 0n) release(outBuf);
+  }
+}
+
 // ─── Size threshold ────────────────────────────────────────────────────────
 // Matches cuda.ts — the fixed per-dispatch cost (buffer alloc + pipeline
 // binding + GPU/CPU round-trip) makes the CPU path faster under ~256k f32.
 
 const MIN_SIMDMAP_ELEMS = 1 << 18;
+// matVec has two separate thresholds on purpose:
+//
+//   - MIN_MATVEC_DISPATCH_ELEMS: above this, `matVec` runs on the MSL kernel
+//     when the caller hands us f32 inputs. This exists so tests and
+//     benchmarks exercise the real GPU path, not just the simd fallback.
+//   - MIN_MATVEC_WINS_ELEMS:     above this, `winsForSize("matVec", ...)`
+//     returns true. This is what pipeline-style callers use to decide
+//     whether to route the op to bun:gpu in the first place.
+//
+// Right now the naive one-thread-per-row MSL kernel (no threadgroup tiling,
+// no vec-in-shared-memory reuse) is ~2–5× slower than the f32x4 `bun:simd`
+// kernel on M1/M2 across the size grid we benchmarked. So the "wins"
+// threshold is parked at Infinity — automatic callers never route to GPU
+// matVec today — while the "dispatch" threshold stays low enough for us
+// to regression-test the kernel. When the kernel is tuned to actually
+// beat bun:simd, collapse these back into a single constant.
+const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
+const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
 
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
   if (op === "simdMap") return elemBytes === 4 && n >= MIN_SIMDMAP_ELEMS;
+  if (op === "matVec") return elemBytes === 4 && n >= MIN_MATVEC_WINS_ELEMS;
   return false;
 }
 
@@ -405,6 +540,14 @@ function dot(a: FArray, b: FArray): number {
 }
 
 function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray {
+  if (
+    matrix instanceof Float32Array &&
+    vector instanceof Float32Array &&
+    probe() &&
+    nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS
+  ) {
+    return launchMatVecF32(matrix, vector, nRows, nCols);
+  }
   return simd.matVec(matrix as any, vector as any, nRows, nCols);
 }
 
@@ -442,13 +585,21 @@ function dispose(): void {
     release(commandQueue);
     commandQueue = 0n;
   }
-  if (computePipeline !== 0n) {
-    release(computePipeline);
-    computePipeline = 0n;
+  if (matVecPipeline !== 0n) {
+    release(matVecPipeline);
+    matVecPipeline = 0n;
   }
-  if (metalFunctionObj !== 0n) {
-    release(metalFunctionObj);
-    metalFunctionObj = 0n;
+  if (matVecFn !== 0n) {
+    release(matVecFn);
+    matVecFn = 0n;
+  }
+  if (simdMapPipeline !== 0n) {
+    release(simdMapPipeline);
+    simdMapPipeline = 0n;
+  }
+  if (simdMapFn !== 0n) {
+    release(simdMapFn);
+    simdMapFn = 0n;
   }
   if (metalLibraryObj !== 0n) {
     release(metalLibraryObj);

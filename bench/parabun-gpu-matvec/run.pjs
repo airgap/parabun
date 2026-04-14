@@ -1,0 +1,100 @@
+// Microbenchmark: bun:simd.matVec vs bun:gpu.matVec across sizes.
+//
+//   bun run build:release bench/parabun-gpu-matvec/run.pjs
+//
+// Emits a table comparing the SIMD path (f32x4 WASM kernel) against the
+// GPU path (Metal MSL on Apple Silicon, CUDA PTX forwarding-to-SIMD
+// elsewhere) across a grid of M and K. The GPU backend's own
+// `winsForSize` threshold is also shown — sizes below the threshold are
+// still measured to show why the threshold is set where it is.
+
+import simd from "bun:simd";
+import gpu from "bun:gpu";
+
+const desc = gpu.describe();
+console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}\n`);
+
+const cases = [
+  { M: 256, K: 256 }, // 64k elems — below threshold, tight loop wins
+  { M: 512, K: 512 }, // 256k elems — still below
+  { M: 1024, K: 1024 }, // 1M elems — at threshold
+  { M: 2048, K: 2048 }, // 4M elems — above threshold
+  { M: 4096, K: 2048 }, // 8M elems
+  { M: 10_000, K: 384 }, // retrieval shape (100k × 384 truncated to 10k)
+];
+
+// Deterministic fill so both variants see identical input.
+function fill(mat, vec) {
+  let s = 0xC0FFEE;
+  const r = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s / 0xFFFFFFFF) * 2 - 1;
+  };
+  for (let i = 0; i < mat.length; i++) mat[i] = r();
+  for (let j = 0; j < vec.length; j++) vec[j] = r();
+}
+
+function bench(fn, iters) {
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    const out = fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+    // Touch a value so the optimizer can't elide the call.
+    if (out[0] === Infinity) throw new Error("unreachable");
+  }
+  samples.sort((a, b) => a - b);
+  return {
+    min: samples[0],
+    med: samples[Math.floor(samples.length / 2)],
+    max: samples[samples.length - 1],
+  };
+}
+
+function crossCheck(a, b, tol) {
+  let mismatches = 0;
+  let maxErr = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      mismatches++;
+      const e = Math.abs(a[i] - b[i]);
+      if (e > maxErr) maxErr = e;
+    }
+  }
+  if (mismatches > 0 && maxErr > tol) {
+    throw new Error(`matVec mismatch: ${mismatches} elems differ, maxErr=${maxErr}`);
+  }
+  return { mismatches, maxErr };
+}
+
+const ITERS = 7;
+console.log(
+  `${"M".padStart(6)} × ${"K".padEnd(6)} | ${"elems".padStart(10)} | ${"wins?".padEnd(5)} | ${"simd med (ms)".padStart(13)} | ${"gpu  med (ms)".padStart(13)} | ${"speedup".padStart(8)}`,
+);
+console.log("-".repeat(92));
+
+for (const { M, K } of cases) {
+  const mat = new Float32Array(M * K);
+  const vec = new Float32Array(K);
+  fill(mat, vec);
+
+  // Warm both backends before sampling.
+  simd.matVec(mat, vec, M, K);
+  gpu.matVec(mat, vec, M, K);
+
+  const sStats = bench(() => simd.matVec(mat, vec, M, K), ITERS);
+  const gStats = bench(() => gpu.matVec(mat, vec, M, K), ITERS);
+
+  // Correctness — tolerate tiny rounding drift in case a backend
+  // re-associates the reduction. At K ≤ 2048, f32 accumulation drift
+  // from FMA vs plain ops stays under ~1e-3 on typical normalized inputs.
+  const sOut = simd.matVec(mat, vec, M, K);
+  const gOut = gpu.matVec(mat, vec, M, K);
+  crossCheck(sOut, gOut, 1e-3);
+
+  const wins = gpu.winsForSize("matVec", M * K, 4);
+  const speedup = sStats.med / gStats.med;
+  console.log(
+    `${String(M).padStart(6)} × ${String(K).padEnd(6)} | ${String(M * K).padStart(10)} | ${(wins ? "yes" : "no").padEnd(5)} | ${sStats.med.toFixed(2).padStart(13)} | ${gStats.med.toFixed(2).padStart(13)} | ${speedup.toFixed(2).padStart(7)}×`,
+  );
+}
