@@ -1,0 +1,137 @@
+// Microbenchmark: CUDA matmul (naive PTX) vs JS triple-loop.
+//
+//   bun run build:release bench/parabun-gpu-matmul/run.pjs
+//
+// gpu.matmul dispatches to a naive one-thread-per-output PTX kernel on CUDA
+// backends; size gates (m*n*k >= 16.7M) and residency-first (gpu.hold()
+// skips per-call HtoD) govern when the GPU path wins. Scenarios:
+//
+//   js         : reference naive triple loop
+//   gpu-cold   : gpu.matmul(a, b, M, K, N) — alloc + HtoD(a) + HtoD(b) + kernel + DtoH + free
+//   gpu-held   : ha = gpu.hold(a), hb = gpu.hold(b); loop: gpu.matmul(ha, hb, M, K, N)
+//
+// Baseline is js so "× speedup" reads naturally. Held scenario also reports
+// aggregate hold cost (HtoD for a + b once) so the break-even is visible.
+
+import gpu from "bun:gpu";
+
+const desc = gpu.describe();
+console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}\n`);
+
+const cases = [
+  { M: 128, K: 128, N: 128 }, // ~2M FMA   — below dispatch threshold, cold stays on JS
+  { M: 256, K: 256, N: 256 }, // ~16.7M    — right at dispatch threshold
+  { M: 512, K: 512, N: 512 }, // ~134M     — solid GPU territory
+  { M: 1024, K: 512, N: 1024 }, // ~537M
+];
+
+const CALLS_PER_SCENARIO = 10;
+
+function fill(arr) {
+  let s = 0xC0FFEE;
+  const r = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s / 0xFFFFFFFF) * 2 - 1;
+  };
+  for (let i = 0; i < arr.length; i++) arr[i] = r();
+}
+
+function jsMatmul(a, b, M, K, N) {
+  const out = new Float32Array(M * N);
+  for (let i = 0; i < M; i++) {
+    const aRow = i * K;
+    const oRow = i * N;
+    for (let p = 0; p < K; p++) {
+      const x = a[aRow + p];
+      if (x === 0) continue;
+      const bRow = p * N;
+      for (let j = 0; j < N; j++) out[oRow + j] += x * b[bRow + j];
+    }
+  }
+  return out;
+}
+
+function bench(fn, iters) {
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    const out = fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+    if (out && out[0] === Infinity) throw new Error("unreachable");
+  }
+  samples.sort((a, b) => a - b);
+  return {
+    min: samples[0],
+    med: samples[Math.floor(samples.length / 2)],
+  };
+}
+
+console.log(
+  `${"M×K×N".padStart(14)} | ${"FMA".padStart(6)} | ${"scenario".padEnd(10)} | ${"med (ms)".padStart(8)} | ${"vs js".padStart(7)} | ${"hold (ms)".padStart(9)}`,
+);
+console.log("-".repeat(78));
+
+for (const { M, K, N } of cases) {
+  const flops = (M * K * N / 1_000_000).toFixed(1) + "M";
+  const a = new Float32Array(M * K);
+  const b = new Float32Array(K * N);
+  fill(a);
+  fill(b);
+
+  // Warm up
+  jsMatmul(a, b, M, K, N);
+  gpu.matmul(a, b, M, K, N);
+
+  const jsStats = bench(() => jsMatmul(a, b, M, K, N), CALLS_PER_SCENARIO);
+  const gColdStats = bench(() => gpu.matmul(a, b, M, K, N), CALLS_PER_SCENARIO);
+
+  // Residency: hold cost for both inputs, then N warm matmul calls.
+  const tHoldStart = Bun.nanoseconds();
+  const ha = gpu.hold(a);
+  const hb = gpu.hold(b);
+  const holdMs = (Bun.nanoseconds() - tHoldStart) / 1e6;
+  gpu.matmul(ha, hb, M, K, N); // first warm call not timed
+  const gHeldStats = bench(() => gpu.matmul(ha, hb, M, K, N), CALLS_PER_SCENARIO);
+  gpu.release(ha);
+  gpu.release(hb);
+
+  const label = `${M}×${K}×${N}`;
+  const fmt = (name, stats, holdLabel) =>
+    `${label.padStart(14)} | ${flops.padStart(6)} | ${name.padEnd(10)} | ${stats.med.toFixed(2).padStart(8)} | ${(jsStats.med / stats.med).toFixed(2).padStart(6)}× | ${holdLabel.padStart(9)}`;
+
+  console.log(fmt("js", jsStats, "-"));
+  console.log(fmt("gpu-cold", gColdStats, "-"));
+  console.log(fmt("gpu-held", gHeldStats, holdMs.toFixed(2)));
+  console.log();
+}
+
+// Correctness check — all three paths must agree within fp32 FMA rounding.
+{
+  const { M, K, N } = cases[0];
+  const a = new Float32Array(M * K);
+  const b = new Float32Array(K * N);
+  fill(a);
+  fill(b);
+  const j = jsMatmul(a, b, M, K, N);
+  const gc = gpu.matmul(a, b, M, K, N);
+  const ha = gpu.hold(a);
+  const hb = gpu.hold(b);
+  const gh = gpu.matmul(ha, hb, M, K, N);
+  gpu.release(ha);
+  gpu.release(hb);
+  let d1 = 0,
+    d2 = 0,
+    max1 = 0,
+    max2 = 0;
+  for (let i = 0; i < j.length; i++) {
+    const e1 = Math.abs(j[i] - gc[i]);
+    const e2 = Math.abs(gc[i] - gh[i]);
+    if (e1 > 1e-4) d1++;
+    if (e2 > 0) d2++;
+    if (e1 > max1) max1 = e1;
+    if (e2 > max2) max2 = e2;
+  }
+  console.log(`correctness check @ ${M}×${K}×${N}:`);
+  console.log(`  js vs gpu-cold     : ${d1} mismatches (tol 1e-4), maxErr=${max1.toExponential(2)}`);
+  console.log(`  gpu-cold vs gpu-held: ${d2} mismatches (exact), maxErr=${max2.toExponential(2)}`);
+}

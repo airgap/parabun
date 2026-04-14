@@ -120,6 +120,13 @@ function tryLoadCuda(): boolean {
 //                      the Metal simdgroup-reduction kernel; kernel is correct
 //                      but dispatched past a hard "wins" threshold at Infinity
 //                      until we have a real RTX benchmark.
+//   matmulF32        — (M×K)·(K×N) → M×N, naive one-thread-per-output. 16×16
+//                      threadblock; each thread walks one row of A and one
+//                      column of B with an fma.rn.f32 accumulator. No shared
+//                      memory tiling yet — the residency win (hold(a)+hold(b))
+//                      is still worth it because the matmul is compute-bound
+//                      at the sizes where it's interesting, and naive fp32
+//                      on an RTX 4070 Ti clocks in around the TFLOP mark.
 //
 // PTX 7.0 is the floor — the non-sync shfl.bfly was removed in PTX 6.0, so
 // we use shfl.sync.bfly.b32 with a full 0xffffffff membermask (the warp is
@@ -258,6 +265,88 @@ MVREDUCE:
 MVDONE:
     ret;
 }
+
+.visible .entry matmulF32(
+    .param .u64 aPtr,
+    .param .u64 bPtr,
+    .param .u64 cPtr,
+    .param .u32 m,
+    .param .u32 k,
+    .param .u32 n
+)
+{
+    .reg .pred  %p<3>;
+    .reg .b32   %r<14>;
+    .reg .f32   %f<4>;
+    .reg .b64   %rd<18>;
+
+    ld.param.u64  %rd1, [aPtr];
+    ld.param.u64  %rd2, [bPtr];
+    ld.param.u64  %rd3, [cPtr];
+    ld.param.u32  %r1,  [m];
+    ld.param.u32  %r2,  [k];
+    ld.param.u32  %r3,  [n];
+
+    // row = ctaid.y * ntid.y + tid.y
+    mov.u32       %r4, %ctaid.y;
+    mov.u32       %r5, %ntid.y;
+    mov.u32       %r6, %tid.y;
+    mad.lo.s32    %r7, %r4, %r5, %r6;
+
+    // col = ctaid.x * ntid.x + tid.x
+    mov.u32       %r8, %ctaid.x;
+    mov.u32       %r9, %ntid.x;
+    mov.u32       %r10, %tid.x;
+    mad.lo.s32    %r11, %r8, %r9, %r10;
+
+    setp.ge.u32   %p1, %r7, %r1;
+    @%p1 bra      MMDONE;
+    setp.ge.u32   %p2, %r11, %r3;
+    @%p2 bra      MMDONE;
+
+    // aAddr = A + row*k*4 (walks by +4 per iter)
+    mul.wide.u32  %rd4, %r7, %r2;
+    shl.b64       %rd4, %rd4, 2;
+    cvta.to.global.u64 %rd5, %rd1;
+    add.s64       %rd6, %rd5, %rd4;
+
+    // bAddr = B + col*4 (walks by +n*4 per iter)
+    mul.wide.u32  %rd7, %r11, 4;
+    cvta.to.global.u64 %rd8, %rd2;
+    add.s64       %rd9, %rd8, %rd7;
+
+    // bStride = n*4 bytes
+    mul.wide.u32  %rd10, %r3, 4;
+
+    mov.f32       %f1, 0f00000000;
+    mov.u32       %r12, 0;
+
+MMLOOP:
+    setp.ge.u32   %p1, %r12, %r2;
+    @%p1 bra      MMSTORE;
+
+    ld.global.f32 %f2, [%rd6];
+    ld.global.f32 %f3, [%rd9];
+    fma.rn.f32    %f1, %f2, %f3, %f1;
+
+    add.s64       %rd6, %rd6, 4;
+    add.s64       %rd9, %rd9, %rd10;
+    add.u32       %r12, %r12, 1;
+    bra           MMLOOP;
+
+MMSTORE:
+    // cAddr = C + (row*n + col)*4
+    mul.wide.u32  %rd11, %r7, %r3;
+    cvt.u64.u32   %rd12, %r11;
+    add.s64       %rd13, %rd11, %rd12;
+    shl.b64       %rd14, %rd13, 2;
+    cvta.to.global.u64 %rd15, %rd3;
+    add.s64       %rd16, %rd15, %rd14;
+    st.global.f32 [%rd16], %f1;
+
+MMDONE:
+    ret;
+}
 `;
 
 // ─── State ────────────────────────────────────────────────────────────────
@@ -299,6 +388,7 @@ let ctx: bigint | null = null;
 let mod: bigint | null = null;
 let fnAffineF32: bigint | null = null;
 let fnMatVecF32: bigint | null = null;
+let fnMatmulF32: bigint | null = null;
 let deviceName: string = "";
 
 function probe(): boolean {
@@ -358,6 +448,19 @@ function probe(): boolean {
     return false;
   }
   fnMatVecF32 = matVecBuf[0];
+
+  const matmulName = new TextEncoder().encode("matmulF32\0");
+  const matmulBuf = new BigUint64Array(1);
+  if (s.cuModuleGetFunction(ptr(matmulBuf), mod, ptr(matmulName)) !== 0) {
+    s.cuModuleUnload(mod);
+    s.cuCtxDestroy_v2(ctx);
+    fnAffineF32 = null;
+    fnMatVecF32 = null;
+    mod = null;
+    ctx = null;
+    return false;
+  }
+  fnMatmulF32 = matmulBuf[0];
 
   probeResult = true;
   return true;
@@ -519,6 +622,107 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
   }
 }
 
+// ─── Kernel launch: matmulF32 ─────────────────────────────────────────────
+//
+// (M×K)·(K×N) → M×N. Three device buffers (A, B, C). Grid is 2D: one thread
+// per output cell, 16×16 threadblock. Either input may arrive held (Tier 4
+// residency) — held inputs skip their cuMemAlloc+HtoD+free. C is always
+// freshly allocated, HtoD'd from nothing, and DtoH'd back to the host output.
+
+function launchMatmulF32(
+  a: Float32Array | GpuHandle,
+  b: Float32Array | GpuHandle,
+  m: number,
+  k: number,
+  n: number,
+): Float32Array {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aBytes = BigInt(m * k * 4);
+  const bBytes = BigInt(k * n * 4);
+  const cBytes = BigInt(m * n * 4);
+
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(a)) {
+    if (a.released) throw new Error("bun:gpu: matmul called on released handle");
+    if (a.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = a.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(A) failed");
+    dA = dABuf[0];
+    aOwned = true;
+  }
+
+  let dB: bigint;
+  let bOwned: boolean;
+  if (isGpuHandle(b)) {
+    if (b.released) throw new Error("bun:gpu: matmul called on released handle");
+    if (b.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dB = b.buffer;
+    bOwned = false;
+  } else {
+    const dBBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dBBuf), bBytes) !== 0) {
+      if (aOwned) s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemAlloc(B) failed");
+    }
+    dB = dBBuf[0];
+    bOwned = true;
+  }
+
+  let dC: bigint = 0n;
+  try {
+    const dCBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dCBuf), cBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(C) failed");
+    dC = dCBuf[0];
+
+    if (aOwned) {
+      if (s.cuMemcpyHtoD_v2(dA, ptr(a as Float32Array), aBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(A) failed");
+      }
+    }
+    if (bOwned) {
+      if (s.cuMemcpyHtoD_v2(dB, ptr(b as Float32Array), bBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(B) failed");
+      }
+    }
+
+    const pABuf = new BigUint64Array([dA]);
+    const pBBuf = new BigUint64Array([dB]);
+    const pCBuf = new BigUint64Array([dC]);
+    const pM = new Uint32Array([m]);
+    const pK = new Uint32Array([k]);
+    const pN = new Uint32Array([n]);
+    const paramPtrs = new BigUint64Array([
+      BigInt(ptr(pABuf)),
+      BigInt(ptr(pBBuf)),
+      BigInt(ptr(pCBuf)),
+      BigInt(ptr(pM)),
+      BigInt(ptr(pK)),
+      BigInt(ptr(pN)),
+    ]);
+
+    // 16×16 threadblock; grid covers ceil(n/16) × ceil(m/16).
+    const TILE = 16;
+    const gridX = Math.floor((n + TILE - 1) / TILE);
+    const gridY = Math.floor((m + TILE - 1) / TILE);
+    const r = s.cuLaunchKernel(fnMatmulF32!, gridX, gridY, 1, TILE, TILE, 1, 0, 0n, ptr(paramPtrs), null);
+    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+
+    const out = new Float32Array(m * n);
+    if (s.cuMemcpyDtoH_v2(ptr(out), dC, cBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(C) failed");
+    return out;
+  } finally {
+    if (aOwned && dA !== 0n) s.cuMemFree_v2(dA);
+    if (bOwned && dB !== 0n) s.cuMemFree_v2(dB);
+    if (dC !== 0n) s.cuMemFree_v2(dC);
+  }
+}
+
 // ─── Size threshold ───────────────────────────────────────────────────────
 //
 // GPU dispatch has a fixed round-trip cost (~2 cuMemAlloc + HtoD + DtoH +
@@ -546,11 +750,20 @@ const MIN_SIMDMAP_ELEMS = 1 << 18; // 256k f32 = 1 MB
 const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
 const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
 
+// matmul dispatch threshold: at M*N*K below this, the PTX naive kernel
+// doesn't win against bun:simd's tiled JS loop because per-call HtoD+sync
+// dominates. Held inputs bypass this (their HtoD already happened).
+// `wins` stays at Infinity for now — the held path is the winner; cold
+// dispatch is parked. Revisit once we have a 4070 Ti matmul benchmark.
+const MIN_MATMUL_DISPATCH_FLOPS = 1 << 24; // 16M multiply-adds (e.g. 256^3)
+const MIN_MATMUL_WINS_FLOPS = Number.POSITIVE_INFINITY;
+
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
   if (op === "simdMap") return elemBytes === 4 && n >= MIN_SIMDMAP_ELEMS;
   if (op === "matVec") return elemBytes === 4 && n >= MIN_MATVEC_WINS_ELEMS;
+  if (op === "matmul") return elemBytes === 4 && n >= MIN_MATMUL_WINS_FLOPS;
   return false;
 }
 
@@ -582,11 +795,35 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
 }
 
 function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray {
-  const av = unwrapHandle(a);
-  const bv = unwrapHandle(b);
+  const aIsHandle = isGpuHandle(a);
+  const bIsHandle = isGpuHandle(b);
+  if (aIsHandle && a.released) throw new Error("bun:gpu: matmul called on released handle");
+  if (bIsHandle && b.released) throw new Error("bun:gpu: matmul called on released handle");
+  const av = aIsHandle ? a.view : (a as FArray);
+  const bv = bIsHandle ? b.view : (b as FArray);
   if (av.constructor !== bv.constructor) {
     throw new TypeError(
       `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
+    );
+  }
+  // Dispatch the PTX matmul when both inputs are f32 and either (a) a residency
+  // handle already staged its HtoD, or (b) the work is big enough to amortize
+  // a cold dispatch. Otherwise fall back to the simd JS triple loop.
+  const residentA = aIsHandle && a.type === "f32" && a.buffer !== 0n;
+  const residentB = bIsHandle && b.type === "f32" && b.buffer !== 0n;
+  const anyResident = residentA || residentB;
+  if (
+    av instanceof Float32Array &&
+    bv instanceof Float32Array &&
+    probe() &&
+    (anyResident || m * n * k >= MIN_MATMUL_DISPATCH_FLOPS)
+  ) {
+    return launchMatmulF32(
+      aIsHandle ? (a as GpuHandle) : (av as Float32Array),
+      bIsHandle ? (b as GpuHandle) : (bv as Float32Array),
+      m,
+      k,
+      n,
     );
   }
   const out = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
@@ -624,6 +861,7 @@ function dispose(): void {
   }
   fnAffineF32 = null;
   fnMatVecF32 = null;
+  fnMatmulF32 = null;
   probed = false;
   probeResult = false;
 }

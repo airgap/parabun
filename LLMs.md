@@ -361,11 +361,16 @@ Backend implementations:
   `gpu.alloc`'d inputs gives true zero-copy dispatch; non-aligned
   inputs fall back to `newBufferWithBytes:` which still works but pays
   one memcpy per call.
-- **CUDA** (`src/js/bun/gpu/cuda.ts`) — PTX kernels (`simdMapAffineF32`,
-  `matVecF32` — warp-reduced via `shfl.sync.bfly.b32`) loaded via the
-  CUDA driver API. `dot`/`matmul` still forward to `bun:simd`; `matVec`
-  dispatches to the PTX kernel past `MIN_MATVEC_DISPATCH_ELEMS` but
-  `winsForSize` stays parked at Infinity pending RTX benchmarks.
+- **CUDA** (`src/js/bun/gpu/cuda.ts`) — PTX kernels loaded via the
+  CUDA driver API: `simdMapAffineF32`, `matVecF32` (warp-reduced via
+  `shfl.sync.bfly.b32`), and `matmulF32` (naive one-thread-per-output,
+  16×16 threadblock). `matVec` and `matmul` dispatch to their PTX
+  kernels past fixed size thresholds (or unconditionally if a caller
+  held an input via `gpu.hold`); `dot` still forwards to `bun:simd`.
+  `winsForSize` stays parked at Infinity for both — the held path is
+  the real win and callers opt in explicitly (see
+  `bench/parabun-gpu-matmul` — up to ~99× JS on held 512³ matmul on an
+  RTX 4070 Ti, bit-exact).
 - **CPU** (`src/js/bun/gpu/cpu.ts`) — every op forwards to `bun:simd`.
 
 Pipeline integration: when a fused affine chain on a `Float32Array` is
