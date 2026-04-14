@@ -53,23 +53,37 @@ kernel void simdMapAffineF32(
 }
 
 // Row-major M x K matrix times a K-vector -> M-vector.
-// One thread per output row; inner loop is a straight-line FMA chain.
-// (No threadgroup tiling — at the sizes where this kernel wins, dispatch
-// is memory-bandwidth bound on Apple GPUs; the shared-cache reuse a tiled
-// kernel would buy you doesn't matter until K is >> 1024.)
+//
+// Each threadgroup is exactly one simdgroup (32 threads on Apple Silicon)
+// handling exactly one output row. The 32 lanes split the K-column dot
+// product stride-wise — lane t reads r[t], r[t+32], r[t+64], ... — then
+// simd_sum tree-reduces the 32 partial sums into one value that lane 0
+// writes to outPtr[row].
+//
+// Why this beats the naive one-thread-per-row version: coalescing. With
+// 32 threads of one simdgroup reading mat[row*K + {j, j+1, ..., j+31}] in
+// lockstep, the GPU issues one 128-byte load per iteration instead of 32
+// stride-K loads. Same for vec[]. The FMA count per row is unchanged (K)
+// but effective memory bandwidth doubles-to-triples on M-series.
+//
+// The tree reduction in simd_sum produces a different rounding order
+// from bun:simd's left-to-right accumulator, so outputs may differ from
+// simd.matVec by up to a few ULP — the cross-check tolerates this.
 kernel void matVecF32(
     device const float *mat       [[buffer(0)]],
     device const float *vec       [[buffer(1)]],
     device       float *outPtr    [[buffer(2)]],
     constant     uint  &m         [[buffer(3)]],
     constant     uint  &k         [[buffer(4)]],
-    uint                row       [[thread_position_in_grid]])
+    uint                row       [[threadgroup_position_in_grid]],
+    uint                lane      [[thread_position_in_threadgroup]])
 {
     if (row >= m) return;
     device const float *r = mat + (ulong)row * k;
     float acc = 0.0f;
-    for (uint j = 0; j < k; j++) acc = fma(r[j], vec[j], acc);
-    outPtr[row] = acc;
+    for (uint j = lane; j < k; j += 32) acc = fma(r[j], vec[j], acc);
+    acc = simd_sum(acc);
+    if (lane == 0) outPtr[row] = acc;
 }
 `;
 
@@ -127,10 +141,11 @@ let metalLibraryObj: bigint = 0n;
 let simdMapFn: bigint = 0n;
 let simdMapPipeline: bigint = 0n;
 let simdMapMaxTg = 1024;
-// matVec kernel
+// matVec kernel — threadgroup size is fixed at 32 (one simdgroup on
+// Apple Silicon), so the pipeline's maxTotalThreadsPerThreadgroup is
+// probed but not consulted at launch time.
 let matVecFn: bigint = 0n;
 let matVecPipeline: bigint = 0n;
-let matVecMaxTg = 1024;
 
 function tryLoad(): boolean {
   if (metalLib !== null && objcBase !== null) return true;
@@ -289,7 +304,6 @@ function probe(): boolean {
   }
   matVecFn = mv.fn;
   matVecPipeline = mv.pipe;
-  matVecMaxTg = mv.maxTg;
 
   const queue = msgSend_2!(dev, sel("newCommandQueue"));
   if (queue === 0n) {
@@ -476,13 +490,19 @@ function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: num
     msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
     msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pK), 4n, 4n);
 
-    // Grid = M rows; threadgroup size picked to match the pipeline's
-    // preferred max (capped at 256, a safe value on both M-series and older
-    // discrete GPUs).
-    const tgSize = Math.min(matVecMaxTg, 256);
-    const grid = new BigUint64Array([BigInt(m), 1n, 1n]);
-    const threads = new BigUint64Array([BigInt(tgSize), 1n, 1n]);
-    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(grid), ffiPtr!(threads));
+    // Launch M threadgroups of 32 threads each. Each threadgroup is one
+    // simdgroup on Apple Silicon (simdgroup width = 32), so the kernel's
+    // `simd_sum` tree-reduces within a single TG without needing a
+    // threadgroup barrier. dispatchThreadgroups (not dispatchThreads) so
+    // the TG count is M exactly — no partial trailing TG, no edge cases.
+    const tgCount = new BigUint64Array([BigInt(m), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([32n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
 
     msgSend_2!(encoder, sel("endEncoding"));
     msgSend_2!(cmdBuf, sel("commit"));

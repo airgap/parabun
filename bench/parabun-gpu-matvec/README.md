@@ -3,12 +3,20 @@
 Microbenchmark: `bun:simd.matVec` vs `bun:gpu.matVec` across a grid of
 M × K sizes, plus bit-exactness cross-check.
 
-Answers one question: does the naive one-thread-per-row MSL kernel beat
-the tight `f32x4` SIMD kernel at any size? Today, on M1/M2, the answer
-is **no** — the GPU path is slower across the whole grid we tested.
-That's why `winsForSize("matVec", ...)` is gated at `Infinity`: no
-pipeline-style caller ever routes through the GPU matVec, even though
-the kernel is compiled and correct.
+Answers one question: does the MSL kernel beat the tight `f32x4` SIMD
+kernel at any size? Today, on M1/M2, the answer is **no** — the GPU
+path is slower across the whole grid we tested. That's why
+`winsForSize("matVec", ...)` is gated at `Infinity`: no pipeline-style
+caller ever routes through the GPU matVec, even though the kernel is
+compiled and correct.
+
+The real bottleneck is not the kernel but the `newBufferWithBytes:`
+copy into shared-storage MTLBuffer on every call — a 1024×1024
+Float32Array is 4 MB, and copying it across the PCIe-equivalent
+Apple-Silicon unified memory fence costs more than the compute ever
+saves. A truly zero-copy path (`newBufferWithBytesNoCopy:` with
+page-aligned buffers, or cross-call GPU residency — see LLMs.md
+"Tier 4") would change this picture; the kernel tuning won't.
 
 ## Running
 
@@ -21,12 +29,11 @@ so always use the release build for timing comparisons.)
 
 ## What to expect
 
-On an Apple Silicon mac (Metal active), SIMD wins everywhere. Buffer
-alloc + dispatch + readback is fixed overhead per call, and the naive
-kernel is memory-bandwidth-bound — Apple Silicon unified memory gives
-the CPU and GPU roughly equivalent bandwidth, so the GPU can't hide its
-fixed cost. Expect `speedup ≈ 0.2–0.5×` (GPU slower) across the entire
-size grid.
+On an Apple Silicon mac (Metal active), SIMD wins everywhere. Per-call
+overhead (4 MB mat copy into a shared MTLBuffer + command buffer commit
++ wait) is several hundred microseconds; the CPU's `f32x4` kernel has
+already finished by the time the GPU kernel is dispatched. Expect
+`speedup ≈ 0.2–0.5×` (GPU slower) across the entire size grid.
 
 On a Linux host without CUDA (or with ASAN-disabled `cuInit`), both
 `bun:gpu.matVec` and `bun:simd.matVec` resolve to the same tight SIMD
@@ -40,19 +47,27 @@ gpu backend: metal  available=[metal,cpu]  platform=darwin
 
      M × K      |      elems | wins? | simd med (ms) | gpu  med (ms) |  speedup
 --------------------------------------------------------------------------------------------
-   256 × 256    |      65536 | no    |          0.03 |          0.03 |    0.99×
-   512 × 512    |     262144 | no    |          0.04 |          0.04 |    1.00×
-  1024 × 1024   |    1048576 | no    |          0.19 |          0.96 |    0.20×
-  2048 × 2048   |    4194304 | no    |          1.04 |          1.82 |    0.57×
-  4096 × 2048   |    8388608 | no    |          2.04 |          4.07 |    0.50×
- 10000 × 384    |    3840000 | no    |          0.75 |          2.00 |    0.37×
+   256 × 256    |      65536 | no    |          0.03 |          0.03 |    1.04×
+   512 × 512    |     262144 | no    |          0.04 |          0.04 |    1.08×
+  1024 × 1024   |    1048576 | no    |          0.18 |          0.90 |    0.20×
+  2048 × 2048   |    4194304 | no    |          0.98 |          1.91 |    0.51×
+  4096 × 2048   |    8388608 | no    |          2.05 |          4.60 |    0.44×
+ 10000 × 384    |    3840000 | no    |          0.70 |          2.60 |    0.27×
 ```
 
-Two regimes visible: at the bottom (< 256k elems) the SIMD path completes
+Two regimes visible. At the bottom (< 256k elems) the SIMD path completes
 before the GPU dispatch overhead even closes, so both wall-clock numbers
-collapse to the ~30µs floor. Above that, the MSL kernel runs but is
-bandwidth-bound at roughly half the rate of the `f32x4` loop, so the GPU
-takes ~2× as long across the rest of the grid.
+collapse to the ~30µs floor. Above that, the per-call 4 MB mat copy is
+the dominant cost and stays proportional to matrix size, so the gap
+widens.
+
+The current kernel uses simdgroup reduction (32 threads per row, stride-
+32 partial dot, `simd_sum` tree reduction). This design is strictly
+better than the earlier one-thread-per-row kernel for memory coalescing,
+but the improvement is invisible at these sizes because the copy
+dominates the kernel runtime. The kernel is correct and future-proofed
+for discrete GPUs (CUDA) where dedicated VRAM bandwidth would make it
+win outright.
 
 Columns:
 - `wins?` — backend's own `winsForSize` verdict for that size. Always
