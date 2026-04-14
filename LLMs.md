@@ -423,9 +423,11 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   explicit opt-in (`gpu.hold`/`release` on Float32Array matrices) is live
   on Metal and accepted by every op (`dot`, `matVec`, `matmul`,
   `simdMap`). Still pending: (a) CUDA residency (cuMemAlloc +
-  cuMemcpyHtoD once, then reuse device pointer — gated on RTX benchmark
-  data); (b) implicit residency via escape analysis or a
-  `GpuFloat32Array` wrapper so common code doesn't have to call `hold`
-  manually. For discrete GPUs implicit residency is make-or-break; on
-  Apple Silicon the explicit API already captures most of the win thanks
-  to unified memory.
+  cuMemcpyHtoD once, then reuse device pointer — benchmarked on an RTX
+  4070 Ti and confirmed to be the bottleneck: the non-resident path
+  loses 3–10× to bun:simd at 1M–8M elems because per-call HtoD +
+  cuCtxSynchronize dominate, see bench/parabun-gpu-matvec); (b) implicit
+  residency via escape analysis or a `GpuFloat32Array` wrapper so common
+  code doesn't have to call `hold` manually. For discrete GPUs
+  residency is make-or-break; on Apple Silicon the explicit API already
+  captures most of the win thanks to unified memory.

@@ -19,9 +19,12 @@
 //   - simdMap-affine (y = k1*x + k0) on Float32Array — proven end-to-end
 //     against cuCtxSynchronize on RTX hosts.
 //   - matVec f32 — warp-reduced MSL-equivalent kernel (one warp per row,
-//     stride-32 partial dot, shfl.bfly reduction). Correct but currently
-//     dispatched past a hard "wins" threshold at Infinity, matching
-//     metal.ts, until we have benchmark data from a real RTX host.
+//     stride-32 partial dot, shfl.bfly reduction). Correct but the "wins"
+//     threshold is parked at Infinity because the per-call
+//     cuMemAlloc + cuMemcpyHtoD + cuCtxSynchronize dominates compute
+//     at every size we measure on an RTX 4070 Ti (~0.09–0.4× speedup —
+//     see bench/parabun-gpu-matvec). Residency (alloc once + reuse)
+//     is the real unlock here; kernel tuning won't move the needle.
 // dot / matmul still fall back to bun:simd.
 
 const simd = require("../simd.ts");
@@ -516,10 +519,12 @@ const MIN_SIMDMAP_ELEMS = 1 << 18; // 256k f32 = 1 MB
 //     returns true — pipeline-style callers use this to decide whether to
 //     route the op to bun:gpu at all.
 //
-// The warp-reduced kernel is correct but we don't have RTX benchmark
-// data yet, so the "wins" side is parked at Infinity (mirrors Metal —
-// where the per-call HtoD copy dominates, not the kernel). When we have
-// numbers that show it beats bun:simd, collapse these into one constant.
+// Benchmarked on an RTX 4070 Ti + PCIe 4.0 ×16: the non-resident path
+// loses 3–10× to bun:simd at every size we care about because the
+// cuMemcpyHtoD + cuCtxSynchronize per call dominates the actual kernel
+// (see bench/parabun-gpu-matvec). `wins` stays at Infinity until the
+// residency path (alloc once, reuse across calls) lands. When it does,
+// collapse these into one constant.
 const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
 const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
 
