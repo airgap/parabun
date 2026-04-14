@@ -1,4 +1,4 @@
-import { mulScalar, addScalar, add, mul, sum, dot, simdMap } from "bun:simd";
+import { mulScalar, addScalar, add, mul, sum, dot, simdMap, alloc } from "bun:simd";
 
 // Fair-ish microbench:
 //   - warm up each variant (let JSC tier up to FTL)
@@ -38,11 +38,13 @@ function header(sizeLabel) {
   console.log(`${"op".padEnd(26)}\t.map/.reduce\ttight loop\tbun:simd\t(vs naive: tight, simd)`);
 }
 
-function runSize(N, Ctor, label) {
-  header(`${label} — N = ${N.toLocaleString()}`);
+function runSize(N, Ctor, label, { zeroCopy = false } = {}) {
+  header(`${label} — N = ${N.toLocaleString()}${zeroCopy ? " (zero-copy alloc'd inputs)" : ""}`);
 
-  const a = new Ctor(N);
-  const b = new Ctor(N);
+  const typeTag = Ctor === Float64Array ? "f64" : "f32";
+  const a = zeroCopy ? alloc(N, typeTag) : new Ctor(N);
+  const b = zeroCopy ? alloc(N, typeTag) : new Ctor(N);
+  const outScratch = zeroCopy ? alloc(N, typeTag) : null;
   for (let i = 0; i < N; i++) { a[i] = Math.sin(i); b[i] = Math.cos(i); }
 
   // --- mulScalar: y = a * 3 ---
@@ -52,7 +54,9 @@ function runSize(N, Ctor, label) {
       const out = new Ctor(N);
       for (let i = 0; i < N; i++) out[i] = a[i] * 3;
     }),
-    bench("simd", () => mulScalar(a, 3)),
+    bench("simd", () => zeroCopy
+      ? mulScalar(a, 3, { dst: outScratch })
+      : mulScalar(a, 3)),
   ]);
 
   // --- elementwise add ---
@@ -62,7 +66,9 @@ function runSize(N, Ctor, label) {
       const out = new Ctor(N);
       for (let i = 0; i < N; i++) out[i] = a[i] + b[i];
     }),
-    bench("simd", () => add(a, b)),
+    bench("simd", () => zeroCopy
+      ? add(a, b, { dst: outScratch })
+      : add(a, b)),
   ]);
 
   // --- sum ---
@@ -111,3 +117,11 @@ console.log("\n######## Float64Array (f64x2 kernels) ########");
 runSize(1_024,     Float64Array, "Float64Array");
 runSize(100_000,   Float64Array, "Float64Array");
 runSize(1_000_000, Float64Array, "Float64Array");
+
+// Zero-copy pass: inputs + output pre-allocated from WASM memory via alloc().
+// At N = 1M the default path takes the JS tight-loop fallback (over 4 MiB
+// copy-in threshold), so the zero-copy rows are the ones that stay
+// vectorized at this size.
+console.log("\n######## Zero-copy (alloc'd inputs/output) ########");
+runSize(1_000_000, Float32Array, "Float32Array", { zeroCopy: true });
+runSize(1_000_000, Float64Array, "Float64Array", { zeroCopy: true });
