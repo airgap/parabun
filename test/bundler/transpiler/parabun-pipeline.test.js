@@ -266,6 +266,42 @@ describe("bun:pipeline", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("fusion: large f32 affine chain matches bun:simd (GPU tier)", async () => {
+    // Covers the pipeline → bun:gpu promotion path. When the fused chain
+    // collapses to `x*K + C` over a Float32Array big enough for the GPU
+    // to win (>= 1<<18 elems), `realizeChain` dispatches to `gpu.simdMap`
+    // instead of stacking `simd.mulScalar` + `simd.addScalar`. On mac
+    // the active backend is Metal (MSL kernel); on a CUDA-capable linux
+    // box it's CUDA PTX; on hosts without either, gpu.simdMap transparently
+    // falls back to simd.simdMap — the result must match bit-for-bit in
+    // every path. We assert on a handful of sampled indices + a rolling
+    // xor-sum so a single wrong element would flip the sum.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-pipe-fuse-gpu-tier",
+      `
+        import { map, toFloat32Array } from "bun:pipeline";
+        import simd from "bun:simd";
+        pure function k1(x) { return x * 3 + 1; }
+        pure function k2(x) { return x * 0.5 - 2; }
+        const n = 1 << 20;
+        const arr = new Float32Array(n);
+        for (let i = 0; i < n; i++) arr[i] = i * 0.25;
+        const out = await (arr |> map(k1) |> map(k2) |> toFloat32Array);
+        // Reference: same chain through bun:simd directly.
+        const ref = simd.simdMap(x => 0.5 * (x * 3 + 1) - 2, arr);
+        let mismatches = 0;
+        for (let i = 0; i < n; i++) if (out[i] !== ref[i]) mismatches++;
+        console.log(out.length, mismatches, out[0], out[1000], out[n - 1]);
+      `,
+    );
+    // k2(k1(x)) = 0.5*(3x+1) - 2 = 1.5x - 1.5
+    // x=0     → -1.5
+    // x=250   → 373.5 (i=1000, x=250)
+    // x=262143.75 → 393214.125 (i=n-1)
+    expect(stdout).toBe("1048576 0 -1.5 373.5 393214.125");
+    expect(exitCode).toBe(0);
+  });
+
   it("fusion: empty chain on typed array is identity", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-empty",

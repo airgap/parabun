@@ -22,6 +22,22 @@
 
 const simd = require("./simd.ts");
 
+// bun:gpu is loaded lazily the first time we consider promoting a chain to
+// the GPU tier. Keeping it lazy means a pipeline that never grows a big
+// Float32Array never pays for backend probing / MSL compilation.
+let gpuMod: any = null;
+let gpuLookedUp = false;
+function getGpu(): any {
+  if (gpuLookedUp) return gpuMod;
+  gpuLookedUp = true;
+  try {
+    gpuMod = require("./gpu.ts");
+  } catch {
+    gpuMod = null;
+  }
+  return gpuMod;
+}
+
 type FArray = Float32Array | Float64Array;
 type Source<T> = Iterable<T> | AsyncIterable<T>;
 type Stream<T> = AsyncGenerator<T, void, unknown>;
@@ -91,6 +107,22 @@ function composeAffineChain(ops: FusedMap[]): { K: number; C: number } | null {
   return { K, C };
 }
 
+// Tier 3 — GPU dispatch for f32 affine chains. When the fused chain
+// collapses to a single `x*K + C` and the backend beats bun:simd at this
+// size, route the single affine pass to the GPU (one kernel launch vs
+// two SIMD passes: mulScalar + addScalar). Non-affine chains and f64
+// stay on bun:simd — neither Metal nor CUDA ship a kernel for them yet.
+function affineGpuF32(source: Float32Array, K: number, C: number): Float32Array | null {
+  const gpu = getGpu();
+  if (gpu === null) return null;
+  try {
+    if (!gpu.winsForSize("simdMap", source.length, 4)) return null;
+    return gpu.simdMap((x: number) => K * x + C, source);
+  } catch {
+    return null;
+  }
+}
+
 function realizeChain(chain: FusedChain): FArray {
   const { source, ops } = chain;
   if (ops.length === 0) return source;
@@ -98,6 +130,10 @@ function realizeChain(chain: FusedChain): FArray {
   if (aff !== null) {
     const { K, C } = aff;
     if (K === 1 && C === 0) return source;
+    if (source instanceof Float32Array) {
+      const gpuOut = affineGpuF32(source, K, C);
+      if (gpuOut !== null) return gpuOut;
+    }
     if (C === 0) return simd.mulScalar(source, K);
     if (K === 1) return simd.addScalar(source, C);
     const scaled = simd.mulScalar(source, K);
