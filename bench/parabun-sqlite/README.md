@@ -27,14 +27,14 @@ the same across all three variants and dominates total runtime.
 
 | variant                         | analyze_ms (min/med/max) | total_ms | vs A  |
 |---------------------------------|-------------------------:|---------:|------:|
-| A  (.js, idiomatic Bun)         |   18.6 /  19.2 /  21.4   |  ~310    | 1.00× |
-| B  (.pjs, same code as A)       |   18.4 /  19.0 /  20.7   |  ~309    | 1.01× |
-| **C  (parabun-optimized)**      |    6.8 /   7.1 /   8.0   |  ~299    | 2.7×  |
+| A  (.js, idiomatic Bun)         |   14.5 /  16.0 /  16.4   |  ~250    | 1.00× |
+| B  (.pjs, same code as A)       |   14.5 /  15.2 /  15.9   |  ~253    | 1.05× |
+| **C  (parabun-optimized)**      |    5.8 /   5.9 /   6.6   |  ~239    | 2.7×  |
 
 - Variant B confirms `.pjs` parsing is free: the variance between A and
   B is inside run-to-run noise.
 - Variant C is **2.7× faster on the analytical step**. End-to-end the
-  win is ~10% because the SQLite extraction (~290 ms) is the same
+  win is ~5% because the SQLite extraction (~235 ms) is the same
   bottleneck for all three — Parabun doesn't speed up SQLite I/O, only
   the work downstream of it.
 
