@@ -46,6 +46,17 @@ function isGpuHandle(x: unknown): x is GpuHandle {
   return typeof x === "object" && x !== null && (x as any).__bunGpuHandle === true;
 }
 
+// Unwrap a handle or pass-through a typed array. Throws on released
+// handles so use-after-release is a consistent error across every op,
+// not just matVec.
+function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
+  if (isGpuHandle(x)) {
+    if (x.released) throw new Error("bun:gpu: op called on released handle");
+    return x.view as T;
+  }
+  return x;
+}
+
 const LIBOBJC = "/usr/lib/libobjc.A.dylib";
 const METAL_FRAMEWORK = "/System/Library/Frameworks/Metal.framework/Metal";
 
@@ -740,8 +751,8 @@ function winsForSize(op: string, n: number, elemBytes: number): boolean {
 
 // ─── Backend methods ───────────────────────────────────────────────────────
 
-function dot(a: FArray, b: FArray): number {
-  return simd.dot(a, b);
+function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
+  return simd.dot(unwrapHandle(a), unwrapHandle(b));
 }
 
 function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
@@ -763,33 +774,36 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
   return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
 
-function matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray {
-  if (a.constructor !== b.constructor) {
+function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray {
+  const av = unwrapHandle(a);
+  const bv = unwrapHandle(b);
+  if (av.constructor !== bv.constructor) {
     throw new TypeError(
-      `a and b must both be Float32Array or both be Float64Array; got ${a.constructor.name} and ${b.constructor.name}`,
+      `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
     );
   }
-  const out = (a instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+  const out = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
   for (let i = 0; i < m; i++) {
     const aRow = i * k;
     const oRow = i * n;
     for (let p = 0; p < k; p++) {
-      const av = a[aRow + p];
-      if (av === 0) continue;
+      const x = av[aRow + p];
+      if (x === 0) continue;
       const bRow = p * n;
-      for (let j = 0; j < n; j++) out[oRow + j] += av * b[bRow + j];
+      for (let j = 0; j < n; j++) out[oRow + j] += x * bv[bRow + j];
     }
   }
   return out;
 }
 
-function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
+function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   if (typeof fn !== "function") throw new TypeError("fn must be a function");
-  if (a instanceof Float32Array && fn.length <= 1 && probe() && a.length >= MIN_SIMDMAP_ELEMS) {
+  const view = unwrapHandle(a);
+  if (view instanceof Float32Array && fn.length <= 1 && probe() && view.length >= MIN_SIMDMAP_ELEMS) {
     const aff = tryAffineKernel(fn as (x: number) => number);
-    if (aff) return launchAffineF32(a, aff.k1, aff.k0);
+    if (aff) return launchAffineF32(view, aff.k1, aff.k0);
   }
-  return simd.simdMap(fn, a as any);
+  return simd.simdMap(fn, view as any);
 }
 
 function dispose(): void {

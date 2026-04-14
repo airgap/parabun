@@ -70,15 +70,23 @@ interface Backend {
   readonly name: BackendName;
   probe(): boolean;
   winsForSize(op: OpKind, n: number, elemBytes: number): boolean;
-  dot(a: FArray, b: FArray): number;
+  dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number;
   matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
-  matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray;
-  simdMap(fn: (x: number, i: number) => number, a: FArray): FArray;
+  matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray;
+  simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
   alloc(length: number, type: "f32" | "f64"): FArray;
   isAligned(arr: FArray): boolean;
   hold(arr: FArray): GpuHandle;
   releaseHandle(handle: GpuHandle): void;
   dispose(): void;
+}
+
+function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
+  if (isGpuHandle(x)) {
+    if (x.released) throw new Error("bun:gpu: op called on released handle");
+    return x.view as T;
+  }
+  return x;
 }
 
 // ─── CPU backend (always available — forwards to bun:simd) ──────────────────
@@ -92,22 +100,21 @@ const cpuBackend: Backend = {
     return false;
   },
   dot(a, b) {
-    return simd.dot(a, b);
+    return simd.dot(unwrapHandle(a), unwrapHandle(b));
   },
   matVec(matrix, vector, nRows, nCols) {
-    if (isGpuHandle(matrix) && matrix.released) {
-      throw new Error("bun:gpu: matVec called on released handle");
-    }
-    const matView = isGpuHandle(matrix) ? matrix.view : matrix;
+    const matView = unwrapHandle(matrix);
     return simd.matVec(matView as any, vector as any, nRows, nCols);
   },
   matmul(a, b, m, k, n) {
-    if (a.constructor !== b.constructor) {
+    const av = unwrapHandle(a);
+    const bv = unwrapHandle(b);
+    if (av.constructor !== bv.constructor) {
       throw new TypeError(
-        `a and b must both be Float32Array or both be Float64Array; got ${a.constructor.name} and ${b.constructor.name}`,
+        `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
       );
     }
-    const out = (a instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+    const out = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
     // Row-major A (m×k), row-major B (k×n), row-major out (m×n).
     // Naive triple loop with accumulator promoted out of the inner loop.
     // GPU backends replace this with a proper tiled kernel.
@@ -115,16 +122,16 @@ const cpuBackend: Backend = {
       const aRow = i * k;
       const oRow = i * n;
       for (let p = 0; p < k; p++) {
-        const av = a[aRow + p];
-        if (av === 0) continue;
+        const x = av[aRow + p];
+        if (x === 0) continue;
         const bRow = p * n;
-        for (let j = 0; j < n; j++) out[oRow + j] += av * b[bRow + j];
+        for (let j = 0; j < n; j++) out[oRow + j] += x * bv[bRow + j];
       }
     }
     return out;
   },
   simdMap(fn, a) {
-    return simd.simdMap(fn, a as any);
+    return simd.simdMap(fn, unwrapHandle(a) as any);
   },
   alloc(length, type) {
     if (!Number.isInteger(length) || length < 0) {
@@ -238,7 +245,7 @@ function winsForSize(op: OpKind, n: number, elemBytes: number): boolean {
 
 // ─── Public ops ────────────────────────────────────────────────────────────
 
-function dot(a: FArray, b: FArray): number {
+function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
   return resolveActive().dot(a, b);
 }
 
@@ -251,7 +258,8 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
 
 function matmul(a: Float32Array, b: Float32Array, m: number, k: number, n: number): Float32Array;
 function matmul(a: Float64Array, b: Float64Array, m: number, k: number, n: number): Float64Array;
-function matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray {
+function matmul(a: GpuHandle, b: GpuHandle, m: number, k: number, n: number): FArray;
+function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray {
   if (!Number.isInteger(m) || m < 0) throw new RangeError("m must be a non-negative integer");
   if (!Number.isInteger(k) || k < 0) throw new RangeError("k must be a non-negative integer");
   if (!Number.isInteger(n) || n < 0) throw new RangeError("n must be a non-negative integer");
@@ -262,7 +270,8 @@ function matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray {
 
 function simdMap(fn: (x: number, i: number) => number, a: Float32Array): Float32Array;
 function simdMap(fn: (x: number, i: number) => number, a: Float64Array): Float64Array;
-function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
+function simdMap(fn: (x: number, i: number) => number, a: GpuHandle): FArray;
+function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   return resolveActive().simdMap(fn, a);
 }
 

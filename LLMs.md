@@ -420,12 +420,12 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   is scalar-in/scalar-out numeric kernels with `Math.*` → shader
   intrinsics and `if/else/loop` → shader control flow.
 - **Auto-accel dispatch, Tier 4 (implicit cross-call residency)** — the
-  explicit opt-in (`gpu.hold`/`release` on Float32Array matrices for
-  `matVec`) is live on Metal. Still pending: (a) CUDA residency
-  (cuMemAlloc + cuMemcpyHtoD once, then reuse device pointer — gated on
-  RTX benchmark data); (b) implicit residency via escape analysis or a
+  explicit opt-in (`gpu.hold`/`release` on Float32Array matrices) is live
+  on Metal and accepted by every op (`dot`, `matVec`, `matmul`,
+  `simdMap`). Still pending: (a) CUDA residency (cuMemAlloc +
+  cuMemcpyHtoD once, then reuse device pointer — gated on RTX benchmark
+  data); (b) implicit residency via escape analysis or a
   `GpuFloat32Array` wrapper so common code doesn't have to call `hold`
-  manually; (c) handle support for `dot`, `simdMap`, and `matmul` (today
-  only `matVec` consumes handles). For discrete GPUs implicit residency
-  is make-or-break; on Apple Silicon the explicit API already captures
-  most of the win thanks to unified memory.
+  manually. For discrete GPUs implicit residency is make-or-break; on
+  Apple Silicon the explicit API already captures most of the win thanks
+  to unified memory.

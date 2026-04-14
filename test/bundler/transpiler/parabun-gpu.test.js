@@ -521,6 +521,96 @@ describe("bun:gpu scaffold", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("dot accepts GpuHandle inputs equivalently to plain typed arrays", async () => {
+    // Same contract as matVec: passing `hold(a)` where `a` was the argument
+    // must produce the same scalar. On metal this lets the MTLBuffer for
+    // `a` stay resident across many dot products; on cpu it's a pure
+    // passthrough. Correctness is what we pin here.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-dot-equiv",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4, 5]);
+        const b = new Float32Array([10, 20, 30, 40, 50]);
+        const plain = gpu.dot(a, b);
+        const ha = gpu.hold(a);
+        const hb = gpu.hold(b);
+        const held = gpu.dot(ha, hb);
+        const mixed = gpu.dot(ha, b);
+        gpu.release(ha);
+        gpu.release(hb);
+        console.log(JSON.stringify({ plain, held, mixed }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ plain: 550, held: 550, mixed: 550 });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matmul accepts GpuHandle inputs equivalently to plain typed arrays", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-matmul-equiv",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1,2,3, 4,5,6]);
+        const b = new Float32Array([7,8, 9,10, 11,12]);
+        const plain = gpu.matmul(a, b, 2, 3, 2);
+        const ha = gpu.hold(a);
+        const hb = gpu.hold(b);
+        const held = gpu.matmul(ha, hb, 2, 3, 2);
+        gpu.release(ha);
+        gpu.release(hb);
+        console.log(JSON.stringify({ plain: Array.from(plain), held: Array.from(held) }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      plain: [58, 64, 139, 154],
+      held: [58, 64, 139, 154],
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it("simdMap accepts a GpuHandle input equivalently to a plain typed array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-simdmap-equiv",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const plain = gpu.simdMap(x => x * x, a);
+        const h = gpu.hold(a);
+        const held = gpu.simdMap(x => x * x, h);
+        gpu.release(h);
+        console.log(JSON.stringify({ plain: Array.from(plain), held: Array.from(held) }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      plain: [1, 4, 9, 16],
+      held: [1, 4, 9, 16],
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it("dot/matmul/simdMap on a released handle throw a released-handle error", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-hold-use-after-release-ops",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const ha = gpu.hold(a);
+        const hb = gpu.hold(b);
+        gpu.release(ha);
+        gpu.release(hb);
+        const threw = { dot: false, matmul: false, simdMap: false };
+        try { gpu.dot(ha, hb); } catch (e) { threw.dot = /released handle/.test(e.message); }
+        try { gpu.matmul(ha, hb, 2, 2, 2); } catch (e) { threw.matmul = /released handle/.test(e.message); }
+        try { gpu.simdMap(x => x, ha); } catch (e) { threw.simdMap = /released handle/.test(e.message); }
+        console.log(JSON.stringify(threw));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ dot: true, matmul: true, simdMap: true });
+    expect(exitCode).toBe(0);
+  });
+
   it("describe reports active + available backends", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-describe",
