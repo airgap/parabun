@@ -1,0 +1,59 @@
+// Batched GPU variant (true batch): one gpu.matmul call computes scores for
+// all Q queries at once. Requires embeddings in D×N layout (transpose once on
+// the host at index-load time — off the timed window, matching the
+// gpu.hold() contract).
+//
+//   scores[q, n] = sum_d queries[q, d] * embeddings[n, d]
+//                = sum_d Q[q, d] * E_T[d, n]
+//                = (Q @ E_T)[q, n]
+//
+// Q: (Q × D) row-major queries
+// E_T: (D × N) row-major — a transposed view of the (N × D) embedding matrix
+// scores: (Q × N) row-major — per-query scores, all in one DtoH.
+
+import { hold, release, matmul } from "bun:gpu";
+import { topK as simdTopK } from "bun:simd";
+import { generateBatch, N, D, K } from "./gen.js";
+
+function transposeToDN(src, nRows, nCols) {
+  // src is (nRows × nCols) row-major; returns (nCols × nRows) row-major.
+  const out = new Float32Array(nRows * nCols);
+  for (let r = 0; r < nRows; r++) {
+    const srcOff = r * nCols;
+    for (let c = 0; c < nCols; c++) {
+      out[c * nRows + r] = src[srcOff + c];
+    }
+  }
+  return out;
+}
+
+const tGen0 = Bun.nanoseconds();
+const { embeddings, queries, Q } = generateBatch();
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+// One-time index setup: transpose (N × D) → (D × N), then hold on device.
+// Both cost live outside the timed window because in a real retrieval system
+// this happens once at index load, not per batch.
+const embeddingsT = transposeToDN(embeddings, N, D);
+const hT = hold(embeddingsT);
+
+// Warm one dispatch so first-call context-sync doesn't land on the timed call.
+matmul(queries.subarray(0, D), hT, 1, D, N);
+
+const tScore0 = Bun.nanoseconds();
+// One kernel launch, one DtoH of Q × N scores.
+const scores = matmul(queries, hT, Q, D, N);
+const allTop = [];
+for (let q = 0; q < Q; q++) {
+  const row = scores.subarray(q * N, (q + 1) * N);
+  const topIdx = simdTopK(row, K);
+  allTop.push(Array.from(topIdx, idx => ({ idx, score: row[idx] })));
+}
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+release(hT);
+
+const topStr = allTop.map(t => t.map(r => r.idx).join(":")).join(",");
+console.log(
+  `batched-gpu-matmul gen_ms=${genMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} per_query_ms=${(scoreMs / Q).toFixed(3)} Q=${Q} top=[${topStr}]`,
+);

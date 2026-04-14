@@ -55,3 +55,22 @@ export function generate({ shared = false } = {}) {
   normalizeInPlace(query, 0, D);
   return { embeddings, query };
 }
+
+// Batched-query variant: same embeddings (seeded identically to the single-query
+// path so downstream variants can reuse the index), plus Q normalized queries
+// generated from a secondary seed so they don't alias the single-query vector.
+// Returned shape: queries is a (Q × D) row-major Float32Array.
+export const Q_BATCH = 32;
+
+export function generateBatch({ Q = Q_BATCH, shared = false } = {}) {
+  const { embeddings } = generate({ shared });
+  const queryRng = mulberry32(SEED ^ 0x51eed);
+  const queryBuf = shared ? new SharedArrayBuffer(Q * D * 4) : new ArrayBuffer(Q * D * 4);
+  const queries = new Float32Array(queryBuf);
+  for (let q = 0; q < Q; q++) {
+    const off = q * D;
+    for (let d = 0; d < D; d++) queries[off + d] = randn(queryRng);
+    normalizeInPlace(queries, off, D);
+  }
+  return { embeddings, queries, Q };
+}

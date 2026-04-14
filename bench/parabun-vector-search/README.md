@@ -138,3 +138,54 @@ routes through the CPU backend transparently.
   device. Score phase runs CUDA PTX when available, falls through to
   `bun:simd.matVec` otherwise.
 - `run.ts` — best-of-5 harness, top-K cross-check.
+- `batched-baseline.js`, `batched-gpu-loop.pjs`, `batched-gpu-matmul.pjs`,
+  `batched-run.ts` — batched harness for Q = 32 queries (see below).
+
+## Batched queries (Q = 32)
+
+Real retrieval systems don't score one query at a time — RAG pipelines
+and semantic-search APIs batch requests. The single-query rows above
+already amortize the ~200 ms `hold()` across many queries, but each
+per-query call still pays a full `kernel + DtoH(400 KB) + cuCtxSynchronize`
+round-trip (~0.8 ms of fixed overhead, regardless of compute). A batched
+`matmul` collapses all that into one round-trip.
+
+### Results (best-of-5 median, same host)
+
+| variant                                  | score_ms total (min/med/max) | per_query_ms (min/med/max) | vs baseline |
+|------------------------------------------|-----------------------------:|---------------------------:|------------:|
+| batched-baseline (plain JS loop)         |  1163 / 1250 / 1358          |  36.4 / 39.1 / 42.4        |    1.00×    |
+| batched-gpu-loop (`gpu.matVec` × Q)      |  37.6 /  37.9 /  50.4        |   1.17 /  1.18 /  1.57     |   33.1×     |
+| **batched-gpu-matmul (one `gpu.matmul`)**|  21.2 /  23.1 /  23.2        |   0.66 /  0.72 /  0.72     |  **54.2×**  |
+
+The concatenated top-K for all Q queries is asserted bit-identical across
+all three batched variants.
+
+### What each row shows
+
+- **`batched-gpu-loop`** amortizes the first-call context-sync tax across
+  Q calls and drops per-query latency from ~4 ms to ~1.2 ms. The 1 ms
+  per call is now almost entirely `cuCtxSynchronize` + `cuMemcpyDtoH` of
+  the 400 KB score vector — the kernel itself is only a few µs of it.
+- **`batched-gpu-matmul`** computes `Q @ E^T` in one kernel launch. One
+  `matmul` replaces Q `matVec` calls, so the fixed per-call overhead
+  collapses from `Q × overhead` to `1 × overhead`. Per-query latency
+  drops to 0.72 ms, ~1.6× over the loop variant. The remaining cost is
+  split between the `Q × N` matmul kernel and 32 CPU-side `simd.topK`
+  calls (~16 ms total). Parallelizing the top-K across queries via
+  `pmap` would push it further, but that's a story for another tier.
+- **Requirement**: the matmul path needs the embedding matrix in D × N
+  layout, not N × D. `batched-gpu-matmul.pjs` transposes once on the
+  host before `hold()`, which is off the timed window — in a real index
+  you'd pick this layout at build time.
+
+The narrative: move from "one call per query" to "one kernel per batch"
+and the fixed overhead gets divided by Q. The 54× per-query speedup
+isn't new compute — it's the same CUDA `matmulF32` kernel, just
+dispatched with far less wrapper work around it.
+
+### Running it
+
+```sh
+bun run build:release bench/parabun-vector-search/batched-run.ts
+```
