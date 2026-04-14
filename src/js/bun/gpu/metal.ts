@@ -114,6 +114,52 @@ kernel void matVecF32(
     acc = simd_sum(acc);
     if (lane == 0) outPtr[row] = acc;
 }
+
+// Row-major matmul: C[m, n] = A[m, k] @ B[k, n].
+//
+// 32x32 output tile per threadgroup, one thread per output cell (1024
+// threads = the Apple GPU max-per-threadgroup limit). We walk K in 32-wide
+// strips, co-loading the A-tile and B-tile into threadgroup memory, then
+// each thread does 32 FMAs into its private accumulator.
+//
+// Shape vs the CUDA PTX kernel: CUDA uses 64 threads with a 4x4 register
+// tile per thread for the same 32x32 output tile; Metal's simdgroup width
+// is 32 and register files are larger per-thread, but 1024 threads/TG is
+// the hard cap, so we use one-thread-per-cell here. Same output shape,
+// different work-per-thread. For the shapes bun:gpu targets (Q @ E^T in
+// retrieval workloads: M=Q≈64, K=D=384, N=100k) the bottleneck is the
+// 9.6 GB SMEM + register fill, not the FMA rate — the simpler kernel
+// should hit the same memory ceiling.
+kernel void matmulF32(
+    device const float *A         [[buffer(0)]],
+    device const float *B         [[buffer(1)]],
+    device       float *C         [[buffer(2)]],
+    constant     uint  &M         [[buffer(3)]],
+    constant     uint  &K         [[buffer(4)]],
+    constant     uint  &N         [[buffer(5)]],
+    uint2               gid       [[threadgroup_position_in_grid]],
+    uint2               lid       [[thread_position_in_threadgroup]])
+{
+    constexpr uint TS = 32u;
+    threadgroup float As[TS][TS];
+    threadgroup float Bs[TS][TS];
+
+    uint row = gid.y * TS + lid.y;
+    uint col = gid.x * TS + lid.x;
+
+    float acc = 0.0f;
+    for (uint t = 0; t < K; t += TS) {
+        uint aCol = t + lid.x;
+        uint bRow = t + lid.y;
+        As[lid.y][lid.x] = (row < M && aCol < K) ? A[(ulong)row * K + aCol] : 0.0f;
+        Bs[lid.y][lid.x] = (bRow < K && col < N) ? B[(ulong)bRow * N + col] : 0.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = 0; s < TS; s++) acc = fma(As[lid.y][s], Bs[s][lid.x], acc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (row < M && col < N) C[(ulong)row * N + col] = acc;
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -198,6 +244,8 @@ let simdMapMaxTg = 1024;
 // probed but not consulted at launch time.
 let matVecFn: bigint = 0n;
 let matVecPipeline: bigint = 0n;
+let matmulFn: bigint = 0n;
+let matmulPipeline: bigint = 0n;
 
 function tryLoad(): boolean {
   if (metalLib !== null && objcBase !== null) return true;
@@ -371,13 +419,34 @@ function probe(): boolean {
   matVecFn = mv.fn;
   matVecPipeline = mv.pipe;
 
-  const queue = msgSend_2!(dev, sel("newCommandQueue"));
-  if (queue === 0n) {
+  const mm = compileKernel(lib, "matmulF32");
+  if (mm === null) {
     objcRelease(matVecPipeline);
     objcRelease(matVecFn);
     objcRelease(simdMapPipeline);
     objcRelease(simdMapFn);
     objcRelease(lib);
+    matVecPipeline = 0n;
+    matVecFn = 0n;
+    simdMapPipeline = 0n;
+    simdMapFn = 0n;
+    metalLibraryObj = 0n;
+    return false;
+  }
+  matmulFn = mm.fn;
+  matmulPipeline = mm.pipe;
+
+  const queue = msgSend_2!(dev, sel("newCommandQueue"));
+  if (queue === 0n) {
+    objcRelease(matmulPipeline);
+    objcRelease(matmulFn);
+    objcRelease(matVecPipeline);
+    objcRelease(matVecFn);
+    objcRelease(simdMapPipeline);
+    objcRelease(simdMapFn);
+    objcRelease(lib);
+    matmulPipeline = 0n;
+    matmulFn = 0n;
     matVecPipeline = 0n;
     matVecFn = 0n;
     simdMapPipeline = 0n;
@@ -712,6 +781,110 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
   }
 }
 
+// ─── Kernel launch: matmulF32 ──────────────────────────────────────────────
+// C = A·B where A is M×K, B is K×N, C is M×N, all row-major f32.
+// Same buffer/encoder choreography as launchMatVecF32; different pipeline,
+// different grid. Grid covers ceil(N/32) × ceil(M/32); threadgroup is
+// 32×32 = 1024 threads (Apple GPU max per TG).
+
+function launchMatmulF32(
+  a: Float32Array | GpuHandle,
+  b: Float32Array | GpuHandle,
+  m: number,
+  k: number,
+  n: number,
+  out?: Float32Array,
+): Float32Array {
+  const aBytes = BigInt(m * k * 4);
+  const bBytes = BigInt(k * n * 4);
+  const cBytes = BigInt(m * n * 4);
+
+  let aBuf: bigint;
+  let aBufOwned: boolean;
+  if (isGpuHandle(a)) {
+    if (a.released) throw new Error("bun:gpu: matmul called on released handle");
+    if (a.buffer === 0n) throw new Error("bun:gpu metal: handle has no MTLBuffer (f64?)");
+    aBuf = a.buffer;
+    aBufOwned = false;
+  } else {
+    aBuf = newBufferFromF32(a, aBytes);
+    if (aBuf === 0n) throw new Error("bun:gpu metal: newBuffer (A) failed");
+    aBufOwned = true;
+  }
+
+  let bBuf: bigint;
+  let bBufOwned: boolean;
+  if (isGpuHandle(b)) {
+    if (b.released) throw new Error("bun:gpu: matmul called on released handle");
+    if (b.buffer === 0n) throw new Error("bun:gpu metal: handle has no MTLBuffer (f64?)");
+    bBuf = b.buffer;
+    bBufOwned = false;
+  } else {
+    bBuf = newBufferFromF32(b, bBytes);
+    if (bBuf === 0n) {
+      if (aBufOwned) objcRelease(aBuf);
+      throw new Error("bun:gpu metal: newBuffer (B) failed");
+    }
+    bBufOwned = true;
+  }
+
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), cBytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength (C) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), matmulPipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), aBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), bBuf, 0n, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 2n);
+    const pM = new Uint32Array([m]);
+    const pK = new Uint32Array([k]);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pK), 4n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 5n);
+
+    const OUT_TILE = 32;
+    const tgX = BigInt(Math.floor((n + OUT_TILE - 1) / OUT_TILE));
+    const tgY = BigInt(Math.floor((m + OUT_TILE - 1) / OUT_TILE));
+    const tgCount = new BigUint64Array([tgX, tgY, 1n]);
+    const threadsPerTg = new BigUint64Array([32n, 32n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: outBuf contents is null");
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, m * n * 4));
+    // Copy into caller-provided buffer when present (including SAB-backed).
+    // Metal shared-storage buffers can't alias a JS SharedArrayBuffer, so we
+    // still pay one memcpy — but it's GPU→shared-storage host pointer, not
+    // the JS-side Float32Array.prototype.set that was killing parallel top-K.
+    const dst = out ?? new Float32Array(m * n);
+    dst.set(view);
+    return dst;
+  } finally {
+    if (aBufOwned) objcRelease(aBuf);
+    if (bBufOwned) objcRelease(bBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
+  }
+}
+
 // ─── Size threshold ────────────────────────────────────────────────────────
 // Matches cuda.ts — the fixed per-dispatch cost (buffer alloc + pipeline
 // binding + GPU/CPU round-trip) makes the CPU path faster under ~256k f32.
@@ -740,12 +913,16 @@ const MIN_SIMDMAP_ELEMS = 1 << 18;
 // not page boundaries).
 const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
 const MIN_MATVEC_WINS_ELEMS = 1 << 20;
+// Matches cuda.ts: 16M multiply-adds — e.g. 256^3 or 32×384×32k.
+// Below this the triple-loop fallback beats the MTLBuffer staging cost.
+const MIN_MATMUL_DISPATCH_FLOPS = 1 << 24;
 
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
   if (op === "simdMap") return elemBytes === 4 && n >= MIN_SIMDMAP_ELEMS;
   if (op === "matVec") return elemBytes === 4 && n >= MIN_MATVEC_WINS_ELEMS;
+  if (op === "matmul") return elemBytes === 4 && n >= MIN_MATMUL_DISPATCH_FLOPS;
   return false;
 }
 
@@ -775,11 +952,37 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
 }
 
 function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray {
-  const av = unwrapHandle(a);
-  const bv = unwrapHandle(b);
+  const aIsHandle = isGpuHandle(a);
+  const bIsHandle = isGpuHandle(b);
+  if (aIsHandle && a.released) throw new Error("bun:gpu: matmul called on released handle");
+  if (bIsHandle && b.released) throw new Error("bun:gpu: matmul called on released handle");
+  const av = aIsHandle ? a.view : (a as FArray);
+  const bv = bIsHandle ? b.view : (b as FArray);
   if (av.constructor !== bv.constructor) {
     throw new TypeError(
       `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
+    );
+  }
+  // MSL kernel path: f32 inputs, probe succeeded, and either (a) a resident
+  // handle already staged its MTLBuffer, or (b) the work is big enough to
+  // amortize a cold dispatch. Otherwise fall back to the triple loop.
+  const residentA = aIsHandle && a.type === "f32" && a.buffer !== 0n;
+  const residentB = bIsHandle && b.type === "f32" && b.buffer !== 0n;
+  const anyResident = residentA || residentB;
+  if (
+    av instanceof Float32Array &&
+    bv instanceof Float32Array &&
+    (out === undefined || out instanceof Float32Array) &&
+    probe() &&
+    (anyResident || m * n * k >= MIN_MATMUL_DISPATCH_FLOPS)
+  ) {
+    return launchMatmulF32(
+      aIsHandle ? (a as GpuHandle) : (av as Float32Array),
+      bIsHandle ? (b as GpuHandle) : (bv as Float32Array),
+      m,
+      k,
+      n,
+      out instanceof Float32Array ? out : undefined,
     );
   }
   let dst: FArray;
@@ -819,6 +1022,14 @@ function dispose(): void {
   if (commandQueue !== 0n) {
     objcRelease(commandQueue);
     commandQueue = 0n;
+  }
+  if (matmulPipeline !== 0n) {
+    objcRelease(matmulPipeline);
+    matmulPipeline = 0n;
+  }
+  if (matmulFn !== 0n) {
+    objcRelease(matmulFn);
+    matmulFn = 0n;
   }
   if (matVecPipeline !== 0n) {
     objcRelease(matVecPipeline);
