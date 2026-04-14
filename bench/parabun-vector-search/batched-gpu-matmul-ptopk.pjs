@@ -12,7 +12,7 @@
 // With the copy-to-SAB gone, this path should finally pay off.
 
 import parallel from "bun:parallel";
-import { hold, release, matmul } from "bun:gpu";
+import { GpuFloat32Array, matmul } from "bun:gpu";
 import { generateBatch, N, D, K } from "./gen.js";
 
 const { pmap } = parallel;
@@ -81,12 +81,12 @@ const { embeddings, queries, Q } = generateBatch({ shared: true });
 const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
 
 const embeddingsT = transposeToDN(embeddings, N, D);
-const hT = hold(embeddingsT);
+using indexT = new GpuFloat32Array(embeddingsT);
 
 // Warm worker pool + GPU context — keep first-call dispatch tax out of
 // the timed window, matching what every other batched variant does.
 await pmap(noop, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
-matmul(queries.subarray(0, D), hT, 1, D, N);
+matmul(queries.subarray(0, D), indexT, 1, D, N);
 
 // Pre-allocate SAB-backed scores buffer once; gpu.matmul DtoH's into it
 // directly. Outside the timed window — in a real index this lives in
@@ -95,7 +95,7 @@ const scoresSab = new Float32Array(new SharedArrayBuffer(Q * N * 4));
 
 const tScore0 = Bun.nanoseconds();
 
-matmul(queries, hT, Q, D, N, scoresSab);
+matmul(queries, indexT, Q, D, N, scoresSab);
 
 const chunks = [];
 const chunkSize = Math.ceil(Q / CONCURRENCY);
@@ -118,8 +118,6 @@ for (const part of partials) {
 }
 
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
-
-release(hT);
 
 const topStr = allTop.map(t => t.map(r => r.idx).join(":")).join(",");
 console.log(

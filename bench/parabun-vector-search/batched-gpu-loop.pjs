@@ -3,7 +3,7 @@
 // per-query latency is ~the single-query number. Included as the honest
 // "what you get if you just loop the existing primitive" reference.
 
-import { hold, release, matVec } from "bun:gpu";
+import { GpuFloat32Array, matVec } from "bun:gpu";
 import { topK as simdTopK } from "bun:simd";
 import { generateBatch, N, D, K } from "./gen.js";
 
@@ -11,23 +11,22 @@ const tGen0 = Bun.nanoseconds();
 const { embeddings, queries, Q } = generateBatch();
 const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
 
-// One-time residency setup — off the timed window.
-const h = hold(embeddings);
+// One-time residency setup — off the timed window. The wrapper holds on
+// construction and auto-releases via Symbol.dispose at scope exit.
+using index = new GpuFloat32Array(embeddings);
 
 // Warm one dispatch so the first-call context-sync cost doesn't land on q=0.
-matVec(h, queries.subarray(0, D), N, D);
+matVec(index, queries.subarray(0, D), N, D);
 
 const tScore0 = Bun.nanoseconds();
 const allTop = [];
 for (let q = 0; q < Q; q++) {
   const queryView = queries.subarray(q * D, (q + 1) * D);
-  const scores = matVec(h, queryView, N, D);
+  const scores = matVec(index, queryView, N, D);
   const topIdx = simdTopK(scores, K);
   allTop.push(Array.from(topIdx, idx => ({ idx, score: scores[idx] })));
 }
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
-
-release(h);
 
 const topStr = allTop.map(t => t.map(r => r.idx).join(":")).join(",");
 console.log(

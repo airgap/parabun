@@ -7,7 +7,7 @@
 // If CUDA isn't available, gpu.matVec falls through to bun:simd.matVec
 // and the row degenerates to the same numbers as variant-matvec.
 
-import { hold, release, matVec } from "bun:gpu";
+import { GpuFloat32Array, matVec } from "bun:gpu";
 import { topK as simdTopK } from "bun:simd";
 import { generate, N, D, K } from "./gen.js";
 
@@ -17,16 +17,14 @@ const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
 
 // One-time residency setup — mirrors pmap-shared's pool warmup: out of the
 // timed score window because in a real retrieval workload this happens
-// once at index load, not per query.
-const h = hold(embeddings);
+// once at index load, not per query. The wrapper auto-releases at scope exit.
+using index = new GpuFloat32Array(embeddings);
 
 const tScore0 = Bun.nanoseconds();
-const scores = matVec(h, query, N, D);
+const scores = matVec(index, query, N, D);
 const topIdx = simdTopK(scores, K);
 const top = Array.from(topIdx, idx => ({ idx, score: scores[idx] }));
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
-
-release(h);
 
 const topStr = top.map(t => `${t.idx}:${t.score.toFixed(4)}`).join(",");
 console.log(

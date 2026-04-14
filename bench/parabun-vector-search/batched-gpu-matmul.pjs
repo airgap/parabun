@@ -11,7 +11,7 @@
 // E_T: (D × N) row-major — a transposed view of the (N × D) embedding matrix
 // scores: (Q × N) row-major — per-query scores, all in one DtoH.
 
-import { hold, release, matmul } from "bun:gpu";
+import { GpuFloat32Array, matmul } from "bun:gpu";
 import { topK as simdTopK } from "bun:simd";
 import { generateBatch, N, D, K } from "./gen.js";
 
@@ -31,18 +31,19 @@ const tGen0 = Bun.nanoseconds();
 const { embeddings, queries, Q } = generateBatch();
 const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
 
-// One-time index setup: transpose (N × D) → (D × N), then hold on device.
-// Both cost live outside the timed window because in a real retrieval system
-// this happens once at index load, not per batch.
+// One-time index setup: transpose (N × D) → (D × N), then wrap with the
+// GpuFloat32Array helper so residency + release ride on scope. Both costs
+// live outside the timed window — in a real retrieval system this happens
+// once at index load, not per batch.
 const embeddingsT = transposeToDN(embeddings, N, D);
-const hT = hold(embeddingsT);
+using indexT = new GpuFloat32Array(embeddingsT);
 
 // Warm one dispatch so first-call context-sync doesn't land on the timed call.
-matmul(queries.subarray(0, D), hT, 1, D, N);
+matmul(queries.subarray(0, D), indexT, 1, D, N);
 
 const tScore0 = Bun.nanoseconds();
 // One kernel launch, one DtoH of Q × N scores.
-const scores = matmul(queries, hT, Q, D, N);
+const scores = matmul(queries, indexT, Q, D, N);
 const allTop = [];
 for (let q = 0; q < Q; q++) {
   const row = scores.subarray(q * N, (q + 1) * N);
@@ -50,8 +51,6 @@ for (let q = 0; q < Q; q++) {
   allTop.push(Array.from(topIdx, idx => ({ idx, score: row[idx] })));
 }
 const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
-
-release(hT);
 
 const topStr = allTop.map(t => t.map(r => r.idx).join(":")).join(",");
 console.log(

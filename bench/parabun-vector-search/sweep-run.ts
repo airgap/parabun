@@ -10,7 +10,7 @@
 // overhead stays ~constant, so per-query latency drops until compute or
 // PCIe bandwidth dominates.
 
-import { hold, release, matmul } from "bun:gpu";
+import { GpuFloat32Array, matmul } from "bun:gpu";
 import { topK as simdTopK } from "bun:simd";
 import { generate, N, D, K } from "./gen.js";
 
@@ -75,10 +75,10 @@ const RUNS = 7;
 console.log(`Preparing index (N = ${N} × D = ${D} = ${((N * D * 4) / 1e6).toFixed(1)} MB)...`);
 const { embeddings } = generate();
 const embeddingsT = transposeToDN(embeddings, N, D);
-const hT = hold(embeddingsT);
+using indexT = new GpuFloat32Array(embeddingsT);
 
 // Warm one dispatch so first-call context-sync doesn't land on Q=1.
-matmul(generateQueries(1), hT, 1, D, N);
+matmul(generateQueries(1), indexT, 1, D, N);
 
 console.log(`\nbatch-size sweep on gpu.matmul (best-of-${RUNS})\n`);
 console.log(
@@ -93,7 +93,7 @@ for (const Q of Q_VALUES) {
   const topKMs: number[] = [];
   for (let r = 0; r < RUNS; r++) {
     const t0 = Bun.nanoseconds();
-    const scores = matmul(queries, hT, Q, D, N);
+    const scores = matmul(queries, indexT, Q, D, N);
     const t1 = Bun.nanoseconds();
     for (let q = 0; q < Q; q++) {
       const row = scores.subarray(q * N, (q + 1) * N);
@@ -117,5 +117,3 @@ for (const Q of Q_VALUES) {
     `${String(Q).padStart(4)}  ${fmt3(tStats).padEnd(28)}  ${fmt3(pStats).padEnd(28)}  ${fmt2(mStats).padEnd(20)}  ${fmt2(kStats)}`,
   );
 }
-
-release(hT);
