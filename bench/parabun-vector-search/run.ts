@@ -16,6 +16,7 @@ const variants = [
   { name: "pmap-cold (fresh pool per call)", path: `${HERE}variant-pmap.pjs` },
   { name: "pmap-warm (persistent pool)    ", path: `${HERE}variant-pmap-warm.pjs` },
   { name: "pmap-shared (SAB embeddings)   ", path: `${HERE}variant-pmap-shared.pjs` },
+  { name: "gpu (bun:gpu.matVec, held)     ", path: `${HERE}variant-gpu.pjs` },
 ];
 
 type Phase = { gen: number; score: number; total: number; top: string };

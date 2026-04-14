@@ -1,0 +1,39 @@
+// Variant: CUDA matVec with a held embedding matrix. One-time hold() does
+// the HtoD of all 150 MB of embeddings; each subsequent query reuses the
+// resident device buffer. The timed score_ms measures the per-query path
+// (matVec + DtoH of scores + top-K), matching pmap-shared's contract which
+// also excludes one-time setup from the timed window.
+//
+// If CUDA isn't available, gpu.matVec falls through to bun:simd.matVec
+// and the row degenerates to the same numbers as variant-matvec.
+
+import { hold, release, matVec } from "bun:gpu";
+import { generate, N, D, K } from "./gen.js";
+
+function topK(scores) {
+  const ranked = new Array(N);
+  for (let i = 0; i < N; i++) ranked[i] = { idx: i, score: scores[i] };
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, K);
+}
+
+const tGen0 = Bun.nanoseconds();
+const { embeddings, query } = generate();
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+// One-time residency setup — mirrors pmap-shared's pool warmup: out of the
+// timed score window because in a real retrieval workload this happens
+// once at index load, not per query.
+const h = hold(embeddings);
+
+const tScore0 = Bun.nanoseconds();
+const scores = matVec(h, query, N, D);
+const top = topK(scores);
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+release(h);
+
+const topStr = top.map(t => `${t.idx}:${t.score.toFixed(4)}`).join(",");
+console.log(
+  `gpu gen_ms=${genMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} total_ms=${(genMs + scoreMs).toFixed(2)} top=[${topStr}]`,
+);
