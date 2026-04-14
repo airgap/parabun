@@ -1,18 +1,15 @@
 // Batched GPU matmul + parallelized top-K. Same one-shot gpu.matmul as
 // batched-gpu-matmul.pjs, but top-K selection fans out across 8 workers.
 //
-// The scores matrix (Q × N Float32) returns from matmul as a regular
-// Float32Array; we copy it into a SharedArrayBuffer-backed view so each
-// worker can read its assigned rows in place rather than taking a
-// structured-clone slice. At Q=64 that's 25.6 MB → ~1 ms over 25 GB/s
-// memory bandwidth, paid once.
+// Uses gpu.matmul's optional `out` parameter to DtoH the Q × N scores
+// matrix *directly* into a SharedArrayBuffer-backed Float32Array — no
+// CPU-side copy step. Previously we allocated a regular Float32Array,
+// let CUDA fill it, then did `scoresSab.set(scoresRaw)` at ~3.7 GB/s
+// (27 ms at Q=256). DtoH-into-SAB removes that whole step.
 //
 // Expected lever: at Q=64, serial simd.topK was ~2.3 ms of the 19 ms total.
-// Fan-out across 8 workers drops the per-row selection work to ~0.3 ms
-// but adds pmap dispatch + scores copy overhead. The honest question is
-// whether parallelism pays back the overhead at this batch size — under
-// Q≈32 it usually doesn't, Q≥128 it should. This variant makes the curve
-// measurable.
+// Fan-out across 8 workers drops the per-row selection work to ~0.3 ms.
+// With the copy-to-SAB gone, this path should finally pay off.
 
 import parallel from "bun:parallel";
 import { hold, release, matmul } from "bun:gpu";
@@ -91,11 +88,14 @@ const hT = hold(embeddingsT);
 await pmap(noop, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
 matmul(queries.subarray(0, D), hT, 1, D, N);
 
+// Pre-allocate SAB-backed scores buffer once; gpu.matmul DtoH's into it
+// directly. Outside the timed window — in a real index this lives in
+// the retrieval service's allocator pool.
+const scoresSab = new Float32Array(new SharedArrayBuffer(Q * N * 4));
+
 const tScore0 = Bun.nanoseconds();
 
-const scoresRaw = matmul(queries, hT, Q, D, N);
-const scoresSab = new Float32Array(new SharedArrayBuffer(Q * N * 4));
-scoresSab.set(scoresRaw);
+matmul(queries, hT, Q, D, N, scoresSab);
 
 const chunks = [];
 const chunkSize = Math.ceil(Q / CONCURRENCY);

@@ -155,12 +155,12 @@ round-trip (~0.8 ms of fixed overhead, regardless of compute). A batched
 
 ### Results (best-of-5 median, same host)
 
-| variant                                  | score_ms total (min/med/max) | per_query_ms (min/med/max) | vs baseline |
-|------------------------------------------|-----------------------------:|---------------------------:|------------:|
-| batched-baseline (plain JS loop)         |  1164 / 1168 / 1196          |  36.4 / 36.5 / 37.4        |    1.00×    |
-| batched-gpu-loop (`gpu.matVec` × Q)      |  36.9 /  37.5 /  41.4        |   1.15 /  1.17 /  1.29     |   32.0×     |
-| **batched-gpu-matmul (one `gpu.matmul`)**|  19.9 /  20.0 /  22.6        |   0.62 /  0.63 /  0.70     |  **58.5×**  |
-| batched-gpu-matmul-ptopk (+ `pmap × 8`)  |  23.4 /  23.7 /  26.3        |   0.73 /  0.74 /  0.82     |   49.3×     |
+| variant                                      | score_ms total (min/med/max) | per_query_ms (min/med/max) | vs baseline |
+|----------------------------------------------|-----------------------------:|---------------------------:|------------:|
+| batched-baseline (plain JS loop)             | 1176 / 1356 / 1677           | 36.75 / 42.37 / 52.41      |    1.00×    |
+| batched-gpu-loop (`gpu.matVec` × Q)          |  30.8 /  38.7 /  71.2        |  0.96 /  1.21 /  2.23      |   35.0×     |
+| batched-gpu-matmul (one `gpu.matmul`)        |  13.1 /  22.6 /  24.0        |  0.41 /  0.71 /  0.75      |   60.0×     |
+| **batched-gpu-matmul-ptopk (+ `pmap × 8`)**  |  12.2 /  12.9 /  16.4        |  0.38 /  0.40 /  0.51      | **105.9×**  |
 
 The concatenated top-K for all Q queries is asserted bit-identical across
 all four batched variants.
@@ -174,31 +174,31 @@ all four batched variants.
 - **`batched-gpu-matmul`** computes `Q @ E^T` in one kernel launch. One
   `matmul` replaces Q `matVec` calls, so the fixed per-call overhead
   collapses from `Q × overhead` to `1 × overhead`. Per-query latency
-  drops to 0.63 ms, ~1.9× over the loop variant. The remaining cost is
+  drops to 0.71 ms, ~1.7× over the loop variant. The remaining cost is
   split between the `Q × N` matmul kernel and 32 CPU-side `simd.topK`
   calls (~2 ms total) plus the 12.8 MB DtoH of the scores matrix.
-- **`batched-gpu-matmul-ptopk`** takes the same matmul output, copies
-  it into a SharedArrayBuffer-backed view, and fans top-K selection
-  across 8 `pmap` workers. The theory was: "serial topK is ~2 ms,
-  parallel across 8 cores should be ~0.3 ms." The honest result: it
-  **loses at every Q we tested**. The CPU-side copy of the Q×N scores
-  matrix into a SAB buffer (`Float32Array.prototype.set` measured at
-  ~3.7 GB/s into a SAB destination) costs more than serial `simd.topK`
-  saves. At Q=256 we measured ~27 ms of copy + ~5–12 ms of pmap
-  dispatch vs ~9 ms of serial selection. Making this path pay would
-  require `gpu.matmul` to DtoH directly into a caller-provided SAB
-  buffer, eliminating the copy — that's a GPU backend API change, not
-  a topK-dispatch change. Kept in the harness as a concrete "don't
-  parallelize over a data move" marker.
+- **`batched-gpu-matmul-ptopk`** takes the same matmul output and fans
+  top-K selection across 8 `pmap` workers. Earlier versions copied the
+  Q×N scores matrix into a SharedArrayBuffer first (`scoresSab.set(...)`),
+  and that CPU-side copy (~3.7 GB/s into a SAB destination) cost more
+  than parallel selection saved — the variant **lost at every Q** and
+  sat in the harness as a null-result marker. Adding an optional `out`
+  argument to `gpu.matmul` so CUDA DtoH's directly into a caller-provided
+  SAB-backed Float32Array removed the copy entirely. With that change,
+  pmap top-K wins: at Q=32 it drops per-query latency from 0.71 ms
+  (serial) to 0.40 ms, 1.8× over the serial path and 106× over baseline.
+  The lesson is the same as before — "don't parallelize over a data
+  move" — just satisfied at the API layer instead of worked around.
 - **Requirement**: the matmul path needs the embedding matrix in D × N
   layout, not N × D. `batched-gpu-matmul.pjs` transposes once on the
   host before `hold()`, which is off the timed window — in a real index
   you'd pick this layout at build time.
 
 The narrative: move from "one call per query" to "one kernel per batch"
-and the fixed overhead gets divided by Q. The 54× per-query speedup
+and the fixed overhead gets divided by Q. The 106× per-query speedup
 isn't new compute — it's the same CUDA `matmulF32` kernel, just
-dispatched with far less wrapper work around it.
+dispatched with far less wrapper work around it, with the output
+DtoH'd directly into the SAB the top-K workers read from.
 
 ### Running it
 

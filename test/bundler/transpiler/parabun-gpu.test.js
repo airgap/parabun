@@ -764,6 +764,92 @@ describe("bun:gpu GpuFloat32Array wrapper", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("matmul writes into a caller-provided Float32Array when `out` is passed", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmul-out",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const out = new Float32Array(4);
+        const ret = gpu.matmul(a, b, 2, 2, 2, out);
+        console.log(JSON.stringify({
+          sameRef: ret === out,
+          values: Array.from(out),
+        }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ sameRef: true, values: [19, 22, 43, 50] });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matmul writes directly into a SharedArrayBuffer-backed Float32Array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmul-out-sab",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const sab = new SharedArrayBuffer(4 * 4);
+        const out = new Float32Array(sab);
+        const ret = gpu.matmul(a, b, 2, 2, 2, out);
+        console.log(JSON.stringify({
+          sameRef: ret === out,
+          sharedBuf: ret.buffer instanceof SharedArrayBuffer,
+          values: Array.from(out),
+        }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      sameRef: true,
+      sharedBuf: true,
+      values: [19, 22, 43, 50],
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matmul rejects out buffers that are too small or wrong type", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmul-out-reject",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        let tooSmall = false, wrongType = false;
+        try {
+          gpu.matmul(a, b, 2, 2, 2, new Float32Array(3));
+        } catch (e) {
+          tooSmall = /out length/.test(e.message);
+        }
+        try {
+          gpu.matmul(a, b, 2, 2, 2, new Float64Array(4));
+        } catch (e) {
+          wrongType = /out (type|must)/.test(e.message);
+        }
+        console.log(JSON.stringify({ tooSmall, wrongType }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ tooSmall: true, wrongType: true });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matmul zeroes a reused out buffer before accumulating", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmul-out-reuse",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const out = new Float32Array(4);
+        out.fill(999);
+        gpu.matmul(a, b, 2, 2, 2, out);
+        console.log(JSON.stringify(Array.from(out)));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual([19, 22, 43, 50]);
+    expect(exitCode).toBe(0);
+  });
+
   it("Symbol.dispose auto-releases at scope exit (via `using`)", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-using",

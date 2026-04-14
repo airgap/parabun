@@ -774,7 +774,7 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
   return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
 
-function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray {
+function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray {
   const av = unwrapHandle(a);
   const bv = unwrapHandle(b);
   if (av.constructor !== bv.constructor) {
@@ -782,7 +782,16 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
       `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
     );
   }
-  const out = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+  let dst: FArray;
+  if (out !== undefined) {
+    if (out.constructor !== av.constructor) {
+      throw new TypeError(`out type ${out.constructor.name} must match a/b type ${av.constructor.name}`);
+    }
+    dst = out;
+    for (let i = 0; i < m * n; i++) dst[i] = 0;
+  } else {
+    dst = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+  }
   for (let i = 0; i < m; i++) {
     const aRow = i * k;
     const oRow = i * n;
@@ -790,10 +799,10 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
       const x = av[aRow + p];
       if (x === 0) continue;
       const bRow = p * n;
-      for (let j = 0; j < n; j++) out[oRow + j] += x * bv[bRow + j];
+      for (let j = 0; j < n; j++) dst[oRow + j] += x * bv[bRow + j];
     }
   }
-  return out;
+  return dst;
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {

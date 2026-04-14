@@ -889,6 +889,7 @@ function launchMatmulF32(
   m: number,
   k: number,
   n: number,
+  out?: Float32Array,
 ): Float32Array {
   const s = cudaLib!.symbols;
   const ptr = ffiPtr!;
@@ -969,9 +970,14 @@ function launchMatmulF32(
     if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
     if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
 
-    const out = new Float32Array(m * n);
-    if (s.cuMemcpyDtoH_v2(ptr(out), dC, cBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(C) failed");
-    return out;
+    // DtoH directly into the caller's buffer when provided — including
+    // SharedArrayBuffer-backed Float32Arrays. From CUDA's perspective it's
+    // just a host pointer; shared-ness is invisible. This is the whole
+    // point of the out-buffer API: skip the CPU-side copy that parallel
+    // top-K was paying at Q=256.
+    const dst = out ?? new Float32Array(m * n);
+    if (s.cuMemcpyDtoH_v2(ptr(dst), dC, cBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(C) failed");
+    return dst;
   } finally {
     if (aOwned && dA !== 0n) s.cuMemFree_v2(dA);
     if (bOwned && dB !== 0n) s.cuMemFree_v2(dB);
@@ -1184,7 +1190,7 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
   return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
 
-function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray {
+function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray {
   const aIsHandle = isGpuHandle(a);
   const bIsHandle = isGpuHandle(b);
   if (aIsHandle && a.released) throw new Error("bun:gpu: matmul called on released handle");
@@ -1214,9 +1220,19 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
       m,
       k,
       n,
+      out instanceof Float32Array ? out : undefined,
     );
   }
-  const out = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+  let dst: FArray;
+  if (out !== undefined) {
+    if (out.constructor !== av.constructor) {
+      throw new TypeError(`out type ${out.constructor.name} must match a/b type ${av.constructor.name}`);
+    }
+    dst = out;
+    for (let i = 0; i < m * n; i++) dst[i] = 0;
+  } else {
+    dst = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+  }
   for (let i = 0; i < m; i++) {
     const aRow = i * k;
     const oRow = i * n;
@@ -1224,10 +1240,10 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
       const x = av[aRow + p];
       if (x === 0) continue;
       const bRow = p * n;
-      for (let j = 0; j < n; j++) out[oRow + j] += x * bv[bRow + j];
+      for (let j = 0; j < n; j++) dst[oRow + j] += x * bv[bRow + j];
     }
   }
-  return out;
+  return dst;
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {

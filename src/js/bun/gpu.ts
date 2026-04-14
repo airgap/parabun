@@ -163,7 +163,7 @@ interface Backend {
   winsForSize(op: OpKind, n: number, elemBytes: number): boolean;
   dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number;
   matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
-  matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number): FArray;
+  matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray;
   simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
   alloc(length: number, type: "f32" | "f64"): FArray;
   isAligned(arr: FArray): boolean;
@@ -197,7 +197,7 @@ const cpuBackend: Backend = {
     const matView = unwrapHandle(matrix);
     return simd.matVec(matView as any, vector as any, nRows, nCols);
   },
-  matmul(a, b, m, k, n) {
+  matmul(a, b, m, k, n, out) {
     const av = unwrapHandle(a);
     const bv = unwrapHandle(b);
     if (av.constructor !== bv.constructor) {
@@ -205,7 +205,17 @@ const cpuBackend: Backend = {
         `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
       );
     }
-    const out = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+    let dst: FArray;
+    if (out !== undefined) {
+      if (out.constructor !== av.constructor) {
+        throw new TypeError(`out type ${out.constructor.name} must match a/b type ${av.constructor.name}`);
+      }
+      dst = out;
+      // Caller-provided buffer may be reused — zero before accumulating.
+      for (let i = 0; i < m * n; i++) dst[i] = 0;
+    } else {
+      dst = (av instanceof Float32Array ? new Float32Array(m * n) : new Float64Array(m * n)) as FArray;
+    }
     // Row-major A (m×k), row-major B (k×n), row-major out (m×n).
     // Naive triple loop with accumulator promoted out of the inner loop.
     // GPU backends replace this with a proper tiled kernel.
@@ -216,10 +226,10 @@ const cpuBackend: Backend = {
         const x = av[aRow + p];
         if (x === 0) continue;
         const bRow = p * n;
-        for (let j = 0; j < n; j++) out[oRow + j] += x * bv[bRow + j];
+        for (let j = 0; j < n; j++) dst[oRow + j] += x * bv[bRow + j];
       }
     }
-    return out;
+    return dst;
   },
   simdMap(fn, a) {
     return simd.simdMap(fn, unwrapHandle(a) as any);
@@ -348,14 +358,15 @@ function matVec(matrix: FArray | GpuHandle | GpuFloat32Array, vector: FArray, nR
   return resolveActive().matVec(unwrapGpuArg(matrix), vector, nRows, nCols);
 }
 
-function matmul(a: Float32Array, b: Float32Array, m: number, k: number, n: number): Float32Array;
-function matmul(a: Float64Array, b: Float64Array, m: number, k: number, n: number): Float64Array;
+function matmul(a: Float32Array, b: Float32Array, m: number, k: number, n: number, out?: Float32Array): Float32Array;
+function matmul(a: Float64Array, b: Float64Array, m: number, k: number, n: number, out?: Float64Array): Float64Array;
 function matmul(
   a: GpuHandle | GpuFloat32Array,
   b: GpuHandle | GpuFloat32Array,
   m: number,
   k: number,
   n: number,
+  out?: Float32Array,
 ): FArray;
 function matmul(
   a: FArray | GpuHandle | GpuFloat32Array,
@@ -363,13 +374,24 @@ function matmul(
   m: number,
   k: number,
   n: number,
+  out?: FArray,
 ): FArray {
   if (!Number.isInteger(m) || m < 0) throw new RangeError("m must be a non-negative integer");
   if (!Number.isInteger(k) || k < 0) throw new RangeError("k must be a non-negative integer");
   if (!Number.isInteger(n) || n < 0) throw new RangeError("n must be a non-negative integer");
   if (a.length !== m * k) throw new RangeError(`a length ${a.length} != m * k (${m} * ${k} = ${m * k})`);
   if (b.length !== k * n) throw new RangeError(`b length ${b.length} != k * n (${k} * ${n} = ${k * n})`);
-  return resolveActive().matmul(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n);
+  if (out !== undefined) {
+    if (!(out instanceof Float32Array) && !(out instanceof Float64Array)) {
+      throw new TypeError(
+        `out must be Float32Array or Float64Array; got ${(out as any)?.constructor?.name ?? typeof out}`,
+      );
+    }
+    if (out.length < m * n) {
+      throw new RangeError(`out length ${out.length} < m * n (${m} * ${n} = ${m * n})`);
+    }
+  }
+  return resolveActive().matmul(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n, out);
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: Float32Array): Float32Array;
