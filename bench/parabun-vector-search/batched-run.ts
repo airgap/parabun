@@ -11,9 +11,10 @@ const HERE = new URL(".", import.meta.url).pathname;
 const RUNS = 5;
 
 const variants = [
-  { name: "batched-baseline (.js, plain JS loop)   ", path: `${HERE}batched-baseline.js` },
-  { name: "batched-gpu-loop (gpu.matVec × Q)       ", path: `${HERE}batched-gpu-loop.pjs` },
-  { name: "batched-gpu-matmul (one gpu.matmul call)", path: `${HERE}batched-gpu-matmul.pjs` },
+  { name: "batched-baseline (.js, plain JS loop)         ", path: `${HERE}batched-baseline.js` },
+  { name: "batched-gpu-loop (gpu.matVec × Q)             ", path: `${HERE}batched-gpu-loop.pjs` },
+  { name: "batched-gpu-matmul (one gpu.matmul, serial tK)", path: `${HERE}batched-gpu-matmul.pjs` },
+  { name: "batched-gpu-matmul-ptopk (+ pmap × 8 top-K)   ", path: `${HERE}batched-gpu-matmul-ptopk.pjs` },
 ];
 
 type Phase = { gen: number; score: number; perQuery: number; Q: number; top: string };

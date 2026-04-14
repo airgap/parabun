@@ -139,7 +139,8 @@ routes through the CPU backend transparently.
   `bun:simd.matVec` otherwise.
 - `run.ts` — best-of-5 harness, top-K cross-check.
 - `batched-baseline.js`, `batched-gpu-loop.pjs`, `batched-gpu-matmul.pjs`,
-  `batched-run.ts` — batched harness for Q = 32 queries (see below).
+  `batched-gpu-matmul-ptopk.pjs`, `batched-run.ts` — batched harness for
+  Q = 32 queries (see below).
 - `sweep-run.ts` — in-process batch-size sweep across Q ∈ {1, 4, 16, 64, 256}
   for the `gpu.matmul` path; reports per-query latency curve.
 
@@ -156,12 +157,13 @@ round-trip (~0.8 ms of fixed overhead, regardless of compute). A batched
 
 | variant                                  | score_ms total (min/med/max) | per_query_ms (min/med/max) | vs baseline |
 |------------------------------------------|-----------------------------:|---------------------------:|------------:|
-| batched-baseline (plain JS loop)         |  1163 / 1250 / 1358          |  36.4 / 39.1 / 42.4        |    1.00×    |
-| batched-gpu-loop (`gpu.matVec` × Q)      |  37.6 /  37.9 /  50.4        |   1.17 /  1.18 /  1.57     |   33.1×     |
-| **batched-gpu-matmul (one `gpu.matmul`)**|  21.2 /  23.1 /  23.2        |   0.66 /  0.72 /  0.72     |  **54.2×**  |
+| batched-baseline (plain JS loop)         |  1164 / 1168 / 1196          |  36.4 / 36.5 / 37.4        |    1.00×    |
+| batched-gpu-loop (`gpu.matVec` × Q)      |  36.9 /  37.5 /  41.4        |   1.15 /  1.17 /  1.29     |   32.0×     |
+| **batched-gpu-matmul (one `gpu.matmul`)**|  19.9 /  20.0 /  22.6        |   0.62 /  0.63 /  0.70     |  **58.5×**  |
+| batched-gpu-matmul-ptopk (+ `pmap × 8`)  |  23.4 /  23.7 /  26.3        |   0.73 /  0.74 /  0.82     |   49.3×     |
 
 The concatenated top-K for all Q queries is asserted bit-identical across
-all three batched variants.
+all four batched variants.
 
 ### What each row shows
 
@@ -172,10 +174,22 @@ all three batched variants.
 - **`batched-gpu-matmul`** computes `Q @ E^T` in one kernel launch. One
   `matmul` replaces Q `matVec` calls, so the fixed per-call overhead
   collapses from `Q × overhead` to `1 × overhead`. Per-query latency
-  drops to 0.72 ms, ~1.6× over the loop variant. The remaining cost is
+  drops to 0.63 ms, ~1.9× over the loop variant. The remaining cost is
   split between the `Q × N` matmul kernel and 32 CPU-side `simd.topK`
-  calls (~16 ms total). Parallelizing the top-K across queries via
-  `pmap` would push it further, but that's a story for another tier.
+  calls (~2 ms total) plus the 12.8 MB DtoH of the scores matrix.
+- **`batched-gpu-matmul-ptopk`** takes the same matmul output, copies
+  it into a SharedArrayBuffer-backed view, and fans top-K selection
+  across 8 `pmap` workers. The theory was: "serial topK is ~2 ms,
+  parallel across 8 cores should be ~0.3 ms." The honest result: it
+  **loses at every Q we tested**. The CPU-side copy of the Q×N scores
+  matrix into a SAB buffer (`Float32Array.prototype.set` measured at
+  ~3.7 GB/s into a SAB destination) costs more than serial `simd.topK`
+  saves. At Q=256 we measured ~27 ms of copy + ~5–12 ms of pmap
+  dispatch vs ~9 ms of serial selection. Making this path pay would
+  require `gpu.matmul` to DtoH directly into a caller-provided SAB
+  buffer, eliminating the copy — that's a GPU backend API change, not
+  a topK-dispatch change. Kept in the harness as a concrete "don't
+  parallelize over a data move" marker.
 - **Requirement**: the matmul path needs the embedding matrix in D × N
   layout, not N × D. `batched-gpu-matmul.pjs` transposes once on the
   host before `hold()`, which is off the timed window — in a real index

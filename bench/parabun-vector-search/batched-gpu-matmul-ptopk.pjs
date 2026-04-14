@@ -1,0 +1,127 @@
+// Batched GPU matmul + parallelized top-K. Same one-shot gpu.matmul as
+// batched-gpu-matmul.pjs, but top-K selection fans out across 8 workers.
+//
+// The scores matrix (Q × N Float32) returns from matmul as a regular
+// Float32Array; we copy it into a SharedArrayBuffer-backed view so each
+// worker can read its assigned rows in place rather than taking a
+// structured-clone slice. At Q=64 that's 25.6 MB → ~1 ms over 25 GB/s
+// memory bandwidth, paid once.
+//
+// Expected lever: at Q=64, serial simd.topK was ~2.3 ms of the 19 ms total.
+// Fan-out across 8 workers drops the per-row selection work to ~0.3 ms
+// but adds pmap dispatch + scores copy overhead. The honest question is
+// whether parallelism pays back the overhead at this batch size — under
+// Q≈32 it usually doesn't, Q≥128 it should. This variant makes the curve
+// measurable.
+
+import parallel from "bun:parallel";
+import { hold, release, matmul } from "bun:gpu";
+import { generateBatch, N, D, K } from "./gen.js";
+
+const { pmap } = parallel;
+const CONCURRENCY = 8;
+
+// Fixed-size sorted-array insertion top-K, inlined because pure fns
+// shipped to the worker pool can't require() bun:simd.
+pure function topKChunk(chunk) {
+  const scores = chunk.scores;
+  const startQ = chunk.startQ;
+  const endQ = chunk.endQ;
+  const n = chunk.n;
+  const k = chunk.k;
+  const count = endQ - startQ;
+  const result = new Array(count);
+  for (let q = 0; q < count; q++) {
+    const rowOff = (startQ + q) * n;
+    const topScores = new Float32Array(k);
+    const topIdx = new Int32Array(k);
+    for (let j = 0; j < k; j++) {
+      topScores[j] = -Infinity;
+      topIdx[j] = -1;
+    }
+    const last = k - 1;
+    for (let i = 0; i < n; i++) {
+      const s = scores[rowOff + i];
+      if (s > topScores[last]) {
+        let j = last;
+        while (j > 0 && s > topScores[j - 1]) {
+          topScores[j] = topScores[j - 1];
+          topIdx[j] = topIdx[j - 1];
+          j--;
+        }
+        topScores[j] = s;
+        topIdx[j] = i;
+      }
+    }
+    const outScores = new Array(k);
+    const outIdx = new Array(k);
+    for (let j = 0; j < k; j++) {
+      outScores[j] = topScores[j];
+      outIdx[j] = topIdx[j];
+    }
+    result[q] = { scores: outScores, idx: outIdx };
+  }
+  return result;
+}
+
+pure function noop(x) {
+  return x;
+}
+
+function transposeToDN(src, nRows, nCols) {
+  const out = new Float32Array(nRows * nCols);
+  for (let r = 0; r < nRows; r++) {
+    const srcOff = r * nCols;
+    for (let c = 0; c < nCols; c++) {
+      out[c * nRows + r] = src[srcOff + c];
+    }
+  }
+  return out;
+}
+
+const tGen0 = Bun.nanoseconds();
+const { embeddings, queries, Q } = generateBatch({ shared: true });
+const genMs = (Bun.nanoseconds() - tGen0) / 1e6;
+
+const embeddingsT = transposeToDN(embeddings, N, D);
+const hT = hold(embeddingsT);
+
+// Warm worker pool + GPU context — keep first-call dispatch tax out of
+// the timed window, matching what every other batched variant does.
+await pmap(noop, [1, 2, 3, 4, 5, 6, 7, 8], { concurrency: CONCURRENCY });
+matmul(queries.subarray(0, D), hT, 1, D, N);
+
+const tScore0 = Bun.nanoseconds();
+
+const scoresRaw = matmul(queries, hT, Q, D, N);
+const scoresSab = new Float32Array(new SharedArrayBuffer(Q * N * 4));
+scoresSab.set(scoresRaw);
+
+const chunks = [];
+const chunkSize = Math.ceil(Q / CONCURRENCY);
+for (let c = 0; c < CONCURRENCY; c++) {
+  const startQ = c * chunkSize;
+  if (startQ >= Q) break;
+  const endQ = Math.min(startQ + chunkSize, Q);
+  chunks.push({ scores: scoresSab, startQ, endQ, n: N, k: K });
+}
+
+const partials = await pmap(topKChunk, chunks, { concurrency: CONCURRENCY });
+
+const allTop = new Array(Q);
+let qi = 0;
+for (const part of partials) {
+  for (const p of part) {
+    allTop[qi] = p.idx.map((idx, j) => ({ idx, score: p.scores[j] }));
+    qi++;
+  }
+}
+
+const scoreMs = (Bun.nanoseconds() - tScore0) / 1e6;
+
+release(hT);
+
+const topStr = allTop.map(t => t.map(r => r.idx).join(":")).join(",");
+console.log(
+  `batched-gpu-matmul-ptopk gen_ms=${genMs.toFixed(2)} score_ms=${scoreMs.toFixed(2)} per_query_ms=${(scoreMs / Q).toFixed(3)} Q=${Q} top=[${topStr}]`,
+);
