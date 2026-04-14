@@ -127,6 +127,12 @@ function tryLoadCuda(): boolean {
 //                      is still worth it because the matmul is compute-bound
 //                      at the sizes where it's interesting, and naive fp32
 //                      on an RTX 4070 Ti clocks in around the TFLOP mark.
+//   dotF32           — a·b → scalar. Grid of 1024 blocks × 32 threads (one
+//                      warp per block). Each thread stride-loops the vector
+//                      with fma.rn.f32; within the warp a shfl.sync.bfly
+//                      butterfly reduces to a single per-block f32 partial;
+//                      host sums the 1024 partials. Same reduction shape as
+//                      matVecF32 — that's why the kernel is small.
 //
 // PTX 7.0 is the floor — the non-sync shfl.bfly was removed in PTX 6.0, so
 // we use shfl.sync.bfly.b32 with a full 0xffffffff membermask (the warp is
@@ -347,6 +353,90 @@ MMSTORE:
 MMDONE:
     ret;
 }
+
+.visible .entry dotF32(
+    .param .u64 aPtr,
+    .param .u64 bPtr,
+    .param .u64 outPtr,
+    .param .u32 n
+)
+{
+    .reg .pred  %p<3>;
+    .reg .b32   %r<12>;
+    .reg .f32   %f<6>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u64  %rd1, [aPtr];
+    ld.param.u64  %rd2, [bPtr];
+    ld.param.u64  %rd3, [outPtr];
+    ld.param.u32  %r1,  [n];
+
+    mov.u32       %r2, %ctaid.x;
+    mov.u32       %r3, %nctaid.x;
+    mov.u32       %r4, %tid.x;
+
+    cvta.to.global.u64 %rd4, %rd1;
+    cvta.to.global.u64 %rd5, %rd2;
+
+    mov.f32       %f1, 0f00000000;
+
+    // i = ctaid*32 + tid; stride = nctaid*32
+    shl.b32       %r5, %r2, 5;
+    add.u32       %r6, %r5, %r4;
+    shl.b32       %r7, %r3, 5;
+
+DOTLOOP:
+    setp.ge.u32   %p1, %r6, %r1;
+    @%p1 bra      DOTREDUCE;
+
+    mul.wide.u32  %rd6, %r6, 4;
+    add.s64       %rd7, %rd4, %rd6;
+    add.s64       %rd8, %rd5, %rd6;
+    ld.global.f32 %f2, [%rd7];
+    ld.global.f32 %f3, [%rd8];
+    fma.rn.f32    %f1, %f2, %f3, %f1;
+
+    add.u32       %r6, %r6, %r7;
+    bra           DOTLOOP;
+
+DOTREDUCE:
+    mov.b32       %r8, %f1;
+    shfl.sync.bfly.b32 %r9, %r8, 16, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r9;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r8, %f1;
+    shfl.sync.bfly.b32 %r9, %r8, 8, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r9;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r8, %f1;
+    shfl.sync.bfly.b32 %r9, %r8, 4, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r9;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r8, %f1;
+    shfl.sync.bfly.b32 %r9, %r8, 2, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r9;
+    add.f32       %f1, %f1, %f4;
+
+    mov.b32       %r8, %f1;
+    shfl.sync.bfly.b32 %r9, %r8, 1, 0x1f, 0xffffffff;
+    mov.b32       %f4, %r9;
+    add.f32       %f1, %f1, %f4;
+
+    // thread 0 writes partial[ctaid.x]
+    setp.ne.u32   %p2, %r4, 0;
+    @%p2 bra      DOTDONE;
+
+    mul.wide.u32  %rd9, %r2, 4;
+    cvta.to.global.u64 %rd10, %rd3;
+    add.s64       %rd11, %rd10, %rd9;
+    st.global.f32 [%rd11], %f1;
+
+DOTDONE:
+    ret;
+}
 `;
 
 // ─── State ────────────────────────────────────────────────────────────────
@@ -389,6 +479,7 @@ let mod: bigint | null = null;
 let fnAffineF32: bigint | null = null;
 let fnMatVecF32: bigint | null = null;
 let fnMatmulF32: bigint | null = null;
+let fnDotF32: bigint | null = null;
 let deviceName: string = "";
 
 function probe(): boolean {
@@ -461,6 +552,20 @@ function probe(): boolean {
     return false;
   }
   fnMatmulF32 = matmulBuf[0];
+
+  const dotName = new TextEncoder().encode("dotF32\0");
+  const dotBuf = new BigUint64Array(1);
+  if (s.cuModuleGetFunction(ptr(dotBuf), mod, ptr(dotName)) !== 0) {
+    s.cuModuleUnload(mod);
+    s.cuCtxDestroy_v2(ctx);
+    fnAffineF32 = null;
+    fnMatVecF32 = null;
+    fnMatmulF32 = null;
+    mod = null;
+    ctx = null;
+    return false;
+  }
+  fnDotF32 = dotBuf[0];
 
   probeResult = true;
   return true;
@@ -723,6 +828,106 @@ function launchMatmulF32(
   }
 }
 
+// ─── Kernel launch: dotF32 ────────────────────────────────────────────────
+//
+// a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
+// the vector with an fma.rn.f32 accumulator; within each warp (= block) a
+// shfl.sync.bfly butterfly reduces to a single partial; thread 0 of each
+// block stores that partial to a device array of DOT_GRID f32 values. Host
+// then sums the partials. Either input may arrive held (Tier 4); a held
+// input skips its HtoD.
+
+const DOT_GRID = 1024;
+
+function launchDotF32(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle): number {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aView = isGpuHandle(a) ? (a.view as Float32Array) : a;
+  const n = aView.length;
+  const aBytes = BigInt(n * 4);
+  const bBytes = BigInt(n * 4);
+  const partialsBytes = BigInt(DOT_GRID * 4);
+
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(a)) {
+    if (a.released) throw new Error("bun:gpu: dot called on released handle");
+    if (a.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = a.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(A) failed");
+    dA = dABuf[0];
+    aOwned = true;
+  }
+
+  let dB: bigint;
+  let bOwned: boolean;
+  if (isGpuHandle(b)) {
+    if (b.released) throw new Error("bun:gpu: dot called on released handle");
+    if (b.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dB = b.buffer;
+    bOwned = false;
+  } else {
+    const dBBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dBBuf), bBytes) !== 0) {
+      if (aOwned) s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemAlloc(B) failed");
+    }
+    dB = dBBuf[0];
+    bOwned = true;
+  }
+
+  let dPart: bigint = 0n;
+  try {
+    const dPartBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dPartBuf), partialsBytes) !== 0)
+      throw new Error("bun:gpu cuda: cuMemAlloc(partials) failed");
+    dPart = dPartBuf[0];
+
+    if (aOwned) {
+      if (s.cuMemcpyHtoD_v2(dA, ptr(a as Float32Array), aBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(A) failed");
+      }
+    }
+    if (bOwned) {
+      if (s.cuMemcpyHtoD_v2(dB, ptr(b as Float32Array), bBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(B) failed");
+      }
+    }
+
+    const pABuf = new BigUint64Array([dA]);
+    const pBBuf = new BigUint64Array([dB]);
+    const pPartBuf = new BigUint64Array([dPart]);
+    const pN = new Uint32Array([n]);
+    const paramPtrs = new BigUint64Array([
+      BigInt(ptr(pABuf)),
+      BigInt(ptr(pBBuf)),
+      BigInt(ptr(pPartBuf)),
+      BigInt(ptr(pN)),
+    ]);
+
+    const r = s.cuLaunchKernel(fnDotF32!, DOT_GRID, 1, 1, 32, 1, 1, 0, 0n, ptr(paramPtrs), null);
+    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(dot) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+
+    const partials = new Float32Array(DOT_GRID);
+    if (s.cuMemcpyDtoH_v2(ptr(partials), dPart, partialsBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials) failed");
+    }
+    // Final host reduction. DOT_GRID = 1024 f32 values; the summation order
+    // deviates from SIMD's, so results match SIMD only within f32-FMA tolerance.
+    let sum = 0;
+    for (let i = 0; i < DOT_GRID; i++) sum += partials[i];
+    return sum;
+  } finally {
+    if (aOwned && dA !== 0n) s.cuMemFree_v2(dA);
+    if (bOwned && dB !== 0n) s.cuMemFree_v2(dB);
+    if (dPart !== 0n) s.cuMemFree_v2(dPart);
+  }
+}
+
 // ─── Size threshold ───────────────────────────────────────────────────────
 //
 // GPU dispatch has a fixed round-trip cost (~2 cuMemAlloc + HtoD + DtoH +
@@ -758,19 +963,53 @@ const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
 const MIN_MATMUL_DISPATCH_FLOPS = 1 << 24; // 16M multiply-adds (e.g. 256^3)
 const MIN_MATMUL_WINS_FLOPS = Number.POSITIVE_INFINITY;
 
+// dot: cold GPU loses 9–18× to bun:simd at every size we measured on an RTX
+// 4070 Ti — the per-call HtoD (pageable memory copy at ~760 MB/s) dominates
+// the warp-reduce kernel no matter how big the vector is. Residency is the
+// only path that wins, so dispatch and wins thresholds are both parked at
+// Infinity; callers opt into GPU dot by holding their vectors via gpu.hold.
+// See bench/parabun-gpu-dot for the numbers.
+const MIN_DOT_DISPATCH_ELEMS = Number.POSITIVE_INFINITY;
+const MIN_DOT_WINS_ELEMS = Number.POSITIVE_INFINITY;
+
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
   if (op === "simdMap") return elemBytes === 4 && n >= MIN_SIMDMAP_ELEMS;
   if (op === "matVec") return elemBytes === 4 && n >= MIN_MATVEC_WINS_ELEMS;
   if (op === "matmul") return elemBytes === 4 && n >= MIN_MATMUL_WINS_FLOPS;
+  if (op === "dot") return elemBytes === 4 && n >= MIN_DOT_WINS_ELEMS;
   return false;
 }
 
 // ─── Backend methods ──────────────────────────────────────────────────────
 
 function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
-  return simd.dot(unwrapHandle(a), unwrapHandle(b));
+  const aIsHandle = isGpuHandle(a);
+  const bIsHandle = isGpuHandle(b);
+  if (aIsHandle && a.released) throw new Error("bun:gpu: dot called on released handle");
+  if (bIsHandle && b.released) throw new Error("bun:gpu: dot called on released handle");
+  const av = aIsHandle ? a.view : (a as FArray);
+  const bv = bIsHandle ? b.view : (b as FArray);
+  // GPU dispatch when both sides are Float32Array and either (a) a residency
+  // handle already staged its HtoD, or (b) the vector is big enough to
+  // amortize the cold round-trip. Otherwise fall through to simd.
+  const residentA = aIsHandle && a.type === "f32" && a.buffer !== 0n;
+  const residentB = bIsHandle && b.type === "f32" && b.buffer !== 0n;
+  const anyResident = residentA || residentB;
+  if (
+    av instanceof Float32Array &&
+    bv instanceof Float32Array &&
+    av.length === bv.length &&
+    probe() &&
+    (anyResident || av.length >= MIN_DOT_DISPATCH_ELEMS)
+  ) {
+    return launchDotF32(
+      aIsHandle ? (a as GpuHandle) : (av as Float32Array),
+      bIsHandle ? (b as GpuHandle) : (bv as Float32Array),
+    );
+  }
+  return simd.dot(av, bv);
 }
 
 function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
@@ -862,6 +1101,7 @@ function dispose(): void {
   fnAffineF32 = null;
   fnMatVecF32 = null;
   fnMatmulF32 = null;
+  fnDotF32 = null;
   probed = false;
   probeResult = false;
 }

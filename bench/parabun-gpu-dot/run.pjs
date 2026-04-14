@@ -1,0 +1,106 @@
+// Microbenchmark: CUDA dotF32 vs bun:simd dot.
+//
+//   bun run build:release bench/parabun-gpu-dot/run.pjs
+//
+// gpu.dot(a, b) → scalar. On CUDA with Float32Array inputs, dispatches to
+// a PTX warp-reduce kernel when either (a) the vector is large enough
+// (n ≥ 4M) that the cold round-trip amortizes, or (b) at least one input
+// was held via gpu.hold (Tier 4 residency). Otherwise forwards to bun:simd.
+//
+// Scenarios per size:
+//   simd       : bun:simd.dot(a, b) — baseline
+//   gpu-cold   : gpu.dot(a, b) — alloc × 3 + 2 HtoD + kernel + DtoH + free × 3
+//   gpu-held   : ha=hold(a), hb=hold(b); loop: gpu.dot(ha, hb)
+
+import simd from "bun:simd";
+import gpu from "bun:gpu";
+
+const desc = gpu.describe();
+console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}\n`);
+
+const cases = [
+  { n: 1 << 18 }, // 256k   = 1 MB — below cold threshold, cold matches simd
+  { n: 1 << 20 }, // 1M     = 4 MB — below cold threshold
+  { n: 1 << 22 }, // 4M     = 16 MB — at threshold
+  { n: 1 << 24 }, // 16M    = 64 MB
+  { n: 1 << 25 }, // 32M    = 128 MB
+];
+
+const CALLS_PER_SCENARIO = 20;
+
+function fill(arr) {
+  let s = 0xC0FFEE;
+  const r = () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s / 0xFFFFFFFF) * 2 - 1;
+  };
+  for (let i = 0; i < arr.length; i++) arr[i] = r();
+}
+
+function bench(fn, iters) {
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return { min: samples[0], med: samples[Math.floor(samples.length / 2)] };
+}
+
+console.log(
+  `${"n".padStart(10)} | ${"MB".padStart(5)} | ${"scenario".padEnd(10)} | ${"med (ms)".padStart(8)} | ${"vs simd".padStart(7)} | ${"hold (ms)".padStart(9)}`,
+);
+console.log("-".repeat(74));
+
+for (const { n } of cases) {
+  const mb = ((n * 4) / 1_048_576).toFixed(1);
+  const a = new Float32Array(n);
+  const b = new Float32Array(n);
+  fill(a);
+  fill(b);
+
+  simd.dot(a, b);
+  gpu.dot(a, b);
+
+  const sStats = bench(() => simd.dot(a, b), CALLS_PER_SCENARIO);
+  const gColdStats = bench(() => gpu.dot(a, b), CALLS_PER_SCENARIO);
+
+  const tHoldStart = Bun.nanoseconds();
+  const ha = gpu.hold(a);
+  const hb = gpu.hold(b);
+  const holdMs = (Bun.nanoseconds() - tHoldStart) / 1e6;
+  gpu.dot(ha, hb);
+  const gHeldStats = bench(() => gpu.dot(ha, hb), CALLS_PER_SCENARIO);
+  gpu.release(ha);
+  gpu.release(hb);
+
+  const fmt = (label, stats, holdLabel) =>
+    `${String(n).padStart(10)} | ${mb.padStart(5)} | ${label.padEnd(10)} | ${stats.med.toFixed(2).padStart(8)} | ${(sStats.med / stats.med).toFixed(2).padStart(6)}× | ${holdLabel.padStart(9)}`;
+
+  console.log(fmt("simd", sStats, "-"));
+  console.log(fmt("gpu-cold", gColdStats, "-"));
+  console.log(fmt("gpu-held", gHeldStats, holdMs.toFixed(2)));
+  console.log();
+}
+
+// Correctness check — all three paths must agree within f32 FMA tolerance.
+{
+  const n = 1 << 20;
+  const a = new Float32Array(n);
+  const b = new Float32Array(n);
+  fill(a);
+  fill(b);
+  const sv = simd.dot(a, b);
+  const gc = gpu.dot(a, b);
+  const ha = gpu.hold(a);
+  const hb = gpu.hold(b);
+  const gh = gpu.dot(ha, hb);
+  gpu.release(ha);
+  gpu.release(hb);
+  const relErrCold = Math.abs(gc - sv) / Math.max(1, Math.abs(sv));
+  const relErrHeld = Math.abs(gh - sv) / Math.max(1, Math.abs(sv));
+  console.log(`correctness check @ n=${n}:`);
+  console.log(`  simd=${sv.toFixed(4)}  cold=${gc.toFixed(4)}  held=${gh.toFixed(4)}`);
+  console.log(`  relErr cold=${relErrCold.toExponential(2)}  held=${relErrHeld.toExponential(2)}`);
+}
