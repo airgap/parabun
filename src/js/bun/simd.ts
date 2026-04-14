@@ -778,66 +778,112 @@ function outLike(a: FArray, n: number): FArray {
   return a instanceof Float32Array ? new Float32Array(n) : new Float64Array(n);
 }
 
+// Opt-in escape hatch: `dstOverwrite: "a"` (or "b" for binary ops) tells
+// the primitive to mutate that input in-place and return it, instead of
+// allocating a fresh output buffer. Eliminates the final copy-out slice.
+// Semantics change — caller's `a` (or `b`) holds the result — so it's
+// gated behind an option, not the default.
+type ScalarOpts = { dstOverwrite?: "a" };
+type BinaryOpts = { dstOverwrite?: "a" | "b" };
+
+function requireDstOverwrite(opts: { dstOverwrite?: string } | undefined, allowed: readonly string[]): string | null {
+  const v = opts?.dstOverwrite;
+  if (v === undefined) return null;
+  if (!allowed.includes(v)) {
+    throw new TypeError(
+      `dstOverwrite must be ${allowed.map(a => JSON.stringify(a)).join(" or ")}; got ${JSON.stringify(v)}`,
+    );
+  }
+  return v;
+}
+
 // --- Primitives ---
 
-function mulScalar(a: Float32Array, c: number): Float32Array;
-function mulScalar(a: Float64Array, c: number): Float64Array;
-function mulScalar(a: FArray, c: number): FArray {
+function mulScalar(a: Float32Array, c: number, opts?: ScalarOpts): Float32Array;
+function mulScalar(a: Float64Array, c: number, opts?: ScalarOpts): Float64Array;
+function mulScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const arr = requireFArray(a, "a");
+  const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
   const n = arr.length;
-  if (n === 0) return emptyLike(arr);
+  if (n === 0) return inPlace ? arr : emptyLike(arr);
   if (wasm !== null) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
       view.set(arr, 0);
       wasm.mulScalar(n, c);
+      if (inPlace) {
+        arr.set(view.subarray(0, n));
+        return arr;
+      }
       return view.slice(0, n);
     }
     ensureCapacity(n * 8);
     const view = f64View();
     view.set(arr, 0);
     wasm.mulScalarF64(n, c);
+    if (inPlace) {
+      arr.set(view.subarray(0, n));
+      return arr;
+    }
     return view.slice(0, n);
+  }
+  if (inPlace) {
+    for (let i = 0; i < n; i++) arr[i] = arr[i] * c;
+    return arr;
   }
   const out = outLike(arr, n);
   for (let i = 0; i < n; i++) out[i] = arr[i] * c;
   return out;
 }
 
-function addScalar(a: Float32Array, c: number): Float32Array;
-function addScalar(a: Float64Array, c: number): Float64Array;
-function addScalar(a: FArray, c: number): FArray {
+function addScalar(a: Float32Array, c: number, opts?: ScalarOpts): Float32Array;
+function addScalar(a: Float64Array, c: number, opts?: ScalarOpts): Float64Array;
+function addScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const arr = requireFArray(a, "a");
+  const inPlace = requireDstOverwrite(opts, ["a"]) === "a";
   const n = arr.length;
-  if (n === 0) return emptyLike(arr);
+  if (n === 0) return inPlace ? arr : emptyLike(arr);
   if (wasm !== null) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
       view.set(arr, 0);
       wasm.addScalar(n, c);
+      if (inPlace) {
+        arr.set(view.subarray(0, n));
+        return arr;
+      }
       return view.slice(0, n);
     }
     ensureCapacity(n * 8);
     const view = f64View();
     view.set(arr, 0);
     wasm.addScalarF64(n, c);
+    if (inPlace) {
+      arr.set(view.subarray(0, n));
+      return arr;
+    }
     return view.slice(0, n);
+  }
+  if (inPlace) {
+    for (let i = 0; i < n; i++) arr[i] = arr[i] + c;
+    return arr;
   }
   const out = outLike(arr, n);
   for (let i = 0; i < n; i++) out[i] = arr[i] + c;
   return out;
 }
 
-function add(a: Float32Array, b: Float32Array): Float32Array;
-function add(a: Float64Array, b: Float64Array): Float64Array;
-function add(a: FArray, b: FArray): FArray {
+function add(a: Float32Array, b: Float32Array, opts?: BinaryOpts): Float32Array;
+function add(a: Float64Array, b: Float64Array, opts?: BinaryOpts): Float64Array;
+function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const ax = requireFArray(a, "a");
   const bx = requireFArray(b, "b");
   requireSameTypeAndLen(ax, bx);
+  const dst = requireDstOverwrite(opts, ["a", "b"]);
   const n = ax.length;
-  if (n === 0) return emptyLike(ax);
+  if (n === 0) return dst === "a" ? ax : dst === "b" ? bx : emptyLike(ax);
   if (wasm !== null) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
@@ -845,6 +891,14 @@ function add(a: FArray, b: FArray): FArray {
       view.set(ax, 0);
       view.set(bx as Float32Array, n);
       wasm.add(n);
+      if (dst === "a") {
+        ax.set(view.subarray(0, n));
+        return ax;
+      }
+      if (dst === "b") {
+        (bx as Float32Array).set(view.subarray(0, n));
+        return bx;
+      }
       return view.slice(0, n);
     }
     ensureCapacity(n * 16);
@@ -852,21 +906,38 @@ function add(a: FArray, b: FArray): FArray {
     view.set(ax, 0);
     view.set(bx as Float64Array, n);
     wasm.addF64(n);
+    if (dst === "a") {
+      ax.set(view.subarray(0, n));
+      return ax;
+    }
+    if (dst === "b") {
+      (bx as Float64Array).set(view.subarray(0, n));
+      return bx;
+    }
     return view.slice(0, n);
+  }
+  if (dst === "a") {
+    for (let i = 0; i < n; i++) ax[i] = ax[i] + bx[i];
+    return ax;
+  }
+  if (dst === "b") {
+    for (let i = 0; i < n; i++) bx[i] = ax[i] + bx[i];
+    return bx;
   }
   const out = outLike(ax, n);
   for (let i = 0; i < n; i++) out[i] = ax[i] + bx[i];
   return out;
 }
 
-function mul(a: Float32Array, b: Float32Array): Float32Array;
-function mul(a: Float64Array, b: Float64Array): Float64Array;
-function mul(a: FArray, b: FArray): FArray {
+function mul(a: Float32Array, b: Float32Array, opts?: BinaryOpts): Float32Array;
+function mul(a: Float64Array, b: Float64Array, opts?: BinaryOpts): Float64Array;
+function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const ax = requireFArray(a, "a");
   const bx = requireFArray(b, "b");
   requireSameTypeAndLen(ax, bx);
+  const dst = requireDstOverwrite(opts, ["a", "b"]);
   const n = ax.length;
-  if (n === 0) return emptyLike(ax);
+  if (n === 0) return dst === "a" ? ax : dst === "b" ? bx : emptyLike(ax);
   if (wasm !== null) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
@@ -874,6 +945,14 @@ function mul(a: FArray, b: FArray): FArray {
       view.set(ax, 0);
       view.set(bx as Float32Array, n);
       wasm.mul(n);
+      if (dst === "a") {
+        ax.set(view.subarray(0, n));
+        return ax;
+      }
+      if (dst === "b") {
+        (bx as Float32Array).set(view.subarray(0, n));
+        return bx;
+      }
       return view.slice(0, n);
     }
     ensureCapacity(n * 16);
@@ -881,7 +960,23 @@ function mul(a: FArray, b: FArray): FArray {
     view.set(ax, 0);
     view.set(bx as Float64Array, n);
     wasm.mulF64(n);
+    if (dst === "a") {
+      ax.set(view.subarray(0, n));
+      return ax;
+    }
+    if (dst === "b") {
+      (bx as Float64Array).set(view.subarray(0, n));
+      return bx;
+    }
     return view.slice(0, n);
+  }
+  if (dst === "a") {
+    for (let i = 0; i < n; i++) ax[i] = ax[i] * bx[i];
+    return ax;
+  }
+  if (dst === "b") {
+    for (let i = 0; i < n; i++) bx[i] = ax[i] * bx[i];
+    return bx;
   }
   const out = outLike(ax, n);
   for (let i = 0; i < n; i++) out[i] = ax[i] * bx[i];

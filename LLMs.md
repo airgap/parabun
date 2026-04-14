@@ -193,6 +193,13 @@ Exports: `mulScalar(a, c)`, `addScalar(a, c)`, `add(a, b)`, `mul(a, b)`,
 on length mismatch and `TypeError` when operands mix `Float32Array` and
 `Float64Array`. All ops throw `TypeError` for non-float typed-array inputs.
 
+`mulScalar`/`addScalar`/`add`/`mul` accept an optional final
+`{ dstOverwrite }` argument: `"a"` (or `"b"` for binary ops) tells the
+primitive to mutate that input in-place and return it, skipping the
+copy-out `slice()`. Scope is the allocation elision only — the WASM
+kernels still copy in; true zero-copy is the separate
+`WebAssembly.Memory` binding work.
+
 `simdMap(fn, a)` probes the mapping function at three inputs to detect affine
 kernels (`x * k1 + k0`); matched kernels dispatch to a scalar-multiply-plus-add
 fast path. Unmatched kernels fall back to a plain scalar loop. Only sound for
@@ -348,10 +355,6 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
 
 ## Pending Work
 
-- **In-place binary ops for `bun:simd`** — optional `dstOverwrite: "a"`
-  escape hatch that mutates and returns the input buffer instead of a fresh
-  one, eliding the copy-out slice. Semantics change, so gated behind an
-  option.
 - **`bun:simd` zero-copy path for binary ops** — element-wise `add`/`mul`
   at N ≳ 1 M still pay 8–16 MB of copy-in per call. Sharing the user's
   `ArrayBuffer` with the WASM instance via `WebAssembly.Memory` would let

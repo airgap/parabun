@@ -347,4 +347,109 @@ describe("bun:simd", () => {
     expect(stdout).toBe("TYPE_ERROR");
     expect(exitCode).toBe(0);
   });
+
+  // --- dstOverwrite: opt-in in-place semantics ---
+
+  it("mulScalar dstOverwrite:'a' mutates and returns the input (f32)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-mulscalar-inplace-f32",
+      `
+        import { mulScalar } from "bun:simd";
+        const a = new Float32Array([1, 2, 3, 4, 5, 6, 7]);
+        const out = mulScalar(a, 3, { dstOverwrite: "a" });
+        console.log(out === a, Array.from(a).join(","));
+      `,
+    );
+    expect(stdout).toBe("true 3,6,9,12,15,18,21");
+    expect(exitCode).toBe(0);
+  });
+
+  it("addScalar dstOverwrite:'a' mutates and returns the input (f64)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-addscalar-inplace-f64",
+      `
+        import { addScalar } from "bun:simd";
+        const a = new Float64Array([1, 2, 3, 4, 5]);
+        const out = addScalar(a, 10, { dstOverwrite: "a" });
+        console.log(out === a, Array.from(a).join(","));
+      `,
+    );
+    expect(stdout).toBe("true 11,12,13,14,15");
+    expect(exitCode).toBe(0);
+  });
+
+  it("add dstOverwrite:'a' and dstOverwrite:'b' both mutate the chosen target", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-add-inplace",
+      `
+        import { add } from "bun:simd";
+        const a1 = new Float32Array([1, 2, 3, 4]);
+        const b1 = new Float32Array([10, 20, 30, 40]);
+        const r1 = add(a1, b1, { dstOverwrite: "a" });
+        console.log(r1 === a1, Array.from(a1).join(","), Array.from(b1).join(","));
+
+        const a2 = new Float32Array([1, 2, 3, 4]);
+        const b2 = new Float32Array([10, 20, 30, 40]);
+        const r2 = add(a2, b2, { dstOverwrite: "b" });
+        console.log(r2 === b2, Array.from(a2).join(","), Array.from(b2).join(","));
+      `,
+    );
+    expect(stdout).toBe("true 11,22,33,44 10,20,30,40\ntrue 1,2,3,4 11,22,33,44");
+    expect(exitCode).toBe(0);
+  });
+
+  it("mul dstOverwrite across sizes that exercise both SIMD body and scalar tail", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-mul-inplace-sizes",
+      `
+        import { mul } from "bun:simd";
+        const sizes = [3, 4, 5, 17, 127, 1023];
+        for (const n of sizes) {
+          const a = new Float32Array(n);
+          const b = new Float32Array(n);
+          for (let i = 0; i < n; i++) { a[i] = i + 1; b[i] = 2; }
+          const out = mul(a, b, { dstOverwrite: "a" });
+          let ok = out === a;
+          for (let i = 0; i < n && ok; i++) if (a[i] !== (i + 1) * 2) ok = false;
+          console.log(n + ":" + (ok ? "OK" : "FAIL"));
+        }
+      `,
+    );
+    expect(stdout).toBe("3:OK\n4:OK\n5:OK\n17:OK\n127:OK\n1023:OK");
+    expect(exitCode).toBe(0);
+  });
+
+  it("dstOverwrite on empty arrays returns the input unchanged", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-empty-inplace",
+      `
+        import { mulScalar, add } from "bun:simd";
+        const a = new Float32Array(0);
+        const r1 = mulScalar(a, 3, { dstOverwrite: "a" });
+        const b = new Float64Array(0);
+        const c = new Float64Array(0);
+        const r2 = add(b, c, { dstOverwrite: "b" });
+        console.log(r1 === a, r2 === c, r1.length, r2.length);
+      `,
+    );
+    expect(stdout).toBe("true true 0 0");
+    expect(exitCode).toBe(0);
+  });
+
+  it("invalid dstOverwrite value throws TypeError", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-dstoverwrite-invalid",
+      `
+        import { mulScalar, add } from "bun:simd";
+        const msgs = [];
+        try { mulScalar(new Float32Array([1]), 2, { dstOverwrite: "b" }); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE_ERROR" : "WRONG:" + e.name); }
+        try { add(new Float32Array([1]), new Float32Array([2]), { dstOverwrite: "c" }); msgs.push("NO_THROW"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE_ERROR" : "WRONG:" + e.name); }
+        console.log(msgs.join(" "));
+      `,
+    );
+    expect(stdout).toBe("TYPE_ERROR TYPE_ERROR");
+    expect(exitCode).toBe(0);
+  });
 });
