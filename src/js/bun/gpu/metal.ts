@@ -109,6 +109,17 @@ type MsgSend_id_SEL_ptr_u64_u64 = (self: bigint, op: bigint, a1: number, a2: big
 type MsgSend_id_SEL_ptr_u64_u64_ret = (self: bigint, op: bigint, a1: number, a2: bigint, a3: bigint) => bigint;
 type MsgSend_id_SEL_u64_u64 = (self: bigint, op: bigint, a1: bigint, a2: bigint) => bigint;
 type MsgSend_id_SEL_ptr_ptr = (self: bigint, op: bigint, a1: number, a2: number) => void;
+// newBufferWithBytesNoCopy:length:options:deallocator: — 6 args, all u64,
+// returns id. The `deallocator` block is passed as 0n (nil) since alloc()
+// owns the memory for the backend's lifetime.
+type MsgSend_id_SEL_u64_u64_u64_u64 = (
+  self: bigint,
+  op: bigint,
+  a1: bigint,
+  a2: bigint,
+  a3: bigint,
+  a4: bigint,
+) => bigint;
 
 let metalLib: { symbols: MetalSymbols; close: () => void } | null = null;
 let objcBase: { symbols: ObjcBaseSymbols; close: () => void } | null = null;
@@ -128,6 +139,18 @@ let msgSend_5_ptr_u64_u64: MsgSend_id_SEL_ptr_u64_u64 | null = null; // (id, SEL
 let msgSend_5_ptr_u64_u64_ret: MsgSend_id_SEL_ptr_u64_u64_ret | null = null; // same shape, but id return (newBufferWithBytes:length:options:)
 let msgSend_4_u64_u64: MsgSend_id_SEL_u64_u64 | null = null; // (id, SEL, u64, u64) -> id
 let msgSend_4_ptr_ptr: MsgSend_id_SEL_ptr_ptr | null = null; // (id, SEL, ptr, ptr) -> void
+let msgSend_6_u64x4: MsgSend_id_SEL_u64_u64_u64_u64 | null = null; // newBufferWithBytesNoCopy:length:options:deallocator:
+
+// libc bindings for page-aligned allocation (posix_memalign + getpagesize).
+// Loaded lazily inside tryLoad() to avoid paying the dlopen cost on non-
+// darwin hosts or when alloc() is never called.
+type LibcSymbols = {
+  posix_memalign: (out: number, alignment: bigint, size: bigint) => number;
+  free: (ptr: bigint) => void;
+  getpagesize: () => number;
+};
+let libc: { symbols: LibcSymbols; close: () => void } | null = null;
+let pageSize = 16384;
 
 // ─── State ────────────────────────────────────────────────────────────────
 
@@ -206,11 +229,25 @@ function tryLoad(): boolean {
     msgSend_4_ptr_ptr = dlopen(LIBOBJC, {
       objc_msgSend: { args: [FFIType.u64, FFIType.u64, FFIType.ptr, FFIType.ptr], returns: FFIType.void },
     }).symbols.objc_msgSend as any;
+    msgSend_6_u64x4 = dlopen(LIBOBJC, {
+      objc_msgSend: {
+        args: [FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
+        returns: FFIType.u64,
+      },
+    }).symbols.objc_msgSend as any;
+
+    libc = dlopen("libc.dylib", {
+      posix_memalign: { args: [FFIType.ptr, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+      free: { args: [FFIType.u64], returns: FFIType.void },
+      getpagesize: { args: [], returns: FFIType.i32 },
+    }) as any;
+    pageSize = libc!.symbols.getpagesize();
 
     return true;
   } catch {
     metalLib = null;
     objcBase = null;
+    libc = null;
     return false;
   }
 }
@@ -440,6 +477,76 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
   }
 }
 
+// ─── Buffer staging ────────────────────────────────────────────────────────
+// newBufferFromF32 picks newBufferWithBytesNoCopy: when the caller's typed
+// array is page-aligned (macOS only requires pointer alignment; length is
+// unconstrained), else falls back to newBufferWithBytes: which copies into
+// an MTLBuffer-owned region.
+//
+// For large matrices the internal memcpy is the single biggest item in
+// matVec latency — see bench/parabun-metal-zerocopy for measurements on M4
+// showing the copy path is ~5× slower than nocopy at 64 MiB.
+
+function isPageAlignedAddr(addr: number): boolean {
+  if (pageSize <= 0) return false;
+  return (addr & (pageSize - 1)) === 0;
+}
+
+function newBufferFromF32(arr: Float32Array, byteLen: bigint): bigint {
+  const addr = ffiPtr!(arr);
+  if (isPageAlignedAddr(addr)) {
+    return msgSend_6_u64x4!(
+      device,
+      sel("newBufferWithBytesNoCopy:length:options:deallocator:"),
+      BigInt(addr),
+      byteLen,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+      0n,
+    );
+  }
+  return msgSend_5_ptr_u64_u64_ret!(
+    device,
+    sel("newBufferWithBytes:length:options:"),
+    addr,
+    byteLen,
+    BigInt(MTL_STORAGE_MODE_SHARED),
+  );
+}
+
+// ─── Page-aligned alloc ────────────────────────────────────────────────────
+// Returns a Float32Array / Float64Array whose backing pointer is a multiple
+// of the system page size (16 KiB on Apple Silicon, 4 KiB on Intel). Memory
+// is owned by posix_memalign and never freed — allocations persist for the
+// backend's lifetime, matching bun:simd.alloc's commit-for-lifetime model.
+// The intent is that callers stage hot inputs through alloc() so matVec can
+// take the NOCOPY path; freeing would require a FinalizationRegistry + care
+// around Metal's aliased MTLBuffer lifetimes, which is out of scope here.
+
+function alloc(length: number, type: "f32" | "f64"): FArray {
+  if (!Number.isInteger(length) || length < 0) {
+    throw new RangeError(`length must be a non-negative integer; got ${length}`);
+  }
+  if (type !== "f32" && type !== "f64") {
+    throw new TypeError(`type must be "f32" or "f64"; got ${String(type)}`);
+  }
+  if (!probe()) throw new Error("bun:gpu metal: backend unavailable");
+  const elemBytes = type === "f32" ? 4 : 8;
+  const byteLen = length * elemBytes;
+  if (byteLen === 0) return type === "f32" ? new Float32Array(0) : new Float64Array(0);
+  const outPtr = new BigUint64Array(1);
+  const rc = libc!.symbols.posix_memalign(ffiPtr!(outPtr), BigInt(pageSize), BigInt(byteLen));
+  if (rc !== 0) throw new Error(`bun:gpu metal: posix_memalign failed (rc=${rc})`);
+  const addr = Number(outPtr[0]);
+  const ab = ffiToArrayBuffer!(addr, 0, byteLen);
+  return type === "f32" ? new Float32Array(ab) : new Float64Array(ab);
+}
+
+function isAligned(arr: FArray): boolean {
+  if (!(arr instanceof Float32Array) && !(arr instanceof Float64Array)) return false;
+  if (!probe()) return false;
+  return isPageAlignedAddr(ffiPtr!(arr));
+}
+
 // ─── Kernel launch: matVecF32 ──────────────────────────────────────────────
 // M×K matrix · K-vector → M-vector, one thread per row. Same buffer/encoder
 // choreography as launchAffineF32, different pipeline + buffer layout.
@@ -449,28 +556,21 @@ function launchMatVecF32(mat: Float32Array, vec: Float32Array, m: number, k: num
   const vecBytes = BigInt(k * 4);
   const outBytes = BigInt(m * 4);
 
-  const matBuf = msgSend_5_ptr_u64_u64_ret!(
-    device,
-    sel("newBufferWithBytes:length:options:"),
-    ffiPtr!(mat),
-    matBytes,
-    BigInt(MTL_STORAGE_MODE_SHARED),
-  );
-  if (matBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes (mat) failed");
+  // If the caller's matrix is page-aligned (typically because it came from
+  // gpu.alloc), hand it to Metal zero-copy — newBufferWithBytesNoCopy skips
+  // the MTLBuffer-internal memcpy that dominates matVec time at large sizes.
+  // See bench/parabun-metal-zerocopy/README.md — at 4096² (64 MiB) this is
+  // a ~5× end-to-end win over the copy path.
+  const matBuf = newBufferFromF32(mat, matBytes);
+  if (matBuf === 0n) throw new Error("bun:gpu metal: newBuffer (mat) failed");
 
   let vecBuf: bigint = 0n;
   let outBuf: bigint = 0n;
   let cmdBuf: bigint = 0n;
   let encoder: bigint = 0n;
   try {
-    vecBuf = msgSend_5_ptr_u64_u64_ret!(
-      device,
-      sel("newBufferWithBytes:length:options:"),
-      ffiPtr!(vec),
-      vecBytes,
-      BigInt(MTL_STORAGE_MODE_SHARED),
-    );
-    if (vecBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes (vec) failed");
+    vecBuf = newBufferFromF32(vec, vecBytes);
+    if (vecBuf === 0n) throw new Error("bun:gpu metal: newBuffer (vec) failed");
 
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
     if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength (out) failed");
@@ -535,15 +635,20 @@ const MIN_SIMDMAP_ELEMS = 1 << 18;
 //     returns true. This is what pipeline-style callers use to decide
 //     whether to route the op to bun:gpu in the first place.
 //
-// Right now the naive one-thread-per-row MSL kernel (no threadgroup tiling,
-// no vec-in-shared-memory reuse) is ~2–5× slower than the f32x4 `bun:simd`
-// kernel on M1/M2 across the size grid we benchmarked. So the "wins"
-// threshold is parked at Infinity — automatic callers never route to GPU
-// matVec today — while the "dispatch" threshold stays low enough for us
-// to regression-test the kernel. When the kernel is tuned to actually
-// beat bun:simd, collapse these back into a single constant.
+// The naive newBufferWithBytes: path was a wash with CPU at all sizes
+// because its internal memcpy dominated. The NOCOPY path (bytes-no-copy
+// against page-aligned input) flips the balance: at 1 M f32 elems / 4 MiB
+// it's ~2× faster than CPU; at 4 M it's ~4×; at 16 M it's ~4× (see
+// bench/parabun-metal-zerocopy/README.md). Dispatch threshold and wins
+// threshold are collapsed back to one value now that the kernel actually
+// wins above it.
+//
+// Callers that want the wins at or above this size MUST stage inputs
+// through gpu.alloc — opportunistic alignment of arbitrary Float32Arrays
+// almost never fires (JSC's typed-array backing is aligned to ~16 bytes,
+// not page boundaries).
 const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
-const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
+const MIN_MATVEC_WINS_ELEMS = 1 << 20;
 
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
@@ -644,6 +749,8 @@ export default {
   matVec,
   matmul,
   simdMap,
+  alloc,
+  isAligned,
   dispose,
   getDeviceName,
 };

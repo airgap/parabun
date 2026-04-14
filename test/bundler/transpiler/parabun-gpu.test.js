@@ -25,6 +25,8 @@ describe("bun:gpu scaffold", () => {
           matVec: typeof gpu.matVec,
           matmul: typeof gpu.matmul,
           simdMap: typeof gpu.simdMap,
+          alloc: typeof gpu.alloc,
+          isAligned: typeof gpu.isAligned,
           activeBackend: typeof gpu.activeBackend,
           hasBackend: typeof gpu.hasBackend,
           setBackend: typeof gpu.setBackend,
@@ -39,6 +41,8 @@ describe("bun:gpu scaffold", () => {
       matVec: "function",
       matmul: "function",
       simdMap: "function",
+      alloc: "function",
+      isAligned: "function",
       activeBackend: "function",
       hasBackend: "function",
       setBackend: "function",
@@ -249,6 +253,138 @@ describe("bun:gpu scaffold", () => {
       `,
     );
     expect(stdout).toBe("THREW: true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("alloc returns a typed array of the requested length + type", async () => {
+    // CPU fallback returns a plain typed array; metal returns a page-aligned
+    // one via posix_memalign. Both must satisfy the same observable shape:
+    // right length, right constructor, zero-initialized.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-alloc-shape",
+      `
+        import gpu from "bun:gpu";
+        const a = gpu.alloc(128, "f32");
+        const b = gpu.alloc(64, "f64");
+        const e = gpu.alloc(0, "f32");
+        // Spot-check that alloc'd buffers are writeable + readable.
+        a[0] = 1.5; a[127] = -2.25;
+        b[0] = Math.PI; b[63] = -Math.E;
+        console.log(JSON.stringify({
+          aCtor: a.constructor.name, aLen: a.length, aFirst: a[0], aLast: a[127],
+          bCtor: b.constructor.name, bLen: b.length, bFirst: b[0], bLast: b[63],
+          eCtor: e.constructor.name, eLen: e.length,
+        }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      aCtor: "Float32Array",
+      aLen: 128,
+      aFirst: 1.5,
+      aLast: -2.25,
+      bCtor: "Float64Array",
+      bLen: 64,
+      bFirst: Math.PI,
+      bLast: -Math.E,
+      eCtor: "Float32Array",
+      eLen: 0,
+    });
+    expect(exitCode).toBe(0);
+  });
+
+  it("alloc rejects invalid length and type arguments", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-alloc-invalid",
+      `
+        import gpu from "bun:gpu";
+        const cases = [
+          () => gpu.alloc(-1, "f32"),
+          () => gpu.alloc(1.5, "f32"),
+          () => gpu.alloc(8, "bogus"),
+          () => gpu.alloc(8, 32),
+        ];
+        const results = cases.map(fn => {
+          try { fn(); return "NO_THROW"; } catch (e) { return e.constructor.name; }
+        });
+        console.log(results.join(","));
+      `,
+    );
+    // First two are length errors (RangeError), last two are type errors
+    // (TypeError). Metal and cpu both validate, so output is host-invariant.
+    expect(stdout).toBe("RangeError,RangeError,TypeError,TypeError");
+    expect(exitCode).toBe(0);
+  });
+
+  it("isAligned reports false for plain typed arrays, true for alloc'd (metal only)", async () => {
+    // On the cpu fallback, isAligned() always returns false — a plain
+    // Float32Array is not page-aligned, and `alloc()` just returns another
+    // plain Float32Array, so neither is "aligned" from the backend's view.
+    // On metal, alloc() goes through posix_memalign and isAligned() checks
+    // the pointer. We run both paths and assert what's appropriate per host.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-isaligned",
+      `
+        import gpu from "bun:gpu";
+        const plain = new Float32Array(1024);
+        const allocd = gpu.alloc(1024, "f32");
+        console.log(JSON.stringify({
+          plain: gpu.isAligned(plain),
+          allocd: gpu.isAligned(allocd),
+          active: gpu.activeBackend(),
+        }));
+      `,
+    );
+    const r = JSON.parse(stdout);
+    // A plain Float32Array is NEVER page-aligned (JSC backing is ~16-byte).
+    expect(r.plain).toBe(false);
+    if (r.active === "metal") {
+      // Metal alloc goes through posix_memalign(pagesize), so it must report true.
+      expect(r.allocd).toBe(true);
+    } else {
+      // cpu + cuda backends have no alignment concept; isAligned is a stub.
+      expect(r.allocd).toBe(false);
+    }
+    expect(exitCode).toBe(0);
+  });
+
+  it("matVec over alloc'd inputs matches matVec over plain inputs", async () => {
+    // This is the NOCOPY dispatch correctness test. On macOS, gpu.matVec with
+    // an alloc'd matrix goes through newBufferWithBytesNoCopy (zero-copy),
+    // while the same matrix passed as a plain Float32Array goes through
+    // newBufferWithBytes (memcpy). Both kernels run identical MSL, so the
+    // outputs must be bit-identical.
+    //
+    // On Linux (cpu fallback) both paths collapse to the same bun:simd call,
+    // which also must match bit-for-bit — this pins the contract that the
+    // alloc'd array is observably interchangeable with a plain typed array
+    // as a matVec input.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matvec-alloc",
+      `
+        import gpu from "bun:gpu";
+        const M = 1024, K = 1024; // M*K = 1<<20, at threshold
+        const plainMat = new Float32Array(M * K);
+        const plainVec = new Float32Array(K);
+        let seed = 0xABCDEF;
+        const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return (seed / 0xFFFFFFFF) * 2 - 1; };
+        for (let i = 0; i < plainMat.length; i++) plainMat[i] = rand();
+        for (let j = 0; j < K; j++) plainVec[j] = rand();
+
+        const allocMat = gpu.alloc(M * K, "f32");
+        const allocVec = gpu.alloc(K, "f32");
+        allocMat.set(plainMat);
+        allocVec.set(plainVec);
+
+        const plainOut = gpu.matVec(plainMat, plainVec, M, K);
+        const allocOut = gpu.matVec(allocMat, allocVec, M, K);
+
+        let mismatches = 0;
+        for (let i = 0; i < M; i++) if (plainOut[i] !== allocOut[i]) mismatches++;
+        console.log("mismatches=" + mismatches, "active=" + gpu.activeBackend());
+      `,
+    );
+    // Must be exactly 0 — same kernel, same inputs, just different staging.
+    expect(stdout).toMatch(/^mismatches=0 active=(metal|cuda|cpu)$/);
     expect(exitCode).toBe(0);
   });
 

@@ -574,6 +574,24 @@ function getDeviceName(): string {
   return deviceName;
 }
 
+// Page-aligned alloc is a no-op on CUDA today — the dispatch path does its
+// own cuMemAlloc+cuMemcpy per call, so caller-side alignment doesn't help.
+// Matches the CPU stub so the bun:gpu public surface stays uniform.
+// TODO: cudaHostAlloc / pinned memory for async DMA would be a real win
+// here; out of scope for the Metal-focused input-staging lift.
+function alloc(length: number, type: "f32" | "f64"): FArray {
+  if (!Number.isInteger(length) || length < 0) {
+    throw new RangeError(`length must be a non-negative integer; got ${length}`);
+  }
+  if (type !== "f32" && type !== "f64") {
+    throw new TypeError(`type must be "f32" or "f64"; got ${String(type)}`);
+  }
+  return type === "f32" ? new Float32Array(length) : new Float64Array(length);
+}
+function isAligned(_arr: FArray): boolean {
+  return false;
+}
+
 export default {
   name: "cuda" as const,
   probe,
@@ -582,6 +600,8 @@ export default {
   matVec,
   matmul,
   simdMap,
+  alloc,
+  isAligned,
   dispose,
   getDeviceName,
 };

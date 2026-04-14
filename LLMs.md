@@ -303,11 +303,24 @@ gpu.matVec(mat, vec, M, K); // Float32Array of length M
 gpu.matmul(a, b, M, K, N);  // Float32Array of length M*N
 gpu.simdMap(fn, a);         // Float32Array — affine fn detected
 gpu.winsForSize(op, n, elemBytes); // size-gated routing hint
+const mat = gpu.alloc(M * K, "f32"); // page-aligned; enables NOCOPY matVec
+gpu.isAligned(mat);        // true on metal for alloc'd, false otherwise
 ```
 
-Exports: `dot`, `matVec`, `matmul`, `simdMap`, `activeBackend`, `hasBackend`,
-`setBackend`, `winsForSize`, `describe`, `dispose`. `setBackend("cpu")`
-forces the fallback for testing; `setBackend("auto")` re-runs the probe.
+Exports: `dot`, `matVec`, `matmul`, `simdMap`, `alloc`, `isAligned`,
+`activeBackend`, `hasBackend`, `setBackend`, `winsForSize`, `describe`,
+`dispose`. `setBackend("cpu")` forces the fallback for testing;
+`setBackend("auto")` re-runs the probe.
+
+`alloc(length, "f32"|"f64")` returns a typed array whose backing pointer
+is a multiple of the system page size (16 KiB on Apple Silicon, 4 KiB on
+Intel). On Metal, `matVec` detects page-aligned inputs via `isAligned`
+and dispatches through `newBufferWithBytesNoCopy:length:options:deallocator:`
+— skipping the MTLBuffer-internal memcpy that dominates matVec time at
+large sizes. Callers that don't use `alloc` still work; they just take
+the COPY path. Alloc'd memory is held for the backend's lifetime (same
+commit-for-lifetime model as `bun:simd.alloc`). On CPU/CUDA, `alloc`
+returns a plain typed array.
 
 Two thresholds, not one:
 
@@ -318,21 +331,24 @@ Two thresholds, not one:
   reads this when deciding whether to promote a fused affine chain.
 
 They're decoupled because a compiled-and-correct kernel isn't always a
-*winning* kernel. Today `simdMap` wins at ≥ 1<<18 f32 elems; `matVec`'s
-wins threshold is parked at `Infinity` even though the tuned
-simdgroup-reduction kernel is live on both Metal and CUDA. On Apple
-Silicon the bottleneck is the per-call `newBufferWithBytes:` copy into
-a shared `MTLBuffer` (~4 MB for a 1024² f32 mat), not the kernel; on
-CUDA we haven't benchmarked yet. The dispatch threshold still lets the
-kernel run for regression coverage.
+*winning* kernel. Today `simdMap` wins at ≥ 1<<18 f32 elems; `matVec`
+on Metal wins at ≥ 1<<20 f32 elems (1 M elems, 4 MiB) — but *only* when
+inputs come from `gpu.alloc`. Without alignment the kernel runs the
+COPY path and loses to CPU until ~16 MiB. See
+`bench/parabun-metal-zerocopy/README.md` for the measured crossover on
+M4. On CUDA we haven't benchmarked yet; `winsForSize` there is still
+parked at `Infinity`. The dispatch threshold still lets the kernel run
+for regression coverage regardless.
 
 Backend implementations:
 
 - **Metal** (`src/js/bun/gpu/metal.ts`) — Obj-C runtime via `bun:ffi`
   against `libobjc.A.dylib`. MSL kernels are compiled at load time with
   `newLibraryWithSource:options:error:`, pipeline state cached per
-  kernel. Unified memory + `MTLResourceStorageModeShared` gives
-  zero-copy buffers, so dispatch cost is encoder setup + GPU wait.
+  kernel. Unified memory + `MTLResourceStorageModeShared` + NOCOPY on
+  `gpu.alloc`'d inputs gives true zero-copy dispatch; non-aligned
+  inputs fall back to `newBufferWithBytes:` which still works but pays
+  one memcpy per call.
 - **CUDA** (`src/js/bun/gpu/cuda.ts`) — PTX kernels (`simdMapAffineF32`,
   `matVecF32` — warp-reduced via `shfl.sync.bfly.b32`) loaded via the
   CUDA driver API. `dot`/`matmul` still forward to `bun:simd`; `matVec`
@@ -391,14 +407,6 @@ Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
   transpile (closures, `this`, side effects, stateful globals); scope
   is scalar-in/scalar-out numeric kernels with `Math.*` → shader
   intrinsics and `if/else/loop` → shader control flow.
-- **Zero-copy `matVec` input staging** — tuned simdgroup / warp-reduced
-  kernels (Metal `simd_sum`, CUDA `shfl.sync.bfly`) are live on both
-  backends, but on Apple Silicon the per-call `newBufferWithBytes:`
-  copy of the matrix into a shared `MTLBuffer` dominates. Moving to
-  `newBufferWithBytesNoCopy:` with page-aligned inputs (or cross-call
-  GPU residency — Tier 4) is what would let `MIN_MATVEC_WINS_ELEMS`
-  move off Infinity. On CUDA the limit is still unmeasured —
-  benchmarks on a real RTX host are the next gating step.
 - **Auto-accel dispatch, Tier 4 (cross-call buffer residency)** — deciding
   to keep a typed array GPU-resident between user calls so a one-shot
   `dot(a, b)` on a discrete GPU isn't bottlenecked by PCIe. Either needs

@@ -55,6 +55,8 @@ interface Backend {
   matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): FArray;
   matmul(a: FArray, b: FArray, m: number, k: number, n: number): FArray;
   simdMap(fn: (x: number, i: number) => number, a: FArray): FArray;
+  alloc(length: number, type: "f32" | "f64"): FArray;
+  isAligned(arr: FArray): boolean;
   dispose(): void;
 }
 
@@ -98,6 +100,18 @@ const cpuBackend: Backend = {
   },
   simdMap(fn, a) {
     return simd.simdMap(fn, a as any);
+  },
+  alloc(length, type) {
+    if (!Number.isInteger(length) || length < 0) {
+      throw new RangeError(`length must be a non-negative integer; got ${length}`);
+    }
+    if (type !== "f32" && type !== "f64") {
+      throw new TypeError(`type must be "f32" or "f64"; got ${String(type)}`);
+    }
+    return type === "f32" ? new Float32Array(length) : new Float64Array(length);
+  },
+  isAligned(_arr) {
+    return false;
   },
   dispose() {},
 };
@@ -204,6 +218,21 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
   return resolveActive().simdMap(fn, a);
 }
 
+// Page-aligned typed array suitable for zero-copy staging into the active
+// backend's device memory. On Metal, alloc()'d matrices take the NOCOPY
+// dispatch path in matVec — see bench/parabun-metal-zerocopy/README.md for
+// the size/speed tradeoff. On CPU (and today's CUDA) it just returns a
+// plain typed array since the backend has no benefit from alignment.
+function alloc(length: number, type: "f32"): Float32Array;
+function alloc(length: number, type: "f64"): Float64Array;
+function alloc(length: number, type: "f32" | "f64"): FArray {
+  return resolveActive().alloc(length, type);
+}
+
+function isAligned(arr: FArray): boolean {
+  return resolveActive().isAligned(arr);
+}
+
 function dispose(): void {
   // Dispose every probed backend (not just the active one) — if someone
   // switched away from metal to cpu mid-session, we still want to release
@@ -237,6 +266,8 @@ export default {
   matVec,
   matmul,
   simdMap,
+  alloc,
+  isAligned,
   activeBackend,
   hasBackend,
   setBackend,
