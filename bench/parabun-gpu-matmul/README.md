@@ -1,7 +1,7 @@
 # parabun-gpu-matmul
 
-Microbenchmark: CUDA matmul (naive PTX, one-thread-per-output) vs JS triple
-loop.
+Microbenchmark: CUDA matmul (32×32 shared-memory tiled PTX, unrolled K) vs JS
+triple loop.
 
 `gpu.matmul(a, b, M, K, N)` routes (M×K)·(K×N) → M×N through a PTX
 `matmulF32` kernel on the CUDA backend when (a) the work crosses a size
@@ -26,24 +26,24 @@ gpu backend: cuda  available=[cuda,cpu]  platform=linux
 
          M×K×N |    FMA | scenario   | med (ms) |   vs js | hold (ms)
 ------------------------------------------------------------------------------
-   128×128×128 |   2.1M | js         |     1.59 |   1.00× |         -
-   128×128×128 |   2.1M | gpu-cold   |     1.59 |   1.00× |         -
-   128×128×128 |   2.1M | gpu-held   |     0.20 |   8.11× |      1.40
+   128×128×128 |   2.1M | js         |     1.37 |   1.00× |         -
+   128×128×128 |   2.1M | gpu-cold   |     1.37 |   1.00× |         -
+   128×128×128 |   2.1M | gpu-held   |     0.08 |  16.61× |      0.41
 
-   256×256×256 |  16.8M | js         |    12.71 |   1.00× |         -
-   256×256×256 |  16.8M | gpu-cold   |     0.81 |  15.68× |         -
-   256×256×256 |  16.8M | gpu-held   |     0.31 |  40.91× |      0.26
+   256×256×256 |  16.8M | js         |    10.88 |   1.00× |         -
+   256×256×256 |  16.8M | gpu-cold   |     0.76 |  14.36× |         -
+   256×256×256 |  16.8M | gpu-held   |     0.27 |  40.66× |      0.24
 
-   512×512×512 | 134.2M | js         |   147.54 |   1.00× |         -
-   512×512×512 | 134.2M | gpu-cold   |     3.13 |  47.13× |         -
-   512×512×512 | 134.2M | gpu-held   |     1.49 |  98.85× |      0.94
+   512×512×512 | 134.2M | js         |    89.23 |   1.00× |         -
+   512×512×512 | 134.2M | gpu-cold   |     2.81 |  31.79× |         -
+   512×512×512 | 134.2M | gpu-held   |     1.12 |  79.97× |      0.89
 
- 1024×512×1024 | 536.9M | js         |   369.64 |   1.00× |         -
- 1024×512×1024 | 536.9M | gpu-cold   |     7.10 |  52.09× |         -
- 1024×512×1024 | 536.9M | gpu-held   |     3.82 |  96.86× |      2.41
+ 1024×512×1024 | 536.9M | js         |   349.96 |   1.00× |         -
+ 1024×512×1024 | 536.9M | gpu-cold   |     6.46 |  54.16× |         -
+ 1024×512×1024 | 536.9M | gpu-held   |     3.38 | 103.50× |      1.69
 
 correctness check @ 128×128×128:
-  js vs gpu-cold      : 0 mismatches (tol 1e-4), maxErr=0.00e+0
+  js vs gpu-cold     : 0 mismatches (tol 1e-4), maxErr=0.00e+0
   gpu-cold vs gpu-held: 0 mismatches (exact), maxErr=0.00e+0
 ```
 
@@ -74,21 +74,26 @@ and the "held saves one HtoD" advantage becomes small. Still, held is
 never slower than cold, so the recommendation is: if the matrix is
 reused even twice, hold it.
 
-## Why this is fast even though the kernel is naive
+## Kernel shape
 
-The kernel is one thread per output cell with no shared-memory tiling —
-dumb matmul. It's still 47–99× JS because:
+The kernel is a 32×32 shared-memory tiled matmul: each block computes a
+32×32 output tile. A and B are cooperatively loaded into `MMAs[32][32]`
+and `MMBs[32][32]` (one f32 per thread, `bar.sync`'d), then the inner
+K-loop does 32 fully-unrolled `fma.rn.f32`'s reading from shared. Each
+thread still computes one output cell; global reads are amortized 32×
+over the tile.
 
-1. **The JS loop is fp64** under JSC's typed-array store pattern, so it
-   runs at scalar fp64 speed (~0.4–1 GFLOP/s on this CPU).
-2. **The GPU does it at naive fp32** on 7680 shader units at 2.6 GHz.
-   Even without tiling, memory-BW-per-thread is compensated by the
-   L1/L2 caches and the write coalescing.
-
-A tiled kernel (shared-memory blocking, 32×32 tiles) would improve
-`gpu-cold` toward device peak (~13 TFLOPS f32). Leaving that for later
-if a workload demands it — the residency-first API already gets the
-caller most of the way.
+Going tiled (replacing the earlier naive one-thread-per-output kernel)
+gained ~5–15 % at every size tested — less than the textbook
+expectation. The reason: the naive kernel was already mostly
+L1-resident because every 32-thread warp repeatedly reads the same 32
+B-columns, so explicit shared tiling mostly moved the reuse from
+implicit cache to explicit SMEM. The bigger headroom is register
+tiling (each thread accumulates a 4×4 or 8×8 sub-tile), vectorized
+`ld.global.v4.f32` loads, and eventually tensor cores — those are the
+path toward device peak (~13 TFLOPS f32). Current `gpu-cold` is still
+only ~0.6 % of peak at 1024×512×1024 (~83 GFLOPS); plenty of room left
+on the table if a workload demands it.
 
 ## What this unlocks
 

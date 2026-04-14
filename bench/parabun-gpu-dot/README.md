@@ -93,10 +93,17 @@ already exceeds SIMD's 2 ms full computation. The kernel compute itself
 is essentially free by comparison — so there is no cold vector size
 where GPU dot wins.
 
-Pinned host memory (`cuMemHostAlloc`) would lift the HtoD ceiling an
-order of magnitude and could flip some cold sizes — that's a separate
-lift, tracked as a pending backend improvement alongside `gpu.alloc`
-hooking into pinned allocation.
+Pinned host memory (`cuMemAllocHost_v2`) was tried as a staging pool
+and didn't pay off on this backend. The naive approach — alloc a
+reusable page-locked buffer, `typedArray.set()` into it, then DMA to
+device — adds a JS-visible memcpy that costs as much as the
+`set()`-less path through the driver's internal pinned ring. The
+page-locking syscall itself is ~2.5 ms per MB on first alloc, which
+dominates any short-running HtoD. Net: 5–8 % cold-path win at best,
+and a 1.5–2× hold() regression at 16 MB+ from allocation overhead.
+Leaving the pageable path in place; a real win here would need either
+`cuMemHostRegister` on stable JS buffers (GC-unsafe today) or an
+`alloc(type, length)` API that returns an already-pinned view.
 
 ## What this unlocks
 

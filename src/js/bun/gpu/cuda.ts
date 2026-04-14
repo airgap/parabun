@@ -46,6 +46,13 @@ type CudaSymbols = {
   cuMemcpyHtoD_v2: (dst: bigint, src: number, size: bigint) => number;
   cuMemcpyDtoH_v2: (dst: number, src: bigint, size: bigint) => number;
   cuModuleLoadData: (modPtr: number, img: number) => number;
+  cuModuleLoadDataEx: (
+    modPtr: number,
+    img: number,
+    numOptions: number,
+    options: number,
+    optionValues: number,
+  ) => number;
   cuModuleUnload: (mod: bigint) => number;
   cuModuleGetFunction: (fnPtr: number, mod: bigint, name: number) => number;
   cuLaunchKernel: (
@@ -84,6 +91,10 @@ function tryLoadCuda(): boolean {
       cuMemcpyHtoD_v2: { args: [FFIType.u64, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
       cuMemcpyDtoH_v2: { args: [FFIType.ptr, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
       cuModuleLoadData: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+      cuModuleLoadDataEx: {
+        args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32,
+      },
       cuModuleUnload: { args: [FFIType.u64], returns: FFIType.i32 },
       cuModuleGetFunction: { args: [FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
       cuLaunchKernel: {
@@ -120,13 +131,16 @@ function tryLoadCuda(): boolean {
 //                      the Metal simdgroup-reduction kernel; kernel is correct
 //                      but dispatched past a hard "wins" threshold at Infinity
 //                      until we have a real RTX benchmark.
-//   matmulF32        — (M×K)·(K×N) → M×N, naive one-thread-per-output. 16×16
-//                      threadblock; each thread walks one row of A and one
-//                      column of B with an fma.rn.f32 accumulator. No shared
-//                      memory tiling yet — the residency win (hold(a)+hold(b))
-//                      is still worth it because the matmul is compute-bound
-//                      at the sizes where it's interesting, and naive fp32
-//                      on an RTX 4070 Ti clocks in around the TFLOP mark.
+//   matmulF32        — (M×K)·(K×N) → M×N. 32×32 threadblock computes a 32×32
+//                      output tile using shared-memory tiling: each K-stripe
+//                      of 32 columns/rows is cooperatively loaded into
+//                      As[32][32] / Bs[32][32] (1 thread, 1 f32 each),
+//                      bar.sync'd, then the inner K-loop does 32 fma.rn.f32's
+//                      per K-tile reading from shared. Each thread still
+//                      computes one output cell; global reads are amortized
+//                      32× over the tile. No register-tile / vectorized
+//                      loads / double-buffering yet — room for another
+//                      couple-of-x on cold before we hit memory-BW peak.
 //   dotF32           — a·b → scalar. Grid of 1024 blocks × 32 threads (one
 //                      warp per block). Each thread stride-loops the vector
 //                      with fma.rn.f32; within the warp a shfl.sync.bfly
@@ -138,10 +152,30 @@ function tryLoadCuda(): boolean {
 // we use shfl.sync.bfly.b32 with a full 0xffffffff membermask (the warp is
 // fully active by construction — block size is exactly 32).
 
+// Unrolled inner K-loop for matmulF32 (32 iterations). Each iter reads
+// one f32 from As (walks columns, stride 4) and one from Bs (walks rows,
+// stride 128), accumulates via fma.rn.f32. Unrolling removes ~3 extra
+// instructions per iter (cmp/add/bra) vs the looped form.
+const MATMUL_K_UNROLL = Array.from({ length: 32 }, (_, kk) => {
+  const aOff = kk * 4;
+  const bOff = kk * 128;
+  return [
+    `    ld.shared.f32 %f4, [%r18 + ${aOff}];`,
+    `    ld.shared.f32 %f5, [%r20 + ${bOff}];`,
+    `    fma.rn.f32    %f1, %f4, %f5, %f1;`,
+  ].join("\n");
+}).join("\n");
+
 const PTX_MODULE = `
 .version 7.0
 .target sm_50
 .address_size 64
+
+// Module-scope shared tiles for matmulF32. Declared here (not inside the
+// entry) because ptxas rejects shared-in-entry with + offset addressing
+// across some versions; module scope is the compatible form.
+.shared .align 4 .b32 MMAs[1024];
+.shared .align 4 .b32 MMBs[1024];
 
 .visible .entry simdMapAffineF32(
     .param .u64 inPtr,
@@ -281,10 +315,10 @@ MVDONE:
     .param .u32 n
 )
 {
-    .reg .pred  %p<3>;
-    .reg .b32   %r<14>;
-    .reg .f32   %f<4>;
-    .reg .b64   %rd<18>;
+    .reg .pred  %p<10>;
+    .reg .b32   %r<40>;
+    .reg .f32   %f<10>;
+    .reg .b64   %rd<20>;
 
     ld.param.u64  %rd1, [aPtr];
     ld.param.u64  %rd2, [bPtr];
@@ -293,62 +327,93 @@ MVDONE:
     ld.param.u32  %r2,  [k];
     ld.param.u32  %r3,  [n];
 
-    // row = ctaid.y * ntid.y + tid.y
-    mov.u32       %r4, %ctaid.y;
-    mov.u32       %r5, %ntid.y;
-    mov.u32       %r6, %tid.y;
-    mad.lo.s32    %r7, %r4, %r5, %r6;
+    cvta.to.global.u64 %rd1, %rd1;
+    cvta.to.global.u64 %rd2, %rd2;
+    cvta.to.global.u64 %rd3, %rd3;
 
-    // col = ctaid.x * ntid.x + tid.x
-    mov.u32       %r8, %ctaid.x;
-    mov.u32       %r9, %ntid.x;
-    mov.u32       %r10, %tid.x;
-    mad.lo.s32    %r11, %r8, %r9, %r10;
+    mov.u32       %r4, %tid.x;       // tx 0..31
+    mov.u32       %r5, %tid.y;       // ty 0..31
+    mov.u32       %r6, %ctaid.x;     // bx
+    mov.u32       %r7, %ctaid.y;     // by
 
-    setp.ge.u32   %p1, %r7, %r1;
-    @%p1 bra      MMDONE;
-    setp.ge.u32   %p2, %r11, %r3;
-    @%p2 bra      MMDONE;
+    // row = by*32 + ty
+    shl.b32       %r8, %r7, 5;
+    add.u32       %r8, %r8, %r5;
+    // col = bx*32 + tx
+    shl.b32       %r9, %r6, 5;
+    add.u32       %r9, %r9, %r4;
 
-    // aAddr = A + row*k*4 (walks by +4 per iter)
-    mul.wide.u32  %rd4, %r7, %r2;
-    shl.b64       %rd4, %rd4, 2;
-    cvta.to.global.u64 %rd5, %rd1;
-    add.s64       %rd6, %rd5, %rd4;
+    // my slot in MMAs/MMBs - resolve symbol to shared-address register,
+    // then add byte offset = (ty*32 + tx)*4.
+    shl.b32       %r10, %r5, 5;
+    add.u32       %r10, %r10, %r4;
+    shl.b32       %r10, %r10, 2;
 
-    // bAddr = B + col*4 (walks by +n*4 per iter)
-    mul.wide.u32  %rd7, %r11, 4;
-    cvta.to.global.u64 %rd8, %rd2;
-    add.s64       %rd9, %rd8, %rd7;
+    mov.u32       %r30, MMAs;
+    add.u32       %r30, %r30, %r10;   // my As slot addr
+    mov.u32       %r31, MMBs;
+    add.u32       %r31, %r31, %r10;   // my Bs slot addr
 
-    // bStride = n*4 bytes
-    mul.wide.u32  %rd10, %r3, 4;
+    mov.f32       %f1, 0f00000000;   // acc
+    mov.u32       %r13, 0;           // t (K-tile start)
 
-    mov.f32       %f1, 0f00000000;
-    mov.u32       %r12, 0;
+MMTLOOP:
+    setp.ge.u32   %p1, %r13, %r2;
+    @%p1 bra      MMEPI;
 
-MMLOOP:
-    setp.ge.u32   %p1, %r12, %r2;
-    @%p1 bra      MMSTORE;
+    // Load A[row, t+tx] -> As[ty, tx]   (predicated on row<M && t+tx<K)
+    add.u32       %r14, %r13, %r4;
+    setp.lt.u32   %p2, %r8, %r1;
+    setp.lt.u32   %p3, %r14, %r2;
+    and.pred      %p2, %p2, %p3;
+    mad.lo.s32    %r15, %r8, %r2, %r14;
+    mul.wide.u32  %rd4, %r15, 4;
+    add.s64       %rd5, %rd1, %rd4;
+    mov.f32       %f2, 0f00000000;
+    @%p2 ld.global.f32 %f2, [%rd5];
+    st.shared.f32 [%r30], %f2;
 
-    ld.global.f32 %f2, [%rd6];
-    ld.global.f32 %f3, [%rd9];
-    fma.rn.f32    %f1, %f2, %f3, %f1;
+    // Load B[t+ty, col] -> Bs[ty, tx]   (predicated on t+ty<K && col<N)
+    add.u32       %r16, %r13, %r5;
+    setp.lt.u32   %p4, %r16, %r2;
+    setp.lt.u32   %p5, %r9, %r3;
+    and.pred      %p4, %p4, %p5;
+    mad.lo.s32    %r17, %r16, %r3, %r9;
+    mul.wide.u32  %rd6, %r17, 4;
+    add.s64       %rd7, %rd2, %rd6;
+    mov.f32       %f3, 0f00000000;
+    @%p4 ld.global.f32 %f3, [%rd7];
+    st.shared.f32 [%r31], %f3;
 
-    add.s64       %rd6, %rd6, 4;
-    add.s64       %rd9, %rd9, %rd10;
-    add.u32       %r12, %r12, 1;
-    bra           MMLOOP;
+    bar.sync 0;
 
-MMSTORE:
-    // cAddr = C + (row*n + col)*4
-    mul.wide.u32  %rd11, %r7, %r3;
-    cvt.u64.u32   %rd12, %r11;
-    add.s64       %rd13, %rd11, %rd12;
-    shl.b64       %rd14, %rd13, 2;
-    cvta.to.global.u64 %rd15, %rd3;
-    add.s64       %rd16, %rd15, %rd14;
-    st.global.f32 [%rd16], %f1;
+    // Inner K-loop (unrolled 32x): acc += As[ty*32+kk] * Bs[kk*32+tx].
+    //   %r18 = MMAs + ty*128 (row base, read at +kk*4)
+    //   %r20 = MMBs + tx*4   (col base, read at +kk*128)
+    mov.u32       %r32, MMAs;
+    shl.b32       %r18, %r5, 7;
+    add.u32       %r18, %r18, %r32;
+    mov.u32       %r33, MMBs;
+    shl.b32       %r20, %r4, 2;
+    add.u32       %r20, %r20, %r33;
+
+${MATMUL_K_UNROLL}
+
+    bar.sync 0;
+
+    add.u32       %r13, %r13, 32;
+    bra           MMTLOOP;
+
+MMEPI:
+    setp.ge.u32   %p7, %r8, %r1;
+    @%p7 bra      MMDONE;
+    setp.ge.u32   %p8, %r9, %r3;
+    @%p8 bra      MMDONE;
+
+    mad.lo.s32    %r27, %r8, %r3, %r9;
+    mul.wide.u32  %rd8, %r27, 4;
+    add.s64       %rd9, %rd3, %rd8;
+    st.global.f32 [%rd9], %f1;
 
 MMDONE:
     ret;
@@ -508,9 +573,19 @@ function probe(): boolean {
   if (s.cuCtxCreate_v2(ptr(ctxBuf), 0, device) !== 0) return false;
   ctx = ctxBuf[0];
 
+  // Use cuModuleLoadDataEx so we can surface the ptxas error text when
+  // the PTX fails to compile — invaluable when iterating on kernels.
+  // CU_JIT_ERROR_LOG_BUFFER = 5, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6
   const ptxBytes = new TextEncoder().encode(PTX_MODULE + "\0");
   const modBuf = new BigUint64Array(1);
-  if (s.cuModuleLoadData(ptr(modBuf), ptr(ptxBytes)) !== 0) {
+  const errLog = new Uint8Array(8192);
+  const options = new Uint32Array([5, 6]);
+  const optVals = new BigUint64Array([BigInt(ptr(errLog)), BigInt(errLog.length)]);
+  if (s.cuModuleLoadDataEx(ptr(modBuf), ptr(ptxBytes), 2, ptr(options), ptr(optVals)) !== 0) {
+    const end = errLog.indexOf(0);
+    if (end > 0) {
+      console.error(`bun:gpu cuda: PTX module load failed:\n${new TextDecoder().decode(errLog.subarray(0, end))}`);
+    }
     s.cuCtxDestroy_v2(ctx);
     ctx = null;
     return false;
@@ -810,8 +885,9 @@ function launchMatmulF32(
       BigInt(ptr(pN)),
     ]);
 
-    // 16×16 threadblock; grid covers ceil(n/16) × ceil(m/16).
-    const TILE = 16;
+    // 32×32 threadblock (1024 threads, matches the kernel's shared tile);
+    // grid covers ceil(n/32) × ceil(m/32).
+    const TILE = 32;
     const gridX = Math.floor((n + TILE - 1) / TILE);
     const gridY = Math.floor((m + TILE - 1) / TILE);
     const r = s.cuLaunchKernel(fnMatmulF32!, gridX, gridY, 1, TILE, TILE, 1, 0, 0n, ptr(paramPtrs), null);
