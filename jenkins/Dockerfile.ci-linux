@@ -85,15 +85,19 @@ RUN arch=$(dpkg --print-architecture) && \
         | tar -xz -C /usr/local --strip-components=1 \
     && node --version
 
-# Rust toolchain (nightly) — needed by vendored deps that compile from
-# source (lolhtml, etc.). Install system-wide so the non-root Jenkins
-# container user can invoke cargo.
+# Rust toolchain — needed by vendored deps that compile from source
+# (lolhtml, etc.). Install system-wide so the non-root Jenkins container
+# user can invoke cargo. The repo's rust-toolchain.toml pins a specific
+# nightly; we preinstall it here so the common case hits the image cache,
+# but leave the dirs world-writable so rustup can fetch a new pin if the
+# toml bumps between image rebuilds.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/usr/local/bin:${PATH}
+ARG RUST_NIGHTLY=nightly-2025-12-10
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain nightly --profile minimal --no-modify-path \
-    && chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}" \
+        | sh -s -- -y --default-toolchain "${RUST_NIGHTLY}" --profile minimal --no-modify-path \
+    && chmod -R a+rwX "${RUSTUP_HOME}" "${CARGO_HOME}" \
     && cargo --version \
     && rustc --version
 
