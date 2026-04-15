@@ -123,6 +123,36 @@ const scores = matVec(embeddings, query, N, D);   // one WASM call, f32x4 intern
 
 Primitives include element-wise ops (`mulScalar`, `addScalar`, `simdMap`), reductions (`sum`, `dot`), and bulk operations (`matVec`). Above a ~4 MiB byte-footprint threshold the runtime falls back to monomorphic tight loops (`sumTightF32`/`F64`, `dotTightF32`/`F64`) because at that size the WASM copy-in dominates the reduction.
 
+### Buffer Pooling (`bun:arena`)
+
+`bun:arena` is a typed-array pool. If your hot path repeatedly allocates short-lived buffers of a known size — protocol decode scratch, per-request work buffers, ring stages — borrow from a `Pool` instead of calling `new Uint8Array(N)`:
+
+```pts
+import arena from "bun:arena";
+
+const pool = new arena.Pool(Uint8Array, 65536, { prewarm: 8 });
+
+function handle(frame) {
+  const buf = pool.acquire();
+  try {
+    decodeInto(buf, frame);
+    return process(buf);
+  } finally {
+    pool.release(buf);
+  }
+}
+// or: pool.use(buf => { ... })
+```
+
+Microbench (200k × 64 KiB Uint8Array allocations + 2 KiB touch each, release build, best-of-5):
+
+```
+baseline (new Uint8Array)   707.9 ms
+parabun (bun:arena Pool)    248.8 ms      → 2.85×
+```
+
+This is a microbench by design — it isolates the allocator/zero-init/GC-tracking cost. If your handler spends 10 ms of real CPU per request and 20 µs on allocation, pooling won't move the needle. The win shows up where allocation is a measurable fraction of the workload (binary protocol gateways, columnar pre-processing, tight encode/decode loops). Pass `clear: true` if recycled buffers must not carry old bytes — defaults to off, since skipping the zero-init is the point of a pool.
+
 ### GPU Compute (`bun:gpu`)
 
 `bun:gpu` is a compute-only GPU surface (not graphics) that mirrors the hot parts of `bun:simd`. It probes a backend chain — Metal on darwin, CUDA on Linux/Windows, CPU fallback always available — and picks the first one whose runtime loads.
