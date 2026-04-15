@@ -1,0 +1,76 @@
+// Microbenchmark: adaptive pmap vs Array.prototype.map
+//
+//   bun run build:release bench/parabun-pmap-adaptive/run.pjs
+//
+// Confirms the LYK-712 claim that `pmap` no longer loses to `.map()` at
+// tiny per-item work. Each row reports total wall time for both paths at
+// a grid of (array length × per-item work) so we can see the crossover
+// where fanning out to workers actually helps.
+
+import parallel from "bun:parallel";
+
+const WARMUP = 3;
+const ITERS = 15;
+
+function bench(fn, iters) {
+  // Warmup — especially important for JIT tiers.
+  for (let i = 0; i < WARMUP; i++) void fn();
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    const out = fn();
+    if (out instanceof Promise) {
+      throw new Error("this bench wraps the awaited value — see caller");
+    }
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+async function benchAsync(fn, iters) {
+  for (let i = 0; i < WARMUP; i++) await fn();
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    await fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+// Three "work shapes" spanning the threshold boundaries.
+const shapes = [
+  { name: "trivial", work: x => x * 2 }, // ~10ns/item
+  { name: "medium", work: x => { let s = 0; for (let k = 0; k < 500; k++) s += Math.sin(k) * x; return s; } }, // ~10μs/item
+  { name: "heavy", work: x => { let s = 0; for (let k = 0; k < 200000; k++) s += Math.sin(k) * x; return s; } }, // ~4ms/item
+];
+
+const sizes = [4, 32, 256, 1024];
+
+console.log(`${"shape".padEnd(8)} | ${"N".padStart(6)} | ${"serial map (ms)".padStart(15)} | ${"pmap (ms)".padStart(11)} | ${"speedup".padStart(7)}`);
+console.log("-".repeat(68));
+
+for (const { name, work } of shapes) {
+  for (const N of sizes) {
+    const input = Array.from({ length: N }, (_, i) => i);
+
+    // Reset heuristic so each (shape, N) pair starts cold — that's the
+    // worst-case for the adaptive path (first-call probe overhead).
+    parallel._resetHeuristic();
+
+    const serialMs = bench(() => input.map(work), ITERS);
+    // The first timed iter pays probe cost; after warmup the heuristic
+    // has converged. We include probe cost in the warmup so steady-state
+    // numbers are what we report.
+    const pmapMs = await benchAsync(() => parallel.pmap(work, input), ITERS);
+
+    console.log(
+      `${name.padEnd(8)} | ${String(N).padStart(6)} | ${serialMs.toFixed(3).padStart(13)} ms | ${pmapMs.toFixed(3).padStart(9)} ms | ${(serialMs / pmapMs).toFixed(2).padStart(5)}×`,
+    );
+  }
+  console.log();
+}
+
+parallel.disposeWorkers();
