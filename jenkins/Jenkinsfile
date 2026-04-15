@@ -59,6 +59,13 @@ pipeline {
                             // First run on a node builds the image (~5 min);
                             // subsequent runs reuse the BuildKit layer cache.
                             additionalBuildArgs '--pull'
+                            // The controller's / partition (~500GB, shared
+                            // with crossdraw artifacts + lyku workspaces +
+                            // docker) can't fit a Parabun release build,
+                            // whose zig ReleaseFast step peaks at ~20GB of
+                            // intermediates. /raid has 99GB free on its
+                            // own partition.
+                            customWorkspace '/raid/jenkins-workspaces/parabun'
                         }
                     }
                     steps {
@@ -185,6 +192,7 @@ pipeline {
                 dockerfile {
                     filename 'jenkins/Dockerfile.ci-linux'
                     label 'linux'
+                    customWorkspace '/raid/jenkins-workspaces/parabun-publish'
                 }
             }
             steps {
