@@ -1,0 +1,249 @@
+// Parabun CI — builds release binaries for Linux x64, macOS arm64 and
+// Windows x64 in parallel, optionally publishing all three as one tagged
+// GitHub Release. Mirrors /raid/lyku/jenkins/Jenkinsfile.desktop's
+// parallel-per-platform shape.
+//
+// Per-platform details:
+//   - Linux:   builds in a container from jenkins/Dockerfile.ci-linux
+//              on any agent with the `linux` label (Built-In Node works).
+//   - macOS:   rsyncs source to the `mac-mini` SSH alias and invokes
+//              jenkins/build-macos.sh there. The SSH alias is defined in
+//              the Jenkins controller's ~/.ssh/config (mounted read-only
+//              into the ubuntu:24.04 dispatcher container).
+//   - Windows: runs natively on the `windows` agent (windows-strix).
+//              See jenkins/setup-windows-agent.md for prereqs.
+//
+// Publishing uses the pre-existing `github-pat` credential (scoped to
+// airgap/*, so no parabun-specific token needed). The release tag is
+// `parabun-<short-sha>`; re-runs of the same commit clobber assets rather
+// than creating duplicate tags.
+
+pipeline {
+    agent none
+
+    environment {
+        CI = 'true'
+    }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 120, unit: 'MINUTES')
+    }
+
+    parameters {
+        booleanParam(name: 'BUILD_LINUX',   defaultValue: true,  description: 'Build Linux x64')
+        booleanParam(name: 'BUILD_MACOS',   defaultValue: true,  description: 'Build macOS arm64 (requires mac-mini agent)')
+        booleanParam(name: 'BUILD_WINDOWS', defaultValue: false, description: 'Build Windows x64 (requires windows agent)')
+        booleanParam(name: 'RUN_TESTS',     defaultValue: true,  description: 'Run parabun test suite on macOS after build')
+        string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
+               description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
+        booleanParam(name: 'PUBLISH_RELEASE', defaultValue: false,
+                     description: 'Attach successful build/release binaries to a GitHub Release (parabun-<short-sha>)')
+    }
+
+    stages {
+        stage('Build') {
+            parallel {
+                stage('Linux x64') {
+                    when {
+                        beforeAgent true
+                        expression { params.BUILD_LINUX }
+                    }
+                    agent {
+                        dockerfile {
+                            filename 'jenkins/Dockerfile.ci-linux'
+                            label 'linux'
+                            // First run on a node builds the image (~5 min);
+                            // subsequent runs reuse the BuildKit layer cache.
+                            additionalBuildArgs '--pull'
+                        }
+                    }
+                    steps {
+                        checkout scm
+                        script {
+                            env.FULL_SHA  = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        }
+                        sh '''
+                            chmod +x jenkins/build-linux.sh
+                            GIT_SHA=${FULL_SHA} ./jenkins/build-linux.sh
+                        '''
+                        sh '''
+                            mkdir -p artifacts
+                            cp build/release/bun artifacts/parabun-linux-x64
+                        '''
+                        stash name: 'linux-bin', includes: 'artifacts/parabun-linux-x64'
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'artifacts/parabun-linux-x64', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('macOS arm64') {
+                    when {
+                        beforeAgent true
+                        expression { params.BUILD_MACOS }
+                    }
+                    agent {
+                        docker {
+                            image 'ubuntu:24.04'
+                            label 'linux'
+                            args '--network host -v /var/lib/jenkins/.ssh:/tmp/.ssh-jenkins:ro'
+                        }
+                    }
+                    environment {
+                        SSH_OPTS  = '-F /tmp/.ssh-jenkins/config -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/.ssh-jenkins/known_hosts'
+                        // Stable remote workspace under the mac user's $HOME.
+                        // Single tree so vendor/ (710MB of downloaded platform
+                        // deps) and build/ (incremental cache) survive across
+                        // runs. rsync --exclude preserves both.
+                        REMOTE_WS = 'jenkins/workspace/parabun'
+                    }
+                    steps {
+                        checkout scm
+                        script {
+                            env.FULL_SHA  = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        }
+                        sh 'apt-get update -qq && apt-get install -y -qq --no-install-recommends rsync openssh-client git >/dev/null'
+                        sh '''
+                            rsync -az --delete \
+                                -e "ssh ${SSH_OPTS}" \
+                                --exclude='.git' \
+                                --exclude='node_modules' \
+                                --exclude='/build' \
+                                --exclude='/vendor' \
+                                --exclude='/target' \
+                                --exclude='.claude' \
+                                ./ mac-mini:${REMOTE_WS}/
+                        '''
+                        // The remote has no .git (rsync excludes it), so
+                        // scripts/build/config.ts::getGitRevision() would
+                        // fall back to "unknown", breaking BunProcess.cpp.
+                        // Forward FULL_SHA as GIT_SHA env instead.
+                        sh '''
+                            ssh ${SSH_OPTS} mac-mini "cd ${REMOTE_WS} && chmod +x jenkins/build-macos.sh && GIT_SHA=${FULL_SHA} ./jenkins/build-macos.sh"
+                        '''
+                        script {
+                            if (params.RUN_TESTS) {
+                                sh '''
+                                    ssh ${SSH_OPTS} mac-mini "cd ${REMOTE_WS} && ./build/debug/bun-debug test ${TEST_FILTER}"
+                                '''
+                            }
+                        }
+                        sh '''
+                            mkdir -p artifacts
+                            rsync -az -e "ssh ${SSH_OPTS}" \
+                                mac-mini:${REMOTE_WS}/build/release/bun \
+                                artifacts/parabun-macos-arm64
+                        '''
+                        stash name: 'macos-bin', includes: 'artifacts/parabun-macos-arm64'
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'artifacts/parabun-macos-arm64', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('Windows x64') {
+                    when {
+                        beforeAgent true
+                        expression { params.BUILD_WINDOWS }
+                    }
+                    agent { label 'windows' }
+                    steps {
+                        checkout scm
+                        script {
+                            env.FULL_SHA  = bat(script: '@git rev-parse HEAD', returnStdout: true).trim()
+                            env.SHORT_SHA = bat(script: '@git rev-parse --short HEAD', returnStdout: true).trim()
+                        }
+                        powershell '''
+                            $env:GIT_SHA = $env:FULL_SHA
+                            .\\jenkins\\build-windows.ps1
+                        '''
+                        powershell '''
+                            New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+                            Copy-Item build\\release\\bun.exe artifacts\\parabun-windows-x64.exe
+                        '''
+                        stash name: 'windows-bin', includes: 'artifacts/parabun-windows-x64.exe'
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'artifacts/parabun-windows-x64.exe', allowEmptyArchive: true
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Publish release') {
+            when { expression { params.PUBLISH_RELEASE } }
+            agent {
+                docker {
+                    image 'ubuntu:24.04'
+                    label 'linux'
+                    args '--network host'
+                }
+            }
+            steps {
+                checkout scm
+                script {
+                    env.FULL_SHA  = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                }
+                // Install gh from its own apt repo — ubuntu:24.04's gh is
+                // too old (and absent by default on --no-install-recommends).
+                sh '''
+                    apt-get update -qq
+                    apt-get install -y -qq --no-install-recommends \
+                        git ca-certificates curl gnupg >/dev/null
+                    install -m 0755 -d /etc/apt/keyrings
+                    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+                    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                        > /etc/apt/sources.list.d/github-cli.list
+                    apt-get update -qq
+                    apt-get install -y -qq --no-install-recommends gh >/dev/null
+                '''
+                script {
+                    if (params.BUILD_LINUX)   { unstash 'linux-bin' }
+                    if (params.BUILD_MACOS)   { unstash 'macos-bin' }
+                    if (params.BUILD_WINDOWS) { unstash 'windows-bin' }
+                }
+                // github-pat is a "Username with password" credential; gh
+                // honors GH_TOKEN from the environment.
+                withCredentials([usernamePassword(
+                    credentialsId: 'github-pat',
+                    usernameVariable: 'GH_USER',
+                    passwordVariable: 'GH_TOKEN',
+                )]) {
+                    sh '''
+                        set -eu
+                        TAG="parabun-${SHORT_SHA}"
+                        ASSETS=$(ls artifacts/parabun-* 2>/dev/null || true)
+                        test -n "${ASSETS}" || { echo "no artifacts to publish"; exit 1; }
+                        echo "Uploading to ${TAG}:"
+                        printf '  %s\\n' ${ASSETS}
+
+                        if gh release view "${TAG}" --repo airgap/parabun >/dev/null 2>&1; then
+                            gh release upload "${TAG}" ${ASSETS} --repo airgap/parabun --clobber
+                        else
+                            gh release create "${TAG}" ${ASSETS} \
+                                --repo airgap/parabun \
+                                --target "${FULL_SHA}" \
+                                --title "Parabun @ ${SHORT_SHA}" \
+                                --notes "Built by Jenkins from ${FULL_SHA}."
+                        fi
+                    '''
+                }
+            }
+        }
+    }
+}

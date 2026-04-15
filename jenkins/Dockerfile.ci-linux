@@ -1,0 +1,61 @@
+# Parabun Linux CI image — used by the `Build Linux` stage in Jenkinsfile.
+#
+# Jenkins will build this from the pipeline via `agent { dockerfile { ... } }`,
+# so there's no separate "build once, tag locally" step. BuildKit caches
+# each RUN layer across pipeline runs, so only the first run pays the full
+# install cost.
+#
+# ubuntu:22.04 gets us glibc 2.35 — new enough to match Parabun's target,
+# old enough that the release binary still runs on Ubuntu 22.04+ / Debian
+# bookworm / modern RHEL/Fedora. Matches what upstream Bun uses for
+# distributable Linux artifacts (they use 20.04 for even wider reach;
+# 22.04 is the middle ground).
+
+FROM ubuntu:22.04
+
+ARG LLVM_VERSION=21
+ARG CMAKE_VERSION=3.30.5
+ENV DEBIAN_FRONTEND=noninteractive \
+    CI=true
+
+# Base toolchain + everything Bun's buildkite Dockerfile installs, minus the
+# arm64 cross-compile shim (we only build x86_64 here).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget curl git unzip ca-certificates gnupg lsb-release \
+        software-properties-common apt-transport-https \
+        python3 ninja-build \
+        ruby ruby-dev bison gawk perl make ccache golang \
+        libxml2-dev pkg-config xz-utils \
+        build-essential \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc-13 g++-13 libgcc-13-dev libstdc++-13-dev \
+    && wget https://apt.llvm.org/llvm.sh \
+    && chmod +x llvm.sh \
+    && ./llvm.sh ${LLVM_VERSION} all \
+    && rm llvm.sh \
+    && rm -rf /var/lib/apt/lists/*
+
+# cmake from upstream — ubuntu's 3.22 is too old for Parabun's build scripts.
+RUN wget -O /tmp/cmake.sh \
+        "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh" \
+    && sh /tmp/cmake.sh --skip-license --prefix=/usr \
+    && rm /tmp/cmake.sh
+
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-13
+
+# LLVM ships each tool as e.g. /usr/lib/llvm-21/bin/clang — Parabun's build
+# expects them on PATH unsuffixed.
+RUN for f in /usr/lib/llvm-${LLVM_VERSION}/bin/*; do ln -sf "$f" /usr/bin; done \
+    && ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang \
+    && ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ \
+    && ln -sf /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld
+
+# Host bun — used to run the TypeScript build orchestrator. The release
+# binary we produce is what ends up published; this one just drives the build.
+RUN curl -fsSL https://bun.sh/install | bash \
+    && ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+
+WORKDIR /workspace
