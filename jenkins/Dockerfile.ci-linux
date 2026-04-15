@@ -46,6 +46,18 @@ RUN wget -O /tmp/cmake.sh \
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
         --slave /usr/bin/g++ g++ /usr/bin/g++-13
 
+# GitHub CLI — used by the Publish release stage. Installed from the
+# upstream apt repo since ubuntu's archive gh is too old.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 # LLVM ships each tool as e.g. /usr/lib/llvm-21/bin/clang — Parabun's build
 # expects them on PATH unsuffixed.
 RUN for f in /usr/lib/llvm-${LLVM_VERSION}/bin/*; do ln -sf "$f" /usr/bin; done \
@@ -55,7 +67,18 @@ RUN for f in /usr/lib/llvm-${LLVM_VERSION}/bin/*; do ln -sf "$f" /usr/bin; done 
 
 # Host bun — used to run the TypeScript build orchestrator. The release
 # binary we produce is what ends up published; this one just drives the build.
-RUN curl -fsSL https://bun.sh/install | bash \
-    && ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+# We install into /usr/local/bin (world-readable) rather than using the
+# bun.sh installer, because Jenkins runs the container as the host's jenkins
+# UID (not root) and can't read /root/.bun.
+RUN arch=$(dpkg --print-architecture) && \
+    case "$arch" in \
+        amd64) bun_arch=x64 ;; \
+        arm64) bun_arch=aarch64 ;; \
+        *) echo "unsupported arch: $arch" && exit 1 ;; \
+    esac && \
+    curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${bun_arch}.zip" && \
+    cd /tmp && unzip bun.zip && \
+    install -m 0755 "bun-linux-${bun_arch}/bun" /usr/local/bin/bun && \
+    rm -rf bun.zip "bun-linux-${bun_arch}"
 
 WORKDIR /workspace

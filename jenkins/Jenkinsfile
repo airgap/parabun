@@ -89,15 +89,12 @@ pipeline {
                         beforeAgent true
                         expression { params.BUILD_MACOS }
                     }
-                    agent {
-                        docker {
-                            image 'ubuntu:24.04'
-                            label 'linux'
-                            args '--network host -v /var/lib/jenkins/.ssh:/tmp/.ssh-jenkins:ro'
-                        }
-                    }
+                    // Runs natively on the Jenkins controller (built-in node)
+                    // rather than in a docker dispatcher. The controller
+                    // already has git, rsync, ssh, and the mac-mini alias in
+                    // ~/.ssh/config, so no container gymnastics are needed.
+                    agent { label 'built-in' }
                     environment {
-                        SSH_OPTS  = '-F /tmp/.ssh-jenkins/config -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/.ssh-jenkins/known_hosts'
                         // Stable remote workspace under the mac user's $HOME.
                         // Single tree so vendor/ (710MB of downloaded platform
                         // deps) and build/ (incremental cache) survive across
@@ -110,10 +107,8 @@ pipeline {
                             env.FULL_SHA  = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
                             env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                         }
-                        sh 'apt-get update -qq && apt-get install -y -qq --no-install-recommends rsync openssh-client git >/dev/null'
                         sh '''
                             rsync -az --delete \
-                                -e "ssh ${SSH_OPTS}" \
                                 --exclude='.git' \
                                 --exclude='node_modules' \
                                 --exclude='/build' \
@@ -127,18 +122,18 @@ pipeline {
                         // fall back to "unknown", breaking BunProcess.cpp.
                         // Forward FULL_SHA as GIT_SHA env instead.
                         sh '''
-                            ssh ${SSH_OPTS} mac-mini "cd ${REMOTE_WS} && chmod +x jenkins/build-macos.sh && GIT_SHA=${FULL_SHA} ./jenkins/build-macos.sh"
+                            ssh mac-mini "cd ${REMOTE_WS} && chmod +x jenkins/build-macos.sh && GIT_SHA=${FULL_SHA} ./jenkins/build-macos.sh"
                         '''
                         script {
                             if (params.RUN_TESTS) {
                                 sh '''
-                                    ssh ${SSH_OPTS} mac-mini "cd ${REMOTE_WS} && ./build/debug/bun-debug test ${TEST_FILTER}"
+                                    ssh mac-mini "cd ${REMOTE_WS} && ./build/debug/bun-debug test ${TEST_FILTER}"
                                 '''
                             }
                         }
                         sh '''
                             mkdir -p artifacts
-                            rsync -az -e "ssh ${SSH_OPTS}" \
+                            rsync -az \
                                 mac-mini:${REMOTE_WS}/build/release/bun \
                                 artifacts/parabun-macos-arm64
                         '''
@@ -184,11 +179,12 @@ pipeline {
 
         stage('Publish release') {
             when { expression { params.PUBLISH_RELEASE } }
+            // Reuses the Linux CI image since it already has git + gh baked
+            // in. No additional setup needed beyond unstashing artifacts.
             agent {
-                docker {
-                    image 'ubuntu:24.04'
+                dockerfile {
+                    filename 'jenkins/Dockerfile.ci-linux'
                     label 'linux'
-                    args '--network host'
                 }
             }
             steps {
@@ -197,21 +193,6 @@ pipeline {
                     env.FULL_SHA  = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
                     env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                 }
-                // Install gh from its own apt repo — ubuntu:24.04's gh is
-                // too old (and absent by default on --no-install-recommends).
-                sh '''
-                    apt-get update -qq
-                    apt-get install -y -qq --no-install-recommends \
-                        git ca-certificates curl gnupg >/dev/null
-                    install -m 0755 -d /etc/apt/keyrings
-                    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
-                    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                        > /etc/apt/sources.list.d/github-cli.list
-                    apt-get update -qq
-                    apt-get install -y -qq --no-install-recommends gh >/dev/null
-                '''
                 script {
                     if (params.BUILD_LINUX)   { unstash 'linux-bin' }
                     if (params.BUILD_MACOS)   { unstash 'macos-bin' }
