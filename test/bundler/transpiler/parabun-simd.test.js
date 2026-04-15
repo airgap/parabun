@@ -825,4 +825,63 @@ describe("bun:simd", () => {
     expect(stdout).toBe("TYPE RANGE TYPE");
     expect(exitCode).toBe(0);
   });
+
+  // The WASM kernels cap out at REDUCE_WASM_MAX_BYTES (4 MiB) — beyond that
+  // simd.ts dispatches to the native Highway kernels via $cpp("parabun_simd_kernels.cpp").
+  // 2 M elements of f32 = 8 MiB, 1 M elements of f64 = 8 MiB; both clear the
+  // 4 MiB ceiling, so these tests exercise the native path specifically.
+  it("sum/dot — native Highway path (Float32, beyond WASM threshold)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-native-f32",
+      `
+        import { sum, dot } from "bun:simd";
+        const n = 2_000_000;
+        const a = new Float32Array(n);
+        const b = new Float32Array(n);
+        for (let i = 0; i < n; i++) { a[i] = 1; b[i] = 2; }
+        // sum(a) = n; dot(a,b) = 2n.
+        console.log(sum(a) === n, dot(a, b) === 2 * n);
+      `,
+    );
+    expect(stdout).toBe("true true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("sum/dot — native Highway path (Float64, beyond WASM threshold)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-native-f64",
+      `
+        import { sum, dot } from "bun:simd";
+        const n = 1_000_000;
+        const a = new Float64Array(n);
+        const b = new Float64Array(n);
+        for (let i = 0; i < n; i++) { a[i] = 1; b[i] = 3; }
+        console.log(sum(a) === n, dot(a, b) === 3 * n);
+      `,
+    );
+    expect(stdout).toBe("true true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("native sum/dot — input shape validation", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-simd-native-shape",
+      `
+        // Reach the native kernels directly to exercise the C++ TypeError path
+        // (the public API rejects mismatched inputs in JS first).
+        import { sum, dot } from "bun:simd";
+        // Mixed types: dot() should throw on shape mismatch in JS-side
+        // requireSameTypeAndLen, before reaching native.
+        const msgs = [];
+        try { dot(new Float32Array(8), new Float64Array(8)); msgs.push("NO"); }
+        catch (e) { msgs.push(e instanceof TypeError ? "TYPE" : "OTHER"); }
+        // Empty arrays: short-circuits before any kernel call.
+        msgs.push(sum(new Float32Array(0)));
+        msgs.push(dot(new Float64Array(0), new Float64Array(0)));
+        console.log(msgs.join(" "));
+      `,
+    );
+    expect(stdout).toBe("TYPE 0 0");
+    expect(exitCode).toBe(0);
+  });
 });

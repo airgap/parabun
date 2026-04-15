@@ -1354,36 +1354,19 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
 const REDUCE_WASM_MAX_BYTES = 4 * 1024 * 1024;
 const OUTPUT_WASM_MAX_BYTES = 4 * 1024 * 1024;
 
+// Native Highway kernels read straight from the JS typed array's backing
+// buffer — no copy-in, no wasm.memory ceiling. Above the WASM crossovers
+// they replace the JS tight-loop fallback for sum/dot. Small N still goes
+// through WASM (or the tight loop if WASM is unavailable) because the
+// per-call binding overhead dominates below a few thousand elements.
+const native = $cpp("parabun_simd_kernels.cpp", "createParabunSimdKernels");
+
 // Monomorphic tight-loop helpers for the reduce and output-op fallbacks.
 // Each helper only ever sees one typed-array shape, so JSC's FTL tier can
 // specialize + vectorize the body without a polymorphic-site bailout.
 // Output-op helpers take an `out` parameter so the same helper serves the
 // fresh-allocation path and the dstOverwrite path (where out aliases one
 // of the inputs — the read-then-write loop body is still monomorphic).
-function sumTightF32(a: Float32Array): number {
-  const n = a.length;
-  let s = 0;
-  for (let i = 0; i < n; i++) s += a[i];
-  return s;
-}
-function sumTightF64(a: Float64Array): number {
-  const n = a.length;
-  let s = 0;
-  for (let i = 0; i < n; i++) s += a[i];
-  return s;
-}
-function dotTightF32(a: Float32Array, b: Float32Array): number {
-  const n = a.length;
-  let s = 0;
-  for (let i = 0; i < n; i++) s += a[i] * b[i];
-  return s;
-}
-function dotTightF64(a: Float64Array, b: Float64Array): number {
-  const n = a.length;
-  let s = 0;
-  for (let i = 0; i < n; i++) s += a[i] * b[i];
-  return s;
-}
 function mulScalarTightF32(a: Float32Array, c: number, out: Float32Array): Float32Array {
   const n = a.length;
   for (let i = 0; i < n; i++) out[i] = a[i] * c;
@@ -1440,7 +1423,7 @@ function sum(a: FArray): number {
     f64View().set(arr, 0);
     return wasm.sumF64(n);
   }
-  return arr instanceof Float32Array ? sumTightF32(arr) : sumTightF64(arr);
+  return arr instanceof Float32Array ? native.sumF32(arr) : native.sumF64(arr);
 }
 
 function dot(a: FArray, b: FArray): number {
@@ -1465,8 +1448,8 @@ function dot(a: FArray, b: FArray): number {
     return wasm.dotF64(n);
   }
   return ax instanceof Float32Array
-    ? dotTightF32(ax, bx as Float32Array)
-    : dotTightF64(ax as Float64Array, bx as Float64Array);
+    ? native.dotF32(ax, bx as Float32Array)
+    : native.dotF64(ax as Float64Array, bx as Float64Array);
 }
 
 // --- matVec ---
