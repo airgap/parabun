@@ -536,6 +536,16 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
 const MIN_OSX_DEPLOYMENT_TARGET = "13.0";
 
 /**
+ * Cap on the deployment target we pass to zig/clang. The vendored zig's
+ * std.Target hardcodes macOS at `{ .min = 13.0, .max = 15.6 }` — passing a
+ * newer version (e.g. macOS 26 Tahoe) makes zig bail. Neither oven-sh/zig
+ * nor upstream ziglang/zig has widened this range as of 2026-04. Deployment
+ * target is a MIN, not a max: binaries built with `-mmacosx-version-min=15`
+ * run fine on macOS 26. Lift this once zig's macOS range covers 26.
+ */
+const MAX_OSX_DEPLOYMENT_TARGET = "15.0";
+
+/**
  * Detect macOS SDK paths.
  *
  * - CI: always target the minimum (reproducible builds).
@@ -625,6 +635,11 @@ function detectMacosSdk(ci: boolean): { osxDeploymentTarget: string; osxSysroot:
       `macOS SDK ${osxDeploymentTarget} is older than minimum supported ${MIN_OSX_DEPLOYMENT_TARGET}`,
       { hint: "Update Xcode or Xcode Command Line Tools" },
     );
+  }
+
+  // Cap at max zig supports (see MAX_OSX_DEPLOYMENT_TARGET comment).
+  if (compareVersionStrings(osxDeploymentTarget, MAX_OSX_DEPLOYMENT_TARGET) > 0) {
+    osxDeploymentTarget = MAX_OSX_DEPLOYMENT_TARGET;
   }
 
   return { osxDeploymentTarget, osxSysroot };
