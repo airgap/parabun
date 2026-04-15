@@ -1,37 +1,29 @@
-import * as vscode from 'vscode';
-import {
-  LanguageClient,
-  LanguageClientOptions,
-  ServerOptions,
-} from 'vscode-languageclient/node';
+import * as vscode from "vscode";
+import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-  const config = vscode.workspace.getConfiguration('parabun');
-  const lspPath = config.get<string>('lsp.path', 'parabun');
+  const config = vscode.workspace.getConfiguration("parabun");
+  const lspPath = config.get<string>("lsp.path", "parabun");
+  const lspScript = context.asAbsolutePath("server/parabun-lsp.ts");
 
   const serverOptions: ServerOptions = {
     command: lspPath,
-    args: ['run', '/raid/parabun/editors/lsp/parabun-lsp.ts', '--stdio'],
+    args: ["run", lspScript, "--stdio"],
   };
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      { scheme: 'file', language: 'parabun-ts' },
-      { scheme: 'file', language: 'parabun-js' },
+      { scheme: "file", language: "parabun-ts" },
+      { scheme: "file", language: "parabun-js" },
     ],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{pts,pjs}'),
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{pts,pjs}"),
     },
   };
 
-  client = new LanguageClient(
-    'parabun-lsp',
-    'Parabun Language Server',
-    serverOptions,
-    clientOptions,
-  );
+  client = new LanguageClient("parabun-lsp", "Parabun Language Server", serverOptions, clientOptions);
 
   client.start();
 }

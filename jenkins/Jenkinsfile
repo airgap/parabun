@@ -37,6 +37,7 @@ pipeline {
         booleanParam(name: 'BUILD_LINUX',   defaultValue: true,  description: 'Build Linux x64')
         booleanParam(name: 'BUILD_MACOS',   defaultValue: true,  description: 'Build macOS arm64 (requires mac-mini agent)')
         booleanParam(name: 'BUILD_WINDOWS', defaultValue: false, description: 'Build Windows x64 (requires windows agent)')
+        booleanParam(name: 'BUILD_VSIX',    defaultValue: true,  description: 'Package the VS Code extension (.vsix)')
         booleanParam(name: 'RUN_TESTS',     defaultValue: true,  description: 'Run parabun test suite on macOS after build')
         string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
                description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
@@ -181,6 +182,49 @@ pipeline {
                         }
                     }
                 }
+
+                stage('VSIX') {
+                    when {
+                        beforeAgent true
+                        expression { params.BUILD_VSIX }
+                    }
+                    // Uses the same Linux CI image; node + npm are already
+                    // installed for Parabun's own build scripts, and @vscode/vsce
+                    // is fetched on-demand via npx.
+                    agent {
+                        dockerfile {
+                            filename 'jenkins/Dockerfile.ci-linux'
+                            label 'linux'
+                            additionalBuildArgs '--pull'
+                            customWorkspace '/raid/jenkins-workspaces/parabun-vsix'
+                        }
+                    }
+                    steps {
+                        checkout scm
+                        sh '''
+                            set -eu
+                            cd editors/vscode/parabun
+                            if [ -f package-lock.json ]; then
+                                npm ci --ignore-scripts
+                            else
+                                npm install --ignore-scripts --no-audit --no-fund
+                            fi
+                            npm run build
+                            # Extension imports vscode-languageclient at runtime,
+                            # so node_modules needs to ride along. .vscodeignore
+                            # allowlists only the runtime dep + its transitives.
+                            mkdir -p ../../../artifacts
+                            npx --yes @vscode/vsce@^3 package \
+                                --out ../../../artifacts/parabun.vsix
+                        '''
+                        stash name: 'vsix-bin', includes: 'artifacts/parabun.vsix'
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'artifacts/parabun.vsix', allowEmptyArchive: true
+                        }
+                    }
+                }
             }
         }
 
@@ -205,6 +249,7 @@ pipeline {
                     if (params.BUILD_LINUX)   { unstash 'linux-bin' }
                     if (params.BUILD_MACOS)   { unstash 'macos-bin' }
                     if (params.BUILD_WINDOWS) { unstash 'windows-bin' }
+                    if (params.BUILD_VSIX)    { unstash 'vsix-bin' }
                 }
                 // github-pat is a "Username with password" credential; gh
                 // honors GH_TOKEN from the environment.
@@ -216,7 +261,7 @@ pipeline {
                     sh '''
                         set -eu
                         TAG="parabun-${SHORT_SHA}"
-                        ASSETS=$(ls artifacts/parabun-* 2>/dev/null || true)
+                        ASSETS=$(ls artifacts/parabun* 2>/dev/null || true)
                         test -n "${ASSETS}" || { echo "no artifacts to publish"; exit 1; }
                         echo "Uploading to ${TAG}:"
                         printf '  %s\\n' ${ASSETS}

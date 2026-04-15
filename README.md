@@ -179,7 +179,15 @@ Operators bind tighter-to-looser in the order listed, so `data |> transform ..! 
 
 ### VS Code
 
-Copy `editors/vscode/parabun/` to your VS Code extensions folder, or:
+Install the prebuilt `.vsix` from the latest release:
+
+```bash
+curl -fsSL -o /tmp/parabun.vsix \
+    https://github.com/airgap/parabun/releases/latest/download/parabun.vsix
+code --install-extension /tmp/parabun.vsix
+```
+
+Or build from source:
 
 ```bash
 cd editors/vscode/parabun && npm install && npm run build

@@ -4,10 +4,18 @@
   "description": "Language support for Parabun (.pts/.pjs) — Bun fork with pure functions, error chaining, and pipeline operators",
   "version": "0.1.0",
   "publisher": "parabun",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/airgap/parabun.git",
+    "directory": "editors/vscode/parabun"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
-  "categories": ["Programming Languages"],
+  "categories": [
+    "Programming Languages"
+  ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:parabun-ts",
@@ -17,14 +25,24 @@
     "languages": [
       {
         "id": "parabun-ts",
-        "aliases": ["Parabun TypeScript", "pts"],
-        "extensions": [".pts"],
+        "aliases": [
+          "Parabun TypeScript",
+          "pts"
+        ],
+        "extensions": [
+          ".pts"
+        ],
         "configuration": "./language-configuration.json"
       },
       {
         "id": "parabun-js",
-        "aliases": ["Parabun JavaScript", "pjs"],
-        "extensions": [".pjs"],
+        "aliases": [
+          "Parabun JavaScript",
+          "pjs"
+        ],
+        "extensions": [
+          ".pjs"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -44,13 +62,17 @@
       {
         "language": "parabun-ts",
         "scopes": {
-          "function.pure": ["storage.modifier.pure.parabun"]
+          "function.pure": [
+            "storage.modifier.pure.parabun"
+          ]
         }
       },
       {
         "language": "parabun-js",
         "scopes": {
-          "function.pure": ["storage.modifier.pure.parabun"]
+          "function.pure": [
+            "storage.modifier.pure.parabun"
+          ]
         }
       }
     ],
@@ -73,6 +95,6 @@
     "typescript": "^5.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').mkdirSync('server',{recursive:true});require('fs').copyFileSync('../../lsp/parabun-lsp.ts','server/parabun-lsp.ts')\""
   }
 }
