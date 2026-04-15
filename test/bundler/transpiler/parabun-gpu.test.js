@@ -152,15 +152,15 @@ describe("bun:gpu scaffold", () => {
         );
       `,
     );
-    // The per-row FMA order on Metal is identical to bun:simd's scalar
-    // accumulator, so mismatches must be exactly 0. Tolerance is a
-    // belt-and-braces guard: if a future backend re-associates the
-    // reduction, up to ~1e-3 rounding drift at K=1024 is still acceptable.
-    // wins=false today on every host — the naive MSL kernel is still slower
-    // than f32x4 bun:simd, so winsForSize stays at Infinity. This test just
-    // pins the correctness of the dispatch path; the benchmark is where we
+    // Tolerance: per-row FMA on Metal is identical to bun:simd's scalar
+    // accumulator, but if a backend re-associates the reduction, up to
+    // ~1e-3 rounding drift at K=1024 is still acceptable — hence the
+    // maxErr<=ok gate rather than mismatches==0. wins= depends on the
+    // host: on slower hardware the naive MSL kernel loses to f32x4
+    // bun:simd, on faster Metal devices it already wins. This test pins
+    // the correctness of the dispatch path; the benchmark is where we
     // watch for the crossover.
-    expect(stdout).toMatch(/^wins=false rows=1024 mismatches=\d+ maxErr<=ok$/);
+    expect(stdout).toMatch(/^wins=(?:true|false) rows=1024 mismatches=\d+ maxErr<=ok$/);
     expect(exitCode).toBe(0);
   });
 
