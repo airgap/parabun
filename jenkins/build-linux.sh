@@ -27,12 +27,19 @@ echo "=== Refreshing node-fallbacks deps ==="
 export GIT_SHA="${GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
 echo "GIT_SHA=${GIT_SHA}"
 
-echo "=== Building Parabun (debug, no asan) ==="
-bun run build:debug:noasan
+# Skip the debug build in CI: we only publish the release binary, and the
+# Jenkins host's / partition (~500GB shared with lyku workspaces + docker)
+# can't hold both build/debug (~9GB) and build/release (~25GB peak during
+# zig ReleaseFast) simultaneously. Set BUILD_DEBUG=1 locally if you want
+# to reproduce the full CI shape.
+if [ "${BUILD_DEBUG:-0}" = "1" ]; then
+    echo "=== Building Parabun (debug, no asan) ==="
+    bun run build:debug:noasan
 
-echo "=== Smoke-test debug binary ==="
-./build/debug/bun-debug --version
-./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
+    echo "=== Smoke-test debug binary ==="
+    ./build/debug/bun-debug --version
+    ./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
+fi
 
 echo "=== Building Parabun (release) ==="
 bun run build:release
@@ -42,4 +49,4 @@ echo "=== Smoke-test release binary ==="
 ./build/release/bun -e 'console.log("hello from release/" + process.platform + "/" + process.arch)'
 
 echo "=== Build artifacts ==="
-ls -la build/debug/bun-debug build/release/bun
+ls -la build/release/bun
