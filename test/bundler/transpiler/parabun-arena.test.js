@@ -92,6 +92,61 @@ describe("bun:arena", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("scope(fn) returns fn's value", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-arena-scope-return",
+      `
+        import arena from "bun:arena";
+        console.log(arena.scope(() => 42));
+        console.log(JSON.stringify(arena.scope(() => ({ a: 1, b: [2, 3] }))));
+      `,
+    );
+    expect(stdout).toBe('42\n{"a":1,"b":[2,3]}');
+    expect(exitCode).toBe(0);
+  });
+
+  it("scope(fn) propagates synchronous exceptions and releases the GC deferral", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-arena-scope-throw",
+      `
+        import arena from "bun:arena";
+        try { arena.scope(() => { throw new Error("boom"); }); }
+        catch (e) { console.log(e.message); }
+        // If the deferral leaked, this Bun.gc(true) (sync full) would assert/hang.
+        Bun.gc(true);
+        console.log(arena.scope(() => "still-works"));
+      `,
+    );
+    expect(stdout).toBe("boom\nstill-works");
+    expect(exitCode).toBe(0);
+  });
+
+  it("scope(fn) nests correctly", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-arena-scope-nested",
+      `
+        import arena from "bun:arena";
+        const out = arena.scope(() => arena.scope(() => arena.scope(() => 7 * 6)));
+        console.log(out);
+      `,
+    );
+    expect(stdout).toBe("42");
+    expect(exitCode).toBe(0);
+  });
+
+  it("scope(fn) throws TypeError on non-callable", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-arena-scope-non-callable",
+      `
+        import arena from "bun:arena";
+        try { arena.scope(123); console.log("no-throw"); }
+        catch (e) { console.log(e instanceof TypeError ? "TypeError" : "Other"); }
+      `,
+    );
+    expect(stdout).toBe("TypeError");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects shape-mismatched buffers on release", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-mismatch",

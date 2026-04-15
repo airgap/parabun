@@ -81,17 +81,26 @@ class Pool<T extends TypedArrayCtor> {
   }
 }
 
-// scope(fn): run fn, then request a single async GC at the end. Useful when
-// a batch of work produces a lot of short-lived objects and you want the
-// collection to happen at a predictable point (end of batch) rather than
-// mid-work. It is NOT a bump allocator — we can't intercept JSC's object
-// allocations without modifying the engine. On realistic workloads the
-// impact is latency-smoothing, not throughput.
+const { runWithDeferredGC } = $cpp("ArenaInternals.cpp", "createArenaInternals");
+
+// scope(fn): defer JSC garbage collection for the synchronous duration of fn,
+// then request an async Eden collection on scope exit. The deferral is
+// implemented via JSC::DeferGC — short-lived allocations inside fn pile up
+// instead of triggering mid-work Eden passes, then the heap drains at a
+// predictable point (scope end) rather than at unpredictable allocation
+// thresholds. This is latency-smoothing, not a bump allocator: the heap still
+// pays the eventual collection cost, just at a time of the caller's choosing.
+//
+// Caveat — fn must be synchronous and bounded. DeferGC accumulates without an
+// upper safety threshold; allocating unboundedly inside scope can OOM before
+// the dtor releases. Microtasks queued from fn fire after the scope's deferral
+// has already released, so async work inside `scope(async () => { ... })` does
+// NOT run with GC deferred.
 function scope<R>(fn: () => R): R {
-  const result = fn();
-  // @ts-ignore — Bun.gc(false) schedules an async Eden collection
-  if (typeof Bun !== "undefined" && typeof Bun.gc === "function") Bun.gc(false);
-  return result;
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  return runWithDeferredGC(fn);
 }
 
 export default { Pool, scope };
