@@ -1,0 +1,100 @@
+// Phase profiling for the rewrite: break per-iteration time into
+//   (1) centroid-norm dots   (2) assignment   (3) update   (4) convergence
+
+import { dot } from "bun:simd";
+import { generate, N, D, K } from "./gen.mjs";
+
+const { dataMat, initCentersMat } = generate();
+const centersMat = new Float32Array(initCentersMat);
+const prevCentersMat = new Float32Array(K * D);
+const clusterID = new Int32Array(N);
+const centerNormsSq = new Float32Array(K);
+const scratch = new Float32Array(K * D);
+const counts = new Int32Array(K);
+
+// Warm once
+(function iter() {
+  for (let k = 0; k < K; k++) {
+    const cK = centersMat.subarray(k * D, (k + 1) * D);
+    centerNormsSq[k] = dot(cK, cK);
+  }
+})();
+
+function nowMs() {
+  return Bun.nanoseconds() / 1e6;
+}
+
+const RUNS = 5;
+const t = { norms: 0, assign: 0, update: 0, converge: 0 };
+
+for (let run = 0; run < RUNS; run++) {
+  for (let iter = 0; iter < 4; iter++) {
+    prevCentersMat.set(centersMat);
+
+    let t0 = nowMs();
+    for (let k = 0; k < K; k++) {
+      const cK = centersMat.subarray(k * D, (k + 1) * D);
+      centerNormsSq[k] = dot(cK, cK);
+    }
+    t.norms += nowMs() - t0;
+
+    t0 = nowMs();
+    for (let i = 0; i < N; i++) {
+      const xOff = i * D;
+      let bestK = 0;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let k = 0; k < K; k++) {
+        const cOff = k * D;
+        let cross = 0;
+        for (let d = 0; d < D; d++) cross += dataMat[xOff + d] * centersMat[cOff + d];
+        const cand = centerNormsSq[k] - 2 * cross;
+        if (cand < bestDist) {
+          bestDist = cand;
+          bestK = k;
+        }
+      }
+      clusterID[i] = bestK;
+    }
+    t.assign += nowMs() - t0;
+
+    t0 = nowMs();
+    scratch.fill(0);
+    counts.fill(0);
+    for (let i = 0; i < N; i++) {
+      const k = clusterID[i];
+      counts[k]++;
+      const off = k * D;
+      const dataOff = i * D;
+      for (let d = 0; d < D; d++) scratch[off + d] += dataMat[dataOff + d];
+    }
+    for (let k = 0; k < K; k++) {
+      const n = counts[k];
+      if (n > 0) {
+        const inv = 1 / n;
+        const off = k * D;
+        for (let d = 0; d < D; d++) centersMat[off + d] = scratch[off + d] * inv;
+      }
+    }
+    t.update += nowMs() - t0;
+
+    t0 = nowMs();
+    let maxMove = 0;
+    for (let k = 0; k < K; k++) {
+      let s = 0;
+      const off = k * D;
+      for (let d = 0; d < D; d++) {
+        const delta = centersMat[off + d] - prevCentersMat[off + d];
+        s += delta * delta;
+      }
+      if (s > maxMove) maxMove = s;
+    }
+    t.converge += nowMs() - t0;
+  }
+}
+
+const total = t.norms + t.assign + t.update + t.converge;
+console.log(`\ntotal ${total.toFixed(2)} ms over ${RUNS} runs × 4 iters`);
+console.log(`  norms     ${t.norms.toFixed(2)} ms (${((t.norms * 100) / total).toFixed(1)}%)`);
+console.log(`  assign    ${t.assign.toFixed(2)} ms (${((t.assign * 100) / total).toFixed(1)}%)`);
+console.log(`  update    ${t.update.toFixed(2)} ms (${((t.update * 100) / total).toFixed(1)}%)`);
+console.log(`  converge  ${t.converge.toFixed(2)} ms (${((t.converge * 100) / total).toFixed(1)}%)`);

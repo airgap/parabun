@@ -1,0 +1,712 @@
+{
+  "packages": [
+    {
+      "name": "acorn",
+      "repo": "https://github.com/acornjs/acorn.git",
+      "commit": "3f40dbe68408f95c4502b2a03127f91d7c563503",
+      "subdir": "acorn"
+    },
+    {
+      "name": "adler-32",
+      "repo": "https://github.com/SheetJS/js-adler32.git",
+      "commit": "7ed84a28ca0d9886f7b3c91597bf66389cce86a5",
+      "subdir": "."
+    },
+    {
+      "name": "ansi-regex",
+      "repo": "https://github.com/chalk/ansi-regex.git",
+      "commit": "ff3784580bc9c6b0f6ce4555f6d17d1dca6adc66",
+      "subdir": "."
+    },
+    {
+      "name": "arg",
+      "repo": "https://github.com/vercel/arg.git",
+      "commit": "07b9cadc447bfeddbe9a6b252ee1e6671833ba23",
+      "subdir": "."
+    },
+    {
+      "name": "async",
+      "repo": "https://github.com/caolan/async.git",
+      "commit": "03fbed25c728e78b503df4f21e946948d9459cc9",
+      "subdir": "."
+    },
+    {
+      "name": "base64-js",
+      "repo": "https://github.com/beatgammit/base64-js.git",
+      "commit": "303e81353e21339da09adb1e2fc0da74626bd8b2",
+      "subdir": "."
+    },
+    {
+      "name": "bech32",
+      "repo": "https://github.com/bitcoinjs/bech32.git",
+      "commit": "5ceb0e3d4625561a459c85643ca6947739b2d83c",
+      "subdir": "."
+    },
+    {
+      "name": "big.js",
+      "repo": "https://github.com/MikeMcl/big.js.git",
+      "commit": "cdbc06f1d5ae9be429b97f433ee884cf9ad28072",
+      "subdir": "."
+    },
+    {
+      "name": "bignumber.js",
+      "repo": "https://github.com/MikeMcl/bignumber.js.git",
+      "commit": "1b09c08acfe953d85369fb4522e4ab4a307a3f62",
+      "subdir": "."
+    },
+    {
+      "name": "buffer-crc32",
+      "repo": "https://github.com/brianloveswords/buffer-crc32.git",
+      "commit": "fc79b0d9e490dee637d02107b93b88dc9c26dc69",
+      "subdir": "."
+    },
+    {
+      "name": "buffer-from",
+      "repo": "https://github.com/LinusU/buffer-from.git",
+      "commit": "fa0c9264a1b7eddf8c1aa1bbd78ce0ac256c485f",
+      "subdir": "."
+    },
+    {
+      "name": "bytes",
+      "repo": "https://github.com/visionmedia/bytes.js.git",
+      "commit": "9ddc13b6c66e0cb293616fba246e05db4b6cef4d",
+      "subdir": "."
+    },
+    {
+      "name": "color-convert",
+      "repo": "https://github.com/Qix-/color-convert.git",
+      "commit": "5c106a633b5cd2de554d9c287ad31f9eeca7a271",
+      "subdir": "."
+    },
+    {
+      "name": "color-name",
+      "repo": "https://github.com/colorjs/color-name.git",
+      "commit": "3c11d5afe1abbbcda7da5b538bd84f7472c2c5c7",
+      "subdir": "."
+    },
+    {
+      "name": "commander",
+      "repo": "https://github.com/tj/commander.js.git",
+      "commit": "8247364da749736570161e95682b07fc2d72497b",
+      "subdir": "."
+    },
+    {
+      "name": "compute-mean",
+      "repo": "https://github.com/compute-io/mean.git",
+      "commit": "f04e47195394e92c4092300d8504457a1d807ccb",
+      "subdir": "."
+    },
+    {
+      "name": "compute-stdev",
+      "repo": "https://github.com/compute-io/stdev.git",
+      "commit": "884cf986d1f1b556fb67fda692d09ebbd9570bd8",
+      "subdir": "."
+    },
+    {
+      "name": "compute-variance",
+      "repo": "https://github.com/compute-io/variance.git",
+      "commit": "c86e5b234a2090c72bcfa578a0cce25380dafb69",
+      "subdir": "."
+    },
+    {
+      "name": "cosine-similarity",
+      "repo": "https://github.com/compute-io/cosine-similarity.git",
+      "commit": "b5703d5166766ba85c3c951324fe36a14283c8ac",
+      "subdir": ".",
+      "rewriteLocal": "cosine-similarity"
+    },
+    {
+      "name": "crc-32",
+      "repo": "https://github.com/SheetJS/js-crc32.git",
+      "commit": "01cafc98c3785ac15fd36c731e35b660add07898",
+      "subdir": "."
+    },
+    {
+      "name": "cwise",
+      "repo": "https://github.com/scijs/cwise.git",
+      "commit": "e98ee0b2bf93cc4e641e1639147a2def432ed4b4",
+      "subdir": "."
+    },
+    {
+      "name": "d3-array",
+      "repo": "https://github.com/d3/d3-array.git",
+      "commit": "be0ae0d2b36ab91b833294ad2cfc5d5905acbd0f",
+      "subdir": "."
+    },
+    {
+      "name": "d3-color",
+      "repo": "https://github.com/d3/d3-color.git",
+      "commit": "71c7f100f9fa85a1c70fcbaeb5f803ee8db5620d",
+      "subdir": "."
+    },
+    {
+      "name": "d3-delaunay",
+      "repo": "https://github.com/d3/d3-delaunay.git",
+      "commit": "afbeebfca170e81991e5fc26dbac52f34575a830",
+      "subdir": "."
+    },
+    {
+      "name": "d3-format",
+      "repo": "https://github.com/d3/d3-format.git",
+      "commit": "ebdc2d530277df379157f82fee6ea5623d179bd7",
+      "subdir": "."
+    },
+    {
+      "name": "d3-hierarchy",
+      "repo": "https://github.com/d3/d3-hierarchy.git",
+      "commit": "c4ae7066d5a52e8aeaab24b3f7113e25c38183f2",
+      "subdir": "."
+    },
+    {
+      "name": "d3-interpolate",
+      "repo": "https://github.com/d3/d3-interpolate.git",
+      "commit": "2eeffc0d02f2947552cf0a0b73bdf26fe90e1c28",
+      "subdir": "."
+    },
+    {
+      "name": "d3-path",
+      "repo": "https://github.com/d3/d3-path.git",
+      "commit": "103ce944f2e33ed7e4563ab90102c5dfebc94ca2",
+      "subdir": "."
+    },
+    {
+      "name": "d3-polygon",
+      "repo": "https://github.com/d3/d3-polygon.git",
+      "commit": "a31c7d65e183845d06f4edf14477221a48e8c78c",
+      "subdir": "."
+    },
+    {
+      "name": "d3-quadtree",
+      "repo": "https://github.com/d3/d3-quadtree.git",
+      "commit": "d01b12a024b6dad931c51d288a8ba394478949b4",
+      "subdir": "."
+    },
+    {
+      "name": "d3-random",
+      "repo": "https://github.com/d3/d3-random.git",
+      "commit": "608b3629bb7bc566e1b6c511a3b978cdd5d2cfa1",
+      "subdir": "."
+    },
+    {
+      "name": "d3-time",
+      "repo": "https://github.com/d3/d3-time.git",
+      "commit": "03d890d0292586d30fbe93965501c987bb2078bb",
+      "subdir": "."
+    },
+    {
+      "name": "d3-time-format",
+      "repo": "https://github.com/d3/d3-time-format.git",
+      "commit": "9c473e0500ce97ffcbc750cdb6d3825023a2be86",
+      "subdir": "."
+    },
+    {
+      "name": "damerau-levenshtein",
+      "repo": "https://github.com/tad-lispy/node-damerau-levenshtein.git",
+      "commit": "cb6c4d981c615a64671e3dd2389063526b3db974",
+      "subdir": "."
+    },
+    {
+      "name": "decimal.js",
+      "repo": "https://github.com/MikeMcl/decimal.js.git",
+      "commit": "1a6e845004b29a3b7dcef78fe92b8d786634f4e2",
+      "subdir": "."
+    },
+    {
+      "name": "dotenv",
+      "repo": "https://github.com/motdotla/dotenv.git",
+      "commit": "a61f616a3160bb6e6f22ff55f08b7eba3a3fab68",
+      "subdir": "."
+    },
+    {
+      "name": "elliptic",
+      "repo": "https://github.com/indutny/elliptic.git",
+      "commit": "9b77436a59cc35eccf4ffb848259c8762a492ee7",
+      "subdir": "."
+    },
+    {
+      "name": "emoji-regex",
+      "repo": "https://github.com/mathiasbynens/emoji-regex.git",
+      "commit": "70451eae5f7bbb7c211fec0887f88c444cd562a5",
+      "subdir": "."
+    },
+    {
+      "name": "euclidean-distance",
+      "repo": "https://github.com/zeke/euclidean-distance.git",
+      "commit": "c4e7f9a085a7c22ae816f940ffe5868c8949a1d8",
+      "subdir": "."
+    },
+    {
+      "name": "fast-glob",
+      "repo": "https://github.com/mrmlnc/fast-glob.git",
+      "commit": "096a5b620f4224eb692bd8ff2c8de0e634e50d8e",
+      "subdir": "."
+    },
+    {
+      "name": "fast-levenshtein",
+      "repo": "https://github.com/hiddentao/fast-levenshtein.git",
+      "commit": "93bd3fcf9228806900204878d9a926df572c4c71",
+      "subdir": ".",
+      "rewriteLocal": "fast-levenshtein"
+    },
+    {
+      "name": "fast-safe-stringify",
+      "repo": "https://github.com/davidmarkclements/fast-safe-stringify.git",
+      "commit": "2a9672394b5c7a553800cb844cd7465902e02d11",
+      "subdir": "."
+    },
+    {
+      "name": "fast-xml-parser",
+      "repo": "https://github.com/NaturalIntelligence/fast-xml-parser.git",
+      "commit": "1b14fa7e2a957ea4eae7bbf144534737a19d4527",
+      "subdir": "."
+    },
+    {
+      "name": "fastpriorityqueue",
+      "repo": "https://github.com/lemire/FastPriorityQueue.js.git",
+      "commit": "b4167c2033eedd01597682cd8a138c861782219f",
+      "subdir": "."
+    },
+    {
+      "name": "fft.js",
+      "repo": "https://github.com/indutny/fft.js.git",
+      "commit": "4a18cf88fcdbd4ad5acca6eaea06a0b462047835",
+      "subdir": "."
+    },
+    {
+      "name": "fraction.js",
+      "repo": "https://github.com/rawify/Fraction.js.git",
+      "commit": "9aa0f355e5d6c25d10bce7a7ab25a3a4bd074942",
+      "subdir": "."
+    },
+    {
+      "name": "fuse.js",
+      "repo": "https://github.com/krisk/Fuse.git",
+      "commit": "73bad786059b66239eb7f3ffb307c006f5ee59d2",
+      "subdir": "."
+    },
+    {
+      "name": "fuzzysort",
+      "repo": "https://github.com/farzher/fuzzysort.git",
+      "commit": "b227b021f1de27cb6cd3baede120d2c0f0a1051f",
+      "subdir": "."
+    },
+    {
+      "name": "gl-matrix",
+      "repo": "https://github.com/toji/gl-matrix.git",
+      "commit": "accefb6ddf1897a0dc443bbc7664c90e67af6455",
+      "subdir": "."
+    },
+    {
+      "name": "hashlru",
+      "repo": "https://github.com/dominictarr/hashlru.git",
+      "commit": "89d1b22234ff5ed029f632ecbef74316720cef04",
+      "subdir": "."
+    },
+    {
+      "name": "haversine-distance",
+      "repo": "https://github.com/dcousens/haversine-distance.git",
+      "commit": "919e501c5909bb9e93958b05526c43700927c905",
+      "subdir": "."
+    },
+    {
+      "name": "he",
+      "repo": "https://github.com/mathiasbynens/he.git",
+      "commit": "36afe179392226cf1b6ccdb16ebbb7a5a844d93a",
+      "subdir": "."
+    },
+    {
+      "name": "html-entities",
+      "repo": "https://github.com/mdevils/html-entities.git",
+      "commit": "9ee63a120597292967f7d0d704d68d33950625ee",
+      "subdir": "."
+    },
+    {
+      "name": "is-number",
+      "repo": "https://github.com/jonschlinkert/is-number.git",
+      "commit": "98e8ff1da1a89f93d1397a24d7413ed15421c139",
+      "subdir": "."
+    },
+    {
+      "name": "jpeg-js",
+      "repo": "https://github.com/eugeneware/jpeg-js.git",
+      "commit": "1031ccd7a63c641c16afb2430279d1598530a85c",
+      "subdir": "."
+    },
+    {
+      "name": "js-levenshtein",
+      "repo": "https://github.com/gustf/js-levenshtein.git",
+      "commit": "2f0829e179ef9205e010de73164d5862c69571f3",
+      "subdir": "."
+    },
+    {
+      "name": "js-md5",
+      "repo": "https://github.com/emn178/js-md5.git",
+      "commit": "4c40b9472526dbffff49e42da7aeda79778ac88a",
+      "subdir": "."
+    },
+    {
+      "name": "js-sha1",
+      "repo": "https://github.com/emn178/js-sha1.git",
+      "commit": "5c5ec87644811e9b45c038df615dc52bffa82b22",
+      "subdir": "."
+    },
+    {
+      "name": "js-sha256",
+      "repo": "https://github.com/emn178/js-sha256.git",
+      "commit": "bacba8e8c6d6a79a6505ba52edbad55ec5509b19",
+      "subdir": "."
+    },
+    {
+      "name": "js-sha3",
+      "repo": "https://github.com/emn178/js-sha3.git",
+      "commit": "d1ab318829f2570332200565e70a97ddd7108d60",
+      "subdir": "."
+    },
+    {
+      "name": "js-yaml",
+      "repo": "https://github.com/nodeca/js-yaml.git",
+      "commit": "f8e56bd049ac09f53a012c8d4e86ccb51d4bc92b",
+      "subdir": "."
+    },
+    {
+      "name": "json-stable-stringify",
+      "repo": "https://github.com/ljharb/json-stable-stringify.git",
+      "commit": "4c3d8989da7dd5a341d8ab49b780fbe267411797",
+      "subdir": "."
+    },
+    {
+      "name": "leven",
+      "repo": "https://github.com/sindresorhus/leven.git",
+      "commit": "235e7758c8ec95fc3a30ef32528ce1fa409c040a",
+      "subdir": "."
+    },
+    {
+      "name": "lodash.clonedeep",
+      "repo": "https://github.com/lodash/lodash.git",
+      "commit": "cb0b9b9212521c08e3eafe7c8cb0af1b42b6649e",
+      "subdir": "."
+    },
+    {
+      "name": "lodash.debounce",
+      "repo": "https://github.com/lodash/lodash.git",
+      "commit": "cb0b9b9212521c08e3eafe7c8cb0af1b42b6649e",
+      "subdir": "."
+    },
+    {
+      "name": "lodash.get",
+      "repo": "https://github.com/lodash/lodash.git",
+      "commit": "cb0b9b9212521c08e3eafe7c8cb0af1b42b6649e",
+      "subdir": "."
+    },
+    {
+      "name": "lodash.isequal",
+      "repo": "https://github.com/lodash/lodash.git",
+      "commit": "cb0b9b9212521c08e3eafe7c8cb0af1b42b6649e",
+      "subdir": "."
+    },
+    {
+      "name": "lodash.merge",
+      "repo": "https://github.com/lodash/lodash.git",
+      "commit": "cb0b9b9212521c08e3eafe7c8cb0af1b42b6649e",
+      "subdir": "."
+    },
+    {
+      "name": "lodash.throttle",
+      "repo": "https://github.com/lodash/lodash.git",
+      "commit": "cb0b9b9212521c08e3eafe7c8cb0af1b42b6649e",
+      "subdir": "."
+    },
+    {
+      "name": "lunr",
+      "repo": "https://github.com/olivernn/lunr.js.git",
+      "commit": "aa5a878f62a6bba1e8e5b95714899e17e8150b38",
+      "subdir": "."
+    },
+    {
+      "name": "mersenne-twister",
+      "repo": "https://github.com/boo1ean/mersenne-twister.git",
+      "commit": "bdb5bd16d571c527d88ec29262ac3dde13798da7",
+      "subdir": "."
+    },
+    {
+      "name": "micromatch",
+      "repo": "https://github.com/micromatch/micromatch.git",
+      "commit": "8bd704ec0d9894693d35da425d827819916be920",
+      "subdir": "."
+    },
+    {
+      "name": "mime-db",
+      "repo": "https://github.com/jshttp/mime-db.git",
+      "commit": "c03ddfcab556ab61768dd77d9c52b8fbdb17b4dc",
+      "subdir": "."
+    },
+    {
+      "name": "mime-types",
+      "repo": "https://github.com/jshttp/mime-types.git",
+      "commit": "3a1187ee21388efe46b916d4991589d595bcb26c",
+      "subdir": "."
+    },
+    {
+      "name": "minimatch",
+      "repo": "https://github.com/isaacs/minimatch.git",
+      "commit": "10968eae898cac1b6c5feedada0de793b1fed0bf",
+      "subdir": "."
+    },
+    {
+      "name": "minimist",
+      "repo": "https://github.com/minimistjs/minimist.git",
+      "commit": "ecfdaea23e7931c0d529c52b743c711c3278a8ce",
+      "subdir": "."
+    },
+    {
+      "name": "minisearch",
+      "repo": "https://github.com/lucaong/minisearch.git",
+      "commit": "3d239d1c3ae7aef1bf5d8945dd7b5f0709f646f5",
+      "subdir": "."
+    },
+    {
+      "name": "ml-distance",
+      "repo": "https://github.com/mljs/distance.git",
+      "commit": "03ff961cb56a5621be96897f01f558968b6a4504",
+      "subdir": "."
+    },
+    {
+      "name": "ml-kmeans",
+      "repo": "https://github.com/mljs/kmeans.git",
+      "commit": "a5630f5752e9a945a97160c0cd533ea0450c668f",
+      "subdir": ".",
+      "rewriteLocal": "ml-kmeans",
+      "prebuild": "npm run tsc"
+    },
+    {
+      "name": "ml-knn",
+      "repo": "https://github.com/mljs/knn.git",
+      "commit": "afc1bdb8ddba029b7da54015f2d7e84989e54e2b",
+      "subdir": "."
+    },
+    {
+      "name": "ml-matrix",
+      "repo": "https://github.com/mljs/matrix.git",
+      "commit": "b398a84023583080700e53dbe3e0a38d9c414ba2",
+      "subdir": "."
+    },
+    {
+      "name": "ml-pca",
+      "repo": "https://github.com/mljs/pca.git",
+      "commit": "5a90019338acbc7ea79b3fc23c4f0b76aa2be327",
+      "subdir": "."
+    },
+    {
+      "name": "ml-random-forest",
+      "repo": "https://github.com/mljs/random-forest.git",
+      "commit": "7c75d32671e1805ebab35c1da2847a63e025ab96",
+      "subdir": "."
+    },
+    {
+      "name": "ml-regression-simple-linear",
+      "repo": "https://github.com/mljs/regression-simple-linear.git",
+      "commit": "1fb3f811cd129236f681c1d564e65777ccd33826",
+      "subdir": "."
+    },
+    {
+      "name": "ml-stat",
+      "repo": "https://github.com/mljs/stat.git",
+      "commit": "0dcdf72902b0625386043518e08f8e0fc36b565e",
+      "subdir": "."
+    },
+    {
+      "name": "mnemonist",
+      "repo": "https://github.com/yomguithereal/mnemonist.git",
+      "commit": "b94cfb425c0fccec37bb0545ff5f72261cada098",
+      "subdir": "."
+    },
+    {
+      "name": "mri",
+      "repo": "https://github.com/lukeed/mri.git",
+      "commit": "62b9ce4f25e1f7b476c99858c20882d86c010085",
+      "subdir": "."
+    },
+    {
+      "name": "ndarray",
+      "repo": "https://github.com/mikolalysenko/ndarray.git",
+      "commit": "58f5d8ca9cd37fa708c3996b0e8bbad0937678fc",
+      "subdir": "."
+    },
+    {
+      "name": "object-hash",
+      "repo": "https://github.com/puleos/object-hash.git",
+      "commit": "1dbd457bf4b73e010e4a5b658792f5a1de9192ad",
+      "subdir": "."
+    },
+    {
+      "name": "p-map",
+      "repo": "https://github.com/sindresorhus/p-map.git",
+      "commit": "100a217d3b1d28a3ba8ad726ea2986d7a696966e",
+      "subdir": "."
+    },
+    {
+      "name": "p-queue",
+      "repo": "https://github.com/sindresorhus/p-queue.git",
+      "commit": "53848611d103e16f39e94cba8c70a36f0ec791a0",
+      "subdir": "."
+    },
+    {
+      "name": "pako",
+      "repo": "https://github.com/nodeca/pako.git",
+      "commit": "62cb729e7813176ce2d2694b89c8724680fca383",
+      "subdir": "."
+    },
+    {
+      "name": "picomatch",
+      "repo": "https://github.com/micromatch/picomatch.git",
+      "commit": "69a2d181b9c0c7bc5454eb2e188b4763427e9000",
+      "subdir": "."
+    },
+    {
+      "name": "pluralize",
+      "repo": "https://github.com/blakeembrey/pluralize.git",
+      "commit": "1c42761e49f7a78b756841528d99dfbbca8d903c",
+      "subdir": "."
+    },
+    {
+      "name": "pngjs",
+      "repo": "https://github.com/pngjs/pngjs.git",
+      "commit": "c565210c602527eb459f857eeb78183997482d5b",
+      "subdir": "."
+    },
+    {
+      "name": "pretty-bytes",
+      "repo": "https://github.com/sindresorhus/pretty-bytes.git",
+      "commit": "b7849f7632461fe2b08a81a3a0e1eae3113dbe36",
+      "subdir": "."
+    },
+    {
+      "name": "pretty-ms",
+      "repo": "https://github.com/sindresorhus/pretty-ms.git",
+      "commit": "d1d96e1bb430b8dfaef84281e2b20f9c6e239a1e",
+      "subdir": "."
+    },
+    {
+      "name": "qs",
+      "repo": "https://github.com/ljharb/qs.git",
+      "commit": "3f5e1c528c967d915096787efbffa73cf6044170",
+      "subdir": "."
+    },
+    {
+      "name": "quick-lru",
+      "repo": "https://github.com/sindresorhus/quick-lru.git",
+      "commit": "070bdf331d9e451f75f5335c127255a124d4270d",
+      "subdir": "."
+    },
+    {
+      "name": "rbush",
+      "repo": "https://github.com/mourner/rbush.git",
+      "commit": "e59712716a84dda2e31f9b471b32faa178d8056f",
+      "subdir": "."
+    },
+    {
+      "name": "safe-stable-stringify",
+      "repo": "https://github.com/BridgeAR/safe-stable-stringify.git",
+      "commit": "8a02137ac933eff57dd6e49beb9ee766fe8dd372",
+      "subdir": "."
+    },
+    {
+      "name": "scrypt-js",
+      "repo": "https://github.com/ricmoo/scrypt-js.git",
+      "commit": "3f106c1ba13a0c909f48740eb3cf86d91e724ad2",
+      "subdir": "."
+    },
+    {
+      "name": "short-uuid",
+      "repo": "https://github.com/oculus42/short-uuid.git",
+      "commit": "0705935eaaf933dfd42d8d56069bfa574bbe6aef",
+      "subdir": "."
+    },
+    {
+      "name": "simple-statistics",
+      "repo": "https://github.com/simple-statistics/simple-statistics.git",
+      "commit": "50b2ff8551e7b3ebbcdd7a1e7fd68fe783fe37c7",
+      "subdir": ".",
+      "rewriteLocal": "simple-statistics",
+      "prebuild": "npm run build"
+    },
+    {
+      "name": "sjcl",
+      "repo": "https://github.com/bitwiseshiftleft/sjcl.git",
+      "commit": "35b0641709cbefccb0b58b39b2862152a4f4f428",
+      "subdir": "."
+    },
+    {
+      "name": "slugify",
+      "repo": "https://github.com/simov/slugify.git",
+      "commit": "29e903d2a0fb4460e2af375aadabcdd3b54777fc",
+      "subdir": "."
+    },
+    {
+      "name": "sprintf-js",
+      "repo": "https://github.com/alexei/sprintf.js.git",
+      "commit": "3a0d8c26d291b5bd9f1974877ecc50739921d6f5",
+      "subdir": "."
+    },
+    {
+      "name": "talisman",
+      "repo": "https://github.com/yomguithereal/talisman.git",
+      "commit": "86ae55cbd040ff021d05e282e0e6c71f2dde21f8",
+      "subdir": "."
+    },
+    {
+      "name": "tape",
+      "repo": "https://github.com/tape-testing/tape.git",
+      "commit": "39470e7d6adea7f44b3fbe380e242298b012b3b2",
+      "subdir": "."
+    },
+    {
+      "name": "tinyqueue",
+      "repo": "https://github.com/mourner/tinyqueue.git",
+      "commit": "6f4349d466d79c6ccd3d243f26356efd65ac5b05",
+      "subdir": "."
+    },
+    {
+      "name": "tweetnacl",
+      "repo": "https://github.com/dchest/tweetnacl-js.git",
+      "commit": "e6141a20553498697e9e7d92fbc4517994caff52",
+      "subdir": "."
+    },
+    {
+      "name": "ulid",
+      "repo": "https://github.com/ulid/javascript.git",
+      "commit": "11c2067821ee19e4dc787ca4e0125a025485edc6",
+      "subdir": "."
+    },
+    {
+      "name": "utf8",
+      "repo": "https://github.com/mathiasbynens/utf8.js.git",
+      "commit": "2ce09544b62f2a274dbcd249473c0986e3660849",
+      "subdir": "."
+    },
+    {
+      "name": "uuid",
+      "repo": "https://github.com/uuidjs/uuid.git",
+      "commit": "529ef0899f5dd503d2ee90d690585d63d78bc212",
+      "subdir": "."
+    },
+    {
+      "name": "validator",
+      "repo": "https://github.com/validatorjs/validator.js.git",
+      "commit": "e36b27902bf56d9e91b0d2a098a0e4530d69c09e",
+      "subdir": "."
+    },
+    {
+      "name": "xml2js",
+      "repo": "https://github.com/Leonidas-from-XIV/node-xml2js.git",
+      "commit": "cf3e061e22e98152b88068c2345bc02581f4d6c7",
+      "subdir": "."
+    },
+    {
+      "name": "yargs-parser",
+      "repo": "https://github.com/yargs/yargs-parser.git",
+      "commit": "60f2db5dacde1e94f960ce0941a717f3f422f865",
+      "subdir": "."
+    }
+  ]
+}

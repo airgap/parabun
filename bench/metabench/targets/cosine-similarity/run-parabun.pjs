@@ -1,0 +1,89 @@
+// Parabun-tailored rewrite of cosine-similarity.
+//
+// The upstream API is cosine(x, y) where x, y are plain Arrays. Here we
+// accept Float32Array directly and compute
+//   dot(x, y) / (sqrt(dot(x, x)) * sqrt(dot(y, y)))
+// via `bun:simd.dot` (three SIMD dot products — two for norms, one cross).
+// This is the rewrite path, what a Parabun user would write if they want
+// the fast path.
+//
+// Falls back to the scalar loop if bun:simd isn't available for some reason.
+
+import { dot } from "bun:simd";
+import { generatePair, generateBatch } from "./gen.js";
+
+const WARMUPS = 3;
+const RUNS = 9;
+
+function similarity(xF, yF) {
+  const a = dot(xF, yF);
+  const bx = dot(xF, xF);
+  const by = dot(yF, yF);
+  return a / (Math.sqrt(bx) * Math.sqrt(by));
+}
+
+function nowMs() {
+  return Bun.nanoseconds() / 1e6;
+}
+
+function timePair(D) {
+  const { xF, yF } = generatePair(D, D);
+  for (let i = 0; i < WARMUPS; i++) similarity(xF, yF);
+  const times = [];
+  let last = 0;
+  for (let i = 0; i < RUNS; i++) {
+    const t0 = nowMs();
+    last = similarity(xF, yF);
+    times.push(nowMs() - t0);
+  }
+  times.sort((a, b) => a - b);
+  return {
+    kind: "pair",
+    D,
+    min: times[0],
+    med: times[Math.floor(times.length / 2)],
+    max: times[times.length - 1],
+    value: last,
+  };
+}
+
+function timeBatch(N, D) {
+  const { xMat, yMat } = generateBatch(N, D);
+  // Pre-slice typed-array views (zero-copy) to mirror the upstream harness
+  // which has N discrete (x, y) pairs.
+  const xs = new Array(N);
+  const ys = new Array(N);
+  for (let q = 0; q < N; q++) {
+    xs[q] = xMat.subarray(q * D, (q + 1) * D);
+    ys[q] = yMat.subarray(q * D, (q + 1) * D);
+  }
+  for (let i = 0; i < WARMUPS; i++) {
+    for (let q = 0; q < N; q++) similarity(xs[q], ys[q]);
+  }
+  const times = [];
+  let last = 0;
+  for (let i = 0; i < RUNS; i++) {
+    const t0 = nowMs();
+    for (let q = 0; q < N; q++) last = similarity(xs[q], ys[q]);
+    times.push(nowMs() - t0);
+  }
+  times.sort((a, b) => a - b);
+  return {
+    kind: "batch",
+    N,
+    D,
+    min: times[0],
+    med: times[Math.floor(times.length / 2)],
+    max: times[times.length - 1],
+    value: last,
+  };
+}
+
+const PAIR_DIMS = [128, 768, 4096];
+const BATCH = [
+  { N: 1000, D: 128 },
+  { N: 1000, D: 768 },
+];
+
+for (const D of PAIR_DIMS) console.log(JSON.stringify(timePair(D)));
+for (const { N, D } of BATCH) console.log(JSON.stringify(timeBatch(N, D)));

@@ -1,0 +1,169 @@
+// Parabun rewrite of k-means using bun:simd primitives.
+//
+// Algorithmic reformulation:
+//   dist²(x, c) = ||x||² + ||c||² − 2·(x·c)
+// so for assignment (argmin over k of dist²) the ||x||² term is constant
+// per point and drops out. We need (x·c) for all (i, k) pairs.
+//
+// Why we don't call `bun:simd.matVec` K times per iteration:
+//   matVec copies the full matrix into the WASM scratch pool on every call.
+//   At N=20 000 × D=128 that's 10 MB × K copies = 160 MB memcpy'd per
+//   iteration for no reason — dwarfing the actual FLOPs. Instead the
+//   assignment runs as a fused JS loop; JSC's FTL tier auto-vectorizes
+//   the inner dot-product into AVX2 f32x8 instructions, so the packed
+//   dataMat/centersMat layout pays off without the boundary crossing.
+//   We still use `bun:simd.dot` for the K centroid norms — cheap, and it
+//   exercises the SIMD path on a non-trivial reduction.
+//
+// Layout:
+//   dataMat       Float32Array length N*D, row-major  (constant)
+//   centersMat    Float32Array length K*D, row-major  (updated each iter)
+//   centerNormsSq Float32Array length K               (updated each iter)
+//   scoreK        Float32Array length N               (matVec output buffer, reused)
+//   clusterID    Int32Array length N                  (assignments)
+//
+// Per iteration:
+//   1. Recompute centerNormsSq[k] = simd.dot(centers[k], centers[k]) for k in 0..K
+//   2. For each k: scoreK = simd.matVec(dataMat, centers[k], N, D)
+//      Then for each point i, candidate = centerNormsSq[k] − 2·scoreK[i]
+//      Track running minimum per point.
+//   3. Update centers via a single scalar pass (sum per cluster + count).
+//   4. Convergence: max L2 distance of any center from its previous position.
+
+import { dot } from "bun:simd";
+import { generate, N, D, K } from "./gen.mjs";
+
+function kmeansRewrite({ dataMat, initCentersMat, maxIterations = 50, tolerance = 1e-6 }) {
+  const centersMat = new Float32Array(initCentersMat);
+  const prevCentersMat = new Float32Array(K * D);
+  const clusterID = new Int32Array(N);
+  const centerNormsSq = new Float32Array(K);
+  const assignedMinDist = new Float32Array(N);
+  const scratch = new Float32Array(K * D);
+  const counts = new Int32Array(K);
+
+  let iters = 0;
+  for (let iter = 0; iter < maxIterations; iter++) {
+    iters = iter + 1;
+
+    // Save previous centers for convergence check.
+    prevCentersMat.set(centersMat);
+
+    // 1. ||c_k||² for all k.
+    for (let k = 0; k < K; k++) {
+      const cK = centersMat.subarray(k * D, (k + 1) * D);
+      centerNormsSq[k] = dot(cK, cK);
+    }
+
+    // 2. Assignment — fused JS loop with inner 8-way unroll so JSC's FTL
+    // tier can schedule the multiply-adds in parallel and emit SIMD-ish
+    // code. With the naive one-per-iter loop JSC leaves it as a serial
+    // scalar chain.
+    for (let i = 0; i < N; i++) {
+      const xOff = i * D;
+      let bestK = 0;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let k = 0; k < K; k++) {
+        const cOff = k * D;
+        let s0 = 0;
+        let s1 = 0;
+        let s2 = 0;
+        let s3 = 0;
+        let s4 = 0;
+        let s5 = 0;
+        let s6 = 0;
+        let s7 = 0;
+        for (let d = 0; d < D; d += 8) {
+          s0 += dataMat[xOff + d] * centersMat[cOff + d];
+          s1 += dataMat[xOff + d + 1] * centersMat[cOff + d + 1];
+          s2 += dataMat[xOff + d + 2] * centersMat[cOff + d + 2];
+          s3 += dataMat[xOff + d + 3] * centersMat[cOff + d + 3];
+          s4 += dataMat[xOff + d + 4] * centersMat[cOff + d + 4];
+          s5 += dataMat[xOff + d + 5] * centersMat[cOff + d + 5];
+          s6 += dataMat[xOff + d + 6] * centersMat[cOff + d + 6];
+          s7 += dataMat[xOff + d + 7] * centersMat[cOff + d + 7];
+        }
+        const cross = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7;
+        const cand = centerNormsSq[k] - 2 * cross;
+        if (cand < bestDist) {
+          bestDist = cand;
+          bestK = k;
+        }
+      }
+      clusterID[i] = bestK;
+      assignedMinDist[i] = bestDist;
+    }
+
+    // 3. Update centers: sum points per cluster, divide by count.
+    scratch.fill(0);
+    counts.fill(0);
+    for (let i = 0; i < N; i++) {
+      const k = clusterID[i];
+      counts[k]++;
+      const off = k * D;
+      const dataOff = i * D;
+      for (let d = 0; d < D; d++) scratch[off + d] += dataMat[dataOff + d];
+    }
+    for (let k = 0; k < K; k++) {
+      const n = counts[k];
+      const off = k * D;
+      if (n > 0) {
+        const inv = 1 / n;
+        for (let d = 0; d < D; d++) centersMat[off + d] = scratch[off + d] * inv;
+      }
+      // else: leave previous center untouched — empty cluster
+    }
+
+    // 4. Convergence: max squared movement of any centroid.
+    let maxMove = 0;
+    for (let k = 0; k < K; k++) {
+      let s = 0;
+      const off = k * D;
+      for (let d = 0; d < D; d++) {
+        const delta = centersMat[off + d] - prevCentersMat[off + d];
+        s += delta * delta;
+      }
+      if (s > maxMove) maxMove = s;
+    }
+    if (maxMove <= tolerance) break;
+  }
+
+  return { clusterID, centersMat, iters };
+}
+
+const { dataMat, initCentersMat } = generate();
+
+const WARMUPS = 1;
+const RUNS = 5;
+
+function nowMs() {
+  return Bun.nanoseconds() / 1e6;
+}
+
+for (let i = 0; i < WARMUPS; i++) kmeansRewrite({ dataMat, initCentersMat });
+
+const times = [];
+let finalIters = 0;
+let fingerprint = 0;
+for (let i = 0; i < RUNS; i++) {
+  const t0 = nowMs();
+  const r = kmeansRewrite({ dataMat, initCentersMat });
+  times.push(nowMs() - t0);
+  finalIters = r.iters;
+  fingerprint = r.centersMat[0];
+}
+times.sort((a, b) => a - b);
+
+console.log(
+  JSON.stringify({
+    op: "kmeans",
+    N,
+    D,
+    K,
+    iters: finalIters,
+    min: times[0],
+    med: times[Math.floor(times.length / 2)],
+    max: times[times.length - 1],
+    fingerprint,
+  }),
+);

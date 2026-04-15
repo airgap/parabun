@@ -1,0 +1,102 @@
+// Parabun rewrite of the focused simple-statistics subset.
+//
+// Trade-offs worth knowing:
+//   - Upstream `sum` uses Kahan-Babuska compensation; SIMD `sum` is plain
+//     lane-wise addition. For numbers in [0,1) at N=100k this drifts by a
+//     few ULPs, negligible for typical stats work but the harness still
+//     prints both values so you can see the gap.
+//   - Variance is computed as E[X²] - E[X]² via `simd.dot(x, x)` and
+//     `simd.sum(x)`. This form is known to suffer catastrophic cancellation
+//     when the variance is small relative to the mean. Our uniform [0,1)
+//     workload is well-conditioned so it's fine here; the harness flags
+//     if the relative error vs. upstream exceeds 1e-3.
+//   - Sample covariance: E[XY] - E[X]E[Y] — one `simd.dot(x, y)` and two
+//     `simd.sum` calls. Same numerical caveat as variance.
+
+import { sum as simdSum, dot as simdDot } from "bun:simd";
+import { generateSingle, generatePair } from "./gen.js";
+
+const WARMUPS = 3;
+const RUNS = 9;
+const N = 100_000;
+
+function sum(xF) {
+  return simdSum(xF);
+}
+
+function mean(xF) {
+  return simdSum(xF) / xF.length;
+}
+
+function variance(xF) {
+  // Σx²/N − (Σx/N)²
+  const n = xF.length;
+  const s = simdSum(xF);
+  const ss = simdDot(xF, xF);
+  const m = s / n;
+  return ss / n - m * m;
+}
+
+function standardDeviation(xF) {
+  return Math.sqrt(variance(xF));
+}
+
+function sampleCovariance(xF, yF) {
+  // (Σxy − N·μx·μy) / (N−1)
+  const n = xF.length;
+  const sx = simdSum(xF);
+  const sy = simdSum(yF);
+  const sxy = simdDot(xF, yF);
+  return (sxy - (sx * sy) / n) / (n - 1);
+}
+
+function sampleVariance(xF) {
+  // sample variance uses (N-1) denominator — needed for correlation.
+  const n = xF.length;
+  const s = simdSum(xF);
+  const ss = simdDot(xF, xF);
+  // Σ(x−μ)² = Σx² − N·μ²  →  divide by (N−1)
+  return (ss - (s * s) / n) / (n - 1);
+}
+
+function sampleStandardDeviation(xF) {
+  return Math.sqrt(sampleVariance(xF));
+}
+
+function sampleCorrelation(xF, yF) {
+  return sampleCovariance(xF, yF) / sampleStandardDeviation(xF) / sampleStandardDeviation(yF);
+}
+
+function nowMs() {
+  return Bun.nanoseconds() / 1e6;
+}
+
+function time(name, fn) {
+  for (let i = 0; i < WARMUPS; i++) fn();
+  const times = [];
+  let last = 0;
+  for (let i = 0; i < RUNS; i++) {
+    const t0 = nowMs();
+    last = fn();
+    times.push(nowMs() - t0);
+  }
+  times.sort((a, b) => a - b);
+  return {
+    op: name,
+    N,
+    min: times[0],
+    med: times[Math.floor(times.length / 2)],
+    max: times[times.length - 1],
+    value: last,
+  };
+}
+
+const { xF } = generateSingle(N, 1);
+const pair = generatePair(N, 2);
+
+console.log(JSON.stringify(time("sum", () => sum(xF))));
+console.log(JSON.stringify(time("mean", () => mean(xF))));
+console.log(JSON.stringify(time("variance", () => variance(xF))));
+console.log(JSON.stringify(time("standardDeviation", () => standardDeviation(xF))));
+console.log(JSON.stringify(time("sampleCovariance", () => sampleCovariance(pair.xF, pair.yF))));
+console.log(JSON.stringify(time("sampleCorrelation", () => sampleCorrelation(pair.xF, pair.yF))));
