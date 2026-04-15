@@ -130,19 +130,26 @@ export function registerCodegenRules(n: Ninja, cfg: Config): void {
   // outputs (so deleting node_modules/ correctly retriggers install).
   //
   // Why stamp + restat instead of just the node_modules paths as outputs:
-  // `bun install --frozen-lockfile` with no changes doesn't touch anything.
-  // If package.json was edited at time T and install ran at T-1day, the
-  // node_modules files have mtimes from T-1day < T → ninja loops forever.
-  // Touching the stamp gives ninja something with mtime T to compare against.
-  // Restat lets implicit outputs keep their old mtimes, pruning downstream.
+  // `bun install` with no changes doesn't touch anything. If package.json
+  // was edited at time T and install ran at T-1day, the node_modules files
+  // have mtimes from T-1day < T → ninja loops forever. Touching the stamp
+  // gives ninja something with mtime T to compare against. Restat lets
+  // implicit outputs keep their old mtimes, pruning downstream.
   //
   // CMake only tracked package.json as input; we add bun.lock so lockfile
   // version bumps actually reinstall.
+  //
+  // We deliberately do NOT pass --frozen-lockfile here. Previous Mac builds
+  // hit "ENOENT opening node_modules/<dep>/main.js" when a stamp was fresh
+  // but the node_modules tree was incomplete (dep's package.json present,
+  // main file missing) — frozen-lockfile treated the tree as valid and
+  // didn't repopulate. The lockfile is still authoritative (bun install
+  // reads and respects it); we just let it refill gaps.
   const touch = hostWin ? "type nul >" : "touch";
   n.rule("bun_install", {
     command: hostWin
-      ? `cmd /c "cd /d $dir && ${bun} install --frozen-lockfile && ${touch} $stamp"`
-      : `cd $dir && ${bun} install --frozen-lockfile && ${touch} $stamp`,
+      ? `cmd /c "cd /d $dir && ${bun} install && ${touch} $stamp"`
+      : `cd $dir && ${bun} install && ${touch} $stamp`,
     description: "install $dir",
     restat: true,
     // bun install can be memory-hungry and grabs a lockfile; serialize.
