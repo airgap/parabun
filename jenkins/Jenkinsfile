@@ -203,9 +203,15 @@ pipeline {
                         checkout scm
                         sh '''
                             set -eu
+                            # Container runs as the host jenkins UID (132), which
+                            # has no $HOME. Point npm/npx caches at the workspace
+                            # so they don't try to mkdir /.npm.
+                            export HOME="${WORKSPACE}"
+                            export npm_config_cache="${WORKSPACE}/.npm"
+                            mkdir -p "${npm_config_cache}"
                             cd editors/vscode/parabun
                             if [ -f package-lock.json ]; then
-                                npm ci --ignore-scripts
+                                npm ci --ignore-scripts --no-audit --no-fund
                             else
                                 npm install --ignore-scripts --no-audit --no-fund
                             fi
