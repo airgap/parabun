@@ -1,0 +1,72 @@
+// bun:gpu simdMap round-trip wallclock vs bun:simd, across a size sweep.
+//
+// Target: Apple Silicon (unified memory + shared-storage MTLBuffers) to
+// validate LYK-709's 2-4x claim. On discrete GPU or non-darwin hosts the
+// gpu backend either falls through to CPU or loses to bun:simd by large
+// margins — the bench still prints the numbers so you can see *why*.
+//
+// What we measure: full caller-observable wallclock of one simdMap call
+// end-to-end — no hold()/alloc() staging, because the default simdMap
+// entry point is what the public API contract is. If you pre-stage with
+// alloc() + hold() you're measuring kernel-only latency, which is a
+// separate question.
+//
+// Usage: bun bd bench/parabun-gpu-simdmap-roundtrip/run.pjs
+
+import gpu from "bun:gpu";
+import simd from "bun:simd";
+
+const SIZES = [1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24];
+const ITERS = 50;
+const WARMUP = 10;
+
+// Affine fn — simdMap's fast path requires the mapping be detectable as
+// affine. `x * 1.5 + 2.0` trivially lifts to `y = k1*x + k0` and both
+// backends (bun:simd AVX/NEON + Metal simdMapAffineF32) take their
+// specialized paths.
+const affine = x => x * 1.5 + 2.0;
+
+function bench(label, fn) {
+  for (let i = 0; i < WARMUP; i++) fn();
+  const samples = new Array(ITERS);
+  for (let i = 0; i < ITERS; i++) {
+    const t0 = Bun.nanoseconds();
+    fn();
+    samples[i] = Number(Bun.nanoseconds() - t0);
+  }
+  samples.sort((a, b) => a - b);
+  const med = samples[Math.floor(ITERS / 2)];
+  const min = samples[0];
+  const p95 = samples[Math.floor(ITERS * 0.95)];
+  return { label, min, med, p95 };
+}
+
+console.log(`backend: ${gpu.activeBackend()}`);
+console.log(`iters=${ITERS} warmup=${WARMUP}\n`);
+
+console.log(
+  "N".padStart(10),
+  "simd med(ms)".padStart(14),
+  "gpu med(ms)".padStart(13),
+  "speedup".padStart(9),
+  "simd min".padStart(10),
+  "gpu min".padStart(10),
+);
+
+for (const n of SIZES) {
+  const input = new Float32Array(n);
+  for (let i = 0; i < n; i++) input[i] = Math.sin(i);
+
+  const simdRun = bench("simd", () => simd.simdMap(affine, input));
+  const gpuRun = bench("gpu", () => gpu.simdMap(affine, input));
+
+  const medRatio = simdRun.med / gpuRun.med;
+  console.log(
+    String(n).padStart(10),
+    (simdRun.med / 1e6).toFixed(3).padStart(14),
+    (gpuRun.med / 1e6).toFixed(3).padStart(13),
+    (medRatio >= 1 ? `${medRatio.toFixed(2)}x` : `${(1 / medRatio).toFixed(2)}x⁻`).padStart(9),
+    (simdRun.min / 1e6).toFixed(3).padStart(10),
+    (gpuRun.min / 1e6).toFixed(3).padStart(10),
+  );
+}

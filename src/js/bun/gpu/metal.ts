@@ -233,6 +233,15 @@ let probed = false;
 let probeResult = false;
 let device: bigint = 0n;
 let deviceName = "";
+// [device hasUnifiedMemory] — true on Apple Silicon (the CPU and GPU share a
+// single physical DRAM pool, so Shared-storage MTLBuffers are truly
+// zero-copy) and false on discrete-GPU Intel Macs (where Shared storage
+// still works but the driver DMAs over PCIe on each dispatch, which is
+// what the ticket's 2-4× claim is calibrated *against*). The probe result
+// is informational today — the backend uses Shared everywhere regardless —
+// but callers can read it via getHasUnifiedMemory() to decide whether to
+// bother staging inputs through alloc() + hold() for the NOCOPY path.
+let hasUnifiedMemory = false;
 let commandQueue: bigint = 0n;
 let metalLibraryObj: bigint = 0n;
 // simdMap kernel
@@ -384,6 +393,11 @@ function probe(): boolean {
       }
     }
   }
+
+  // hasUnifiedMemory is an MTLDevice BOOL property (macOS 10.15+). BOOL
+  // on arm64 returns in the low byte of x0; objc_msgSend returning u64
+  // zero-extends, so !== 0n is the correct truthiness test.
+  hasUnifiedMemory = msgSend_2!(dev, sel("hasUnifiedMemory")) !== 0n;
 
   // Compile MSL: [device newLibraryWithSource:source options:nil error:&err]
   // `error` is an NSError** out-param — we pass null and inspect the return.
@@ -1066,10 +1080,15 @@ function dispose(): void {
   probed = false;
   probeResult = false;
   deviceName = "";
+  hasUnifiedMemory = false;
 }
 
 function getDeviceName(): string {
   return deviceName;
+}
+
+function getHasUnifiedMemory(): boolean {
+  return hasUnifiedMemory;
 }
 
 export default {
@@ -1087,4 +1106,5 @@ export default {
   releasePinned,
   dispose,
   getDeviceName,
+  getHasUnifiedMemory,
 };
