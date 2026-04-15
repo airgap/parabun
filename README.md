@@ -213,8 +213,9 @@ bun bd test test/bundler/transpiler/parabun-parser.test.js
 bun bd test test/bundler/transpiler/parabun-pure.test.js
 bun bd test test/bundler/transpiler/parabun-purity.test.js
 
-# Symlink for editor integration
-sudo ln -s $(pwd)/build/debug/bun-debug /usr/local/bin/parabun
+# Symlink for editor integration (installs both 'parabun' and short 'pb')
+sudo ln -sf $(pwd)/build/debug/bun-debug /usr/local/bin/parabun
+sudo ln -sf $(pwd)/build/debug/bun-debug /usr/local/bin/pb
 ```
 
 ## Purity Enforcement
