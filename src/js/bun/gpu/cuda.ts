@@ -723,6 +723,12 @@ function probe(): boolean {
   fnDotF32 = dotBuf[0];
 
   probeResult = true;
+
+  // Rehydrate the persisted per-host calibration if one exists. We do this
+  // lazily inside probe so it runs at most once per process, after we've
+  // read the GPU device name (part of the cache key).
+  applyCachedCalibration();
+
   return true;
 }
 
@@ -1095,10 +1101,14 @@ function launchDotF32(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle):
 //
 // GPU dispatch has a fixed round-trip cost (~2 cuMemAlloc + HtoD + DtoH +
 // one sync ≈ a few hundred µs on a warm context). Below this, staying on
-// CPU/WASM is faster. Tuned empirically on an RTX 4070 Ti — revisit once
-// we have real benchmarks in bench/parabun-gpu/.
+// CPU/WASM is faster. The default is tuned empirically on an RTX 4070 Ti;
+// `calibrate()` overwrites it with a per-host measured crossover and
+// persists the result under `~/.cache/parabun/` (see calibrate() below).
+// On subsequent module loads we rehydrate the cached value during probe()
+// so every host converges on its own best threshold without re-measuring.
 
-const MIN_SIMDMAP_ELEMS = 1 << 18; // 256k f32 = 1 MB
+const DEFAULT_MIN_SIMDMAP_ELEMS = 1 << 18; // 256k f32 = 1 MB — fallback
+let MIN_SIMDMAP_ELEMS = DEFAULT_MIN_SIMDMAP_ELEMS;
 
 // matVec uses a split threshold (same reasoning as metal.ts):
 //
@@ -1143,6 +1153,150 @@ function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (op === "matmul") return elemBytes === 4 && n >= MIN_MATMUL_WINS_FLOPS;
   if (op === "dot") return elemBytes === 4 && n >= MIN_DOT_WINS_ELEMS;
   return false;
+}
+
+// ─── Per-host calibration ─────────────────────────────────────────────────
+//
+// `simdMap` is the only op today where the CPU→GPU crossover genuinely
+// varies by hardware; matVec / matmul / dot all lose to bun:simd at every
+// measured size on the non-resident path, so their thresholds are parked
+// at Infinity. `calibrate()` sweeps a handful of sizes with the real PTX
+// kernel vs bun:simd, finds the smallest N where GPU wins by ≥10% (margin
+// absorbs host noise), and persists the result to
+// `~/.cache/parabun/gpu-calibrate-<hash>.json`. The hash keys on
+// deviceName + backend + platform + arch so a laptop dock switch (or a
+// per-user GPU swap) invalidates cleanly.
+//
+// No auto-calibration on first use: waking up a fresh process with a
+// 200–500 ms sweep inside someone's request path is a worse UX than the
+// static default. Callers opt in with `gpu.calibrate()` (typically at
+// boot) and we cache the result forever afterward.
+
+const CALIBRATION_VERSION = 1;
+const CALIBRATION_SIZES = [1 << 14, 1 << 16, 1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 22];
+const CALIBRATION_ITERS = 5;
+const CALIBRATION_WIN_MARGIN = 1.1; // GPU must beat CPU by ≥10%
+
+type CalibrationFile = {
+  version: number;
+  backend: string;
+  deviceName: string;
+  platform: string;
+  arch: string;
+  timestamp: number;
+  simdMap: number | "infinity"; // JSON.stringify drops Infinity → string sentinel
+};
+
+function cacheDir(): string {
+  const os = require("node:os");
+  const path = require("node:path");
+  const base = process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
+  return path.join(base, "parabun");
+}
+
+function cacheKeyHash(): string {
+  const crypto = require("node:crypto");
+  const key = `cuda|${deviceName}|${process.platform}|${process.arch}`;
+  return crypto.createHash("sha1").update(key).digest("hex").slice(0, 12);
+}
+
+function cacheFilePath(): string {
+  const path = require("node:path");
+  return path.join(cacheDir(), `gpu-calibrate-${cacheKeyHash()}.json`);
+}
+
+function applyCachedCalibration(): void {
+  if (process.env.BUN_PARABUN_SKIP_CALIBRATION === "1") return;
+  let raw: string;
+  try {
+    const fs = require("node:fs");
+    raw = fs.readFileSync(cacheFilePath(), "utf8");
+  } catch {
+    return; // no cache yet — keep the default
+  }
+  try {
+    const obj = JSON.parse(raw) as CalibrationFile;
+    if (obj.version !== CALIBRATION_VERSION) return;
+    if (obj.backend !== "cuda" || obj.deviceName !== deviceName) return;
+    if (obj.platform !== process.platform || obj.arch !== process.arch) return;
+    if (obj.simdMap === "infinity") {
+      MIN_SIMDMAP_ELEMS = Number.POSITIVE_INFINITY;
+    } else if (typeof obj.simdMap === "number" && obj.simdMap > 0) {
+      MIN_SIMDMAP_ELEMS = obj.simdMap;
+    }
+  } catch {
+    // corrupted cache — ignore and keep the default
+  }
+}
+
+function median(samples: number[]): number {
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+function sweepSimdMapCrossover(): number {
+  // Warm up both paths once across all sizes so JIT + driver state are
+  // hot before we sample. The largest size also forces the PCIe ring
+  // into steady state.
+  const fn = (x: number) => 2 * x + 1;
+  const inputs: Array<{ n: number; a: Float32Array }> = [];
+  for (const n of CALIBRATION_SIZES) {
+    const a = new Float32Array(n);
+    for (let i = 0; i < n; i++) a[i] = i * 0.001;
+    inputs.push({ n, a });
+  }
+  for (const { a } of inputs) {
+    launchAffineF32(a, 2, 1);
+    simd.simdMap(fn, a);
+  }
+
+  for (const { n, a } of inputs) {
+    const gpuSamples: number[] = [];
+    const cpuSamples: number[] = [];
+    for (let i = 0; i < CALIBRATION_ITERS; i++) {
+      const g0 = Bun.nanoseconds();
+      launchAffineF32(a, 2, 1);
+      gpuSamples.push(Bun.nanoseconds() - g0);
+      const c0 = Bun.nanoseconds();
+      simd.simdMap(fn, a);
+      cpuSamples.push(Bun.nanoseconds() - c0);
+    }
+    const gpuNs = median(gpuSamples);
+    const cpuNs = median(cpuSamples);
+    if (gpuNs * CALIBRATION_WIN_MARGIN < cpuNs) return n;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function calibrate(): { simdMap: number; cacheFile: string; deviceName: string } {
+  if (!probed && !probe()) throw new Error("bun:gpu cuda: cannot calibrate — backend not available");
+  if (!probeResult) throw new Error("bun:gpu cuda: cannot calibrate — probe failed");
+
+  const crossover = sweepSimdMapCrossover();
+  MIN_SIMDMAP_ELEMS = crossover;
+
+  const record: CalibrationFile = {
+    version: CALIBRATION_VERSION,
+    backend: "cuda",
+    deviceName,
+    platform: process.platform,
+    arch: process.arch,
+    timestamp: Date.now(),
+    simdMap: Number.isFinite(crossover) ? crossover : "infinity",
+  };
+
+  try {
+    const fs = require("node:fs");
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(cacheFilePath(), JSON.stringify(record, null, 2));
+  } catch (err) {
+    // Calibration is never required for correctness. Log but don't throw —
+    // the in-memory MIN_SIMDMAP_ELEMS is still correct for this process.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`bun:gpu cuda: failed to persist calibration (${msg}) — using in-memory value`);
+  }
+
+  return { simdMap: crossover, cacheFile: cacheFilePath(), deviceName };
 }
 
 // ─── Backend methods ──────────────────────────────────────────────────────
@@ -1433,4 +1587,5 @@ export default {
   releasePinned,
   dispose,
   getDeviceName,
+  calibrate,
 };

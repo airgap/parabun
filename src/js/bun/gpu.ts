@@ -170,8 +170,15 @@ interface Backend {
   hold(arr: FArray): GpuHandle;
   releaseHandle(handle: GpuHandle): void;
   releasePinned?(arr: FArray): boolean;
+  calibrate?(): CalibrationResult;
   dispose(): void;
 }
+
+export type CalibrationResult = {
+  simdMap: number; // Infinity if GPU never wins
+  cacheFile: string;
+  deviceName: string;
+};
 
 function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
   if (isGpuHandle(x)) {
@@ -351,6 +358,26 @@ function winsForSize(op: OpKind, n: number, elemBytes: number): boolean {
   return resolveActive().winsForSize(op, n, elemBytes);
 }
 
+// Per-host calibration — sweeps the real GPU kernel against bun:simd at a
+// small set of sizes, persists the measured CPU→GPU crossover under
+// `~/.cache/parabun/gpu-calibrate-<hash>.json`, and rehydrates it on
+// subsequent process starts. Intended to be called once at app boot; the
+// sweep takes on the order of 200–500ms end-to-end and should not run on
+// a request path. Throws on the CPU backend (nothing to calibrate).
+//
+// Returns the measured `simdMap` crossover in elements (or `Infinity` if
+// GPU never wins on this host), plus the persisted cache path and device
+// name so callers can log a one-liner. Setting
+// `BUN_PARABUN_SKIP_CALIBRATION=1` bypasses the cache read on module load
+// — useful for tests that need a known-clean default.
+function calibrate(): CalibrationResult {
+  const b = resolveActive();
+  if (!b.calibrate) {
+    throw new Error(`bun:gpu: backend ${b.name} has no crossover to calibrate`);
+  }
+  return b.calibrate();
+}
+
 // ─── Public ops ────────────────────────────────────────────────────────────
 
 function dot(a: FArray | GpuHandle | GpuFloat32Array, b: FArray | GpuHandle | GpuFloat32Array): number {
@@ -501,6 +528,7 @@ export default {
   hasBackend,
   setBackend,
   winsForSize,
+  calibrate,
   dispose,
   describe,
 };

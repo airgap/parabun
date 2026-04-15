@@ -968,3 +968,285 @@ describe("bun:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+describe("bun:gpu per-host calibration (CUDA simdMap crossover)", () => {
+  // `calibrate()` sweeps the real PTX kernel vs bun:simd and persists a
+  // crossover under $XDG_CACHE_HOME/parabun/. We point XDG_CACHE_HOME at a
+  // tempDir so the test doesn't touch the user's real cache, and the
+  // per-test cache files stay isolated.
+
+  it("exposes calibrate on the public surface", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-calibrate-surface",
+      `
+        import gpu from "bun:gpu";
+        console.log(typeof gpu.calibrate);
+      `,
+    );
+    expect(stdout).toBe("function");
+    expect(exitCode).toBe(0);
+  });
+
+  it("calibrate throws on the cpu backend (nothing to calibrate)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-calibrate-cpu",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        try {
+          gpu.calibrate();
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW:" + (e.message.includes("no crossover") ? "ok" : "unexpected"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW:ok");
+    expect(exitCode).toBe(0);
+  });
+
+  it("writes a cache file and reports the measured crossover", async () => {
+    using dir = tempDir("parabun-gpu-calibrate-persist", {
+      "index.pjs": `
+        import gpu from "bun:gpu";
+        import fs from "node:fs";
+        if (gpu.activeBackend() !== "cuda") {
+          console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
+          process.exit(0);
+        }
+        const result = gpu.calibrate();
+        const cacheExists = fs.existsSync(result.cacheFile);
+        const parsed = JSON.parse(fs.readFileSync(result.cacheFile, "utf8"));
+        console.log(JSON.stringify({
+          skipped: false,
+          simdMap: Number.isFinite(result.simdMap) ? result.simdMap : "infinity",
+          simdMapIsPositive: result.simdMap > 0,
+          cacheExists,
+          cacheBackend: parsed.backend,
+          cacheDevice: parsed.deviceName === result.deviceName,
+          cachePlatform: parsed.platform,
+          cacheArch: parsed.arch,
+          cacheVersion: parsed.version,
+          cacheHasTimestamp: typeof parsed.timestamp === "number" && parsed.timestamp > 0,
+        }));
+      `.trimStart(),
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "index.pjs"],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir) },
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, , exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    const parsed = JSON.parse(stdout.trim());
+    if (parsed.skipped) {
+      // No CUDA on this host — the path is untestable; confirm the skip
+      // signal came from the cpu fallback (harness guarantee).
+      expect(parsed.backend === "cpu" || parsed.backend === "metal").toBe(true);
+    } else {
+      expect(parsed.cacheExists).toBe(true);
+      expect(parsed.cacheBackend).toBe("cuda");
+      expect(parsed.cacheDevice).toBe(true);
+      expect(parsed.cachePlatform).toBe(process.platform);
+      expect(parsed.cacheArch).toBe(process.arch);
+      expect(parsed.cacheVersion).toBe(1);
+      expect(parsed.cacheHasTimestamp).toBe(true);
+      expect(parsed.simdMapIsPositive).toBe(true);
+    }
+    expect(exitCode).toBe(0);
+  });
+
+  it("rehydrates a cached crossover on the next process load", async () => {
+    // Write a calibration file by hand with a known non-default crossover,
+    // then spawn a fresh bun process and assert that winsForSize reflects
+    // the rehydrated value. If the rehydrate path is broken we'd see the
+    // static default (1 << 18) instead.
+    using dir = tempDir("parabun-gpu-calibrate-rehydrate", {
+      "index.pjs": `
+        import gpu from "bun:gpu";
+        if (gpu.activeBackend() !== "cuda") {
+          console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
+          process.exit(0);
+        }
+        // Threshold we wrote into the cache: 1 << 10 = 1024 elements.
+        // Anything at or above that must win; below must lose.
+        console.log(JSON.stringify({
+          skipped: false,
+          belowThreshold: gpu.winsForSize("simdMap", 512, 4),
+          atThreshold: gpu.winsForSize("simdMap", 1024, 4),
+          aboveThreshold: gpu.winsForSize("simdMap", 8192, 4),
+        }));
+      `.trimStart(),
+    });
+
+    // First: seed the cache. We need the real deviceName to build the
+    // cache key hash — ask cuda.ts's calibrate for it in a short warmup
+    // run, then overwrite the file contents with our fake crossover.
+    await using seedProc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `import gpu from "bun:gpu";
+         import fs from "node:fs";
+         if (gpu.activeBackend() !== "cuda") { console.log(JSON.stringify({ skipped: true })); process.exit(0); }
+         const r = gpu.calibrate();
+         const record = {
+           version: 1, backend: "cuda", deviceName: r.deviceName,
+           platform: process.platform, arch: process.arch,
+           timestamp: Date.now(), simdMap: 1024,
+         };
+         fs.writeFileSync(r.cacheFile, JSON.stringify(record));
+         console.log(JSON.stringify({ seeded: true, file: r.cacheFile }));`,
+      ],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir) },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const seedOut = JSON.parse((await seedProc.stdout.text()).trim());
+    await seedProc.exited;
+
+    if (seedOut.skipped) {
+      // No CUDA on this host — bail politely.
+      expect(seedOut.skipped).toBe(true);
+      return;
+    }
+
+    // Second: run the real assertion against the seeded cache.
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "index.pjs"],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir) },
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, , exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    const parsed = JSON.parse(stdout.trim());
+    expect(parsed.skipped).toBe(false);
+    expect(parsed.belowThreshold).toBe(false);
+    expect(parsed.atThreshold).toBe(true);
+    expect(parsed.aboveThreshold).toBe(true);
+    expect(exitCode).toBe(0);
+  });
+
+  it("BUN_PARABUN_SKIP_CALIBRATION=1 bypasses the cache read on probe", async () => {
+    // Seed the cache with a known crossover (1024), then set the skip env
+    // var and assert that winsForSize falls back to the static default
+    // (1 << 18 = 262144).
+    using dir = tempDir("parabun-gpu-calibrate-skip", {
+      "index.pjs": `
+        import gpu from "bun:gpu";
+        if (gpu.activeBackend() !== "cuda") {
+          console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
+          process.exit(0);
+        }
+        // With the cache ignored, MIN_SIMDMAP_ELEMS stays at 1 << 18 = 262144.
+        // 1024 must fall below; 262144 must match; 300000 must win.
+        console.log(JSON.stringify({
+          skipped: false,
+          below: gpu.winsForSize("simdMap", 1024, 4),
+          atDefault: gpu.winsForSize("simdMap", 262144, 4),
+          aboveDefault: gpu.winsForSize("simdMap", 300000, 4),
+        }));
+      `.trimStart(),
+    });
+
+    await using seedProc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `import gpu from "bun:gpu";
+         import fs from "node:fs";
+         if (gpu.activeBackend() !== "cuda") { console.log(JSON.stringify({ skipped: true })); process.exit(0); }
+         const r = gpu.calibrate();
+         const record = {
+           version: 1, backend: "cuda", deviceName: r.deviceName,
+           platform: process.platform, arch: process.arch,
+           timestamp: Date.now(), simdMap: 1024,
+         };
+         fs.writeFileSync(r.cacheFile, JSON.stringify(record));
+         console.log(JSON.stringify({ seeded: true }));`,
+      ],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir) },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const seedOut = JSON.parse((await seedProc.stdout.text()).trim());
+    await seedProc.exited;
+    if (seedOut.skipped) return;
+
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "index.pjs"],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir), BUN_PARABUN_SKIP_CALIBRATION: "1" },
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, , exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    const parsed = JSON.parse(stdout.trim());
+    expect(parsed.skipped).toBe(false);
+    expect(parsed.below).toBe(false);
+    expect(parsed.atDefault).toBe(true);
+    expect(parsed.aboveDefault).toBe(true);
+    expect(exitCode).toBe(0);
+  });
+
+  it("ignores cached records with a mismatched deviceName", async () => {
+    // Invalidation check: if the cache file exists but was written for a
+    // different GPU, we must discard it and fall back to the static default.
+    using dir = tempDir("parabun-gpu-calibrate-invalidate", {
+      "index.pjs": `
+        import gpu from "bun:gpu";
+        if (gpu.activeBackend() !== "cuda") {
+          console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
+          process.exit(0);
+        }
+        console.log(JSON.stringify({
+          skipped: false,
+          atDefault: gpu.winsForSize("simdMap", 262144, 4),
+          belowDefault: gpu.winsForSize("simdMap", 1024, 4),
+        }));
+      `.trimStart(),
+    });
+
+    // Seed a cache file whose deviceName will never match.
+    await using seedProc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `import gpu from "bun:gpu";
+         import fs from "node:fs";
+         if (gpu.activeBackend() !== "cuda") { console.log(JSON.stringify({ skipped: true })); process.exit(0); }
+         const r = gpu.calibrate();
+         const record = {
+           version: 1, backend: "cuda", deviceName: "Definitely Not Your GPU 9000",
+           platform: process.platform, arch: process.arch,
+           timestamp: Date.now(), simdMap: 1024,
+         };
+         fs.writeFileSync(r.cacheFile, JSON.stringify(record));
+         console.log(JSON.stringify({ seeded: true }));`,
+      ],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir) },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const seedOut = JSON.parse((await seedProc.stdout.text()).trim());
+    await seedProc.exited;
+    if (seedOut.skipped) return;
+
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "index.pjs"],
+      env: { ...bunEnv, XDG_CACHE_HOME: String(dir) },
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, , exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    const parsed = JSON.parse(stdout.trim());
+    expect(parsed.skipped).toBe(false);
+    // Cache rejected → static default (262144) applies.
+    expect(parsed.atDefault).toBe(true);
+    expect(parsed.belowDefault).toBe(false);
+    expect(exitCode).toBe(0);
+  });
+});
