@@ -165,10 +165,11 @@ interface Backend {
   matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
   matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray;
   simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
-  alloc(length: number, type: "f32" | "f64"): FArray;
+  alloc(length: number, type: "f32" | "f64", opts?: { pinned?: boolean }): FArray;
   isAligned(arr: FArray): boolean;
   hold(arr: FArray): GpuHandle;
   releaseHandle(handle: GpuHandle): void;
+  releasePinned?(arr: FArray): boolean;
   dispose(): void;
 }
 
@@ -234,16 +235,22 @@ const cpuBackend: Backend = {
   simdMap(fn, a) {
     return simd.simdMap(fn, unwrapHandle(a) as any);
   },
-  alloc(length, type) {
+  alloc(length, type, _opts) {
     if (!Number.isInteger(length) || length < 0) {
       throw new RangeError(`length must be a non-negative integer; got ${length}`);
     }
     if (type !== "f32" && type !== "f64") {
       throw new TypeError(`type must be "f32" or "f64"; got ${String(type)}`);
     }
+    // `pinned: true` is a silent no-op on CPU — the flag exists for CUDA
+    // and Metal to opt into DMA-capable / unified-memory allocations; CPU
+    // just returns a plain typed array either way.
     return type === "f32" ? new Float32Array(length) : new Float64Array(length);
   },
   isAligned(_arr) {
+    return false;
+  },
+  releasePinned(_arr) {
     return false;
   },
   hold(arr) {
@@ -406,14 +413,23 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle | G
 // dispatch path in matVec — see bench/parabun-metal-zerocopy/README.md for
 // the size/speed tradeoff. On CPU (and today's CUDA) it just returns a
 // plain typed array since the backend has no benefit from alignment.
-function alloc(length: number, type: "f32"): Float32Array;
-function alloc(length: number, type: "f64"): Float64Array;
-function alloc(length: number, type: "f32" | "f64"): FArray {
-  return resolveActive().alloc(length, type);
+function alloc(length: number, type: "f32", opts?: { pinned?: boolean }): Float32Array;
+function alloc(length: number, type: "f64", opts?: { pinned?: boolean }): Float64Array;
+function alloc(length: number, type: "f32" | "f64", opts?: { pinned?: boolean }): FArray {
+  return resolveActive().alloc(length, type, opts);
 }
 
 function isAligned(arr: FArray): boolean {
   return resolveActive().isAligned(arr);
+}
+
+// Free memory previously allocated with `alloc(n, t, { pinned: true })`.
+// Returns true if `arr` was pinned on the active backend, false if it was a
+// plain typed array (no-op). On backends that don't support pinning (CPU,
+// today's Metal), always returns false — caller code stays portable.
+function releasePinned(arr: FArray): boolean {
+  const backend = resolveActive();
+  return backend.releasePinned ? backend.releasePinned(arr) : false;
 }
 
 // hold(arr) keeps a typed array GPU-resident across matVec calls. On Metal
@@ -479,6 +495,7 @@ export default {
   isAligned,
   hold,
   release,
+  releasePinned,
   GpuFloat32Array,
   activeBackend,
   hasBackend,

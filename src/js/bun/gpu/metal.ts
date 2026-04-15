@@ -620,13 +620,16 @@ function newBufferFromF32(arr: Float32Array, byteLen: bigint): bigint {
 // take the NOCOPY path; freeing would require a FinalizationRegistry + care
 // around Metal's aliased MTLBuffer lifetimes, which is out of scope here.
 
-function alloc(length: number, type: "f32" | "f64"): FArray {
+function alloc(length: number, type: "f32" | "f64", _opts?: { pinned?: boolean }): FArray {
   if (!Number.isInteger(length) || length < 0) {
     throw new RangeError(`length must be a non-negative integer; got ${length}`);
   }
   if (type !== "f32" && type !== "f64") {
     throw new TypeError(`type must be "f32" or "f64"; got ${String(type)}`);
   }
+  // `pinned: true` on Metal is subsumed by page-aligned unified memory (the
+  // NOCOPY dispatch path alloc already takes). Accept the flag for API
+  // uniformity with CUDA; no behavior difference.
   if (!probe()) throw new Error("bun:gpu metal: backend unavailable");
   const elemBytes = type === "f32" ? 4 : 8;
   const byteLen = length * elemBytes;
@@ -695,6 +698,13 @@ function releaseHandle(handle: GpuHandle): void {
     handle.buffer = 0n;
   }
   handle.released = true;
+}
+
+// Metal's `alloc` returns page-aligned memory owned by posix_memalign; we
+// deliberately leak that memory today because MTLBuffer NOCOPY aliases it.
+// Accept `releasePinned` calls as no-ops for API parity with CUDA.
+function releasePinned(_arr: FArray): boolean {
+  return false;
 }
 
 // ─── Kernel launch: matVecF32 ──────────────────────────────────────────────
@@ -1074,6 +1084,7 @@ export default {
   isAligned,
   hold,
   releaseHandle,
+  releasePinned,
   dispose,
   getDeviceName,
 };

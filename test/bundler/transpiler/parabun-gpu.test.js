@@ -29,6 +29,7 @@ describe("bun:gpu scaffold", () => {
           isAligned: typeof gpu.isAligned,
           hold: typeof gpu.hold,
           release: typeof gpu.release,
+          releasePinned: typeof gpu.releasePinned,
           activeBackend: typeof gpu.activeBackend,
           hasBackend: typeof gpu.hasBackend,
           setBackend: typeof gpu.setBackend,
@@ -48,6 +49,7 @@ describe("bun:gpu scaffold", () => {
       isAligned: "function",
       hold: "function",
       release: "function",
+      releasePinned: "function",
       activeBackend: "function",
       hasBackend: "function",
       setBackend: "function",
@@ -871,6 +873,98 @@ describe("bun:gpu GpuFloat32Array wrapper", () => {
     const lines = stdout.split("\n");
     expect(JSON.parse(lines[0])).toEqual({ inScope: true });
     expect(JSON.parse(lines[1])).toEqual({ postThrew: true });
+    expect(exitCode).toBe(0);
+  });
+});
+
+describe("bun:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
+  it("releasePinned is part of the public surface", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-pinned-surface",
+      `
+        import gpu from "bun:gpu";
+        console.log(typeof gpu.releasePinned);
+      `,
+    );
+    expect(stdout).toBe("function");
+    expect(exitCode).toBe(0);
+  });
+
+  it("alloc accepts a pinned option without throwing on any backend", async () => {
+    // The { pinned: true } flag is a silent no-op on backends that don't
+    // support it (cpu, metal). On cuda it routes through cuMemAllocHost_v2.
+    // Either way the returned typed array must be a working FArray.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-pinned-alloc",
+      `
+        import gpu from "bun:gpu";
+        const a = gpu.alloc(8, "f32", { pinned: true });
+        for (let i = 0; i < 8; i++) a[i] = i + 1;
+        let s = 0;
+        for (let i = 0; i < 8; i++) s += a[i];
+        const released = gpu.releasePinned(a);
+        console.log(JSON.stringify({
+          ctor: a.constructor.name,
+          length: a.length,
+          sum: s,
+          released,
+          backend: gpu.activeBackend(),
+        }));
+      `,
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ctor).toBe("Float32Array");
+    expect(parsed.length).toBe(8);
+    expect(parsed.sum).toBe(36);
+    // Only the CUDA backend actually pins; everyone else returns false.
+    if (parsed.backend === "cuda") {
+      expect(parsed.released).toBe(true);
+    } else {
+      expect(parsed.released).toBe(false);
+    }
+    expect(exitCode).toBe(0);
+  });
+
+  it("releasePinned on a plain typed array is a harmless false", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-pinned-nonpinned",
+      `
+        import gpu from "bun:gpu";
+        const a = new Float32Array(4);
+        console.log(gpu.releasePinned(a));
+      `,
+    );
+    expect(stdout).toBe("false");
+    expect(exitCode).toBe(0);
+  });
+
+  it("pinned f64 allocation round-trips and frees", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-pinned-f64",
+      `
+        import gpu from "bun:gpu";
+        const a = gpu.alloc(16, "f64", { pinned: true });
+        for (let i = 0; i < 16; i++) a[i] = (i + 1) * 0.5;
+        let s = 0;
+        for (let i = 0; i < 16; i++) s += a[i];
+        const released = gpu.releasePinned(a);
+        console.log(JSON.stringify({
+          ctor: a.constructor.name,
+          sum: s,
+          released,
+          backend: gpu.activeBackend(),
+        }));
+      `,
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ctor).toBe("Float64Array");
+    // 0.5 + 1.0 + 1.5 + … + 8.0 = 68.
+    expect(parsed.sum).toBeCloseTo(68);
+    if (parsed.backend === "cuda") {
+      expect(parsed.released).toBe(true);
+    } else {
+      expect(parsed.released).toBe(false);
+    }
     expect(exitCode).toBe(0);
   });
 });

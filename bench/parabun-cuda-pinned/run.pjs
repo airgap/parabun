@@ -1,0 +1,141 @@
+// Microbenchmark: CUDA pinned-host memory (cuMemAllocHost) vs pageable
+// staging. When the host buffer is already page-locked, the CUDA driver
+// skips staging through its own private pinned buffer and DMAs straight
+// from the caller's memory — so `cuMemcpyHtoD_v2` drops roughly 2–3× on
+// large transfers.
+//
+//   bun run build:release --asan=off bench/parabun-cuda-pinned/run.pjs
+//
+// Each case measures the total wall time of matmul (two HtoD + one kernel
+// + one DtoH per call) with pageable-vs-pinned host buffers and reports
+// the speedup. matmul is the stress target because it ships two big HtoDs
+// per call — the worst-offender per-dispatch transfer shape. The kernel
+// itself is identical across both paths, so any delta is PCIe transfer.
+
+import gpu from "bun:gpu";
+
+const desc = gpu.describe();
+console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}`);
+if (desc.active !== "cuda") {
+  console.log("(not running: pinned-host path only exercises the CUDA backend)");
+  process.exit(0);
+}
+console.log();
+
+const cases = [
+  { M: 512, K: 512, N: 512 }, // 1 MB A, 1 MB B, 1 MB C
+  { M: 1024, K: 1024, N: 1024 }, // 4 MB × 3
+  { M: 2048, K: 1024, N: 2048 }, // 8 MB A, 8 MB B, 16 MB C
+  { M: 2048, K: 2048, N: 2048 }, // 16 MB × 3
+];
+
+const CALLS = 20;
+
+function fill(arr) {
+  let s = 0xC0FFEE;
+  for (let i = 0; i < arr.length; i++) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    arr[i] = (s / 0xFFFFFFFF) * 2 - 1;
+  }
+}
+
+function bench(fn, iters) {
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+console.log(
+  `${"shape".padEnd(18)} | ${"total MB".padStart(8)} | ${"pageable".padStart(10)} | ${"pinned".padStart(10)} | ${"speedup".padStart(8)}`,
+);
+console.log("-".repeat(68));
+
+for (const { M, K, N } of cases) {
+  const totalMB = (((M * K + K * N + M * N) * 4) / 1_048_576).toFixed(1);
+
+  const aPlain = new Float32Array(M * K);
+  const bPlain = new Float32Array(K * N);
+  const cPlain = new Float32Array(M * N);
+  fill(aPlain);
+  fill(bPlain);
+
+  const aPinned = gpu.alloc(M * K, "f32", { pinned: true });
+  const bPinned = gpu.alloc(K * N, "f32", { pinned: true });
+  const cPinned = gpu.alloc(M * N, "f32", { pinned: true });
+  aPinned.set(aPlain);
+  bPinned.set(bPlain);
+
+  // Warm up each path.
+  gpu.matmul(aPlain, bPlain, M, K, N, cPlain);
+  gpu.matmul(aPinned, bPinned, M, K, N, cPinned);
+
+  const pageable = bench(() => gpu.matmul(aPlain, bPlain, M, K, N, cPlain), CALLS);
+  const pinned = bench(() => gpu.matmul(aPinned, bPinned, M, K, N, cPinned), CALLS);
+
+  console.log(
+    `${`${M}×${K}·${K}×${N}`.padEnd(18)} | ${totalMB.padStart(8)} | ${pageable.toFixed(2).padStart(8)} ms | ${pinned.toFixed(2).padStart(8)} ms | ${(pageable / pinned).toFixed(2).padStart(6)}×`,
+  );
+
+  gpu.releasePinned(aPinned);
+  gpu.releasePinned(bPinned);
+  gpu.releasePinned(cPinned);
+}
+
+// Transfer-bound workload: a large simdMap (y = 2x + 1). Arithmetic
+// intensity is 1 FMA per loaded+stored element, so PCIe transfer cost
+// dominates — this is where pinning shows up clearly.
+console.log();
+console.log("simdMap (PCIe-bound) — transfer-dominated affine over a single large buffer");
+console.log(
+  `${"N (elems)".padEnd(12)} | ${"MB".padStart(6)} | ${"pageable".padStart(10)} | ${"pinned".padStart(10)} | ${"speedup".padStart(8)}`,
+);
+console.log("-".repeat(60));
+const affineFn = x => 2 * x + 1;
+const affineSizes = [1 << 18, 1 << 20, 1 << 22, 1 << 24]; // 1, 4, 16, 64 MB
+for (const N of affineSizes) {
+  const plain = new Float32Array(N);
+  fill(plain);
+  const pinned = gpu.alloc(N, "f32", { pinned: true });
+  pinned.set(plain);
+  gpu.simdMap(affineFn, plain);
+  gpu.simdMap(affineFn, pinned);
+  const p = bench(() => gpu.simdMap(affineFn, plain), CALLS);
+  const q = bench(() => gpu.simdMap(affineFn, pinned), CALLS);
+  const mb = ((N * 4) / 1_048_576).toFixed(1);
+  console.log(
+    `${String(N).padEnd(12)} | ${mb.padStart(6)} | ${p.toFixed(2).padStart(8)} ms | ${q.toFixed(2).padStart(8)} ms | ${(p / q).toFixed(2).padStart(6)}×`,
+  );
+  gpu.releasePinned(pinned);
+}
+
+// Correctness check — pinned and pageable paths must agree bit-for-bit
+// (same kernel, same inputs, only the host-memory allocation differs).
+{
+  const { M, K, N } = cases[0];
+  const aPlain = new Float32Array(M * K);
+  const bPlain = new Float32Array(K * N);
+  fill(aPlain);
+  fill(bPlain);
+  const aPinned = gpu.alloc(M * K, "f32", { pinned: true });
+  const bPinned = gpu.alloc(K * N, "f32", { pinned: true });
+  aPinned.set(aPlain);
+  bPinned.set(bPlain);
+  const cPlain = gpu.matmul(aPlain, bPlain, M, K, N);
+  const cPinned = gpu.matmul(aPinned, bPinned, M, K, N);
+  let mismatches = 0;
+  let maxErr = 0;
+  for (let i = 0; i < M * N; i++) {
+    const d = Math.abs(cPlain[i] - cPinned[i]);
+    if (d > 0) mismatches++;
+    if (d > maxErr) maxErr = d;
+  }
+  console.log();
+  console.log(`correctness @ ${M}×${K}·${K}×${N}: ${mismatches} mismatches, maxErr=${maxErr.toExponential(2)}`);
+  gpu.releasePinned(aPinned);
+  gpu.releasePinned(bPinned);
+}

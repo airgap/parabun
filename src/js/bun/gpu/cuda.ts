@@ -43,6 +43,8 @@ type CudaSymbols = {
   cuCtxSynchronize: () => number;
   cuMemAlloc_v2: (ptrPtr: number, size: bigint) => number;
   cuMemFree_v2: (ptr: bigint) => number;
+  cuMemAllocHost_v2: (ptrPtr: number, size: bigint) => number;
+  cuMemFreeHost: (ptr: bigint) => number;
   cuMemcpyHtoD_v2: (dst: bigint, src: number, size: bigint) => number;
   cuMemcpyDtoH_v2: (dst: number, src: bigint, size: bigint) => number;
   cuModuleLoadData: (modPtr: number, img: number) => number;
@@ -72,12 +74,14 @@ type CudaSymbols = {
 
 let cudaLib: { symbols: CudaSymbols; close: () => void } | null = null;
 let ffiPtr: ((x: any) => number) | null = null;
+let ffiToArrayBuffer: ((ptr: bigint | number, byteOffset: number, byteLength: number) => ArrayBuffer) | null = null;
 
 function tryLoadCuda(): boolean {
   if (cudaLib !== null) return true;
   try {
-    const { dlopen, FFIType, ptr } = require("../ffi.ts");
+    const { dlopen, FFIType, ptr, toArrayBuffer } = require("../ffi.ts");
     ffiPtr = ptr;
+    ffiToArrayBuffer = toArrayBuffer;
     cudaLib = dlopen(LIBNAME, {
       cuInit: { args: [FFIType.u32], returns: FFIType.i32 },
       cuDeviceGetCount: { args: [FFIType.ptr], returns: FFIType.i32 },
@@ -88,6 +92,8 @@ function tryLoadCuda(): boolean {
       cuCtxSynchronize: { args: [], returns: FFIType.i32 },
       cuMemAlloc_v2: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
       cuMemFree_v2: { args: [FFIType.u64], returns: FFIType.i32 },
+      cuMemAllocHost_v2: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+      cuMemFreeHost: { args: [FFIType.u64], returns: FFIType.i32 },
       cuMemcpyHtoD_v2: { args: [FFIType.u64, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
       cuMemcpyDtoH_v2: { args: [FFIType.ptr, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
       cuModuleLoadData: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
@@ -1279,22 +1285,85 @@ function getDeviceName(): string {
   return deviceName;
 }
 
-// Page-aligned alloc is a no-op on CUDA today — the dispatch path does its
-// own cuMemAlloc+cuMemcpy per call, so caller-side alignment doesn't help.
-// Matches the CPU stub so the bun:gpu public surface stays uniform.
-// TODO: cudaHostAlloc / pinned memory for async DMA would be a real win
-// here; out of scope for the Metal-focused input-staging lift.
-function alloc(length: number, type: "f32" | "f64"): FArray {
+// Pinned-host-memory allocation (cuMemAllocHost_v2).
+//
+// Pageable Float32Arrays force the CUDA driver to stage HtoD transfers
+// through a private internal pinned buffer — an extra memcpy per dispatch.
+// When the caller hands us memory that's already pinned, `cuMemcpyHtoD_v2`
+// DMAs straight to the device from the user buffer, so PCIe transfers drop
+// roughly 2–3× on large payloads (matmul, matVec). The win is biggest
+// where the workload is PCIe-bound, i.e. medium buffers where compute
+// doesn't hide the copy; residency (hold) is still the right answer when
+// the same buffer is reused many times.
+//
+// We track pinned buffers via (a) a WeakMap for explicit release lookup
+// and (b) a FinalizationRegistry as a GC safety net. Callers SHOULD call
+// `releasePinned(arr)` deterministically — FinalizationRegistry timing is
+// non-deterministic and pinned memory is a scarce resource (page-locked).
+const pinnedPtrs = new WeakMap<ArrayBufferLike, bigint>();
+const pinnedFinalizer = new FinalizationRegistry<bigint>(hostPtr => {
+  if (cudaLib && hostPtr !== 0n) cudaLib.symbols.cuMemFreeHost(hostPtr);
+});
+
+type AllocOptions = { pinned?: boolean };
+
+function alloc(length: number, type: "f32" | "f64", opts?: AllocOptions): FArray {
   if (!Number.isInteger(length) || length < 0) {
     throw new RangeError(`length must be a non-negative integer; got ${length}`);
   }
   if (type !== "f32" && type !== "f64") {
     throw new TypeError(`type must be "f32" or "f64"; got ${String(type)}`);
   }
+  if (opts?.pinned && length > 0 && probe()) {
+    const elemBytes = type === "f32" ? 4 : 8;
+    const bytes = length * elemBytes;
+    const s = cudaLib!.symbols;
+    const p = ffiPtr!;
+    const tab = ffiToArrayBuffer!;
+    const dPtrBuf = new BigUint64Array(1);
+    if (s.cuMemAllocHost_v2(p(dPtrBuf), BigInt(bytes)) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAllocHost failed");
+    }
+    const hostPtr = dPtrBuf[0];
+    // toArrayBuffer wants a Number-typed Pointer; convert from the bigint
+    // u64 the CUDA Driver API returned. 48-bit user-space pointers fit in
+    // a JS Number exactly — see Metal's alloc for the same conversion.
+    const ab = tab(Number(hostPtr), 0, bytes);
+    pinnedPtrs.set(ab, hostPtr);
+    pinnedFinalizer.register(ab, hostPtr, ab);
+    const view = type === "f32" ? new Float32Array(ab) : new Float64Array(ab);
+    // Memory from cuMemAllocHost isn't zero-initialized — match ArrayBuffer
+    // semantics so callers can't observe stale bytes.
+    view.fill(0);
+    return view;
+  }
   return type === "f32" ? new Float32Array(length) : new Float64Array(length);
 }
-function isAligned(_arr: FArray): boolean {
-  return false;
+
+// Free a previously pinned allocation. Returns true if `arr` was pinned,
+// false if it was a plain typed array (in which case this is a no-op). Safe
+// to call on a buffer whose finalizer already ran — we unregister so
+// double-free can't happen.
+function releasePinned(arr: FArray): boolean {
+  if (!(arr instanceof Float32Array) && !(arr instanceof Float64Array)) {
+    throw new TypeError(
+      `releasePinned requires Float32Array or Float64Array; got ${(arr as any)?.constructor?.name ?? typeof arr}`,
+    );
+  }
+  const ab = arr.buffer;
+  const hostPtr = pinnedPtrs.get(ab);
+  if (hostPtr === undefined) return false;
+  pinnedPtrs.delete(ab);
+  pinnedFinalizer.unregister(ab);
+  if (cudaLib && hostPtr !== 0n) cudaLib.symbols.cuMemFreeHost(hostPtr);
+  return true;
+}
+
+function isAligned(arr: FArray): boolean {
+  // Pinned buffers are the only "aligned" allocation we distinguish — the
+  // Metal backend uses this flag for its zero-copy path; on CUDA it tells
+  // callers whether PCIe DMA will go direct.
+  return pinnedPtrs.has(arr.buffer);
 }
 
 // Tier 4 residency: hold(arr) on an f32 array does the cuMemAlloc +
@@ -1361,6 +1430,7 @@ export default {
   isAligned,
   hold,
   releaseHandle,
+  releasePinned,
   dispose,
   getDeviceName,
 };
