@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs on the macOS agent. Mirrors the steps a dev does locally:
 # reinstall node-fallbacks deps (they vendor a package.json per module),
-# then `bun run build` to produce build/debug/bun-debug.
+# then produce build/debug/bun-debug AND build/release/bun — the release
+# binary is what Jenkins publishes as a GitHub Release asset for macOS.
 #
 # Fails fast on any error so Jenkins catches it at the right step.
 set -euo pipefail
@@ -38,9 +39,18 @@ echo "GIT_SHA=${GIT_SHA}"
 # anyway since asan interferes with Metal/CUDA signal handlers.
 bun run build:debug:noasan
 
-echo "=== Smoke-test the binary ==="
+echo "=== Smoke-test debug binary ==="
 ./build/debug/bun-debug --version
 ./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
 
+# Release build — what gets published. Separate build/release/ tree so
+# debug and release don't clobber each other across runs.
+echo "=== Building Parabun (release) ==="
+bun run build:release
+
+echo "=== Smoke-test release binary ==="
+./build/release/bun --revision
+./build/release/bun -e 'console.log("hello from release/" + process.platform + "/" + process.arch)'
+
 echo "=== Build artifacts ==="
-ls -la build/debug/bun-debug
+ls -la build/debug/bun-debug build/release/bun

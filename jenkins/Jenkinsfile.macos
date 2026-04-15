@@ -38,6 +38,8 @@ pipeline {
         booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run parabun test suite after build')
         string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
                description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
+        booleanParam(name: 'PUBLISH_RELEASE', defaultValue: false,
+                     description: 'Publish build/release/bun as a GitHub Release asset (parabun-macos-arm64-<sha>)')
     }
 
     stages {
@@ -64,7 +66,22 @@ pipeline {
 
         stage('Install agent deps') {
             steps {
-                sh 'apt-get update -qq && apt-get install -y -qq --no-install-recommends rsync openssh-client git >/dev/null'
+                // gh needed for the Publish release stage; pulled from the
+                // GitHub CLI apt repo since ubuntu:24.04's archive is too old.
+                sh '''
+                    apt-get update -qq
+                    apt-get install -y -qq --no-install-recommends rsync openssh-client git ca-certificates curl gnupg >/dev/null
+                    if [ "${PUBLISH_RELEASE}" = "true" ]; then
+                        install -m 0755 -d /etc/apt/keyrings
+                        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                            | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+                        chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+                        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                            > /etc/apt/sources.list.d/github-cli.list
+                        apt-get update -qq
+                        apt-get install -y -qq --no-install-recommends gh >/dev/null
+                    fi
+                '''
             }
         }
 
@@ -105,16 +122,56 @@ pipeline {
 
         stage('Fetch artifacts') {
             steps {
+                // Pull both debug and release binaries. Release comes over
+                // only when PUBLISH_RELEASE is on; its absence is not a failure
+                // for plain test runs.
                 sh '''
                     mkdir -p artifacts/macos-arm64
                     rsync -az -e "ssh ${SSH_OPTS}" \
                         mac-mini:${REMOTE_WS}/build/debug/bun-debug \
                         artifacts/macos-arm64/ || true
+                    if [ "${PUBLISH_RELEASE}" = "true" ]; then
+                        rsync -az -e "ssh ${SSH_OPTS}" \
+                            mac-mini:${REMOTE_WS}/build/release/bun \
+                            artifacts/macos-arm64/
+                    fi
                 '''
             }
             post {
                 success {
-                    archiveArtifacts artifacts: 'artifacts/macos-arm64/bun-debug', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'artifacts/macos-arm64/*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Publish release') {
+            when { expression { params.PUBLISH_RELEASE } }
+            steps {
+                // GITHUB_TOKEN is a Jenkins "Secret text" credential scoped to
+                // airgap/parabun with contents:write. The tag is SHA-derived so
+                // reruns of the same commit are idempotent (we skip if the tag
+                // already has the macos-arm64 asset attached).
+                withCredentials([string(credentialsId: 'parabun-gh-token', variable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        set -eu
+                        TAG="parabun-macos-arm64-${SHORT_SHA}"
+                        ASSET="artifacts/macos-arm64/bun"
+                        test -x "${ASSET}"
+
+                        # Rename the asset to something recognizable on the releases page.
+                        RENAMED="artifacts/macos-arm64/parabun-macos-arm64"
+                        cp "${ASSET}" "${RENAMED}"
+
+                        if gh release view "${TAG}" --repo airgap/parabun >/dev/null 2>&1; then
+                            gh release upload "${TAG}" "${RENAMED}" --repo airgap/parabun --clobber
+                        else
+                            gh release create "${TAG}" "${RENAMED}" \
+                                --repo airgap/parabun \
+                                --target "${FULL_SHA}" \
+                                --title "Parabun macOS arm64 @ ${SHORT_SHA}" \
+                                --notes "Built by Jenkins on ${NODE_NAME} from ${FULL_SHA}."
+                        fi
+                    '''
                 }
             }
         }

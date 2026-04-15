@@ -1,2 +1,2 @@
-export * from "./node_modules/punycode";
-export { default } from "./node_modules/punycode";
+export * from "./vendor/punycode.js";
+export { default } from "./vendor/punycode.js";
