@@ -59,11 +59,43 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # LLVM ships each tool as e.g. /usr/lib/llvm-21/bin/clang — Parabun's build
-# expects them on PATH unsuffixed.
+# expects them on PATH unsuffixed. Also wire cc/c++/ld to the clang toolchain
+# so CMake's default compiler detection picks up clang rather than gcc.
 RUN for f in /usr/lib/llvm-${LLVM_VERSION}/bin/*; do ln -sf "$f" /usr/bin; done \
     && ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang \
     && ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ \
-    && ln -sf /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld
+    && ln -sf /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld \
+    && ln -sf /usr/bin/ld.lld /usr/bin/ld \
+    && ln -sf /usr/bin/clang /usr/bin/cc \
+    && ln -sf /usr/bin/clang++ /usr/bin/c++
+
+ENV CC=clang \
+    CXX=clang++ \
+    LD=lld
+
+# Node.js — Parabun's build scripts (scripts/build.ts and codegen) run under
+# node for some sub-steps even though the orchestrator is bun.
+ARG NODE_VERSION=24.3.0
+RUN arch=$(dpkg --print-architecture) && \
+    case "$arch" in \
+        amd64) node_arch=x64 ;; \
+        arm64) node_arch=arm64 ;; \
+    esac && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+        | tar -xz -C /usr/local --strip-components=1 \
+    && node --version
+
+# Rust toolchain (nightly) — needed by vendored deps that compile from
+# source (lolhtml, etc.). Install system-wide so the non-root Jenkins
+# container user can invoke cargo.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain nightly --profile minimal --no-modify-path \
+    && chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}" \
+    && cargo --version \
+    && rustc --version
 
 # Host bun — used to run the TypeScript build orchestrator. The release
 # binary we produce is what ends up published; this one just drives the build.
