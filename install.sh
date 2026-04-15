@@ -78,6 +78,16 @@ curl --fail --location --progress-bar --output "$exe" "$parabun_uri" \
 
 chmod +x "$exe" || error 'failed to set permissions on parabun executable'
 
+# Short alias. argv[0] only branches on "bunx"/"node" (src/cli.zig), so "pb"
+# falls through to the normal Parabun CLI. Symlink on unix, copy on MinGW
+# where symlinks need developer mode.
+pb_alias=$bin_dir/pb$exe_ext
+if ln -sf "$(basename "$exe")" "$pb_alias" 2>/dev/null; then
+    :
+else
+    cp -f "$exe" "$pb_alias" && chmod +x "$pb_alias"
+fi
+
 tildify() {
     if [[ $1 = $HOME/* ]]; then
         echo "${1/$HOME\//\~/}"
@@ -87,9 +97,10 @@ tildify() {
 }
 
 success "parabun was installed successfully to $Bold_Green$(tildify "$exe")"
+info "(also aliased as ${Bold_White}pb${Color_Off}${Dim})"
 
 if command -v parabun >/dev/null; then
-    echo "Run 'parabun --help' to get started"
+    echo "Run 'parabun --help' or 'pb --help' to get started"
     exit
 fi
 
@@ -182,4 +193,4 @@ echo
 if [[ $refresh_command ]]; then
     info_bold "  $refresh_command"
 fi
-info_bold "  parabun --help"
+info_bold "  parabun --help   # or 'pb --help'"
