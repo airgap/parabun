@@ -26,6 +26,9 @@ echo "ninja: $(ninja --version)"
 echo "=== Refreshing node-fallbacks deps ==="
 (cd src/node-fallbacks && bun install --ignore-scripts)
 
+echo "=== Cleaning stale PCH + codegen (incremental workspace may have stale artifacts) ==="
+rm -rf build/debug/pch/*.pch build/release/pch/*.pch build/debug/tmp_modules build/release/tmp_modules
+
 echo "=== Building Parabun (debug, no asan) ==="
 # We rsync without .git, so scripts/build/config.ts can't compute the
 # revision — it falls back to "unknown", which depVersionsHeader.ts then

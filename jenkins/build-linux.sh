@@ -41,6 +41,9 @@ if [ "${BUILD_DEBUG:-0}" = "1" ]; then
     ./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
 fi
 
+echo "=== Cleaning stale PCH (container header mtimes may differ between runs) ==="
+rm -f build/release/pch/*.pch build/debug/pch/*.pch
+
 echo "=== Building Parabun (release) ==="
 bun run build:release
 
