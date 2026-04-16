@@ -16,10 +16,12 @@ export function activate(context: vscode.ExtensionContext) {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "parabun-ts" },
+      { scheme: "file", language: "parabun-tsx" },
       { scheme: "file", language: "parabun-js" },
+      { scheme: "file", language: "parabun-jsx" },
     ],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{pts,pjs}"),
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{pts,ptsx,pjs,pjsx}"),
     },
   };
 

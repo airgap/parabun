@@ -1,38 +1,34 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Parabun TypeScript",
-  "scopeName": "source.pts",
-  "patterns": [{ "include": "#parabun-pure" }, { "include": "#parabun-operators" }, { "include": "source.ts" }],
+  "name": "Parabun JSX",
+  "scopeName": "source.pjsx",
+  "patterns": [{ "include": "#parabun-pure" }, { "include": "#parabun-operators" }, { "include": "source.js.jsx" }],
   "repository": {
     "parabun-pure": {
       "patterns": [
         {
-          "comment": "pure async function declaration/expression",
           "match": "\\b(pure)\\s+(async)\\s+(function)\\b",
           "captures": {
             "1": { "name": "storage.modifier.pure.parabun" },
-            "2": { "name": "storage.modifier.async.ts" },
-            "3": { "name": "storage.type.function.ts" }
+            "2": { "name": "storage.modifier.async.js" },
+            "3": { "name": "storage.type.function.js" }
           }
         },
         {
-          "comment": "pure function declaration/expression",
           "match": "\\b(pure)\\s+(function)\\b",
           "captures": {
             "1": { "name": "storage.modifier.pure.parabun" },
-            "2": { "name": "storage.type.function.ts" }
+            "2": { "name": "storage.type.function.js" }
           }
         },
         {
-          "comment": "pure async arrow (before async keyword)",
           "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
             "1": { "name": "storage.modifier.pure.parabun" },
-            "2": { "name": "storage.modifier.async.ts" }
+            "2": { "name": "storage.modifier.async.js" }
           }
         },
         {
-          "comment": "pure arrow (before parens or identifier)",
           "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
             "1": { "name": "storage.modifier.pure.parabun" }
@@ -43,27 +39,18 @@
     "parabun-operators": {
       "patterns": [
         {
-          "comment": "..= await-assign operator",
           "name": "keyword.operator.await-assign.parabun",
           "match": "\\.\\.="
         },
         {
-          "comment": "..> await-yield operator",
-          "name": "keyword.operator.await-yield.parabun",
-          "match": "\\.\\.>"
-        },
-        {
-          "comment": "..! error catch operator",
           "name": "keyword.operator.catch.parabun",
           "match": "\\.\\.!"
         },
         {
-          "comment": "..& finally operator",
           "name": "keyword.operator.finally.parabun",
           "match": "\\.\\.&"
         },
         {
-          "comment": "|> pipeline operator",
           "name": "keyword.operator.pipeline.parabun",
           "match": "\\|>"
         }

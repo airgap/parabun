@@ -279,6 +279,126 @@ describe("cross-extension imports", () => {
   });
 });
 
+describe(".ptsx extension (TSX + Parabun)", () => {
+  it("runs a .ptsx file directly", async () => {
+    using dir = tempDir("ptsx-run", {
+      "main.ptsx": `
+        pure function add(a: number, b: number): number { return a + b; }
+        console.log(add(10, 11));
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.ptsx"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("21");
+    expect(exitCode).toBe(0);
+  });
+
+  it("imports a .ptsx module from .ts", async () => {
+    using dir = tempDir("ts-import-ptsx", {
+      "main.ts": `
+        import { double } from "./util.ptsx";
+        console.log(double(21));
+      `,
+      "util.ptsx": `
+        export pure function double(n: number): number { return n * 2; }
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.ts"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("42");
+    expect(exitCode).toBe(0);
+  });
+
+  it("enforces purity in .ptsx files", async () => {
+    using dir = tempDir("ptsx-purity", {
+      "main.ptsx": `
+        pure function bad(): void { console.log("side effect"); }
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.ptsx"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(exitCode).not.toBe(0);
+  });
+});
+
+describe(".pjsx extension (JSX + Parabun)", () => {
+  it("runs a .pjsx file directly", async () => {
+    using dir = tempDir("pjsx-run", {
+      "main.pjsx": `
+        pure function square(x) { return x * x; }
+        console.log(square(9));
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.pjsx"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("81");
+    expect(exitCode).toBe(0);
+  });
+
+  it("imports a .pjsx module from .js", async () => {
+    using dir = tempDir("js-import-pjsx", {
+      "main.js": `
+        import { triple } from "./util.pjsx";
+        console.log(triple(10));
+      `,
+      "util.pjsx": `
+        export pure function triple(x) { return x * 3; }
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.js"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("30");
+    expect(exitCode).toBe(0);
+  });
+
+  it("enforces purity in .pjsx files", async () => {
+    using dir = tempDir("pjsx-purity", {
+      "main.pjsx": `
+        pure function bad() { console.log("side effect"); }
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.pjsx"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(exitCode).not.toBe(0);
+  });
+});
+
 describe("transpiler API with .pts/.pjs", () => {
   it("transpiles .pts content via Bun.Transpiler", () => {
     const transpiler = new Bun.Transpiler({ loader: "ts" });

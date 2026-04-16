@@ -16,10 +16,13 @@
   "categories": [
     "Programming Languages"
   ],
+  "icon": "icon.png",
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:parabun-ts",
-    "onLanguage:parabun-js"
+    "onLanguage:parabun-tsx",
+    "onLanguage:parabun-js",
+    "onLanguage:parabun-jsx"
   ],
   "contributes": {
     "languages": [
@@ -35,6 +38,17 @@
         "configuration": "./language-configuration.json"
       },
       {
+        "id": "parabun-tsx",
+        "aliases": [
+          "Parabun TSX",
+          "ptsx"
+        ],
+        "extensions": [
+          ".ptsx"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
         "id": "parabun-js",
         "aliases": [
           "Parabun JavaScript",
@@ -42,6 +56,17 @@
         ],
         "extensions": [
           ".pjs"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "parabun-jsx",
+        "aliases": [
+          "Parabun JSX",
+          "pjsx"
+        ],
+        "extensions": [
+          ".pjsx"
         ],
         "configuration": "./language-configuration.json"
       }
@@ -53,9 +78,19 @@
         "path": "./syntaxes/parabun-ts.tmLanguage.json"
       },
       {
+        "language": "parabun-tsx",
+        "scopeName": "source.ptsx",
+        "path": "./syntaxes/parabun-tsx.tmLanguage.json"
+      },
+      {
         "language": "parabun-js",
         "scopeName": "source.pjs",
         "path": "./syntaxes/parabun-js.tmLanguage.json"
+      },
+      {
+        "language": "parabun-jsx",
+        "scopeName": "source.pjsx",
+        "path": "./syntaxes/parabun-jsx.tmLanguage.json"
       }
     ],
     "semanticTokenScopes": [
@@ -68,7 +103,23 @@
         }
       },
       {
+        "language": "parabun-tsx",
+        "scopes": {
+          "function.pure": [
+            "storage.modifier.pure.parabun"
+          ]
+        }
+      },
+      {
         "language": "parabun-js",
+        "scopes": {
+          "function.pure": [
+            "storage.modifier.pure.parabun"
+          ]
+        }
+      },
+      {
+        "language": "parabun-jsx",
         "scopes": {
           "function.pure": [
             "storage.modifier.pure.parabun"

@@ -12,9 +12,9 @@
 // JSON-RPC / LSP message framing
 // ---------------------------------------------------------------------------
 
-const HEADER_SEP = '\r\n\r\n';
+const HEADER_SEP = "\r\n\r\n";
 
-let inputBuffer = '';
+let inputBuffer = "";
 
 function send(msg: object) {
   const body = JSON.stringify(msg);
@@ -23,15 +23,15 @@ function send(msg: object) {
 }
 
 function sendResponse(id: number | string, result: unknown) {
-  send({ jsonrpc: '2.0', id, result });
+  send({ jsonrpc: "2.0", id, result });
 }
 
 function sendNotification(method: string, params: unknown) {
-  send({ jsonrpc: '2.0', method, params });
+  send({ jsonrpc: "2.0", method, params });
 }
 
 function publishDiagnostics(uri: string, diagnostics: Diagnostic[]) {
-  sendNotification('textDocument/publishDiagnostics', { uri, diagnostics });
+  sendNotification("textDocument/publishDiagnostics", { uri, diagnostics });
 }
 
 // ---------------------------------------------------------------------------
@@ -68,12 +68,15 @@ interface BuildMessagePosition {
 // ---------------------------------------------------------------------------
 
 const transpilers = {
-  ts: new Bun.Transpiler({ loader: 'ts' }),
-  js: new Bun.Transpiler({ loader: 'jsx' }),
+  ts: new Bun.Transpiler({ loader: "ts" }),
+  tsx: new Bun.Transpiler({ loader: "tsx" }),
+  js: new Bun.Transpiler({ loader: "jsx" }),
 };
 
-function loaderForUri(uri: string): 'ts' | 'js' {
-  return uri.endsWith('.pts') ? 'ts' : 'js';
+function loaderForUri(uri: string): "ts" | "tsx" | "js" {
+  if (uri.endsWith(".pts")) return "ts";
+  if (uri.endsWith(".ptsx")) return "tsx";
+  return "js";
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +99,7 @@ function validate(uri: string, content: string) {
   } catch (e: any) {
     const pos: BuildMessagePosition | undefined = e?.position;
     const message: string = e?.message ?? String(e);
-    const level: string = e?.level ?? 'error';
+    const level: string = e?.level ?? "error";
 
     // LSP lines/columns are 0-based; Bun's are 1-based
     const line = pos ? pos.line - 1 : 0;
@@ -108,8 +111,8 @@ function validate(uri: string, content: string) {
         start: { line, character: col },
         end: { line, character: col + len },
       },
-      severity: level === 'warning' ? 2 : 1,
-      source: 'parabun',
+      severity: level === "warning" ? 2 : 1,
+      source: "parabun",
       message,
     });
   }
@@ -123,48 +126,48 @@ function validate(uri: string, content: string) {
 
 const parabunCompletions = [
   {
-    label: 'pure',
+    label: "pure",
     kind: 14, // Keyword
-    detail: 'Parabun: pure function modifier',
-    insertText: 'pure ',
+    detail: "Parabun: pure function modifier",
+    insertText: "pure ",
   },
   {
-    label: 'pure function',
+    label: "pure function",
     kind: 15, // Snippet
-    detail: 'Parabun: pure function declaration',
-    insertText: 'pure function ${1:name}(${2:params}) {\n\t${0}\n}',
+    detail: "Parabun: pure function declaration",
+    insertText: "pure function ${1:name}(${2:params}) {\n\t${0}\n}",
     insertTextFormat: 2, // Snippet
   },
   {
-    label: 'pure async function',
+    label: "pure async function",
     kind: 15,
-    detail: 'Parabun: pure async function declaration',
-    insertText: 'pure async function ${1:name}(${2:params}) {\n\t${0}\n}',
+    detail: "Parabun: pure async function declaration",
+    insertText: "pure async function ${1:name}(${2:params}) {\n\t${0}\n}",
     insertTextFormat: 2,
   },
   {
-    label: '..=',
+    label: "..=",
     kind: 24, // Operator
-    detail: 'Parabun: await-assign (desugars to await)',
-    insertText: '..= ',
+    detail: "Parabun: await-assign (desugars to await)",
+    insertText: "..= ",
   },
   {
-    label: '..!',
+    label: "..!",
     kind: 24,
-    detail: 'Parabun: catch operator (desugars to .catch())',
-    insertText: '..! ',
+    detail: "Parabun: catch operator (desugars to .catch())",
+    insertText: "..! ",
   },
   {
-    label: '..&',
+    label: "..&",
     kind: 24,
-    detail: 'Parabun: finally operator (desugars to .finally())',
-    insertText: '..& ',
+    detail: "Parabun: finally operator (desugars to .finally())",
+    insertText: "..& ",
   },
   {
-    label: '|>',
+    label: "|>",
     kind: 24,
-    detail: 'Parabun: pipeline operator (desugars to f(x))',
-    insertText: '|> ',
+    detail: "Parabun: pipeline operator (desugars to f(x))",
+    insertText: "|> ",
   },
 ];
 
@@ -172,63 +175,55 @@ const parabunCompletions = [
 // Hover — Parabun-specific hover info
 // ---------------------------------------------------------------------------
 
-function getHoverInfo(
-  content: string,
-  line: number,
-  character: number,
-): { contents: string } | null {
-  const lines = content.split('\n');
+function getHoverInfo(content: string, line: number, character: number): { contents: string } | null {
+  const lines = content.split("\n");
   if (line >= lines.length) return null;
   const lineText = lines[line];
 
   // Check if cursor is on a Parabun keyword/operator
   const wordAt = getWordAt(lineText, character);
 
-  if (wordAt === 'pure') {
+  if (wordAt === "pure") {
     return {
       contents: [
-        '```parabun',
-        'pure function modifier',
-        '```',
-        '---',
-        'Marks a function as **pure** — it cannot access `this` or cause side effects.',
-        '',
-        'Desugars to a standard function at transpile time.',
-        '',
-        '```typescript',
-        'pure function add(a: number, b: number): number {',
-        '  return a + b;',
-        '}',
-        '```',
-      ].join('\n'),
+        "```parabun",
+        "pure function modifier",
+        "```",
+        "---",
+        "Marks a function as **pure** — it cannot access `this` or cause side effects.",
+        "",
+        "Desugars to a standard function at transpile time.",
+        "",
+        "```typescript",
+        "pure function add(a: number, b: number): number {",
+        "  return a + b;",
+        "}",
+        "```",
+      ].join("\n"),
     };
   }
 
   // Check for operators at the cursor position
   const around = lineText.slice(Math.max(0, character - 2), character + 2);
 
-  if (around.includes('..=')) {
+  if (around.includes("..=")) {
     return {
-      contents:
-        '**`..=` await-assign** — Desugars `x ..= expr` to `const x = await expr`',
+      contents: "**`..=` await-assign** — Desugars `x ..= expr` to `const x = await expr`",
     };
   }
-  if (around.includes('..!')) {
+  if (around.includes("..!")) {
     return {
-      contents:
-        '**`..!` catch operator** — Desugars `expr ..! handler` to `expr.catch(handler)`',
+      contents: "**`..!` catch operator** — Desugars `expr ..! handler` to `expr.catch(handler)`",
     };
   }
-  if (around.includes('..&')) {
+  if (around.includes("..&")) {
     return {
-      contents:
-        '**`..&` finally operator** — Desugars `expr ..& cleanup` to `expr.finally(cleanup)`',
+      contents: "**`..&` finally operator** — Desugars `expr ..& cleanup` to `expr.finally(cleanup)`",
     };
   }
-  if (around.includes('|>')) {
+  if (around.includes("|>")) {
     return {
-      contents:
-        '**`|>` pipeline operator** — Desugars `x |> f` to `f(x)`',
+      contents: "**`|>` pipeline operator** — Desugars `x |> f` to `f(x)`",
     };
   }
 
@@ -249,12 +244,12 @@ function getWordAt(line: string, col: number): string {
 
 // Token types: 0=function
 // Token modifiers: bit 0 = declaration, bit 1 = pure
-const SEMANTIC_TOKEN_TYPES = ['function'];
-const SEMANTIC_TOKEN_MODIFIERS = ['declaration', 'pure'];
+const SEMANTIC_TOKEN_TYPES = ["function"];
+const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "pure"];
 
 function computeSemanticTokens(content: string): number[] {
   const data: number[] = [];
-  const lines = content.split('\n');
+  const lines = content.split("\n");
   let prevLine = 0;
   let prevChar = 0;
 
@@ -288,7 +283,7 @@ function handleMessage(msg: any) {
   const { id, method, params } = msg;
 
   switch (method) {
-    case 'initialize':
+    case "initialize":
       sendResponse(id, {
         capabilities: {
           textDocumentSync: {
@@ -296,7 +291,7 @@ function handleMessage(msg: any) {
             change: 1, // Full sync
           },
           completionProvider: {
-            triggerCharacters: ['.', '|'],
+            triggerCharacters: [".", "|"],
           },
           hoverProvider: true,
           semanticTokensProvider: {
@@ -308,32 +303,32 @@ function handleMessage(msg: any) {
           },
         },
         serverInfo: {
-          name: 'parabun-lsp',
-          version: '0.1.0',
+          name: "parabun-lsp",
+          version: "0.1.0",
         },
       });
       break;
 
-    case 'initialized':
+    case "initialized":
       // Client acknowledged — nothing to do
       break;
 
-    case 'shutdown':
+    case "shutdown":
       sendResponse(id, null);
       break;
 
-    case 'exit':
+    case "exit":
       process.exit(0);
       break;
 
-    case 'textDocument/didOpen': {
+    case "textDocument/didOpen": {
       const { uri, text } = params.textDocument;
       documents.set(uri, text);
       validate(uri, text);
       break;
     }
 
-    case 'textDocument/didChange': {
+    case "textDocument/didChange": {
       const uri = params.textDocument.uri;
       const content = params.contentChanges[0]?.text;
       if (content !== undefined) {
@@ -343,14 +338,14 @@ function handleMessage(msg: any) {
       break;
     }
 
-    case 'textDocument/didClose': {
+    case "textDocument/didClose": {
       const uri = params.textDocument.uri;
       documents.delete(uri);
       publishDiagnostics(uri, []);
       break;
     }
 
-    case 'textDocument/completion': {
+    case "textDocument/completion": {
       sendResponse(id, {
         isIncomplete: false,
         items: parabunCompletions,
@@ -358,23 +353,19 @@ function handleMessage(msg: any) {
       break;
     }
 
-    case 'textDocument/hover': {
+    case "textDocument/hover": {
       const uri = params.textDocument.uri;
       const content = documents.get(uri);
       if (content) {
-        const hover = getHoverInfo(
-          content,
-          params.position.line,
-          params.position.character,
-        );
-        sendResponse(id, hover ? { contents: { kind: 'markdown', value: hover.contents } } : null);
+        const hover = getHoverInfo(content, params.position.line, params.position.character);
+        sendResponse(id, hover ? { contents: { kind: "markdown", value: hover.contents } } : null);
       } else {
         sendResponse(id, null);
       }
       break;
     }
 
-    case 'textDocument/semanticTokens/full': {
+    case "textDocument/semanticTokens/full": {
       const uri = params.textDocument.uri;
       const content = documents.get(uri);
       if (content) {
@@ -398,8 +389,8 @@ function handleMessage(msg: any) {
 // stdin reader — Content-Length framed messages
 // ---------------------------------------------------------------------------
 
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk: string) => {
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
   inputBuffer += chunk;
 
   while (true) {
