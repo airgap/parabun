@@ -346,6 +346,18 @@ pub fn ParseFn(
                 return func;
             }
             var tempOpts = opts;
+            // Parabun: collect parameter names for the purity validator so
+            // `pure function foo(x) { x = 1; }` and `x.y = 1` / `x++` etc.
+            // are rejected. Inherits outer enclosing-pure params so inner
+            // pure arrows catch closure-mutations of the outer's params.
+            if (opts.is_pure) {
+                tempOpts.pure_param_names = js_parser.collectPureParamNames(
+                    p.allocator,
+                    p.fn_or_arrow_data_parse.pure_param_names,
+                    p,
+                    func.args,
+                );
+            }
             func.body = try p.parseFnBody(&tempOpts);
 
             return func;
@@ -450,6 +462,17 @@ pub fn ParseFn(
             data.is_this_disallowed = p.fn_or_arrow_data_parse.is_this_disallowed;
             // Parabun: purity is inherited by arrow functions (they capture outer "this")
             if (p.fn_or_arrow_data_parse.is_pure) data.is_pure = true;
+            // Parabun: extend pure-param tracking with this arrow's own params so mutation
+            // of `x => x = 1` is flagged, and inherit outer params so `() => outer_x = 1`
+            // is flagged via closure.
+            if (data.is_pure) {
+                data.pure_param_names = js_parser.collectPureParamNames(
+                    p.allocator,
+                    p.fn_or_arrow_data_parse.pure_param_names,
+                    p,
+                    args,
+                );
+            }
 
             if (p.lexer.token == .t_open_brace) {
                 const body = try p.parseFnBody(data);

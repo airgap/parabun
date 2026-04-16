@@ -1030,7 +1030,22 @@ pub fn ParseSuffix(
                 };
 
                 switch (try continuation) {
-                    .next => {},
+                    .next => {
+                        // Parabun: reject parameter mutation inside pure functions.
+                        // Each assign/update handler builds an E.Binary(bin_*_assign) or
+                        // E.Unary(un_post_inc/dec) wrapping `left`; check the new shape.
+                        if (p.fn_or_arrow_data_parse.is_pure and p.fn_or_arrow_data_parse.pure_param_names.len != 0) {
+                            switch (left.data) {
+                                .e_binary => |bin| if (js_ast.Op.Code.binaryAssignTarget(bin.op) != .none) {
+                                    js_parser.checkPureParamMutation(p, bin.left, left.loc);
+                                },
+                                .e_unary => |un| if (js_ast.Op.Code.unaryAssignTarget(un.op) != .none) {
+                                    js_parser.checkPureParamMutation(p, un.value, left.loc);
+                                },
+                                else => {},
+                            }
+                        }
+                    },
                     .done => break,
                 }
             }

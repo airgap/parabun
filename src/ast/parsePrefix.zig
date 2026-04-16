@@ -375,12 +375,18 @@ pub fn ParsePrefix(
         fn t_minus_minus(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();
             try p.lexer.next();
-            return p.newExpr(E.Unary{ .op = .un_pre_dec, .value = try p.parseExpr(.prefix) }, loc);
+            const value = try p.parseExpr(.prefix);
+            // Parabun: reject `--x` where x is a pure function's parameter.
+            js_parser.checkPureParamMutation(p, value, loc);
+            return p.newExpr(E.Unary{ .op = .un_pre_dec, .value = value }, loc);
         }
         fn t_plus_plus(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();
             try p.lexer.next();
-            return p.newExpr(E.Unary{ .op = .un_pre_inc, .value = try p.parseExpr(.prefix) }, loc);
+            const value = try p.parseExpr(.prefix);
+            // Parabun: reject `++x` where x is a pure function's parameter.
+            js_parser.checkPureParamMutation(p, value, loc);
+            return p.newExpr(E.Unary{ .op = .un_pre_inc, .value = value }, loc);
         }
         fn t_function(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();

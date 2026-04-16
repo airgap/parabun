@@ -387,6 +387,71 @@ pub fn isImpureMemberAccess(target: string, name: string) bool {
     return false;
 }
 
+// Parabun: flag mutation of a pure function's parameter (or a property/index
+// reached through one). Called at assignment and ++/-- construction sites.
+// Walks `.e_dot` / `.e_index` targets to find the root identifier, so
+// `x.y.z = 1` and `x[0] = 1` both resolve to param `x` and are rejected.
+// Only matches against the enclosing pure function's own params; inner
+// non-pure functions are treated as an escape hatch (consistent with how
+// `this` / `arguments` / impure globals behave in nested non-pure bodies).
+pub fn checkPureParamMutation(p: anytype, target: Expr, loc: logger.Loc) void {
+    if (!p.fn_or_arrow_data_parse.is_pure) return;
+    const param_names = p.fn_or_arrow_data_parse.pure_param_names;
+    if (param_names.len == 0) return;
+
+    var cur = target;
+    var depth: u32 = 0;
+    while (depth < 64) : (depth += 1) {
+        switch (cur.data) {
+            .e_identifier => |ident| {
+                const name = p.loadNameFromRef(ident.ref);
+                for (param_names) |pname| {
+                    if (bun.strings.eql(name, pname)) {
+                        p.log.addRangeErrorFmt(
+                            p.source,
+                            logger.Range{ .loc = loc, .len = 0 },
+                            p.allocator,
+                            "Cannot mutate parameter \"{s}\" inside a pure function",
+                            .{name},
+                        ) catch unreachable;
+                        return;
+                    }
+                }
+                return;
+            },
+            .e_dot => |dot| cur = dot.target,
+            .e_index => |idx| cur = idx.target,
+            else => return,
+        }
+    }
+}
+
+// Parabun: extract simple identifier parameter names from a function's args.
+// Destructured params (`pure function f({a, b})`) are skipped — they'll be
+// handled in a later phase.
+pub fn collectPureParamNames(
+    allocator: std.mem.Allocator,
+    inherited: []const string,
+    p: anytype,
+    args: []const G.Arg,
+) []const string {
+    var count: usize = inherited.len;
+    for (args) |a| {
+        if (a.binding.data == .b_identifier) count += 1;
+    }
+    if (count == 0) return &.{};
+    const names = allocator.alloc(string, count) catch unreachable;
+    @memcpy(names[0..inherited.len], inherited);
+    var idx: usize = inherited.len;
+    for (args) |a| {
+        if (a.binding.data == .b_identifier) {
+            names[idx] = p.loadNameFromRef(a.binding.data.b_identifier.ref);
+            idx += 1;
+        }
+    }
+    return names;
+}
+
 pub const IdentifierOpts = packed struct(u8) {
     assign_target: js_ast.AssignTarget = js_ast.AssignTarget.none,
     is_delete_target: bool = false,
@@ -667,6 +732,10 @@ pub const FnOrArrowDataParse = struct {
 
     has_async_range: bool = false,
     is_pure: bool = false, // Parabun: pure function annotation
+    // Parabun: names of parameters bound by enclosing pure function/arrow bodies.
+    // Includes inherited outer-pure params so inner pure arrows catch closure-mutations.
+    // Populated only when is_pure is true; checked at assignment/update construction sites.
+    pure_param_names: []const string = &.{},
     arrow_arg_errors: DeferredArrowArgErrors = DeferredArrowArgErrors{},
     track_arrow_arg_errors: bool = false,
 

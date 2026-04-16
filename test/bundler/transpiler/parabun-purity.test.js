@@ -244,4 +244,160 @@ describe("Parabun Purity Validator", () => {
       expect(out).toContain("Date.now");
     });
   });
+
+  describe("parameter mutation rejected in pure functions", () => {
+    it("rejects parameter reassignment with =", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x = 5; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects parameter compound assignment (+=)", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x += 1; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects parameter compound assignment (-=, *=, /=, %=, **=)", () => {
+      const ops = ["-=", "*=", "/=", "%=", "**="];
+      for (const op of ops) {
+        expect(() => transpiler.transformSync(`pure function foo(x) { x ${op} 2; return x; }`)).toThrow(
+          /Cannot mutate parameter "x"/,
+        );
+      }
+    });
+
+    it("rejects parameter bitwise compound assigns (|=, &=, ^=, <<=, >>=, >>>=)", () => {
+      const ops = ["|=", "&=", "^=", "<<=", ">>=", ">>>="];
+      for (const op of ops) {
+        expect(() => transpiler.transformSync(`pure function foo(x) { x ${op} 1; return x; }`)).toThrow(
+          /Cannot mutate parameter "x"/,
+        );
+      }
+    });
+
+    it("rejects parameter logical compound assigns (||=, &&=, ??=)", () => {
+      const ops = ["||=", "&&=", "??="];
+      for (const op of ops) {
+        expect(() => transpiler.transformSync(`pure function foo(x) { x ${op} 1; return x; }`)).toThrow(
+          /Cannot mutate parameter "x"/,
+        );
+      }
+    });
+
+    it("rejects postfix ++ on parameter", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x++; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects postfix -- on parameter", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x--; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects prefix ++ on parameter", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { ++x; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects prefix -- on parameter", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { --x; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects property write on parameter (x.y = 1)", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x.y = 1; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects nested property write on parameter (x.y.z = 1)", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x.y.z = 1; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects index write on parameter (x[0] = 1)", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x[0] = 1; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects property compound assign on parameter (x.y += 1)", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x.y += 1; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects postfix ++ on parameter property", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { x.y++; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects multi-parameter mutation (second param)", () => {
+      expect(() => transpiler.transformSync("pure function foo(a, b) { b = 5; return a; }")).toThrow(
+        /Cannot mutate parameter "b"/,
+      );
+    });
+
+    it("rejects parameter mutation in pure arrow", () => {
+      expect(() => transpiler.transformSync("const f = pure (x) => { x = 5; return x; };")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects parameter mutation in pure async function", () => {
+      expect(() => transpiler.transformSync("pure async function foo(x) { x.y = 1; return x; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("rejects outer-param mutation via inherited-pure arrow", () => {
+      expect(() => transpiler.transformSync("pure function foo(x) { const f = () => { x = 1; }; return f; }")).toThrow(
+        /Cannot mutate parameter "x"/,
+      );
+    });
+
+    it("allows pure function that reads parameter", () => {
+      const out = transpiler.transformSync("pure function foo(x) { return x + 1; }");
+      expect(out).toContain("x + 1");
+    });
+
+    it("allows pure function that uses parameter as function arg", () => {
+      const out = transpiler.transformSync("pure function foo(x) { return Math.abs(x); }");
+      expect(out).toContain("Math.abs(x)");
+    });
+
+    it("allows parameter mutation in non-pure function", () => {
+      const out = transpiler.transformSync("function foo(x) { x = 5; return x; }");
+      expect(out).toContain("x = 5");
+    });
+
+    it("allows parameter mutation in nested non-pure function inside pure", () => {
+      const out = transpiler.transformSync(
+        "pure function foo() { function inner(x) { x = 5; return x; } return inner; }",
+      );
+      expect(out).toContain("x = 5");
+    });
+
+    it("allows local variable mutation in pure function", () => {
+      const out = transpiler.transformSync("pure function foo(x) { let y = x; y = x + 1; return y; }");
+      expect(out).toContain("y = x + 1");
+    });
+
+    it("allows local counter increment in pure function", () => {
+      const out = transpiler.transformSync("pure function foo(x) { let i = 0; i++; return i + x; }");
+      expect(out).toContain("i++");
+    });
+
+    it("allows assigning to local that shadows outer name", () => {
+      const out = transpiler.transformSync("pure function foo(x) { { let y = x; y = y + 1; return y; } }");
+      expect(out).toContain("y = y + 1");
+    });
+  });
 });
