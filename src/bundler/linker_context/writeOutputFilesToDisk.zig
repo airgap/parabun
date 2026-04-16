@@ -241,15 +241,22 @@ pub fn writeOutputFilesToDisk(
                         @memcpy(fdpath[0..chunk.final_rel_path.len], chunk.final_rel_path);
                         fdpath[chunk.final_rel_path.len..][0..bun.bytecode_extension.len].* = bun.bytecode_extension.*;
                         defer cached_bytecode.deref();
+
+                        const versioned_len = bytecode.len + bun.parabun_bytecode_header.len;
+                        const versioned_buf = bun.default_allocator.alloc(u8, versioned_len) catch unreachable;
+                        defer bun.default_allocator.free(versioned_buf);
+                        @memcpy(versioned_buf[0..bytecode.len], bytecode);
+                        @memcpy(versioned_buf[bytecode.len..], &bun.parabun_bytecode_header);
+
                         switch (jsc.Node.fs.NodeFS.writeFileWithPathBuffer(
                             &pathbuf,
                             .{
                                 .data = .{
                                     .buffer = .{
                                         .buffer = .{
-                                            .ptr = @constCast(bytecode.ptr),
-                                            .len = @as(u32, @truncate(bytecode.len)),
-                                            .byte_len = @as(u32, @truncate(bytecode.len)),
+                                            .ptr = versioned_buf.ptr,
+                                            .len = @as(u32, @truncate(versioned_len)),
+                                            .byte_len = @as(u32, @truncate(versioned_len)),
                                         },
                                     },
                                 },

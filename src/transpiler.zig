@@ -1186,11 +1186,16 @@ pub const Transpiler = struct {
                                     var path_buf2: bun.PathBuffer = undefined;
                                     @memcpy(path_buf2[0..path.text.len], path.text);
                                     path_buf2[path.text.len..][0..bun.bytecode_extension.len].* = bun.bytecode_extension.*;
-                                    const bytecode = bun.sys.File.toSourceAt(dirname_fd.unwrapValid() orelse bun.FD.cwd(), path_buf2[0 .. path.text.len + bun.bytecode_extension.len], bun.default_allocator, .{}).asValue() orelse break :brk default_value;
-                                    if (bytecode.contents.len == 0) {
+                                    const raw = bun.sys.File.toSourceAt(dirname_fd.unwrapValid() orelse bun.FD.cwd(), path_buf2[0 .. path.text.len + bun.bytecode_extension.len], bun.default_allocator, .{}).asValue() orelse break :brk default_value;
+                                    if (raw.contents.len <= bun.parabun_bytecode_header.len) {
                                         break :brk default_value;
                                     }
-                                    break :brk if (already_bundled == .bytecode_cjs) .{ .bytecode_cjs = @constCast(bytecode.contents) } else .{ .bytecode = @constCast(bytecode.contents) };
+                                    const trailer_start = raw.contents.len - bun.parabun_bytecode_header.len;
+                                    if (!std.mem.eql(u8, raw.contents[trailer_start..], &bun.parabun_bytecode_header)) {
+                                        break :brk default_value;
+                                    }
+                                    const bytecode_payload = raw.contents[0..trailer_start];
+                                    break :brk if (already_bundled == .bytecode_cjs) .{ .bytecode_cjs = @constCast(bytecode_payload) } else .{ .bytecode = @constCast(bytecode_payload) };
                                 }
                                 break :brk default_value;
                             },
