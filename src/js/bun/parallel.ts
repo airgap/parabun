@@ -49,17 +49,27 @@ self.onmessage = async ({ data }) => {
   }
   try {
     if (data.op === "reduce") {
+      var mapFn = null;
+      if (data.mapFnSrc) {
+        mapFn = __cache.get(data.mapFnSrc);
+        if (!mapFn) {
+          mapFn = (0, eval)("(" + data.mapFnSrc + ")");
+          __cache.set(data.mapFnSrc, mapFn);
+        }
+      }
       var acc = data.init;
       if (data.reduceSab !== undefined) {
         var Ctor = __ctors[data.elemType];
         var input = new Ctor(data.reduceSab, data.byteStart, data.count);
         for (var i = 0; i < data.count; i++) {
-          acc = fn(acc, input[i], data.baseIndex + i);
+          var v = mapFn ? mapFn(input[i], data.baseIndex + i) : input[i];
+          acc = fn(acc, v, data.baseIndex + i);
         }
       } else {
         var items = data.items, baseIndex = data.baseIndex;
         for (var i = 0; i < items.length; i++) {
-          acc = await fn(acc, items[i], baseIndex + i);
+          var v = mapFn ? mapFn(items[i], baseIndex + i) : items[i];
+          acc = await fn(acc, v, baseIndex + i);
         }
       }
       self.postMessage({ id, ok: true, acc });
@@ -479,19 +489,25 @@ type ReduceFn<T, A> = (accumulator: A, value: T, index: number) => A | Promise<A
 
 const REDUCE_SERIAL_THRESHOLD = 512;
 
+interface PreduceOptions extends PMapOptions {
+  mapFn?: (x: any, i: number) => any;
+}
+
 async function preduce<T, A>(
   fn: ReduceFn<T, A>,
   array: readonly T[],
   initialValue: A,
-  options?: PMapOptions,
+  options?: PreduceOptions,
 ): Promise<A> {
   if (!$isCallable(fn)) {
     throw new TypeError("preduce: first argument must be a function");
   }
 
+  const mapFn = options?.mapFn;
+
   const elemType = getElemType(array);
   if (elemType !== null) {
-    return preduceTyped(fn as any, array as any, elemType, initialValue as any, options) as any;
+    return preduceTyped(fn as any, array as any, elemType, initialValue as any, options, mapFn) as any;
   }
 
   if (!$isJSArray(array)) {
@@ -502,22 +518,30 @@ async function preduce<T, A>(
   if (len === 0) return initialValue;
 
   const fnSrc = fn.toString();
+  const mapFnSrc = mapFn ? mapFn.toString() : undefined;
   const requested = options?.concurrency;
 
   if (len < REDUCE_SERIAL_THRESHOLD || (typeof requested === "number" && requested === 1)) {
-    return reduceInline(fn, array, initialValue, 0);
+    return reduceInline(fn, array, initialValue, 0, mapFn);
   }
 
   const concurrency =
     typeof requested === "number" && requested > 1 ? Math.min(len, requested) : Math.min(len, defaultConcurrency());
 
-  return dispatchReduceWorkers(fn, fnSrc, array, initialValue, concurrency);
+  return dispatchReduceWorkers(fn, fnSrc, array, initialValue, concurrency, mapFnSrc);
 }
 
-async function reduceInline<T, A>(fn: ReduceFn<T, A>, array: readonly T[], init: A, start: number): Promise<A> {
+async function reduceInline<T, A>(
+  fn: ReduceFn<T, A>,
+  array: readonly T[],
+  init: A,
+  start: number,
+  mapFn?: (x: any, i: number) => any,
+): Promise<A> {
   let acc = init;
   for (let i = start; i < array.length; i++) {
-    const r = fn(acc, array[i], i) as A | Promise<A>;
+    const elem = mapFn ? mapFn(array[i], i) : array[i];
+    const r = fn(acc, elem, i) as A | Promise<A>;
     if (r !== null && typeof r === "object" && typeof (r as any).then === "function") {
       acc = await (r as Promise<A>);
     } else {
@@ -533,6 +557,7 @@ async function dispatchReduceWorkers<T, A>(
   array: readonly T[],
   initialValue: A,
   concurrency: number,
+  mapFnSrc?: string,
 ): Promise<A> {
   const len = array.length;
   const workers = ensurePool(concurrency);
@@ -551,7 +576,15 @@ async function dispatchReduceWorkers<T, A>(
       new Promise((resolve, reject) => {
         entry.resolve = (data: any) => resolve({ id: w, acc: data.acc });
         entry.reject = reject;
-        entry.w.postMessage({ id: w, fnSrc, op: "reduce", items, baseIndex: chunkStart, init: initialValue });
+        entry.w.postMessage({
+          id: w,
+          fnSrc,
+          op: "reduce",
+          items,
+          baseIndex: chunkStart,
+          init: initialValue,
+          mapFnSrc,
+        });
       }),
     );
   }
@@ -575,31 +608,35 @@ async function preduceTyped(
   elemType: ElemType,
   initialValue: number,
   options?: PMapOptions,
+  mapFn?: (x: any, i: number) => any,
 ): Promise<number> {
   const len = array.length;
   if (len === 0) return initialValue;
 
   const fnSrc = fn.toString();
+  const mapFnSrc = mapFn ? mapFn.toString() : undefined;
   const requested = options?.concurrency;
 
   if (len < REDUCE_SERIAL_THRESHOLD || (typeof requested === "number" && requested === 1)) {
-    return reduceTypedInline(fn, array, initialValue);
+    return reduceTypedInline(fn, array, initialValue, mapFn);
   }
 
   const concurrency =
     typeof requested === "number" && requested > 1 ? Math.min(len, requested) : Math.min(len, defaultConcurrency());
 
-  return dispatchReduceTypedWorkers(fnSrc, array, elemType, initialValue, concurrency);
+  return dispatchReduceTypedWorkers(fnSrc, array, elemType, initialValue, concurrency, mapFnSrc);
 }
 
 function reduceTypedInline(
   fn: (acc: number, value: number, index: number) => number,
   array: any,
   init: number,
+  mapFn?: (x: any, i: number) => any,
 ): number {
   let acc = init;
   for (let i = 0; i < array.length; i++) {
-    acc = fn(acc, array[i], i);
+    const v = mapFn ? mapFn(array[i], i) : array[i];
+    acc = fn(acc, v, i);
   }
   return acc;
 }
@@ -610,6 +647,7 @@ async function dispatchReduceTypedWorkers(
   elemType: ElemType,
   initialValue: number,
   concurrency: number,
+  mapFnSrc?: string,
 ): Promise<number> {
   const len = array.length;
   const bytesPerElem = array.BYTES_PER_ELEMENT as number;
@@ -647,6 +685,7 @@ async function dispatchReduceTypedWorkers(
           count,
           baseIndex: chunkStart,
           init: initialValue,
+          mapFnSrc,
         });
       }),
     );

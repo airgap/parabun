@@ -79,13 +79,15 @@ function probeAffine(fn: (x: number, i: number) => number): { k1: number; k0: nu
   if (fn.length > 1) return null;
   try {
     const g = fn as (x: number) => number;
+    const yn1 = g(-1);
     const y0 = g(0);
     const y1 = g(1);
     const y2 = g(2);
-    if (!Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+    if (!Number.isFinite(yn1) || !Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
     const k1 = y1 - y0;
     const k0 = y0;
     if (Math.abs(y2 - (2 * k1 + k0)) > AFFINE_TOL * (1 + Math.abs(y2))) return null;
+    if (Math.abs(yn1 - (-k1 + k0)) > AFFINE_TOL * (1 + Math.abs(yn1))) return null;
     return { k1, k0 };
   } catch {
     return null;
@@ -155,6 +157,23 @@ function sumChain(chain: FusedChain): number {
     return aff.K * simd.sum(source) + aff.C * source.length;
   }
   return simd.sum(realizeChain(chain));
+}
+
+function reduceChain(chain: FusedChain, reduceFn: (acc: any, x: any) => any, init: any): any {
+  const { source, ops } = chain;
+  if (ops.length === 0) {
+    let acc = init;
+    for (let i = 0; i < source.length; i++) acc = reduceFn(acc, source[i]);
+    return acc;
+  }
+  const composed = (x: number, i: number) => {
+    let v = x;
+    for (const op of ops) v = op.fn(v, i);
+    return v;
+  };
+  let acc = init;
+  for (let i = 0; i < source.length; i++) acc = reduceFn(acc, composed(source[i], i));
+  return acc;
 }
 
 function map<T, U>(fn: (x: T, i: number) => U | Promise<U>): Transform<T, U> {
@@ -296,6 +315,9 @@ async function collect<T>(source: Source<T> | FArray | FusedChain): Promise<T[]>
 
 function reduce<T, A>(fn: (acc: A, x: T, i: number) => A | Promise<A>, init: A) {
   const terminal: any = async function (source: Source<T>): Promise<A> {
+    if (isFusedChain(source)) {
+      return reduceChain(source, fn as any, init);
+    }
     let acc = init;
     let i = 0;
     for await (const x of source) {
@@ -480,9 +502,15 @@ async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => a
 
   const segments = classifyStages(stages);
 
-  for (const seg of segments) {
+  for (let si = 0; si < segments.length; si++) {
+    const seg = segments[si];
     switch (seg.kind) {
       case "maps": {
+        const next = segments[si + 1];
+        if (next && next.kind === "reduce") {
+          const composed = composeFnSources(seg.fns);
+          return parallel.preduce(next.fn, data, next.init, { mapFn: composed });
+        }
         const composed = composeFnSources(seg.fns);
         data = await parallel.pmap(composed, data);
         break;

@@ -165,7 +165,7 @@ Transformations: `map`, `filter`, `take`, `drop`, `takeWhile`, `dropWhile`,
 `FusedChain` descriptor instead of wrapping the previous layer in another
 async generator. Fusion-aware terminals (`collect`, `sum`,
 `toFloat32Array`, `toFloat64Array`) walk the chain and:
-- probe each map fn for affine shape (`x*k+c`) via three-point evaluation,
+- probe each map fn for affine shape (`x*k+c`) via four-point evaluation,
 - if all affine, collapse the chain to a single `(K, C)` and dispatch to
   `bun:simd` (`mulScalar`/`addScalar`) — one pass over the array,
 - on any non-affine fn, fall back to `simdMap(composed_fn, source)` — one
@@ -173,16 +173,24 @@ async generator. Fusion-aware terminals (`collect`, `sum`,
 
 For reductions, `sum` over an all-affine chain becomes
 `K * simd.sum(source) + C * n` — a single SIMD pass + two scalar ops,
-regardless of chain length. Non-fusion-aware combinators (`filter`,
+regardless of chain length. The `reduce` combinator detects FusedChain
+sources and calls `reduceChain`, which applies the fused map operations
+inline inside the reduce accumulator loop — zero intermediate arrays
+for `pipe(Float32Array, map(f), map(g), reduce(h, init))` patterns.
+
+Non-fusion-aware combinators (`filter`,
 `take`, etc.) still accept a `FusedChain` via its `Symbol.asyncIterator`,
 which realizes the chain on demand and proceeds on the existing
 async-generator path.
 
 **Parallel pipeline (`pipeParallel`):** dispatches pipeline stages via
 `bun:parallel` for data parallelism. Consecutive `map` stages are composed
-into a single function and dispatched via `pmap`. A terminal `reduce` uses
-`preduce`. Non-parallelizable stages (`filter`, `take`, etc.) act as
-barriers — data is collected, the barrier runs serially, then the next
+into a single function and dispatched via `pmap`. When consecutive maps are
+immediately followed by a `reduce`, the maps are fused into the reduce via
+`preduce`'s `mapFn` option — maps execute inside each worker's reduce loop
+with no intermediate array allocation. A standalone terminal `reduce` uses
+`preduce` directly. Non-parallelizable stages (`filter`, `take`, etc.) act
+as barriers — data is collected, the barrier runs serially, then the next
 parallel segment resumes. Falls back to serial `pipe` for small inputs
 (< 256 items).
 

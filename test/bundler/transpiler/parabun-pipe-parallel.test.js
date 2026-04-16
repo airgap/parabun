@@ -221,6 +221,57 @@ describe("pipeParallel", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("fuses consecutive maps into reduce (no intermediate array)", async () => {
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `
+        import { map, reduce, pipeParallel } from "bun:pipeline";
+        pure function double(x) { return x * 2; }
+        pure function addOne(x) { return x + 1; }
+        pure function add(acc, x) { return acc + x; }
+        const data = Array.from({ length: 1000 }, (_, i) => i);
+        const result = await pipeParallel(data, map(double), map(addOne), reduce(add, 0));
+        // (2i+1) summed for i=0..999 = 2*499500 + 1000 = 1000000
+        console.log(result);
+        `,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, exitCode] = await Promise.all([proc.stdout.text(), proc.exited]);
+    expect(stdout.trim()).toBe("1000000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("single map fused into reduce", async () => {
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `
+        import { map, reduce, pipeParallel } from "bun:pipeline";
+        pure function square(x) { return x * x; }
+        pure function add(acc, x) { return acc + x; }
+        const data = Array.from({ length: 500 }, (_, i) => i + 1);
+        const result = await pipeParallel(data, map(square), reduce(add, 0));
+        // sum of i^2 for i=1..500 = 500*501*1001/6 = 41791750
+        console.log(result);
+        `,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, exitCode] = await Promise.all([proc.stdout.text(), proc.exited]);
+    expect(stdout.trim()).toBe("41791750");
+    expect(exitCode).toBe(0);
+  });
+
   it("map|>filter|>map|>reduce full pipeline", async () => {
     using dir = tempDir("pipe-par-full", {
       "index.pjs": `
