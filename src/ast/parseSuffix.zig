@@ -286,6 +286,16 @@ pub fn ParseSuffix(
                 return .done;
             }
 
+            // Parabun: reject Date() calls inside pure functions (returns current time)
+            if (p.fn_or_arrow_data_parse.is_pure) {
+                if (left.data == .e_identifier) {
+                    const callee_name = p.loadNameFromRef(left.data.e_identifier.ref);
+                    if (bun.strings.eqlComptime(callee_name, "Date")) {
+                        p.log.addRangeErrorFmt(p.source, .{ .loc = left.loc, .len = 4 }, p.allocator, "Cannot call \"Date()\" inside a pure function — it returns the current time", .{}) catch unreachable;
+                    }
+                }
+            }
+
             const list_loc = try p.parseCallArgs();
             left.* = p.newExpr(
                 E.Call{

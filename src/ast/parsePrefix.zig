@@ -529,6 +529,16 @@ pub fn ParsePrefix(
                 new.data.e_new.args = .{};
             }
 
+            // Parabun: reject `new Date()` inside pure functions (returns current time)
+            if (p.fn_or_arrow_data_parse.is_pure) {
+                if (new.data.e_new.target.data == .e_identifier) {
+                    const ctor_name = p.loadNameFromRef(new.data.e_new.target.data.e_identifier.ref);
+                    if (bun.strings.eqlComptime(ctor_name, "Date")) {
+                        p.log.addRangeErrorFmt(p.source, .{ .loc = loc, .len = 8 }, p.allocator, "Cannot call \"new Date()\" inside a pure function — it returns the current time", .{}) catch unreachable;
+                    }
+                }
+            }
+
             return new;
         }
         fn t_open_bracket(noalias p: *P, noalias errors: ?*DeferredErrors) anyerror!Expr {

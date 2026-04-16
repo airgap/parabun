@@ -243,6 +243,39 @@ describe("Parabun Purity Validator", () => {
       );
       expect(out).toContain("Date.now");
     });
+
+    it("rejects Date() call in pure function", () => {
+      expect(() => transpiler.transformSync("pure function foo() { return Date(); }")).toThrow(
+        /Cannot call "Date\(\)"/,
+      );
+    });
+
+    it("rejects new Date() in pure function", () => {
+      expect(() => transpiler.transformSync("pure function foo() { return new Date(); }")).toThrow(
+        /Cannot call "new Date\(\)"/,
+      );
+    });
+
+    it("rejects Date() with args in pure function", () => {
+      expect(() => transpiler.transformSync('pure function foo() { return Date("2024-01-01"); }')).toThrow(
+        /Cannot call "Date\(\)"/,
+      );
+    });
+
+    it("allows Date() in non-pure function", () => {
+      const out = transpiler.transformSync("function foo() { return Date(); }");
+      expect(out).toContain("Date()");
+    });
+
+    it("allows Date.parse in pure function (deterministic)", () => {
+      const out = transpiler.transformSync("pure function foo(s) { return Date.parse(s); }");
+      expect(out).toContain("Date.parse");
+    });
+
+    it("allows Date.UTC in pure function (deterministic)", () => {
+      const out = transpiler.transformSync("pure function foo(y, m) { return Date.UTC(y, m); }");
+      expect(out).toContain("Date.UTC");
+    });
   });
 
   describe("parameter mutation rejected in pure functions", () => {
