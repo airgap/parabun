@@ -16,6 +16,13 @@ export var __using = (stack, value, async) => {
   return value;
 };
 
+// Parabun: peek a promise for ..= await elision.
+// Returns [1, result] if fulfilled or non-promise, [0, value] otherwise.
+export var __parabunPeek = v => {
+  var s = Bun.peek.status(v);
+  return s === "fulfilled" ? [1, Bun.peek(v)] : [0, v];
+};
+
 export var __callDispose = (stack, error, hasError) => {
   let fail = e =>
       (error = hasError

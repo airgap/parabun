@@ -812,7 +812,7 @@ pub fn ParseSuffix(
             }
 
             const rhs = try p.parseExpr(Level.assign.sub(1));
-            const await_expr = p.newExpr(E.Await{ .value = rhs }, dot_dot_eq_range.loc);
+            const await_expr = p.newExpr(E.Await{ .value = rhs, .can_elide = true }, dot_dot_eq_range.loc);
             left.* = p.newExpr(E.Binary{ .op = .bin_assign, .left = left.*, .right = await_expr }, left.loc);
             return .next;
         }

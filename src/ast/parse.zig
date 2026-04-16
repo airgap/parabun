@@ -1036,7 +1036,7 @@ pub fn Parse(
                     } else if (p.fn_or_arrow_data_parse.is_top_level) {
                         p.top_level_await_keyword = dot_dot_eq_range;
                     }
-                    value = p.newExpr(E.Await{ .value = rhs }, dot_dot_eq_range.loc);
+                    value = p.newExpr(E.Await{ .value = rhs, .can_elide = true }, dot_dot_eq_range.loc);
                 }
 
                 decls.append(G.Decl{
