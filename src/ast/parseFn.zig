@@ -357,6 +357,10 @@ pub fn ParseFn(
                     p,
                     func.args,
                 );
+                // Set scope boundary for free-variable detection. Each
+                // explicitly-pure function gets its own boundary; inner arrows
+                // that merely inherit purity keep the outer's boundary.
+                tempOpts.pure_fn_scope = p.current_scope;
             }
             func.body = try p.parseFnBody(&tempOpts);
 
@@ -472,6 +476,11 @@ pub fn ParseFn(
                     p,
                     args,
                 );
+                // Inherit the outer pure function's scope boundary for free-variable
+                // detection. Arrows don't create a new purity domain — they share
+                // the enclosing pure function's scope so locals captured via closure
+                // are not flagged as free variables.
+                data.pure_fn_scope = p.fn_or_arrow_data_parse.pure_fn_scope;
             }
 
             if (p.lexer.token == .t_open_brace) {

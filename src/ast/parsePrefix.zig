@@ -212,12 +212,17 @@ pub fn ParsePrefix(
                 return p.newExpr(try p.parseArrowBody(args, &fn_or_arrow_data), loc);
             }
 
-            // Parabun: pure functions reject `arguments` and known impure globals
+            // Parabun: pure functions reject `arguments`, impure globals, and free variables
             if (p.fn_or_arrow_data_parse.is_pure) {
                 if (strings.eqlComptime(name, "arguments")) {
                     p.log.addRangeError(p.source, name_range, "Cannot use \"arguments\" inside a pure function") catch unreachable;
                 } else if (js_parser.isImpureGlobalIdent(name)) {
                     p.log.addRangeErrorFmt(p.source, name_range, p.allocator, "Cannot reference impure global \"{s}\" inside a pure function", .{name}) catch unreachable;
+                } else if (p.fn_or_arrow_data_parse.pure_fn_scope != null and
+                    !js_parser.isPureSafeGlobal(name) and
+                    !js_parser.isDeclaredInPureFnScope(p, name))
+                {
+                    p.log.addRangeErrorFmt(p.source, name_range, p.allocator, "Cannot reference free variable \"{s}\" inside a pure function", .{name}) catch unreachable;
                 }
             }
 

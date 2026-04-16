@@ -368,6 +368,82 @@ pub fn isImpureGlobalIdent(name: string) bool {
     return impure_global_idents.has(name);
 }
 
+// Parabun: globals that are safe to reference inside a pure function.
+// Referencing these doesn't produce side effects and they're conventionally
+// immutable (prototype-mutation is a runtime-level attack we don't guard
+// against at compile time, matching how TypeScript handles `readonly`).
+const pure_safe_globals = bun.ComptimeStringMap(void, .{
+    // Value constructors / namespaces
+    .{ "Math", {} },
+    .{ "JSON", {} },
+    .{ "Intl", {} },
+    .{ "Reflect", {} },
+    .{ "Proxy", {} },
+    // Type constructors (referencing them is pure; calling them may not be)
+    .{ "Array", {} },
+    .{ "Object", {} },
+    .{ "Number", {} },
+    .{ "String", {} },
+    .{ "Boolean", {} },
+    .{ "Symbol", {} },
+    .{ "BigInt", {} },
+    .{ "Date", {} },
+    .{ "RegExp", {} },
+    .{ "Map", {} },
+    .{ "Set", {} },
+    .{ "WeakMap", {} },
+    .{ "WeakSet", {} },
+    .{ "WeakRef", {} },
+    .{ "Promise", {} },
+    .{ "ArrayBuffer", {} },
+    .{ "SharedArrayBuffer", {} },
+    .{ "DataView", {} },
+    .{ "Int8Array", {} },
+    .{ "Uint8Array", {} },
+    .{ "Uint8ClampedArray", {} },
+    .{ "Int16Array", {} },
+    .{ "Uint16Array", {} },
+    .{ "Int32Array", {} },
+    .{ "Uint32Array", {} },
+    .{ "Float32Array", {} },
+    .{ "Float64Array", {} },
+    .{ "BigInt64Array", {} },
+    .{ "BigUint64Array", {} },
+    // Error types
+    .{ "Error", {} },
+    .{ "TypeError", {} },
+    .{ "RangeError", {} },
+    .{ "ReferenceError", {} },
+    .{ "SyntaxError", {} },
+    .{ "URIError", {} },
+    .{ "EvalError", {} },
+    .{ "AggregateError", {} },
+    // Host objects that are safe to reference; impure members (crypto.randomUUID,
+    // performance.now) are caught separately by isImpureMemberAccess.
+    .{ "crypto", {} },
+    .{ "performance", {} },
+    .{ "navigator", {} },
+    // Global pure functions / constants
+    .{ "parseInt", {} },
+    .{ "parseFloat", {} },
+    .{ "isNaN", {} },
+    .{ "isFinite", {} },
+    .{ "encodeURI", {} },
+    .{ "encodeURIComponent", {} },
+    .{ "decodeURI", {} },
+    .{ "decodeURIComponent", {} },
+    .{ "undefined", {} },
+    .{ "NaN", {} },
+    .{ "Infinity", {} },
+    .{ "structuredClone", {} },
+    .{ "atob", {} },
+    .{ "btoa", {} },
+});
+
+pub fn isPureSafeGlobal(name: string) bool {
+    return pure_safe_globals.has(name);
+}
+
 // Parabun: `<target>.<name>` combinations that are impure (non-deterministic or
 // side-effecting) even though the bare target is fine.
 pub fn isImpureMemberAccess(target: string, name: string) bool {
@@ -426,9 +502,9 @@ pub fn checkPureParamMutation(p: anytype, target: Expr, loc: logger.Loc) void {
     }
 }
 
-// Parabun: extract simple identifier parameter names from a function's args.
-// Destructured params (`pure function f({a, b})`) are skipped — they'll be
-// handled in a later phase.
+// Parabun: extract all identifier names from a function's parameter bindings,
+// recursing into destructured patterns so `pure function f({a, b}, [c])` tracks
+// a, b, and c as parameters.
 pub fn collectPureParamNames(
     allocator: std.mem.Allocator,
     inherited: []const string,
@@ -436,20 +512,62 @@ pub fn collectPureParamNames(
     args: []const G.Arg,
 ) []const string {
     var count: usize = inherited.len;
-    for (args) |a| {
-        if (a.binding.data == .b_identifier) count += 1;
-    }
+    for (args) |a| count += countBindingIdents(a.binding);
     if (count == 0) return &.{};
     const names = allocator.alloc(string, count) catch unreachable;
     @memcpy(names[0..inherited.len], inherited);
     var idx: usize = inherited.len;
-    for (args) |a| {
-        if (a.binding.data == .b_identifier) {
-            names[idx] = p.loadNameFromRef(a.binding.data.b_identifier.ref);
-            idx += 1;
-        }
-    }
+    for (args) |a| idx = collectBindingIdents(p, a.binding, names, idx);
     return names;
+}
+
+fn countBindingIdents(binding: BindingNodeIndex) usize {
+    return switch (binding.data) {
+        .b_identifier => 1,
+        .b_array => |arr| {
+            var n: usize = 0;
+            for (arr.items) |item| n += countBindingIdents(item.binding);
+            return n;
+        },
+        .b_object => |obj| {
+            var n: usize = 0;
+            for (obj.properties) |prop| n += countBindingIdents(prop.value);
+            return n;
+        },
+        .b_missing => 0,
+    };
+}
+
+fn collectBindingIdents(p: anytype, binding: BindingNodeIndex, out: []string, start: usize) usize {
+    var idx = start;
+    switch (binding.data) {
+        .b_identifier => |ident| {
+            out[idx] = p.loadNameFromRef(ident.ref);
+            idx += 1;
+        },
+        .b_array => |arr| {
+            for (arr.items) |item| idx = collectBindingIdents(p, item.binding, out, idx);
+        },
+        .b_object => |obj| {
+            for (obj.properties) |prop| idx = collectBindingIdents(p, prop.value, out, idx);
+        },
+        .b_missing => {},
+    }
+    return idx;
+}
+
+// Parabun: check if `name` is declared within the pure function's scope chain.
+// Walks from `p.current_scope` up to (and including) `pure_fn_scope`.
+// Returns true if the name is found in any scope member table along the way.
+pub fn isDeclaredInPureFnScope(p: anytype, name: string) bool {
+    const boundary = p.fn_or_arrow_data_parse.pure_fn_scope orelse return false;
+    var scope: ?*Scope = p.current_scope;
+    while (scope) |s| {
+        if (s.members.contains(name)) return true;
+        if (s == boundary) break;
+        scope = s.parent;
+    }
+    return false;
 }
 
 pub const IdentifierOpts = packed struct(u8) {
@@ -736,6 +854,10 @@ pub const FnOrArrowDataParse = struct {
     // Includes inherited outer-pure params so inner pure arrows catch closure-mutations.
     // Populated only when is_pure is true; checked at assignment/update construction sites.
     pure_param_names: []const string = &.{},
+    // Parabun: the function_args scope of the enclosing pure function, used as the
+    // boundary for free-variable detection. Identifier references that aren't found
+    // in any scope from current up to (and including) this scope are flagged.
+    pure_fn_scope: ?*Scope = null,
     arrow_arg_errors: DeferredArrowArgErrors = DeferredArrowArgErrors{},
     track_arrow_arg_errors: bool = false,
 

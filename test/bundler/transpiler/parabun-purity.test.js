@@ -400,4 +400,163 @@ describe("Parabun Purity Validator", () => {
       expect(out).toContain("y = y + 1");
     });
   });
+
+  describe("destructured parameter mutation rejected in pure functions", () => {
+    it("rejects reassignment of object-destructured param", () => {
+      expect(() => transpiler.transformSync("pure function foo({a, b}) { a = 5; return b; }")).toThrow(
+        /Cannot mutate parameter "a"/,
+      );
+    });
+
+    it("rejects reassignment of second destructured param", () => {
+      expect(() => transpiler.transformSync("pure function foo({a, b}) { b = 5; return a; }")).toThrow(
+        /Cannot mutate parameter "b"/,
+      );
+    });
+
+    it("rejects property write on destructured param", () => {
+      expect(() => transpiler.transformSync("pure function foo({a}) { a.x = 1; return a; }")).toThrow(
+        /Cannot mutate parameter "a"/,
+      );
+    });
+
+    it("rejects reassignment of array-destructured param", () => {
+      expect(() => transpiler.transformSync("pure function foo([a, b]) { a = 5; return b; }")).toThrow(
+        /Cannot mutate parameter "a"/,
+      );
+    });
+
+    it("rejects reassignment of nested destructured param", () => {
+      expect(() => transpiler.transformSync("pure function foo({x: {y}}) { y = 5; return y; }")).toThrow(
+        /Cannot mutate parameter "y"/,
+      );
+    });
+
+    it("rejects mutation in pure arrow with destructured params", () => {
+      expect(() => transpiler.transformSync("const f = pure ({a}) => { a = 1; return a; };")).toThrow(
+        /Cannot mutate parameter "a"/,
+      );
+    });
+
+    it("allows reading destructured params in pure function", () => {
+      const out = transpiler.transformSync("pure function foo({a, b}) { return a + b; }");
+      expect(out).toContain("a + b");
+    });
+
+    it("allows reading array-destructured params in pure function", () => {
+      const out = transpiler.transformSync("pure function foo([a, b]) { return a * b; }");
+      expect(out).toContain("a * b");
+    });
+  });
+
+  describe("free variable detection in pure functions", () => {
+    it("rejects reference to outer let variable", () => {
+      expect(() => transpiler.transformSync("let x = 10; pure function foo() { return x; }")).toThrow(
+        /Cannot reference free variable "x"/,
+      );
+    });
+
+    it("rejects reference to outer const variable", () => {
+      expect(() => transpiler.transformSync("const x = 10; pure function foo() { return x; }")).toThrow(
+        /Cannot reference free variable "x"/,
+      );
+    });
+
+    it("rejects reference to outer var variable", () => {
+      expect(() => transpiler.transformSync("var x = 10; pure function foo() { return x; }")).toThrow(
+        /Cannot reference free variable "x"/,
+      );
+    });
+
+    it("rejects reference to undeclared identifier", () => {
+      expect(() => transpiler.transformSync("pure function foo() { return someGlobal; }")).toThrow(
+        /Cannot reference free variable "someGlobal"/,
+      );
+    });
+
+    it("rejects reference to outer function", () => {
+      expect(() => transpiler.transformSync("function bar() {} pure function foo() { return bar(); }")).toThrow(
+        /Cannot reference free variable "bar"/,
+      );
+    });
+
+    it("allows parameter references", () => {
+      const out = transpiler.transformSync("pure function foo(x, y) { return x + y; }");
+      expect(out).toContain("x + y");
+    });
+
+    it("allows local variable references", () => {
+      const out = transpiler.transformSync("pure function foo(x) { const y = x + 1; return y; }");
+      expect(out).toContain("y");
+    });
+
+    it("allows pure-safe globals (Math, Array, JSON, etc.)", () => {
+      const out = transpiler.transformSync("pure function foo(x) { return Math.abs(x); }");
+      expect(out).toContain("Math.abs");
+    });
+
+    it("allows parseInt and parseFloat", () => {
+      const out = transpiler.transformSync("pure function foo(s) { return parseInt(s, 10); }");
+      expect(out).toContain("parseInt");
+    });
+
+    it("allows Array, Object, Number constructors", () => {
+      const out = transpiler.transformSync(
+        "pure function foo(x) { return Array.isArray(x) && typeof x === typeof Number(0); }",
+      );
+      expect(out).toContain("Array.isArray");
+    });
+
+    it("allows JSON.stringify / JSON.parse", () => {
+      const out = transpiler.transformSync("pure function foo(x) { return JSON.parse(JSON.stringify(x)); }");
+      expect(out).toContain("JSON.parse");
+    });
+
+    it("allows Error constructors", () => {
+      const out = transpiler.transformSync('pure function foo() { return new TypeError("bad"); }');
+      expect(out).toContain("TypeError");
+    });
+
+    it("allows local function declarations (hoisted)", () => {
+      const out = transpiler.transformSync(
+        "pure function foo(x) { function helper(y) { return y + 1; } return helper(x); }",
+      );
+      expect(out).toContain("helper");
+    });
+
+    it("allows variables declared in nested blocks", () => {
+      const out = transpiler.transformSync("pure function foo(x) { if (x > 0) { const y = x; return y; } return 0; }");
+      expect(out).toContain("const y = x");
+    });
+
+    it("allows for-loop counter", () => {
+      const out = transpiler.transformSync(
+        "pure function foo(n) { let sum = 0; for (let i = 0; i < n; i++) { sum += i; } return sum; }",
+      );
+      expect(out).toContain("for");
+    });
+
+    it("allows inner arrow to capture pure fn's locals via closure", () => {
+      const out = transpiler.transformSync("pure function foo(x) { const y = x + 1; const f = () => y; return f(); }");
+      expect(out).toContain("() => y");
+    });
+
+    it("rejects inner arrow capturing outer-scope free variable", () => {
+      expect(() =>
+        transpiler.transformSync("let outer = 1; pure function foo() { const f = () => outer; return f(); }"),
+      ).toThrow(/Cannot reference free variable "outer"/);
+    });
+
+    it("allows undefined, NaN, Infinity", () => {
+      const out = transpiler.transformSync(
+        "pure function foo(x) { return x === undefined || x !== NaN || x < Infinity; }",
+      );
+      expect(out).toContain("undefined");
+    });
+
+    it("allows Intl and Reflect", () => {
+      const out = transpiler.transformSync("pure function foo(x) { return Reflect.ownKeys(x); }");
+      expect(out).toContain("Reflect.ownKeys");
+    });
+  });
 });
