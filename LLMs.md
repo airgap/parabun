@@ -493,14 +493,18 @@ breakdown and the sweep curve.
 ## Pending Work
 
 - **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `bun:gpu`
-  ships the affine special case (Metal MSL kernel for `x*K + C` on
-  Float32Array; pipeline fusion promotes matching chains automatically).
-  Still pending: full AST-to-MSL/WGSL transpile so non-affine `pure`
-  functions (polynomials, tanh, sqrt-based kernels) also run on GPU.
-  The purity contract forbids the constructs that would fail the
-  transpile (closures, `this`, side effects, stateful globals); scope
-  is scalar-in/scalar-out numeric kernels with `Math.*` → shader
-  intrinsics and `if/else/loop` → shader control flow.
+  ships both the affine special case (GPU kernel for `x*K + C` on
+  Float32Array; pipeline fusion promotes matching chains automatically)
+  and **dynamic kernel compilation** for arbitrary non-affine pure
+  functions. On CUDA: NVRTC compiles JS→CUDA C→PTX at runtime; on
+  Metal: `newLibraryWithSource:` compiles JS→MSL at runtime. Both paths
+  extract the function's return expression via regex, translate
+  `Math.*` to GPU intrinsics, `**` to `pow`, ternary passes through
+  natively. Results are cached in `kernelCache`/`mslKernelCache`.
+  Supported: arithmetic, ternary, all `Math.*` builtins, `**`, constants.
+  Unsupported (closures, multi-statement, string ops) silently falls back
+  to WASM/scalar. The four-point affine probe (x=-1,0,1,2) correctly
+  rejects piecewise functions like relu before reaching the compiler.
 - **Auto-accel dispatch, Tier 4 (implicit cross-call residency)** — the
   explicit opt-in (`gpu.hold`/`release` on Float32Array matrices) is live
   on **both** Metal and CUDA, and accepted by every op (`dot`, `matVec`,

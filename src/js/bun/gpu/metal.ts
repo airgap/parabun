@@ -493,19 +493,22 @@ function compileKernel(lib: bigint, name: string): { fn: bigint; pipe: bigint; m
   return { fn, pipe, maxTg };
 }
 
-// ─── Affine detector (mirrors cuda.ts) ─────────────────────────────────────
+// ─── Affine detector (mirrors cuda.ts / simd.ts) ───────────────────────────
+// Four-point probe (x=-1,0,1,2) catches piecewise functions like relu.
 
 const AFFINE_TOL = 1e-5;
 
 function tryAffineKernel(fn: (x: number) => number): { k1: number; k0: number } | null {
   try {
+    const yn1 = fn(-1);
     const y0 = fn(0);
     const y1 = fn(1);
     const y2 = fn(2);
-    if (!Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+    if (!Number.isFinite(yn1) || !Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
     const k1 = y1 - y0;
     const k0 = y0;
     if (Math.abs(y2 - (2 * k1 + k0)) > AFFINE_TOL * (1 + Math.abs(y2))) return null;
+    if (Math.abs(yn1 - (-k1 + k0)) > AFFINE_TOL * (1 + Math.abs(yn1))) return null;
     return { k1, k0 };
   } catch {
     return null;
@@ -1032,17 +1035,221 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
   return dst;
 }
 
+// ─── Dynamic MSL kernel compilation ──────────────────────────────────────
+//
+// For non-affine pure functions on Float32Array, compile a custom MSL
+// compute shader at runtime via [MTLDevice newLibraryWithSource:...].
+// Same approach as the NVRTC path in cuda.ts but targeting Metal.
+
+const MSL_MATH_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\bMath\.sin\b/g, "sin"],
+  [/\bMath\.cos\b/g, "cos"],
+  [/\bMath\.tan\b/g, "tan"],
+  [/\bMath\.asin\b/g, "asin"],
+  [/\bMath\.acos\b/g, "acos"],
+  [/\bMath\.atan\b/g, "atan"],
+  [/\bMath\.atan2\b/g, "atan2"],
+  [/\bMath\.exp\b/g, "exp"],
+  [/\bMath\.log\b/g, "log"],
+  [/\bMath\.log2\b/g, "log2"],
+  [/\bMath\.log10\b/g, "log10"],
+  [/\bMath\.sqrt\b/g, "sqrt"],
+  [/\bMath\.cbrt\b/g, "cbrt"],
+  [/\bMath\.abs\b/g, "abs"],
+  [/\bMath\.floor\b/g, "floor"],
+  [/\bMath\.ceil\b/g, "ceil"],
+  [/\bMath\.round\b/g, "round"],
+  [/\bMath\.trunc\b/g, "trunc"],
+  [/\bMath\.sign\b/g, "sign"],
+  [/\bMath\.min\b/g, "min"],
+  [/\bMath\.max\b/g, "max"],
+  [/\bMath\.pow\b/g, "pow"],
+  [/\bMath\.hypot\b/g, "hypot"],
+  [/\bMath\.PI\b/g, "3.14159265358979323846f"],
+  [/\bMath\.E\b/g, "2.71828182845904523536f"],
+  [/\bMath\.LN2\b/g, "0.6931471805599453f"],
+  [/\bMath\.LN10\b/g, "2.302585092994046f"],
+  [/\bMath\.SQRT2\b/g, "1.4142135623730951f"],
+];
+
+function extractReturnExpr(fnSrc: string): { param: string; expr: string } | null {
+  let m: RegExpMatchArray | null;
+  m = fnSrc.match(/^\s*(?:pure\s+)?(?:function\s+\w*)?\s*\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)\s*(?:=>|{)\s*/);
+  if (!m) m = fnSrc.match(/^\s*(?:pure\s+)?\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)\s*=>\s*/);
+  if (!m) m = fnSrc.match(/^\s*(?:pure\s+)?(\w+)\s*=>\s*/);
+  if (!m) return null;
+
+  const param = m[1];
+  const rest = fnSrc.slice(m[0].length);
+
+  if (!fnSrc.includes("{") || fnSrc.indexOf("{") > fnSrc.indexOf("=>")) {
+    const expr = rest.replace(/\s*;?\s*$/, "");
+    if (expr.length === 0) return null;
+    return { param, expr };
+  }
+
+  const retMatch = rest.match(/^\s*return\s+(.+?)\s*;?\s*}\s*$/);
+  if (!retMatch) return null;
+  return { param, expr: retMatch[1] };
+}
+
+function translateExprToMSL(expr: string, param: string): string | null {
+  let msl = expr;
+  msl = msl.replace(
+    /(\b\w+(?:\([^)]*\))?|\([^)]+\)|\d+(?:\.\d+)?)\s*\*\*\s*(\b\w+(?:\([^)]*\))?|\([^)]+\)|\d+(?:\.\d+)?)/g,
+    "pow($1, $2)",
+  );
+  for (const [pat, rep] of MSL_MATH_REPLACEMENTS) msl = msl.replace(pat, rep);
+  msl = msl.replace(/===/g, "==").replace(/!==/g, "!=");
+  const mslBuiltins =
+    /\b(sin|cos|tan|asin|acos|atan|atan2|exp|log|log2|log10|sqrt|cbrt|abs|floor|ceil|round|trunc|sign|min|max|pow|hypot)\b/g;
+  const stripped = msl.replace(mslBuiltins, "").replace(new RegExp("\\b" + param + "\\b", "g"), "");
+  if (/[a-zA-Z_]/.test(stripped)) return null;
+  return msl;
+}
+
+function generateMSLKernelSrc(mslExpr: string, param: string): string {
+  return `#include <metal_stdlib>
+using namespace metal;
+kernel void custom_map(
+    device const float *inPtr  [[buffer(0)]],
+    device       float *outPtr [[buffer(1)]],
+    constant     uint  &n      [[buffer(2)]],
+    uint                gid    [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    float ${param} = inPtr[gid];
+    outPtr[gid] = ${mslExpr};
+}
+`;
+}
+
+type CachedMSLKernel = { pipeline: bigint; fn: bigint; lib: bigint; maxTg: number };
+const mslKernelCache = new Map<string, CachedMSLKernel | null>();
+
+function compileCustomMSLKernel(fnSrc: string): CachedMSLKernel | null {
+  const cached = mslKernelCache.get(fnSrc);
+  if (cached !== undefined) return cached;
+
+  if (!probe()) {
+    mslKernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const extracted = extractReturnExpr(fnSrc);
+  if (!extracted) {
+    mslKernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const mslExpr = translateExprToMSL(extracted.expr, extracted.param);
+  if (!mslExpr) {
+    mslKernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const src = generateMSLKernelSrc(mslExpr, extracted.param);
+  const nsSrc = nsstring(src);
+  if (nsSrc === 0n) {
+    mslKernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const lib = msgSend_5_id_id_ptr!(device, sel("newLibraryWithSource:options:error:"), nsSrc, 0n, null);
+  objcRelease(nsSrc);
+  if (lib === 0n) {
+    mslKernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const result = compileKernel(lib, "custom_map");
+  if (result === null) {
+    objcRelease(lib);
+    mslKernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const entry: CachedMSLKernel = { pipeline: result.pipe, fn: result.fn, lib, maxTg: result.maxTg };
+  mslKernelCache.set(fnSrc, entry);
+  return entry;
+}
+
+function launchCustomMSLF32(a: Float32Array, kernel: CachedMSLKernel): Float32Array {
+  const n = a.length;
+  const bytes = BigInt(n * 4);
+
+  const inBuf = msgSend_5_ptr_u64_u64_ret!(
+    device,
+    sel("newBufferWithBytes:length:options:"),
+    ffiPtr!(a),
+    bytes,
+    BigInt(MTL_STORAGE_MODE_SHARED),
+  );
+  if (inBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes failed");
+
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), kernel.pipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 1n);
+
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 2n);
+
+    const tg = Math.min(kernel.maxTg, 256);
+    const grid = new BigUint64Array([BigInt(n), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(tg), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(grid), ffiPtr!(threads));
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: contents returned null");
+    const out = new Float32Array(n);
+    out.set(new Float32Array(ffiToArrayBuffer!(contents, 0, n * 4)));
+    return out;
+  } finally {
+    if (encoder !== 0n) objcRelease(encoder);
+    if (cmdBuf !== 0n) objcRelease(cmdBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
+    objcRelease(inBuf);
+  }
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   if (typeof fn !== "function") throw new TypeError("fn must be a function");
   const view = unwrapHandle(a);
   if (view instanceof Float32Array && fn.length <= 1 && probe() && view.length >= MIN_SIMDMAP_ELEMS) {
     const aff = tryAffineKernel(fn as (x: number) => number);
     if (aff) return launchAffineF32(view, aff.k1, aff.k0);
+    const kernel = compileCustomMSLKernel(fn.toString());
+    if (kernel) return launchCustomMSLF32(view, kernel);
   }
   return simd.simdMap(fn, view as any);
 }
 
 function dispose(): void {
+  for (const entry of mslKernelCache.values()) {
+    if (entry) {
+      objcRelease(entry.pipeline);
+      objcRelease(entry.fn);
+      objcRelease(entry.lib);
+    }
+  }
+  mslKernelCache.clear();
   if (commandQueue !== 0n) {
     objcRelease(commandQueue);
     commandQueue = 0n;
