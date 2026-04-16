@@ -30,21 +30,40 @@ function defaultConcurrency(): number {
 
 // Worker source. The worker caches compiled fns by source string so that
 // repeated pmap() calls with the same fn skip the eval() step entirely.
+// Handles both regular array messages and SAB-backed TypedArray messages.
 const WORKER_SRC = `
 const __cache = new Map();
+const __ctors = {
+  f32: Float32Array, f64: Float64Array,
+  i32: Int32Array, u32: Uint32Array,
+  i16: Int16Array, u16: Uint16Array,
+  i8: Int8Array, u8: Uint8Array,
+  u8c: Uint8ClampedArray,
+};
 self.onmessage = async ({ data }) => {
-  const { id, fnSrc, items, baseIndex } = data;
+  const { id, fnSrc } = data;
   let fn = __cache.get(fnSrc);
   if (!fn) {
     fn = (0, eval)("(" + fnSrc + ")");
     __cache.set(fnSrc, fn);
   }
   try {
-    const out = new Array(items.length);
-    for (let i = 0; i < items.length; i++) {
-      out[i] = await fn(items[i], baseIndex + i);
+    if (data.inputSab !== undefined) {
+      var Ctor = __ctors[data.elemType];
+      var input = new Ctor(data.inputSab, data.byteStart, data.count);
+      var output = new Ctor(data.outputSab, data.byteStart, data.count);
+      for (var i = 0; i < data.count; i++) {
+        output[i] = fn(input[i], data.baseIndex + i);
+      }
+      self.postMessage({ id, ok: true });
+    } else {
+      var items = data.items, baseIndex = data.baseIndex;
+      var out = new Array(items.length);
+      for (var i = 0; i < items.length; i++) {
+        out[i] = await fn(items[i], baseIndex + i);
+      }
+      self.postMessage({ id, ok: true, out });
     }
-    self.postMessage({ id, ok: true, out });
   } catch (err) {
     self.postMessage({ id, ok: false, err: err && err.message ? String(err.message) : String(err) });
   }
@@ -112,35 +131,66 @@ function disposeWorkers(): void {
   }
 }
 
-// Adaptive-concurrency heuristic.
+// ---------------------------------------------------------------------------
+// SharedArrayBuffer scratch pool (LYK-716)
 //
-// Historically pmap always dispatched `defaultConcurrency()` workers
-// regardless of per-item cost; that loses to `.map()` when the per-item
-// work is below Worker postMessage + structured-clone overhead (~50-150 μs
-// per chunk round-trip on Bun). We now:
-//
-//   1. Probe up to 64 items on the main thread to measure per-item cost
-//      (first call per distinct fn source).
-//   2. Cache the probed cost in an EMA keyed on `fn.toString()`.
-//   3. Size the worker fan-out based on the estimated total serial time:
-//      - below 1 ms    → run everything on the main thread (0 workers)
-//      - below 2 ms    → fan out to 2 workers
-//      - below 10 ms   → fan out to 4 workers
-//      - otherwise     → fan out to defaultConcurrency()
-//
-// A caller-supplied `{ concurrency: N }` always overrides the heuristic —
-// we trust the user when they ask for a specific fan-out.
-//
-// Thresholds are calibrated against measured Bun Worker dispatch overhead
-// (~400μs per chunk on 2026-04-x builds — structured-clone + postMessage
-// + Promise.all synchronization). If that drops (e.g. SharedArrayBuffer-
-// based transfer), the heuristic can be re-tuned without touching pmap
-// shape.
+// SABs are reused across pmap calls to avoid repeated allocation. The pool
+// is a simple sorted free-list capped at SAB_POOL_MAX entries.
+// ---------------------------------------------------------------------------
+
+const SAB_POOL_MAX = 8;
+const sabPool: SharedArrayBuffer[] = [];
+
+function nextPow2(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+function borrowSab(bytes: number): SharedArrayBuffer {
+  for (let i = 0; i < sabPool.length; i++) {
+    if (sabPool[i].byteLength >= bytes) {
+      return sabPool.splice(i, 1)[0];
+    }
+  }
+  return new SharedArrayBuffer(Math.max(65536, nextPow2(bytes)));
+}
+
+function returnSab(sab: SharedArrayBuffer): void {
+  if (sabPool.length < SAB_POOL_MAX) {
+    sabPool.push(sab);
+    sabPool.sort((a, b) => a.byteLength - b.byteLength);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TypedArray detection
+// ---------------------------------------------------------------------------
+
+type ElemType = "f32" | "f64" | "i32" | "u32" | "i16" | "u16" | "i8" | "u8" | "u8c";
+
+function getElemType(arr: unknown): ElemType | null {
+  if (arr instanceof Float32Array) return "f32";
+  if (arr instanceof Float64Array) return "f64";
+  if (arr instanceof Int32Array) return "i32";
+  if (arr instanceof Uint32Array) return "u32";
+  if (arr instanceof Int16Array) return "i16";
+  if (arr instanceof Uint16Array) return "u16";
+  if (arr instanceof Int8Array) return "i8";
+  if (arr instanceof Uint8Array) return "u8";
+  if (arr instanceof Uint8ClampedArray) return "u8c";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive-concurrency heuristic
+// ---------------------------------------------------------------------------
+
 const SERIAL_THRESHOLD_NS = 1_000_000;
 const TWO_WORKER_NS = 2_000_000;
 const FOUR_WORKER_NS = 10_000_000;
 const PROBE_MAX_ITEMS = 64;
-const PROBE_MAX_NS = 1_000_000; // bail out of probe after ≥1ms of work
+const PROBE_MAX_NS = 1_000_000;
 const EMA_ALPHA = 0.3;
 
 const perItemEma = new Map<string, number>();
@@ -161,8 +211,6 @@ function chooseWorkers(estTotalNs: number, len: number): number {
   return Math.min(len, defaultConcurrency());
 }
 
-// Test/inspection hook — returns the current EMA map as a plain object.
-// Not part of the stable public API; mainly useful for heuristic tuning.
 function _heuristicState(): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [k, v] of perItemEma) out[k] = v;
@@ -173,12 +221,23 @@ function _resetHeuristic(): void {
   perItemEma.clear();
 }
 
+// ---------------------------------------------------------------------------
+// pmap — main entry point
+// ---------------------------------------------------------------------------
+
 async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOptions): Promise<U[]> {
   if (!$isCallable(fn)) {
     throw new TypeError("pmap: first argument must be a function");
   }
+
+  // TypedArray fast path: SAB-backed zero-copy transfer
+  const elemType = getElemType(array);
+  if (elemType !== null) {
+    return pmapTyped(fn as any, array as any, elemType, options) as any;
+  }
+
   if (!$isJSArray(array)) {
-    throw new TypeError("pmap: second argument must be an array");
+    throw new TypeError("pmap: second argument must be an array or TypedArray");
   }
 
   const len = array.length;
@@ -187,8 +246,6 @@ async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOp
   const requested = options?.concurrency;
   const fnSrc = fn.toString();
 
-  // Explicit concurrency override → honor exactly, including concurrency=1
-  // which skips the pool entirely.
   if (typeof requested === "number" && requested > 0) {
     const requestedInt = Math.max(1, Math.min(len, requested));
     if (requestedInt === 1) {
@@ -197,7 +254,6 @@ async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOp
     return dispatchWorkers(fn, fnSrc, array, 0, []);
   }
 
-  // Heuristic path: probe (or use EMA) to size the fan-out.
   const prior = perItemEma.get(fnSrc);
   if (prior !== undefined) {
     const workers = chooseWorkers(prior * len, len);
@@ -207,10 +263,6 @@ async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOp
     return dispatchWorkers(fn, fnSrc, array, workers, []);
   }
 
-  // Unknown fn — probe the first N items on the main thread, bail out if
-  // the probe itself exceeds PROBE_MAX_NS so slow per-item work doesn't
-  // starve the pool. The probe uses the same sync-fast-path runner as
-  // the inline hot path so a trivial sync fn isn't penalized.
   const probeTarget = Math.min(len, PROBE_MAX_ITEMS);
   const result: U[] = new Array(len);
   const probeStart = Bun.nanoseconds();
@@ -239,11 +291,107 @@ async function pmap<T, U>(fn: MapFn<T, U>, array: readonly T[], options?: PMapOp
   return dispatchWorkers(fn, fnSrc, array, workers, result.slice(0, probed));
 }
 
-// Synchronous-fast-path inline runner. Calls `fn` against array[start..end)
-// and fills `out` in place. If `fn` never returns a Promise we avoid the
-// per-item `await` microtask entirely, which is what closes the gap with
-// `.map()` on trivial per-item work; the moment we see a thenable we
-// switch to awaiting the rest.
+// ---------------------------------------------------------------------------
+// TypedArray pmap — SAB-backed zero-copy path
+// ---------------------------------------------------------------------------
+
+// For TypedArrays the dispatch overhead with SAB is much lower than
+// structured clone (~10x), so we use lower thresholds.
+const TYPED_SERIAL_THRESHOLD = 1000;
+
+async function pmapTyped(
+  fn: (value: number, index: number) => number,
+  array: any,
+  elemType: ElemType,
+  options?: PMapOptions,
+): Promise<any> {
+  const len = array.length;
+  if (len === 0) return new array.constructor(0);
+
+  const fnSrc = fn.toString();
+  const requested = options?.concurrency;
+
+  // Small arrays or explicit concurrency=1 → inline
+  if (len < TYPED_SERIAL_THRESHOLD || (typeof requested === "number" && requested === 1)) {
+    return runTypedInline(fn, array);
+  }
+
+  const concurrency =
+    typeof requested === "number" && requested > 1 ? Math.min(len, requested) : Math.min(len, defaultConcurrency());
+
+  return dispatchTypedWorkers(fnSrc, array, elemType, concurrency);
+}
+
+function runTypedInline(fn: (value: number, index: number) => number, array: any): any {
+  const len = array.length;
+  const out = new array.constructor(len);
+  for (let i = 0; i < len; i++) {
+    out[i] = fn(array[i], i);
+  }
+  return out;
+}
+
+async function dispatchTypedWorkers(fnSrc: string, array: any, elemType: ElemType, concurrency: number): Promise<any> {
+  const len = array.length;
+  const bytesPerElem = array.BYTES_PER_ELEMENT as number;
+  const totalBytes = len * bytesPerElem;
+
+  const inputSab = borrowSab(totalBytes);
+  const outputSab = borrowSab(totalBytes);
+
+  // One copy: source → input SAB
+  const Ctor = array.constructor as any;
+  const inputView = new Ctor(inputSab, 0, len);
+  inputView.set(array);
+
+  const workers = ensurePool(concurrency);
+  const chunkSize = Math.ceil(len / concurrency);
+
+  const pending: Promise<void>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    const chunkStart = w * chunkSize;
+    if (chunkStart >= len) break;
+    const count = Math.min(chunkSize, len - chunkStart);
+    const byteStart = chunkStart * bytesPerElem;
+
+    const entry = workers[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    pending.push(
+      new Promise<void>((resolve, reject) => {
+        entry.resolve = () => resolve();
+        entry.reject = reject;
+        entry.w.postMessage({
+          id: w,
+          fnSrc,
+          inputSab,
+          outputSab,
+          elemType,
+          byteStart,
+          count,
+          baseIndex: chunkStart,
+        });
+      }),
+    );
+  }
+
+  await Promise.all(pending);
+
+  // One copy: output SAB → result TypedArray
+  const outputView = new Ctor(outputSab, 0, len);
+  const result = new Ctor(len);
+  result.set(outputView);
+
+  returnSab(inputSab);
+  returnSab(outputSab);
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Regular array dispatch (unchanged)
+// ---------------------------------------------------------------------------
+
 async function runInline<T, U>(
   fn: MapFn<T, U>,
   fnSrc: string,
@@ -266,8 +414,6 @@ async function runInline<T, U>(
   return out;
 }
 
-// Fan-out helper. If `prefix` is non-empty it's the already-computed
-// probe results for array[0..prefix.length); we dispatch the rest.
 async function dispatchWorkers<T, U>(
   _fn: MapFn<T, U>,
   fnSrc: string,
@@ -307,11 +453,6 @@ async function dispatchWorkers<T, U>(
     const chunkStart = remainingStart + id * chunkSize;
     for (let i = 0; i < out.length; i++) result[chunkStart + i] = out[i];
   }
-  // Intentionally do NOT updateEma from the dispatch path: the wall time
-  // here conflates per-item work with dispatch + structured-clone overhead,
-  // so blending it into the EMA biases the estimate upward and pins us to
-  // a bad fan-out decision across subsequent calls. The EMA is a pure
-  // inline-cost signal — probe + runInline are the only writers.
   return result;
 }
 
