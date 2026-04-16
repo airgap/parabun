@@ -154,7 +154,17 @@ describe("Parabun Purity Validator", () => {
   });
 
   describe("impure globals rejected in pure functions", () => {
-    const bareGlobals = ["console", "fetch", "process", "globalThis", "setTimeout", "setInterval", "queueMicrotask"];
+    const bareGlobals = [
+      "console",
+      "fetch",
+      "process",
+      "globalThis",
+      "setTimeout",
+      "setInterval",
+      "setImmediate",
+      "queueMicrotask",
+      "eval",
+    ];
     for (const g of bareGlobals) {
       it(`rejects ${g} in pure function`, () => {
         expect(() => transpiler.transformSync(`pure function foo() { return ${g}; }`)).toThrow(
@@ -167,6 +177,36 @@ describe("Parabun Purity Validator", () => {
       expect(() => transpiler.transformSync("pure function foo(x) { console.log(x); return x; }")).toThrow(
         /Cannot reference impure global "console"/,
       );
+    });
+
+    it("rejects direct eval call in pure function", () => {
+      expect(() => transpiler.transformSync("pure function foo(s) { return eval(s); }")).toThrow(
+        /Cannot reference impure global "eval"/,
+      );
+    });
+
+    it("rejects direct eval with string literal in pure function", () => {
+      expect(() => transpiler.transformSync('pure function foo() { return eval("1 + 1"); }')).toThrow(
+        /Cannot reference impure global "eval"/,
+      );
+    });
+
+    it("rejects direct eval in pure arrow", () => {
+      expect(() => transpiler.transformSync("const f = pure (s) => eval(s);")).toThrow(
+        /Cannot reference impure global "eval"/,
+      );
+    });
+
+    it("allows eval in non-pure function", () => {
+      const out = transpiler.transformSync("function foo(s) { return eval(s); }");
+      expect(out).toContain("eval");
+    });
+
+    it("allows eval in nested non-pure function inside pure", () => {
+      const out = transpiler.transformSync(
+        "pure function foo() { function inner(s) { return eval(s); } return inner; }",
+      );
+      expect(out).toContain("eval");
     });
 
     const memberAccesses = [

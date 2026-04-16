@@ -345,6 +345,13 @@ pub const AsyncPrefixExpression = enum(u2) {
 
 // Parabun: identifiers that are always impure when referenced as free variables.
 // Used by the purity validator in parsePrefix/parseSuffix.
+//
+// `eval` is included because direct-eval can see the caller's scope and
+// execute arbitrary code, which breaks every purity guarantee we make —
+// even if the argument is a string literal, we cannot predict what the
+// evaluated code does. Indirect eval (`(0, eval)(…)`) is a runtime-level
+// dodge we don't try to chase here; the goal is to catch the common shape
+// at compile time.
 const impure_global_idents = bun.ComptimeStringMap(void, .{
     .{ "console", {} },
     .{ "fetch", {} },
@@ -354,6 +361,7 @@ const impure_global_idents = bun.ComptimeStringMap(void, .{
     .{ "setInterval", {} },
     .{ "setImmediate", {} },
     .{ "queueMicrotask", {} },
+    .{ "eval", {} },
 });
 
 pub fn isImpureGlobalIdent(name: string) bool {
