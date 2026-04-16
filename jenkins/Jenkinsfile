@@ -25,6 +25,10 @@ pipeline {
         CI = 'true'
     }
 
+    triggers {
+        pollSCM('H/5 * * * *')
+    }
+
     options {
         timestamps()
         ansiColor('xterm')
