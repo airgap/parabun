@@ -1984,6 +1984,13 @@ pub const Path = struct {
         return strings.hasSuffixComptime(this.name.filename, ".jsx") or strings.hasSuffixComptime(this.name.filename, ".tsx");
     }
 
+    pub fn isParabunFile(this: *const Path) bool {
+        return strings.hasSuffixComptime(this.name.filename, ".pts") or
+            strings.hasSuffixComptime(this.name.filename, ".pjs") or
+            strings.hasSuffixComptime(this.name.filename, ".ptsx") or
+            strings.hasSuffixComptime(this.name.filename, ".pjsx");
+    }
+
     pub fn keyForIncrementalGraph(path: *const Path) []const u8 {
         return if (path.isFile())
             path.text

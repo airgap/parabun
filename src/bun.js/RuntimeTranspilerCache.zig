@@ -636,7 +636,8 @@ pub const RuntimeTranspilerCache = struct {
 
         if (this.entry != null) return true;
 
-        if (source.contents.len < MINIMUM_CACHE_SIZE)
+        const min_cache_size: usize = if (source.path.isParabunFile()) 1024 else MINIMUM_CACHE_SIZE;
+        if (source.contents.len < min_cache_size)
             return false;
 
         if (is_disabled)

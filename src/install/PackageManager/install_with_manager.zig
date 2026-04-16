@@ -938,6 +938,8 @@ pub fn installWithManager(
         }
     }
 
+    preTranspileParabunFiles(log_level);
+
     if (log_level != .silent) {
         try printInstallSummary(manager, ctx, &install_summary, did_meta_hash_change, log_level);
     }
@@ -1050,6 +1052,51 @@ fn printInstallSummary(
             Output.printStartEndStdout(ctx.start_time, std.time.nanoTimestamp());
             Output.prettyln("<d> done<r>", .{});
             printed_timestamp = true;
+        }
+    }
+}
+
+fn preTranspileParabunFiles(log_level: Options.LogLevel) void {
+    var nm_dir = std.fs.cwd().openDir("node_modules", .{ .iterate = true }) catch return;
+    defer nm_dir.close();
+
+    var count: usize = 0;
+    countParabunFiles(nm_dir, &count, 0);
+
+    if (count == 0) return;
+
+    if (log_level != .silent) {
+        Output.prettyln("\n<d>parabun: {d} .pts/.pjs source file{s} in dependencies (cached on first load)<r>", .{
+            count,
+            if (count != 1) "s" else "",
+        });
+        Output.flush();
+    }
+}
+
+fn countParabunFiles(dir: std.fs.Dir, count: *usize, depth: u32) void {
+    if (depth > 10) return;
+
+    var it = dir.iterate();
+    while (it.next() catch null) |entry| {
+        if (entry.name.len > 0 and entry.name[0] == '.') continue;
+        switch (entry.kind) {
+            .directory => {
+                if (strings.eqlComptime(entry.name, ".bin")) continue;
+                var sub = dir.openDir(entry.name, .{ .iterate = true }) catch continue;
+                defer sub.close();
+                countParabunFiles(sub, count, depth + 1);
+            },
+            .file => {
+                if (strings.hasSuffixComptime(entry.name, ".pts") or
+                    strings.hasSuffixComptime(entry.name, ".pjs") or
+                    strings.hasSuffixComptime(entry.name, ".ptsx") or
+                    strings.hasSuffixComptime(entry.name, ".pjsx"))
+                {
+                    count.* += 1;
+                }
+            },
+            else => {},
         }
     }
 }
