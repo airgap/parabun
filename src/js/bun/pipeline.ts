@@ -20,7 +20,11 @@
 // `Symbol.asyncIterator`, so they realize the chain on demand and proceed
 // on the existing async-generator path.
 
-const simd = require("./simd.ts");
+let _simd: any = null;
+function simd(): any {
+  if (_simd === null) _simd = require("./simd.ts");
+  return _simd;
+}
 
 // bun:gpu is loaded lazily the first time we consider promoting a chain to
 // the GPU tier. Keeping it lazy means a pipeline that never grows a big
@@ -136,27 +140,27 @@ function realizeChain(chain: FusedChain): FArray {
       const gpuOut = affineGpuF32(source, K, C);
       if (gpuOut !== null) return gpuOut;
     }
-    if (C === 0) return simd.mulScalar(source, K);
-    if (K === 1) return simd.addScalar(source, C);
-    const scaled = simd.mulScalar(source, K);
-    return simd.addScalar(scaled, C);
+    if (C === 0) return simd().mulScalar(source, K);
+    if (K === 1) return simd().addScalar(source, C);
+    const scaled = simd().mulScalar(source, K);
+    return simd().addScalar(scaled, C);
   }
   const composed = (x: number, i: number) => {
     let v = x;
     for (const op of ops) v = op.fn(v, i);
     return v;
   };
-  return simd.simdMap(composed, source);
+  return simd().simdMap(composed, source);
 }
 
 function sumChain(chain: FusedChain): number {
   const { source, ops } = chain;
-  if (ops.length === 0) return simd.sum(source);
+  if (ops.length === 0) return simd().sum(source);
   const aff = composeAffineChain(ops);
   if (aff !== null) {
-    return aff.K * simd.sum(source) + aff.C * source.length;
+    return aff.K * simd().sum(source) + aff.C * source.length;
   }
-  return simd.sum(realizeChain(chain));
+  return simd().sum(realizeChain(chain));
 }
 
 function reduceChain(chain: FusedChain, reduceFn: (acc: any, x: any) => any, init: any): any {
@@ -348,7 +352,7 @@ async function count<T>(source: Source<T>): Promise<number> {
 
 async function sum(source: Source<number> | FArray | FusedChain): Promise<number> {
   if (isFusedChain(source)) return sumChain(source);
-  if (isFArray(source)) return simd.sum(source);
+  if (isFArray(source)) return simd().sum(source);
   let s = 0;
   for await (const x of source as Source<number>) s += x as number;
   return s;
@@ -415,7 +419,11 @@ function pipe<T>(source: Source<T>, ...transforms: Array<(s: any) => any>): any 
 
 const PARALLEL_THRESHOLD = 256;
 
-const parallel = require("./parallel.ts");
+let _parallel: any = null;
+function parallel(): any {
+  if (_parallel === null) _parallel = require("./parallel.ts");
+  return _parallel;
+}
 
 function composeFnSources(fns: Array<(x: any, i: number) => any>): (x: any, i: number) => any {
   if (fns.length === 1) return fns[0];
@@ -507,10 +515,10 @@ async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => a
         const next = segments[si + 1];
         if (next && next.kind === "reduce") {
           const composed = composeFnSources(seg.fns);
-          return parallel.preduce(next.fn, data, next.init, { mapFn: composed });
+          return parallel().preduce(next.fn, data, next.init, { mapFn: composed });
         }
         const composed = composeFnSources(seg.fns);
-        data = await parallel.pmap(composed, data);
+        data = await parallel().pmap(composed, data);
         break;
       }
       case "filter": {
@@ -520,7 +528,7 @@ async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => a
         break;
       }
       case "reduce": {
-        return parallel.preduce(seg.fn, data, seg.init);
+        return parallel().preduce(seg.fn, data, seg.init);
       }
       case "opaque": {
         data = toArray(data);

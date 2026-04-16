@@ -949,17 +949,24 @@ type WasmExports = {
 };
 
 let wasm: WasmExports | null = null;
-try {
-  const mod = new WebAssembly.Module(buildModule());
-  const inst = new WebAssembly.Instance(mod);
-  // @ts-ignore — exports are untyped
-  wasm = inst.exports as WasmExports;
-} catch {
-  wasm = null;
+let wasmProbed = false;
+
+function ensureWasm(): WasmExports | null {
+  if (wasmProbed) return wasm;
+  wasmProbed = true;
+  try {
+    const mod = new WebAssembly.Module(buildModule());
+    const inst = new WebAssembly.Instance(mod);
+    // @ts-ignore — exports are untyped
+    wasm = inst.exports as WasmExports;
+  } catch {
+    wasm = null;
+  }
+  return wasm;
 }
 
 function isWasmAvailable(): boolean {
-  return wasm !== null;
+  return ensureWasm() !== null;
 }
 
 // Return true iff the kernel memory has enough room for bytesNeeded. Before
@@ -1013,11 +1020,11 @@ function alignUp(x: number, a: number): number {
 }
 
 function isWasmBacked(arr: FArray): boolean {
-  return wasm !== null && arr.buffer === wasm.mem.buffer;
+  return isWasmAvailable() && arr.buffer === wasm.mem.buffer;
 }
 
 function commitAllocPool(): void {
-  if (allocCommitted || wasm === null) return;
+  if (allocCommitted || !isWasmAvailable()) return;
   const mem = wasm.mem;
   if (mem.buffer.byteLength < ALLOC_COMMIT_BYTES) {
     const need = Math.ceil((ALLOC_COMMIT_BYTES - mem.buffer.byteLength) / 65536);
@@ -1027,7 +1034,7 @@ function commitAllocPool(): void {
 }
 
 function alloc(length: number, type: "f32" | "f64"): FArray {
-  if (wasm === null) throw new Error("bun:simd alloc requires the WASM backend");
+  if (!isWasmAvailable()) throw new Error("bun:simd alloc requires the WASM backend");
   if (!Number.isInteger(length) || length < 0) {
     throw new RangeError("length must be a non-negative integer");
   }
@@ -1163,7 +1170,7 @@ function mulScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   // Zero-copy fast path: both input and output live in WASM memory. Call the
   // offset-parameterized kernel with the actual byteOffsets — no copy-in/out,
   // vectorized at any N.
-  if (wasm !== null && aWasm && outWasm) {
+  if (isWasmAvailable() && aWasm && outWasm) {
     if (arr instanceof Float32Array) {
       wasm.mulScalarAt(n, c, arr.byteOffset, out.byteOffset);
     } else {
@@ -1173,7 +1180,7 @@ function mulScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   }
 
   // Below-threshold copy-in WASM path.
-  if (wasm !== null && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
+  if (isWasmAvailable() && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
@@ -1209,7 +1216,7 @@ function addScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
   const aWasm = isWasmBacked(arr);
   const elemBytes = arr.BYTES_PER_ELEMENT;
 
-  if (wasm !== null && aWasm && outWasm) {
+  if (isWasmAvailable() && aWasm && outWasm) {
     if (arr instanceof Float32Array) {
       wasm.addScalarAt(n, c, arr.byteOffset, out.byteOffset);
     } else {
@@ -1218,7 +1225,7 @@ function addScalar(a: FArray, c: number, opts?: ScalarOpts): FArray {
     return out;
   }
 
-  if (wasm !== null && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
+  if (isWasmAvailable() && n * elemBytes <= OUTPUT_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       const view = f32View();
@@ -1257,7 +1264,7 @@ function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const elemBytes = ax.BYTES_PER_ELEMENT;
 
   // Zero-copy fast path: all of a, b, out share the SAB — call addAt directly.
-  if (wasm !== null && aWasm && bWasm && outWasm) {
+  if (isWasmAvailable() && aWasm && bWasm && outWasm) {
     if (ax instanceof Float32Array) {
       wasm.addAt(n, ax.byteOffset, (bx as Float32Array).byteOffset, out.byteOffset);
     } else {
@@ -1266,7 +1273,7 @@ function add(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
     return out;
   }
 
-  if (wasm !== null && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
+  if (isWasmAvailable() && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
       const view = f32View();
@@ -1306,7 +1313,7 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
   const bWasm = isWasmBacked(bx);
   const elemBytes = ax.BYTES_PER_ELEMENT;
 
-  if (wasm !== null && aWasm && bWasm && outWasm) {
+  if (isWasmAvailable() && aWasm && bWasm && outWasm) {
     if (ax instanceof Float32Array) {
       wasm.mulAt(n, ax.byteOffset, (bx as Float32Array).byteOffset, out.byteOffset);
     } else {
@@ -1315,7 +1322,7 @@ function mul(a: FArray, b: FArray, opts?: BinaryOpts): FArray {
     return out;
   }
 
-  if (wasm !== null && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
+  if (isWasmAvailable() && n * elemBytes * 2 <= OUTPUT_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
       const view = f32View();
@@ -1413,7 +1420,7 @@ function sum(a: FArray): number {
   const n = arr.length;
   if (n === 0) return 0;
   const elemBytes = arr.BYTES_PER_ELEMENT;
-  if (wasm !== null && n * elemBytes <= REDUCE_WASM_MAX_BYTES) {
+  if (isWasmAvailable() && n * elemBytes <= REDUCE_WASM_MAX_BYTES) {
     if (arr instanceof Float32Array) {
       ensureCapacity(n * 4);
       f32View().set(arr, 0);
@@ -1433,7 +1440,7 @@ function dot(a: FArray, b: FArray): number {
   const n = ax.length;
   if (n === 0) return 0;
   const elemBytes = ax.BYTES_PER_ELEMENT;
-  if (wasm !== null && n * elemBytes * 2 <= REDUCE_WASM_MAX_BYTES) {
+  if (isWasmAvailable() && n * elemBytes * 2 <= REDUCE_WASM_MAX_BYTES) {
     if (ax instanceof Float32Array) {
       ensureCapacity(n * 8);
       const view = f32View();
@@ -1502,7 +1509,7 @@ function matVec(matrix: FArray, vector: FArray, nRows: number, nCols: number): F
   // from ever overwriting user alloc'd buffers. After the alloc pool is
   // committed, ensureCapacity won't grow, so a too-large matVec falls back
   // to the JS tight loop below.
-  if (wasm !== null) {
+  if (isWasmAvailable()) {
     const elemBytes = mx.BYTES_PER_ELEMENT;
     const scratchBase = alignUp(allocTop, ALLOC_ALIGN);
     const matByteOffset = scratchBase;
@@ -1648,7 +1655,7 @@ const MIN_WASM_ELEMENTS = 64;
 type SimdOpKind = "map" | "scalar" | "binary" | "reduce";
 
 function wasmWinsForSize(op: SimdOpKind, n: number, elemBytes: number): boolean {
-  if (wasm === null) return false;
+  if (!isWasmAvailable()) return false;
   if (n < MIN_WASM_ELEMENTS) return false;
   if (op === "reduce") {
     if (n * elemBytes > REDUCE_WASM_MAX_BYTES) return false;
