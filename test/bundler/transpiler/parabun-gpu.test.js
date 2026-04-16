@@ -323,33 +323,33 @@ describe("bun:gpu scaffold", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("isAligned reports false for plain typed arrays, true for alloc'd (metal only)", async () => {
-    // On the cpu fallback, isAligned() always returns false — a plain
-    // Float32Array is not page-aligned, and `alloc()` just returns another
-    // plain Float32Array, so neither is "aligned" from the backend's view.
-    // On metal, alloc() goes through posix_memalign and isAligned() checks
-    // the pointer. We run both paths and assert what's appropriate per host.
+  it("isAligned reports true for alloc'd typed arrays on metal", async () => {
+    // Contract: gpu.alloc() on the Metal backend goes through
+    // posix_memalign(pagesize), so the returned Float32Array is always
+    // page-aligned and isAligned() returns true. On cpu + cuda backends
+    // isAligned is a stub that always returns false.
+    //
+    // Deliberately NOT asserted: `isAligned(new Float32Array(N))` — JSC's
+    // allocator can return page-aligned backings for plain typed arrays
+    // by chance (seen on Apple Silicon's 16 KiB pages for mid-sized
+    // buffers). The plain-vs-alloc'd contrast isn't a reliable probe, so
+    // we pin the real invariant instead: alloc() is always aligned on
+    // Metal, full stop.
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-isaligned",
       `
         import gpu from "bun:gpu";
-        const plain = new Float32Array(1024);
         const allocd = gpu.alloc(1024, "f32");
         console.log(JSON.stringify({
-          plain: gpu.isAligned(plain),
           allocd: gpu.isAligned(allocd),
           active: gpu.activeBackend(),
         }));
       `,
     );
     const r = JSON.parse(stdout);
-    // A plain Float32Array is NEVER page-aligned (JSC backing is ~16-byte).
-    expect(r.plain).toBe(false);
     if (r.active === "metal") {
-      // Metal alloc goes through posix_memalign(pagesize), so it must report true.
       expect(r.allocd).toBe(true);
     } else {
-      // cpu + cuda backends have no alignment concept; isAligned is a stub.
       expect(r.allocd).toBe(false);
     }
     expect(exitCode).toBe(0);
