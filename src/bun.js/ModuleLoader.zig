@@ -428,6 +428,17 @@ pub fn transpileSourceCode(
                 // For now, skip it entirely in the runtime transpiler.
                 const module_info: ?*analyze_transpiled_module.ModuleInfoDeserialized = null;
 
+                const tc_is_cjs = entry.metadata.module_type == .cjs;
+                const bc_data = jsc.RuntimeBytecodeCache.getOrGenerate(
+                    cache.input_hash.?,
+                    cache.features_hash.?,
+                    cache.input_byte_length.?,
+                    tc_is_cjs,
+                    entry.output_code.byteSlice(),
+                    path.text,
+                    bun.default_allocator,
+                );
+
                 return ResolvedSource{
                     .allocator = null,
                     .source_code = switch (entry.output_code) {
@@ -441,7 +452,9 @@ pub fn transpileSourceCode(
                     },
                     .specifier = input_specifier,
                     .source_url = input_specifier.createIfDifferent(path.text),
-                    .is_commonjs_module = entry.metadata.module_type == .cjs,
+                    .is_commonjs_module = tc_is_cjs,
+                    .bytecode_cache = if (bc_data) |b| @constCast(b.ptr) else null,
+                    .bytecode_cache_size = if (bc_data) |b| b.len else 0,
                     .module_info = module_info,
                     .tag = brk: {
                         if (entry.metadata.module_type == .cjs and source.path.isFile()) {
@@ -566,13 +579,29 @@ pub fn transpileSourceCode(
                 else => .javascript,
             };
 
+            const transpiled_js = printer.ctx.getWritten();
+
+            const bc_data2 = bc_blk: {
+                const bc_input_hash = cache.input_hash orelse jsc.RuntimeTranspilerCache.hash(source.contents);
+                const bc_features_hash = cache.features_hash orelse 0;
+                const bc_input_len = cache.input_byte_length orelse source.contents.len;
+                break :bc_blk jsc.RuntimeBytecodeCache.getOrGenerate(
+                    bc_input_hash,
+                    bc_features_hash,
+                    bc_input_len,
+                    is_commonjs_module,
+                    transpiled_js,
+                    path.text,
+                    bun.default_allocator,
+                );
+            };
+
             return .{
                 .allocator = null,
                 .source_code = brk: {
-                    const written = printer.ctx.getWritten();
-                    const result = cache.output_code orelse bun.String.cloneLatin1(written);
+                    const result = cache.output_code orelse bun.String.cloneLatin1(transpiled_js);
 
-                    if (written.len > 1024 * 1024 * 2 or jsc_vm.smol) {
+                    if (transpiled_js.len > 1024 * 1024 * 2 or jsc_vm.smol) {
                         printer.ctx.buffer.deinit();
                     }
 
@@ -581,6 +610,8 @@ pub fn transpileSourceCode(
                 .specifier = input_specifier,
                 .source_url = input_specifier.createIfDifferent(path.text),
                 .is_commonjs_module = is_commonjs_module,
+                .bytecode_cache = if (bc_data2) |b| @constCast(b.ptr) else null,
+                .bytecode_cache_size = if (bc_data2) |b| b.len else 0,
                 .module_info = module_info_deserialized,
                 .tag = tag,
             };

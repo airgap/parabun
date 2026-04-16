@@ -202,6 +202,7 @@ pub const Codegen = @import("ZigGeneratedClasses");
 pub const GeneratedClassesList = @import("./bindings/generated_classes_list.zig").Classes;
 
 pub const RuntimeTranspilerCache = @import("./RuntimeTranspilerCache.zig").RuntimeTranspilerCache;
+pub const RuntimeBytecodeCache = @import("./RuntimeBytecodeCache.zig");
 
 /// Track whether an object should keep the event loop alive
 pub const Ref = struct {
