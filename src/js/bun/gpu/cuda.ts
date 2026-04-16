@@ -734,21 +734,24 @@ function probe(): boolean {
 
 // ─── Affine simdMap detector (mirrors simd.ts) ────────────────────────────
 //
-// Fires three probe points (x=0,1,2); if the function is linear it
+// Fires four probe points (x=-1,0,1,2); if the function is linear it
 // uniquely determines y = k1*x + k0 and we can push it to the GPU.
+// The x=-1 probe catches piecewise functions like relu that pass 3-point.
 // Same tolerance as the simd-side detector so behavior stays consistent.
 
 const AFFINE_TOL = 1e-5;
 
 function tryAffineKernel(fn: (x: number) => number): { k1: number; k0: number } | null {
   try {
+    const yn1 = fn(-1);
     const y0 = fn(0);
     const y1 = fn(1);
     const y2 = fn(2);
-    if (!Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+    if (!Number.isFinite(yn1) || !Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
     const k1 = y1 - y0;
     const k0 = y0;
     if (Math.abs(y2 - (2 * k1 + k0)) > AFFINE_TOL * (1 + Math.abs(y2))) return null;
+    if (Math.abs(yn1 - (-k1 + k0)) > AFFINE_TOL * (1 + Math.abs(yn1))) return null;
     return { k1, k0 };
   } catch {
     return null;
@@ -1406,17 +1409,292 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
   return dst;
 }
 
+// ─── Dynamic kernel compilation via NVRTC ─────────────────────────────────
+//
+// For non-affine pure numeric functions, translate JS → CUDA C → PTX via
+// NVRTC (runtime compilation). Compiled modules are cached by function
+// source string. Falls back to WASM if NVRTC is unavailable or translation
+// fails.
+
+const NVRTC_LIBNAMES =
+  process.platform === "win32"
+    ? ["nvrtc64_120_0.dll", "nvrtc64_110_0.dll"]
+    : ["libnvrtc.so", "libnvrtc.so.12", "libnvrtc.so.11"];
+
+type NvrtcSymbols = {
+  nvrtcCreateProgram: (
+    prog: number,
+    src: number,
+    name: number,
+    numHeaders: number,
+    headers: number | null,
+    includeNames: number | null,
+  ) => number;
+  nvrtcCompileProgram: (prog: bigint, numOptions: number, options: number | null) => number;
+  nvrtcGetPTXSize: (prog: bigint, sizePtr: number) => number;
+  nvrtcGetPTX: (prog: bigint, ptx: number) => number;
+  nvrtcDestroyProgram: (progPtr: number) => number;
+  nvrtcGetProgramLogSize: (prog: bigint, sizePtr: number) => number;
+  nvrtcGetProgramLog: (prog: bigint, log: number) => number;
+};
+
+let nvrtcLib: { symbols: NvrtcSymbols; close: () => void } | null = null;
+let nvrtcProbed = false;
+let nvrtcAvailable = false;
+
+function tryLoadNvrtc(): boolean {
+  if (nvrtcProbed) return nvrtcAvailable;
+  nvrtcProbed = true;
+  const { dlopen, FFIType } = require("../ffi.ts");
+  const spec = {
+    nvrtcCreateProgram: {
+      args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.ptr],
+      returns: FFIType.i32,
+    },
+    nvrtcCompileProgram: { args: [FFIType.u64, FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
+    nvrtcGetPTXSize: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+    nvrtcGetPTX: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+    nvrtcDestroyProgram: { args: [FFIType.ptr], returns: FFIType.i32 },
+    nvrtcGetProgramLogSize: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+    nvrtcGetProgramLog: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+  };
+  for (const name of NVRTC_LIBNAMES) {
+    try {
+      nvrtcLib = dlopen(name, spec) as any;
+      nvrtcAvailable = true;
+      return true;
+    } catch {
+      continue;
+    }
+  }
+  nvrtcLib = null;
+  return false;
+}
+
+const MATH_REPLACEMENTS: [RegExp, string][] = [
+  [/\bMath\.sin\b/g, "sinf"],
+  [/\bMath\.cos\b/g, "cosf"],
+  [/\bMath\.tan\b/g, "tanf"],
+  [/\bMath\.asin\b/g, "asinf"],
+  [/\bMath\.acos\b/g, "acosf"],
+  [/\bMath\.atan\b/g, "atanf"],
+  [/\bMath\.atan2\b/g, "atan2f"],
+  [/\bMath\.exp\b/g, "expf"],
+  [/\bMath\.log\b/g, "logf"],
+  [/\bMath\.log2\b/g, "log2f"],
+  [/\bMath\.log10\b/g, "log10f"],
+  [/\bMath\.sqrt\b/g, "sqrtf"],
+  [/\bMath\.cbrt\b/g, "cbrtf"],
+  [/\bMath\.abs\b/g, "fabsf"],
+  [/\bMath\.floor\b/g, "floorf"],
+  [/\bMath\.ceil\b/g, "ceilf"],
+  [/\bMath\.round\b/g, "roundf"],
+  [/\bMath\.trunc\b/g, "truncf"],
+  [/\bMath\.sign\b/g, "copysignf(1.0f, "],
+  [/\bMath\.min\b/g, "fminf"],
+  [/\bMath\.max\b/g, "fmaxf"],
+  [/\bMath\.pow\b/g, "powf"],
+  [/\bMath\.hypot\b/g, "hypotf"],
+  [/\bMath\.PI\b/g, "3.14159265358979323846f"],
+  [/\bMath\.E\b/g, "2.71828182845904523536f"],
+  [/\bMath\.LN2\b/g, "0.6931471805599453f"],
+  [/\bMath\.LN10\b/g, "2.302585092994046f"],
+  [/\bMath\.SQRT2\b/g, "1.4142135623730951f"],
+];
+
+function extractReturnExpr(fnSrc: string): { param: string; expr: string } | null {
+  let m: RegExpMatchArray | null;
+  m = fnSrc.match(/^\s*(?:pure\s+)?(?:function\s+\w*)?\s*\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)\s*(?:=>|{)\s*/);
+  if (!m) m = fnSrc.match(/^\s*(?:pure\s+)?\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)\s*=>\s*/);
+  if (!m) m = fnSrc.match(/^\s*(?:pure\s+)?(\w+)\s*=>\s*/);
+  if (!m) return null;
+
+  const param = m[1];
+  const rest = fnSrc.slice(m[0].length);
+
+  // Arrow with expression body: (x) => expr
+  if (!fnSrc.includes("{") || fnSrc.indexOf("{") > fnSrc.indexOf("=>")) {
+    const expr = rest.replace(/\s*;?\s*$/, "");
+    if (expr.length === 0) return null;
+    return { param, expr };
+  }
+
+  // Function body with single return
+  const retMatch = rest.match(/^\s*return\s+(.+?)\s*;?\s*}\s*$/);
+  if (!retMatch) return null;
+  return { param, expr: retMatch[1] };
+}
+
+function translateExprToCuda(expr: string, param: string): string | null {
+  let cuda = expr;
+  // Replace ** with powf
+  cuda = cuda.replace(
+    /(\b\w+(?:\([^)]*\))?|\([^)]+\)|\d+(?:\.\d+)?)\s*\*\*\s*(\b\w+(?:\([^)]*\))?|\([^)]+\)|\d+(?:\.\d+)?)/g,
+    "powf($1, $2)",
+  );
+  // Replace Math builtins
+  for (const [pat, rep] of MATH_REPLACEMENTS) cuda = cuda.replace(pat, rep);
+  // Replace === and !== with == and !=
+  cuda = cuda.replace(/===/g, "==").replace(/!==/g, "!=");
+  // Bail if there are any remaining identifiers besides the param and CUDA builtins
+  const cudaBuiltins =
+    /\b(sinf|cosf|tanf|asinf|acosf|atanf|atan2f|expf|logf|log2f|log10f|sqrtf|cbrtf|fabsf|floorf|ceilf|roundf|truncf|copysignf|fminf|fmaxf|powf|hypotf)\b/g;
+  const stripped = cuda.replace(cudaBuiltins, "").replace(new RegExp("\\b" + param + "\\b", "g"), "");
+  // Only numbers, operators, parens, whitespace, commas should remain
+  if (/[a-zA-Z_]/.test(stripped)) return null;
+  return cuda;
+}
+
+function generateCudaKernelSrc(cudaExpr: string, param: string): string {
+  return `extern "C" __global__ void custom_map(const float* __restrict__ in, float* __restrict__ out, unsigned int count) {
+  unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count) return;
+  float ${param} = in[i];
+  out[i] = ${cudaExpr};
+}
+`;
+}
+
+type CachedKernel = { mod: bigint; fn: bigint };
+const kernelCache = new Map<string, CachedKernel | null>();
+
+function compileCustomKernel(fnSrc: string): CachedKernel | null {
+  const cached = kernelCache.get(fnSrc);
+  if (cached !== undefined) return cached;
+
+  if (!tryLoadNvrtc() || !cudaLib || ctx === null) {
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const extracted = extractReturnExpr(fnSrc);
+  if (!extracted) {
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const cudaExpr = translateExprToCuda(extracted.expr, extracted.param);
+  if (!cudaExpr) {
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const src = generateCudaKernelSrc(cudaExpr, extracted.param);
+  const s = nvrtcLib!.symbols;
+  const ptr = ffiPtr!;
+
+  const srcBytes = new TextEncoder().encode(src + "\0");
+  const nameBytes = new TextEncoder().encode("custom_map.cu\0");
+  const progBuf = new BigUint64Array(1);
+
+  if (s.nvrtcCreateProgram(ptr(progBuf), ptr(srcBytes), ptr(nameBytes), 0, null, null) !== 0) {
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+  const prog = progBuf[0];
+
+  const compileResult = s.nvrtcCompileProgram(prog, 0, null);
+  if (compileResult !== 0) {
+    s.nvrtcDestroyProgram(ptr(progBuf));
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const ptxSizeBuf = new BigUint64Array(1);
+  if (s.nvrtcGetPTXSize(prog, ptr(ptxSizeBuf)) !== 0) {
+    s.nvrtcDestroyProgram(ptr(progBuf));
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+  const ptxSize = Number(ptxSizeBuf[0]);
+  const ptxBuf = new Uint8Array(ptxSize);
+  if (s.nvrtcGetPTX(prog, ptr(ptxBuf)) !== 0) {
+    s.nvrtcDestroyProgram(ptr(progBuf));
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+  s.nvrtcDestroyProgram(ptr(progBuf));
+
+  const cs = cudaLib!.symbols;
+  const modBuf = new BigUint64Array(1);
+  if (cs.cuModuleLoadData(ptr(modBuf), ptr(ptxBuf)) !== 0) {
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+  const customMod = modBuf[0];
+
+  const fnNameBytes = new TextEncoder().encode("custom_map\0");
+  const fnBuf = new BigUint64Array(1);
+  if (cs.cuModuleGetFunction(ptr(fnBuf), customMod, ptr(fnNameBytes)) !== 0) {
+    cs.cuModuleUnload(customMod);
+    kernelCache.set(fnSrc, null);
+    return null;
+  }
+
+  const entry: CachedKernel = { mod: customMod, fn: fnBuf[0] };
+  kernelCache.set(fnSrc, entry);
+  return entry;
+}
+
+function launchCustomF32(a: Float32Array, kernel: CachedKernel): Float32Array {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const n = a.length;
+  const bytes = BigInt(n * 4);
+
+  const dInBuf = new BigUint64Array(1);
+  const dOutBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dInBuf), bytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(in) failed");
+  if (s.cuMemAlloc_v2(ptr(dOutBuf), bytes) !== 0) {
+    s.cuMemFree_v2(dInBuf[0]);
+    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+  }
+  const dIn = dInBuf[0];
+  const dOut = dOutBuf[0];
+
+  try {
+    if (s.cuMemcpyHtoD_v2(dIn, ptr(a), bytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD failed");
+
+    const pInBuf = new BigUint64Array([dIn]);
+    const pOutBuf = new BigUint64Array([dOut]);
+    const pN = new Uint32Array([n]);
+    const params = new BigUint64Array([BigInt(ptr(pInBuf)), BigInt(ptr(pOutBuf)), BigInt(ptr(pN))]);
+
+    const blockSize = 256;
+    const gridSize = Math.ceil(n / blockSize);
+    if (s.cuLaunchKernel(kernel.fn, gridSize, 1, 1, blockSize, 1, 1, 0, 0n, ptr(params), null) !== 0) {
+      throw new Error("bun:gpu cuda: cuLaunchKernel failed");
+    }
+    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+
+    const out = new Float32Array(n);
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, bytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH failed");
+    return out;
+  } finally {
+    s.cuMemFree_v2(dIn);
+    s.cuMemFree_v2(dOut);
+  }
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   if (typeof fn !== "function") throw new TypeError("fn must be a function");
   const view = unwrapHandle(a);
   if (view instanceof Float32Array && fn.length <= 1 && probe() && view.length >= MIN_SIMDMAP_ELEMS) {
     const aff = tryAffineKernel(fn as (x: number) => number);
     if (aff) return launchAffineF32(view, aff.k1, aff.k0);
+    const kernel = compileCustomKernel(fn.toString());
+    if (kernel) return launchCustomF32(view, kernel);
   }
   return simd.simdMap(fn, view as any);
 }
 
 function dispose(): void {
+  if (cudaLib) {
+    for (const entry of kernelCache.values()) {
+      if (entry) cudaLib.symbols.cuModuleUnload(entry.mod);
+    }
+    kernelCache.clear();
+  }
   if (cudaLib && mod !== null) {
     cudaLib.symbols.cuModuleUnload(mod);
     mod = null;

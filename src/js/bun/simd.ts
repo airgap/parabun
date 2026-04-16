@@ -1588,13 +1588,15 @@ const AFFINE_TOL = 1e-5;
 
 function tryAffineKernel(fn: (x: number) => number): { k1: number; k0: number } | null {
   try {
+    const yn1 = fn(-1);
     const y0 = fn(0);
     const y1 = fn(1);
     const y2 = fn(2);
-    if (!Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
+    if (!Number.isFinite(yn1) || !Number.isFinite(y0) || !Number.isFinite(y1) || !Number.isFinite(y2)) return null;
     const k1 = y1 - y0;
     const k0 = y0;
     if (Math.abs(y2 - (2 * k1 + k0)) > AFFINE_TOL * (1 + Math.abs(y2))) return null;
+    if (Math.abs(yn1 - (-k1 + k0)) > AFFINE_TOL * (1 + Math.abs(yn1))) return null;
     return { k1, k0 };
   } catch {
     return null;

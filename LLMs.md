@@ -254,11 +254,13 @@ mulScalar(a, 3, { dst: out });               // zero-copy: *At kernel writes int
 mulScalar(a, 3, { dstOverwrite: "a" });      // zero-copy in-place
 ```
 
-`simdMap(fn, a)` probes the mapping function at three inputs to detect affine
-kernels (`x * k1 + k0`); matched kernels dispatch to a scalar-multiply-plus-add
-fast path. Unmatched kernels fall back to a plain scalar loop. Only sound for
-`pure` functions — the purity contract guarantees the probe calls are
-observably equivalent.
+`simdMap(fn, a)` probes the mapping function at four inputs (x = -1, 0, 1, 2)
+to detect affine kernels (`x * k1 + k0`); matched kernels dispatch to a
+scalar-multiply-plus-add fast path. The four-point probe catches piecewise
+functions like `relu(x) = x > 0 ? x : 0` that the old three-point probe
+(x = 0, 1, 2) falsely accepted. Unmatched kernels fall back to a plain scalar
+loop. Only sound for `pure` functions — the purity contract guarantees the
+probe calls are observably equivalent.
 
 Implementation: `src/js/bun/simd.ts`.
 
@@ -407,6 +409,23 @@ Backend implementations:
   in via `gpu.hold`. See `bench/parabun-gpu-matmul` (up to ~114× JS on
   held 1024×512×1024 matmul) and `bench/parabun-gpu-dot` (up to ~24×
   `bun:simd` on held 128 MB dot) on an RTX 4070 Ti.
+
+  **Dynamic kernel compilation (NVRTC):** When `simdMap` encounters a
+  non-affine `pure` function on a `Float32Array`, it attempts runtime
+  compilation via NVRTC (NVIDIA Runtime Compilation). The pipeline:
+  1. `extractReturnExpr(fn.toString())` — regex-parse the function source
+     to extract the single return expression and parameter name.
+  2. `translateExprToCuda(expr, param)` — rewrite `Math.*` calls to CUDA
+     intrinsics (`sinf`, `expf`, `fabsf`, etc.), `**` to `powf`, `===`
+     to `==`. Bails if unknown identifiers remain (closures, globals).
+  3. `generateCudaKernelSrc` — wrap the expression in an
+     `extern "C" __global__ void custom_map(...)` kernel template.
+  4. NVRTC compile to PTX → `cuModuleLoadData` → `cuModuleGetFunction`.
+  Results are cached in `kernelCache: Map<string, CachedKernel | null>`.
+  Supported: arithmetic, ternary (`? :`), all `Math.*` single-arg
+  functions, `Math.pow`/`Math.hypot`/`Math.atan2`, constants
+  (`Math.PI`, `Math.E`, etc.). Unsupported expressions (closures,
+  multi-statement bodies, string ops) silently fall back to WASM/scalar.
 - **CPU** (`src/js/bun/gpu/cpu.ts`) — every op forwards to `bun:simd`.
 
 Pipeline integration: when a fused affine chain on a `Float32Array` is
