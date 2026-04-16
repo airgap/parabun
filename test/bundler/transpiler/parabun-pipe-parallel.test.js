@@ -306,4 +306,59 @@ describe("pipeParallel", () => {
     expect(stdout.trim()).toBe(String(expected));
     expect(exitCode).toBe(0);
   });
+
+  it("preserves Float32Array through map stages", async () => {
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `
+        import { map, pipeParallel } from "bun:pipeline";
+        pure function double(x) { return x * 2; }
+        pure function addOne(x) { return x + 1; }
+        const data = new Float32Array([1, 2, 3, 4, 5]);
+        const out = await pipeParallel(data, map(double), map(addOne));
+        console.log(JSON.stringify({
+          type: out.constructor.name,
+          values: Array.from(out),
+        }));
+        `,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    if (stderr.trim()) console.error("stderr:", stderr.trim());
+    const parsed = JSON.parse(stdout.trim());
+    expect(parsed.values).toEqual([3, 5, 7, 9, 11]);
+    expect(exitCode).toBe(0);
+  });
+
+  it("Float32Array map+reduce fusion", async () => {
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `
+        import { map, reduce, pipeParallel } from "bun:pipeline";
+        pure function double(x) { return x * 2; }
+        pure function add(acc, x) { return acc + x; }
+        const data = new Float32Array(Array.from({ length: 500 }, (_, i) => i + 1));
+        const result = await pipeParallel(data, map(double), reduce(add, 0));
+        // sum of 1..500 = 125250, doubled = 250500
+        console.log(result);
+        `,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    if (stderr.trim()) console.error("stderr:", stderr.trim());
+    expect(stdout.trim()).toBe("250500");
+    expect(exitCode).toBe(0);
+  });
 });

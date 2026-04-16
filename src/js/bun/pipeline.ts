@@ -425,19 +425,10 @@ function composeFnSources(fns: Array<(x: any, i: number) => any>): (x: any, i: n
   );
 }
 
-async function materialize(source: any): Promise<any[]> {
+async function materialize(source: any): Promise<any[] | FArray> {
   if ($isJSArray(source)) return source;
-  if (isFusedChain(source)) {
-    const realized = realizeChain(source);
-    const out = new Array(realized.length);
-    for (let i = 0; i < realized.length; i++) out[i] = realized[i];
-    return out;
-  }
-  if (isFArray(source)) {
-    const out = new Array(source.length);
-    for (let i = 0; i < source.length; i++) out[i] = source[i];
-    return out;
-  }
+  if (isFusedChain(source)) return realizeChain(source);
+  if (isFArray(source)) return source;
   if (source != null && typeof source[Symbol.iterator] === "function") {
     return Array.from(source);
   }
@@ -447,6 +438,13 @@ async function materialize(source: any): Promise<any[]> {
     return out;
   }
   throw new TypeError("pipeParallel: source must be iterable");
+}
+
+function toArray(data: any[] | FArray): any[] {
+  if ($isJSArray(data)) return data;
+  const out = new Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data[i];
+  return out;
 }
 
 type Segment =
@@ -486,10 +484,10 @@ function classifyStages(stages: Array<(s: any) => any>): Segment[] {
 async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => any>): Promise<any> {
   if (stages.length === 0) return materialize(source);
 
-  let data = await materialize(source);
+  let data: any = await materialize(source);
 
   if (data.length < PARALLEL_THRESHOLD) {
-    let out: any = data;
+    let out: any = $isJSArray(data) ? data : toArray(data);
     for (const s of stages) out = s(out);
     if (out != null && typeof out.then === "function") out = await out;
     if (out != null && typeof out[Symbol.asyncIterator] === "function") {
@@ -516,6 +514,7 @@ async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => a
         break;
       }
       case "filter": {
+        data = toArray(data);
         const fn = seg.fn;
         data = data.filter((x: any, i: number) => fn(x, i));
         break;
@@ -524,6 +523,7 @@ async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => a
         return parallel.preduce(seg.fn, data, seg.init);
       }
       case "opaque": {
+        data = toArray(data);
         let result = seg.transform(data);
         if (result != null && typeof result.then === "function") result = await result;
         if (result != null && typeof result[Symbol.asyncIterator] === "function") {
