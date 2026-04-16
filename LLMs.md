@@ -113,22 +113,30 @@ test/bundler/transpiler/parabun-purity.test.js  — 16 tests: purity enforcement
 
 ## Runtime
 
-### `bun:parallel` — `pmap`
+### `bun:parallel` — `pmap`, `preduce`
 
-Parallel map over arrays using a Worker pool. The mapping function must be
-pure; its source is shipped to each worker via `fn.toString()`, so closures
+Parallel map and reduce over arrays using a Worker pool. Functions must be
+pure; their source is shipped to each worker via `fn.toString()`, so closures
 and outer references are not available by design.
 
 ```
-import { pmap } from "bun:parallel";
+import { pmap, preduce } from "bun:parallel";
 pure function double(x) { return x * 2; }
 const out = await pmap(double, [1, 2, 3, 4]); // → [2, 4, 6, 8]
+
+pure function add(acc, x) { return acc + x; }
+const sum = await preduce(add, [1, 2, 3, 4, 5], 0); // → 15
 ```
 
-Signature: `pmap(fn, array, options?)`. `options.concurrency` caps the worker
-count (defaults to `min(navigator.hardwareConcurrency, 8)`). Workers run the
-function over contiguous chunks and reassemble in original order. Errors
-thrown in a worker propagate as rejections on the returned promise.
+`pmap(fn, array, options?)` maps `fn` over contiguous chunks in parallel and
+reassembles in original order. `preduce(fn, array, initialValue, options?)`
+reduces chunks in parallel, then merges partial results on the main thread.
+The reduce function must be associative for correct parallel results.
+
+`options.concurrency` caps the worker count (defaults to
+`min(navigator.hardwareConcurrency, 8)`). Both support TypedArrays via
+SAB-backed zero-copy transfer. Errors thrown in a worker propagate as
+rejections on the returned promise.
 
 Implementation: `src/js/bun/parallel.ts` (registered via
 `src/bun.js/HardcodedModule.zig`).

@@ -30,7 +30,7 @@ function defaultConcurrency(): number {
 
 // Worker source. The worker caches compiled fns by source string so that
 // repeated pmap() calls with the same fn skip the eval() step entirely.
-// Handles both regular array messages and SAB-backed TypedArray messages.
+// Handles pmap (regular + SAB TypedArray) and preduce messages.
 const WORKER_SRC = `
 const __cache = new Map();
 const __ctors = {
@@ -48,7 +48,22 @@ self.onmessage = async ({ data }) => {
     __cache.set(fnSrc, fn);
   }
   try {
-    if (data.inputSab !== undefined) {
+    if (data.op === "reduce") {
+      var acc = data.init;
+      if (data.reduceSab !== undefined) {
+        var Ctor = __ctors[data.elemType];
+        var input = new Ctor(data.reduceSab, data.byteStart, data.count);
+        for (var i = 0; i < data.count; i++) {
+          acc = fn(acc, input[i], data.baseIndex + i);
+        }
+      } else {
+        var items = data.items, baseIndex = data.baseIndex;
+        for (var i = 0; i < items.length; i++) {
+          acc = await fn(acc, items[i], baseIndex + i);
+        }
+      }
+      self.postMessage({ id, ok: true, acc });
+    } else if (data.inputSab !== undefined) {
       var Ctor = __ctors[data.elemType];
       var input = new Ctor(data.inputSab, data.byteStart, data.count);
       var output = new Ctor(data.outputSab, data.byteStart, data.count);
@@ -456,4 +471,198 @@ async function dispatchWorkers<T, U>(
   return result;
 }
 
-export default { pmap, disposeWorkers, _heuristicState, _resetHeuristic };
+// ---------------------------------------------------------------------------
+// preduce — parallel reduce
+// ---------------------------------------------------------------------------
+
+type ReduceFn<T, A> = (accumulator: A, value: T, index: number) => A | Promise<A>;
+
+const REDUCE_SERIAL_THRESHOLD = 512;
+
+async function preduce<T, A>(
+  fn: ReduceFn<T, A>,
+  array: readonly T[],
+  initialValue: A,
+  options?: PMapOptions,
+): Promise<A> {
+  if (!$isCallable(fn)) {
+    throw new TypeError("preduce: first argument must be a function");
+  }
+
+  const elemType = getElemType(array);
+  if (elemType !== null) {
+    return preduceTyped(fn as any, array as any, elemType, initialValue as any, options) as any;
+  }
+
+  if (!$isJSArray(array)) {
+    throw new TypeError("preduce: second argument must be an array or TypedArray");
+  }
+
+  const len = array.length;
+  if (len === 0) return initialValue;
+
+  const fnSrc = fn.toString();
+  const requested = options?.concurrency;
+
+  if (len < REDUCE_SERIAL_THRESHOLD || (typeof requested === "number" && requested === 1)) {
+    return reduceInline(fn, array, initialValue, 0);
+  }
+
+  const concurrency =
+    typeof requested === "number" && requested > 1 ? Math.min(len, requested) : Math.min(len, defaultConcurrency());
+
+  return dispatchReduceWorkers(fn, fnSrc, array, initialValue, concurrency);
+}
+
+async function reduceInline<T, A>(fn: ReduceFn<T, A>, array: readonly T[], init: A, start: number): Promise<A> {
+  let acc = init;
+  for (let i = start; i < array.length; i++) {
+    const r = fn(acc, array[i], i) as A | Promise<A>;
+    if (r !== null && typeof r === "object" && typeof (r as any).then === "function") {
+      acc = await (r as Promise<A>);
+    } else {
+      acc = r as A;
+    }
+  }
+  return acc;
+}
+
+async function dispatchReduceWorkers<T, A>(
+  fn: ReduceFn<T, A>,
+  fnSrc: string,
+  array: readonly T[],
+  initialValue: A,
+  concurrency: number,
+): Promise<A> {
+  const len = array.length;
+  const workers = ensurePool(concurrency);
+  const chunkSize = Math.ceil(len / concurrency);
+
+  const pending: Promise<{ id: number; acc: A }>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    const chunkStart = w * chunkSize;
+    if (chunkStart >= len) break;
+    const chunkEnd = Math.min(chunkStart + chunkSize, len);
+    const items = array.slice(chunkStart, chunkEnd);
+    const entry = workers[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    pending.push(
+      new Promise((resolve, reject) => {
+        entry.resolve = (data: any) => resolve({ id: w, acc: data.acc });
+        entry.reject = reject;
+        entry.w.postMessage({ id: w, fnSrc, op: "reduce", items, baseIndex: chunkStart, init: initialValue });
+      }),
+    );
+  }
+
+  const results = await Promise.all(pending);
+  results.sort((a, b) => a.id - b.id);
+  let acc = results[0].acc;
+  for (let i = 1; i < results.length; i++) {
+    acc = fn(acc, results[i].acc as any, -1) as A;
+  }
+  return acc;
+}
+
+// ---------------------------------------------------------------------------
+// TypedArray preduce — SAB-backed path
+// ---------------------------------------------------------------------------
+
+async function preduceTyped(
+  fn: (accumulator: number, value: number, index: number) => number,
+  array: any,
+  elemType: ElemType,
+  initialValue: number,
+  options?: PMapOptions,
+): Promise<number> {
+  const len = array.length;
+  if (len === 0) return initialValue;
+
+  const fnSrc = fn.toString();
+  const requested = options?.concurrency;
+
+  if (len < REDUCE_SERIAL_THRESHOLD || (typeof requested === "number" && requested === 1)) {
+    return reduceTypedInline(fn, array, initialValue);
+  }
+
+  const concurrency =
+    typeof requested === "number" && requested > 1 ? Math.min(len, requested) : Math.min(len, defaultConcurrency());
+
+  return dispatchReduceTypedWorkers(fnSrc, array, elemType, initialValue, concurrency);
+}
+
+function reduceTypedInline(
+  fn: (acc: number, value: number, index: number) => number,
+  array: any,
+  init: number,
+): number {
+  let acc = init;
+  for (let i = 0; i < array.length; i++) {
+    acc = fn(acc, array[i], i);
+  }
+  return acc;
+}
+
+async function dispatchReduceTypedWorkers(
+  fnSrc: string,
+  array: any,
+  elemType: ElemType,
+  initialValue: number,
+  concurrency: number,
+): Promise<number> {
+  const len = array.length;
+  const bytesPerElem = array.BYTES_PER_ELEMENT as number;
+  const totalBytes = len * bytesPerElem;
+
+  const sab = borrowSab(totalBytes);
+  const Ctor = array.constructor as any;
+  const inputView = new Ctor(sab, 0, len);
+  inputView.set(array);
+
+  const workers = ensurePool(concurrency);
+  const chunkSize = Math.ceil(len / concurrency);
+
+  const pending: Promise<{ id: number; acc: number }>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    const chunkStart = w * chunkSize;
+    if (chunkStart >= len) break;
+    const count = Math.min(chunkSize, len - chunkStart);
+    const byteStart = chunkStart * bytesPerElem;
+
+    const entry = workers[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    pending.push(
+      new Promise<{ id: number; acc: number }>((resolve, reject) => {
+        entry.resolve = (data: any) => resolve({ id: w, acc: data.acc });
+        entry.reject = reject;
+        entry.w.postMessage({
+          id: w,
+          fnSrc,
+          op: "reduce",
+          reduceSab: sab,
+          elemType,
+          byteStart,
+          count,
+          baseIndex: chunkStart,
+          init: initialValue,
+        });
+      }),
+    );
+  }
+
+  const results = await Promise.all(pending);
+  returnSab(sab);
+
+  results.sort((a, b) => a.id - b.id);
+
+  const fn = (0, eval)("(" + fnSrc + ")") as (acc: number, val: number, idx: number) => number;
+  let acc = results[0].acc;
+  for (let i = 1; i < results.length; i++) {
+    acc = fn(acc, results[i].acc, -1);
+  }
+  return acc;
+}
+
+export default { pmap, preduce, disposeWorkers, _heuristicState, _resetHeuristic };
