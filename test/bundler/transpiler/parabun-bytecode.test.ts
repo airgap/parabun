@@ -106,8 +106,9 @@ describe("parabun bytecode cache", () => {
     const entry = build.outputs.find(o => o.kind === "entry-point")!;
 
     // Modify the .js to output a different value (simulating parser change)
+    // Pipeline inline fusion turns `21 |> double` into `21 * 2`, so replace that
     let jsContent = readFileSync(entry.path, "utf-8");
-    jsContent = jsContent.replace("double(21)", "double(50)");
+    jsContent = jsContent.replace("21 * 2", "50 * 2");
     writeFileSync(entry.path, jsContent);
 
     // Run — JSC's source hash validation should reject the old bytecode

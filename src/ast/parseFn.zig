@@ -121,6 +121,21 @@ pub fn ParseFn(
                 p.popScope();
             }
 
+            // Parabun: register eligible pure functions for pipeline inline fusion
+            if (name != null and func.flags.contains(.is_pure) and
+                func.args.len == 1 and func.args[0].default == null and
+                func.args[0].binding.data == .b_identifier and
+                func.body.stmts.len == 1 and func.body.stmts[0].data == .s_return)
+            {
+                if (func.body.stmts[0].data.s_return.value) |body_expr| {
+                    p.pure_inline_fns.append(p.allocator, .{
+                        .fn_name = nameText,
+                        .param_name = p.loadNameFromRef(func.args[0].binding.data.b_identifier.ref),
+                        .body_expr = body_expr,
+                    }) catch {};
+                }
+            }
+
             return p.s(
                 S.Function{
                     .func = func,

@@ -878,6 +878,11 @@ pub fn ParseSuffix(
 
             const rhs = try p.parseExpr(.nullish_coalescing);
 
+            // Parabun: pipeline inline fusion — inline pure function bodies
+            if (tryInlinePipeline(p, left, rhs)) {
+                return .next;
+            }
+
             // Build: rhs(left)
             const args = try ExprNodeList.initOne(p.allocator, left.*);
             left.* = p.newExpr(E.Call{
@@ -886,6 +891,129 @@ pub fn ParseSuffix(
                 .close_paren_loc = p.lexer.loc(),
             }, left.loc);
             return .next;
+        }
+
+        /// Try to inline a pure function body at a pipeline call site.
+        /// Returns true if inlining succeeded and `left` was updated.
+        fn tryInlinePipeline(p: *P, left: *Expr, rhs: Expr) bool {
+            // Case 1: RHS is an inline pure arrow — pure (x) => expr
+            if (rhs.data == .e_arrow) {
+                const arrow = rhs.data.e_arrow;
+                if (arrow.is_pure and arrow.args.len == 1 and
+                    arrow.args[0].default == null and
+                    arrow.args[0].binding.data == .b_identifier and
+                    arrow.body.stmts.len == 1 and
+                    arrow.body.stmts[0].data == .s_return)
+                {
+                    if (arrow.body.stmts[0].data.s_return.value) |body_expr| {
+                        const param_name = p.loadNameFromRef(arrow.args[0].binding.data.b_identifier.ref);
+                        if (substituteByName(p, body_expr, param_name, left.*)) |result| {
+                            left.* = result;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
+            // Case 2: RHS is an inline pure function expression
+            if (rhs.data == .e_function) {
+                const func = rhs.data.e_function.func;
+                if (func.flags.contains(.is_pure) and func.args.len == 1 and
+                    func.args[0].default == null and
+                    func.args[0].binding.data == .b_identifier and
+                    func.body.stmts.len == 1 and
+                    func.body.stmts[0].data == .s_return)
+                {
+                    if (func.body.stmts[0].data.s_return.value) |body_expr| {
+                        const param_name = p.loadNameFromRef(func.args[0].binding.data.b_identifier.ref);
+                        if (substituteByName(p, body_expr, param_name, left.*)) |result| {
+                            left.* = result;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
+            // Case 3: RHS is an identifier — look up in the pure inline map
+            if (rhs.data == .e_identifier) {
+                const fn_name = p.loadNameFromRef(rhs.data.e_identifier.ref);
+                for (p.pure_inline_fns.items) |info| {
+                    if (bun.strings.eql(info.fn_name, fn_name)) {
+                        if (substituteByName(p, info.body_expr, info.param_name, left.*)) |result| {
+                            left.* = result;
+                            return true;
+                        }
+                        break;
+                    }
+                }
+                return false;
+            }
+
+            return false;
+        }
+
+        fn substituteByName(p: *P, expr: Expr, param_name: string, replacement: Expr) ?Expr {
+            return switch (expr.data) {
+                .e_identifier => |id| if (bun.strings.eql(p.loadNameFromRef(id.ref), param_name)) replacement else expr,
+                .e_number, .e_string, .e_null, .e_undefined, .e_missing => expr,
+                .e_binary => |bin| {
+                    const new_left = substituteByName(p, bin.left, param_name, replacement) orelse return null;
+                    const new_right = substituteByName(p, bin.right, param_name, replacement) orelse return null;
+                    return Expr.init(E.Binary, .{
+                        .op = bin.op,
+                        .left = new_left,
+                        .right = new_right,
+                    }, expr.loc);
+                },
+                .e_unary => |un| {
+                    const new_val = substituteByName(p, un.value, param_name, replacement) orelse return null;
+                    return Expr.init(E.Unary, .{
+                        .op = un.op,
+                        .value = new_val,
+                    }, expr.loc);
+                },
+                .e_dot => |dot| {
+                    const new_target = substituteByName(p, dot.target, param_name, replacement) orelse return null;
+                    return Expr.init(E.Dot, .{
+                        .target = new_target,
+                        .name = dot.name,
+                        .name_loc = dot.name_loc,
+                    }, expr.loc);
+                },
+                .e_index => |idx| {
+                    const new_target = substituteByName(p, idx.target, param_name, replacement) orelse return null;
+                    const new_index = substituteByName(p, idx.index, param_name, replacement) orelse return null;
+                    return Expr.init(E.Index, .{
+                        .target = new_target,
+                        .index = new_index,
+                    }, expr.loc);
+                },
+                .e_call => |call| {
+                    const new_target = substituteByName(p, call.target, param_name, replacement) orelse return null;
+                    const new_args_slice = p.allocator.alloc(Expr, call.args.len) catch return null;
+                    for (call.args.slice(), 0..) |arg, i| {
+                        new_args_slice[i] = substituteByName(p, arg, param_name, replacement) orelse return null;
+                    }
+                    return Expr.init(E.Call, .{
+                        .target = new_target,
+                        .args = ExprNodeList.fromOwnedSlice(new_args_slice),
+                        .close_paren_loc = call.close_paren_loc,
+                    }, expr.loc);
+                },
+                .e_if => |cond| {
+                    const new_test = substituteByName(p, cond.test_, param_name, replacement) orelse return null;
+                    const new_yes = substituteByName(p, cond.yes, param_name, replacement) orelse return null;
+                    const new_no = substituteByName(p, cond.no, param_name, replacement) orelse return null;
+                    return Expr.init(E.If, .{
+                        .test_ = new_test,
+                        .yes = new_yes,
+                        .no = new_no,
+                    }, expr.loc);
+                },
+                else => null,
+            };
         }
         fn t_in(p: *P, level: Level, left: *Expr) anyerror!Continuation {
             if (level.gte(.compare) or !p.allow_in) {

@@ -161,6 +161,11 @@ pub fn NewParser_(
         fn_or_arrow_data_parse: FnOrArrowDataParse = FnOrArrowDataParse{},
         fn_or_arrow_data_visit: FnOrArrowDataVisit = FnOrArrowDataVisit{},
         fn_only_data_visit: FnOnlyDataVisit = FnOnlyDataVisit{},
+
+        // Parabun: pure functions eligible for pipeline inline fusion.
+        // Populated by parseFnStmt when a pure function has a single parameter
+        // and a single-return body. Consumed by the |> desugaring.
+        pure_inline_fns: List(PureInlineInfo) = .{},
         allocated_names: List(string) = .{},
         // allocated_names: ListManaged(string) = ListManaged(string).init(bun.default_allocator),
         // allocated_names_pool: ?*AllocatedNamesPool.Node = null,
@@ -538,6 +543,12 @@ pub fn NewParser_(
             }
             return "";
         }
+
+        pub const PureInlineInfo = struct {
+            fn_name: string,
+            param_name: string,
+            body_expr: Expr,
+        };
 
         pub fn checkDynamicSpecifier(p: *P, arg: Expr, loc: logger.Loc, comptime kind: []const u8) !void {
             if (!p.options.bundle or p.options.allow_unresolved.* == .all) return;
