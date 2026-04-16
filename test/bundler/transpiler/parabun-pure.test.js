@@ -85,7 +85,7 @@ describe("Parabun Pure Keyword", () => {
     it("pure function with ..= inside", () => {
       const out = transpiler.transformSync("pure async function getData(p) { const result ..= p; return result; }");
       expect(out).toContain("async function getData");
-      expect(out).toContain("await p");
+      expect(out).toContain("__parabunPeek");
     });
   });
 });

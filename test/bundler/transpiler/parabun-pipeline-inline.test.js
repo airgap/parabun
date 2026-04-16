@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { bunEnv, bunExe } from "harness";
 
 function ts(code, options = {}) {
   return new Bun.Transpiler({
@@ -99,13 +100,14 @@ describe("pipeline inline fusion", () => {
   test("runtime correctness: simple pipeline inline", async () => {
     await using proc = Bun.spawn({
       cmd: [
-        process.execPath,
+        bunExe(),
         "-e",
         `
         pure function double(x) { return x * 2 }
         console.log(21 |> double)
       `,
       ],
+      env: bunEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -117,7 +119,7 @@ describe("pipeline inline fusion", () => {
   test("runtime correctness: chained pipeline inline", async () => {
     await using proc = Bun.spawn({
       cmd: [
-        process.execPath,
+        bunExe(),
         "-e",
         `
         pure function double(x) { return x * 2 }
@@ -125,6 +127,7 @@ describe("pipeline inline fusion", () => {
         console.log(10 |> double |> inc)
       `,
       ],
+      env: bunEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -135,7 +138,8 @@ describe("pipeline inline fusion", () => {
 
   test("runtime correctness: inline function expression pipeline", async () => {
     await using proc = Bun.spawn({
-      cmd: [process.execPath, "-e", `console.log(5 |> pure function(x) { return x * 3 })`],
+      cmd: [bunExe(), "-e", `console.log(5 |> pure function(x) { return x * 3 })`],
+      env: bunEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -147,13 +151,14 @@ describe("pipeline inline fusion", () => {
   test("runtime correctness: pipeline with ternary inline", async () => {
     await using proc = Bun.spawn({
       cmd: [
-        process.execPath,
+        bunExe(),
         "-e",
         `
         pure function clamp(x) { return x > 100 ? 100 : x }
         console.log(200 |> clamp)
       `,
       ],
+      env: bunEnv,
       stdout: "pipe",
       stderr: "pipe",
     });
