@@ -172,16 +172,21 @@ function map<T, U>(fn: (x: T, i: number) => U | Promise<U>): Transform<T, U> {
       }
     })();
   };
+  transform.__pbTag = "map";
+  transform.__pbFn = fn;
   return transform;
 }
 
 function filter<T>(pred: (x: T, i: number) => boolean | Promise<boolean>): Transform<T, T> {
-  return async function* (source: Source<T>): Stream<T> {
+  const transform: any = async function* (source: Source<T>): Stream<T> {
     let i = 0;
     for await (const x of source) {
       if (await pred(x, i++)) yield x;
     }
   };
+  transform.__pbTag = "filter";
+  transform.__pbFn = pred;
+  return transform;
 }
 
 function take<T>(n: number): Transform<T, T> {
@@ -290,7 +295,7 @@ async function collect<T>(source: Source<T> | FArray | FusedChain): Promise<T[]>
 }
 
 function reduce<T, A>(fn: (acc: A, x: T, i: number) => A | Promise<A>, init: A) {
-  return async function (source: Source<T>): Promise<A> {
+  const terminal: any = async function (source: Source<T>): Promise<A> {
     let acc = init;
     let i = 0;
     for await (const x of source) {
@@ -298,6 +303,10 @@ function reduce<T, A>(fn: (acc: A, x: T, i: number) => A | Promise<A>, init: A) 
     }
     return acc;
   };
+  terminal.__pbTag = "reduce";
+  terminal.__pbFn = fn;
+  terminal.__pbInit = init;
+  return terminal;
 }
 
 function forEach<T>(fn: (x: T, i: number) => unknown | Promise<unknown>) {
@@ -367,6 +376,145 @@ function pipe<T>(source: Source<T>, ...transforms: Array<(s: any) => any>): any 
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// pipeParallel — parallel pipeline execution via bun:parallel
+//
+// Inspects tagged stages to identify parallelizable segments:
+// - Consecutive `map` stages are composed into a single function and
+//   dispatched via `pmap` (data parallelism across workers).
+// - A terminal `reduce` is dispatched via `preduce`.
+// - Non-parallelizable stages (filter, take, drop, etc.) act as barriers:
+//   data is collected, the barrier runs serially, and the next parallel
+//   segment picks up the output.
+// - Untagged (opaque) stages fall back to serial streaming.
+//
+// For small inputs (< 256 items), falls back to serial `pipe`.
+// ---------------------------------------------------------------------------
+
+const PARALLEL_THRESHOLD = 256;
+
+const parallel = require("./parallel.ts");
+
+function composeFnSources(fns: Array<(x: any, i: number) => any>): (x: any, i: number) => any {
+  if (fns.length === 1) return fns[0];
+  const sources = fns.map(f => f.toString());
+  return (0, eval)(
+    "(function(x,i){var __f=[" + sources.join(",") + "],v=x;for(var j=0;j<__f.length;j++)v=__f[j](v,i);return v})",
+  );
+}
+
+async function materialize(source: any): Promise<any[]> {
+  if ($isJSArray(source)) return source;
+  if (isFusedChain(source)) {
+    const realized = realizeChain(source);
+    const out = new Array(realized.length);
+    for (let i = 0; i < realized.length; i++) out[i] = realized[i];
+    return out;
+  }
+  if (isFArray(source)) {
+    const out = new Array(source.length);
+    for (let i = 0; i < source.length; i++) out[i] = source[i];
+    return out;
+  }
+  if (source != null && typeof source[Symbol.iterator] === "function") {
+    return Array.from(source);
+  }
+  if (source != null && typeof source[Symbol.asyncIterator] === "function") {
+    const out: any[] = [];
+    for await (const x of source) out.push(x);
+    return out;
+  }
+  throw new TypeError("pipeParallel: source must be iterable");
+}
+
+type Segment =
+  | { kind: "maps"; fns: Array<(x: any, i: number) => any> }
+  | { kind: "filter"; fn: (x: any, i: number) => boolean }
+  | { kind: "reduce"; fn: (acc: any, x: any, i: number) => any; init: any }
+  | { kind: "opaque"; transform: (s: any) => any };
+
+function classifyStages(stages: Array<(s: any) => any>): Segment[] {
+  const segments: Segment[] = [];
+  let pendingMaps: Array<(x: any, i: number) => any> = [];
+
+  for (const stage of stages) {
+    const tag = (stage as any).__pbTag;
+    if (tag === "map") {
+      pendingMaps.push((stage as any).__pbFn);
+    } else {
+      if (pendingMaps.length > 0) {
+        segments.push({ kind: "maps", fns: pendingMaps });
+        pendingMaps = [];
+      }
+      if (tag === "filter") {
+        segments.push({ kind: "filter", fn: (stage as any).__pbFn });
+      } else if (tag === "reduce") {
+        segments.push({ kind: "reduce", fn: (stage as any).__pbFn, init: (stage as any).__pbInit });
+      } else {
+        segments.push({ kind: "opaque", transform: stage });
+      }
+    }
+  }
+  if (pendingMaps.length > 0) {
+    segments.push({ kind: "maps", fns: pendingMaps });
+  }
+  return segments;
+}
+
+async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => any>): Promise<any> {
+  if (stages.length === 0) return materialize(source);
+
+  let data = await materialize(source);
+
+  if (data.length < PARALLEL_THRESHOLD) {
+    let out: any = data;
+    for (const s of stages) out = s(out);
+    if (out != null && typeof out.then === "function") out = await out;
+    if (out != null && typeof out[Symbol.asyncIterator] === "function") {
+      const arr: any[] = [];
+      for await (const x of out) arr.push(x);
+      return arr;
+    }
+    return out;
+  }
+
+  const segments = classifyStages(stages);
+
+  for (const seg of segments) {
+    switch (seg.kind) {
+      case "maps": {
+        const composed = composeFnSources(seg.fns);
+        data = await parallel.pmap(composed, data);
+        break;
+      }
+      case "filter": {
+        const fn = seg.fn;
+        data = data.filter((x: any, i: number) => fn(x, i));
+        break;
+      }
+      case "reduce": {
+        return parallel.preduce(seg.fn, data, seg.init);
+      }
+      case "opaque": {
+        let result = seg.transform(data);
+        if (result != null && typeof result.then === "function") result = await result;
+        if (result != null && typeof result[Symbol.asyncIterator] === "function") {
+          const arr: any[] = [];
+          for await (const x of result) arr.push(x);
+          data = arr;
+        } else if ($isJSArray(result)) {
+          data = result;
+        } else {
+          return result;
+        }
+        break;
+      }
+    }
+  }
+
+  return data;
+}
+
 export default {
   map,
   filter,
@@ -387,4 +535,5 @@ export default {
   toFloat64Array,
   range,
   pipe,
+  pipeParallel,
 };

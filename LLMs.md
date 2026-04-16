@@ -178,6 +178,22 @@ regardless of chain length. Non-fusion-aware combinators (`filter`,
 which realizes the chain on demand and proceeds on the existing
 async-generator path.
 
+**Parallel pipeline (`pipeParallel`):** dispatches pipeline stages via
+`bun:parallel` for data parallelism. Consecutive `map` stages are composed
+into a single function and dispatched via `pmap`. A terminal `reduce` uses
+`preduce`. Non-parallelizable stages (`filter`, `take`, etc.) act as
+barriers — data is collected, the barrier runs serially, then the next
+parallel segment resumes. Falls back to serial `pipe` for small inputs
+(< 256 items).
+
+```
+import { map, filter, reduce, pipeParallel } from "bun:pipeline";
+pure function triple(x) { return x * 3; }
+pure function isOdd(x) { return x % 2 !== 0; }
+pure function add(acc, x) { return acc + x; }
+const sum = await pipeParallel(data, map(triple), filter(isOdd), reduce(add, 0));
+```
+
 Implementation: `src/js/bun/pipeline.ts`.
 
 ### `bun:simd` — vector primitives for typed arrays
