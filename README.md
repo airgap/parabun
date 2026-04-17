@@ -207,23 +207,23 @@ Operators bind tighter-to-looser in the order listed, so `data |> transform ..! 
 
 ## Editor Support
 
-### VS Code
+### VS Code / Cursor / Kiro
 
-Install the prebuilt `.vsix` from the latest release:
-
-```bash
-curl -fsSL -o /tmp/parabun.vsix \
-    https://github.com/airgap/parabun/releases/latest/download/parabun.vsix
-code --install-extension /tmp/parabun.vsix
+```sh
+curl -fsSL https://raw.githubusercontent.com/airgap/parabun/main/install-extension.sh | bash
 ```
 
-Or build from source:
+Downloads the latest `.vsix` and installs it into every compatible editor found on the system (`code`, `cursor`, `kiro`).
+
+Features: syntax highlighting, snippets, LSP diagnostics, completions, hover docs with desugaring examples, code actions (convert `await`→`..=`, `.catch()`→`..!`, add `pure`, `f(x)`→`x |> f`), semantic tokens for `pure`, and a **TypeScript language service plugin** that lets you use Parabun syntax in `.ts` files with full TS tooling.
+
+To build from source instead:
 
 ```bash
-cd editors/vscode/parabun && npm install && npm run build
+cd editors/ts-plugin && npm install && npm run build
+cd ../vscode/parabun && npm install && npm run build
+./editors/install-vsix.sh
 ```
-
-Features: syntax highlighting, LSP diagnostics, completions, hover docs, semantic tokens for `pure`.
 
 ### E Editor
 
