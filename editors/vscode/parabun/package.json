@@ -145,6 +145,12 @@
         "path": "./snippets/parabun.json"
       }
     ],
+    "typescriptServerPlugins": [
+      {
+        "name": "parabun-ts-plugin",
+        "enableForWorkspaceTypeScriptVersions": true
+      }
+    ],
     "configuration": {
       "title": "Parabun",
       "properties": {
@@ -164,6 +170,6 @@
     "typescript": "^5.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"require('fs').mkdirSync('server',{recursive:true});require('fs').copyFileSync('../../lsp/parabun-lsp.ts','server/parabun-lsp.ts')\""
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.js"
   }
 }

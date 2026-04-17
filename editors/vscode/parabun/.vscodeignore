@@ -15,3 +15,5 @@ node_modules/**
 !node_modules/semver/**
 !node_modules/lru-cache/**
 !node_modules/yallist/**
+!node_modules/parabun-ts-plugin/out/**
+!node_modules/parabun-ts-plugin/package.json
