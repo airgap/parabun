@@ -1,0 +1,68 @@
+{
+  "Pure Function": {
+    "prefix": "pfn",
+    "body": ["pure function ${1:name}(${2:params}) {", "\t$0", "}"],
+    "description": "Pure function declaration"
+  },
+  "Pure Async Function": {
+    "prefix": "pafn",
+    "body": ["pure async function ${1:name}(${2:params}) {", "\t$0", "}"],
+    "description": "Pure async function declaration"
+  },
+  "Pure Arrow Function": {
+    "prefix": "parrow",
+    "body": "pure (${1:params}) => ${0}",
+    "description": "Pure arrow function expression"
+  },
+  "Pipeline Chain": {
+    "prefix": "pipe",
+    "body": "${1:value} |> ${2:fn1} |> ${0:fn2}",
+    "description": "Pipeline operator chain: value |> f |> g"
+  },
+  "Await Assign": {
+    "prefix": "awas",
+    "body": "const ${1:result} ..= ${0:promise};",
+    "description": "Await-assign: desugars to const result = await promise"
+  },
+  "Error Catch": {
+    "prefix": "errc",
+    "body": "${1:promise} ..! ${0:errorHandler}",
+    "description": "Error catch operator: desugars to promise.catch(handler)"
+  },
+  "Finally": {
+    "prefix": "fin",
+    "body": "${1:promise} ..& ${0:cleanup}",
+    "description": "Finally operator: desugars to promise.finally(cleanup)"
+  },
+  "Error Chain": {
+    "prefix": "errchain",
+    "body": "${1:promise} ..! ${2:onError} ..& ${0:cleanup}",
+    "description": "Chained error handling: promise.catch(onError).finally(cleanup)"
+  },
+  "Pipeline with Pure Inline": {
+    "prefix": "pipefn",
+    "body": "${1:value} |> pure function(${2:x}) { return ${0} }",
+    "description": "Pipeline with inline pure function (gets inlined at transpile time)"
+  },
+  "Parallel Pipeline": {
+    "prefix": "ppipe",
+    "body": [
+      "import { pipeParallel } from \"bun:pipeline\";",
+      "",
+      "const result = pipeParallel(${1:data}, [",
+      "\t{ stage: \"${2:map}\", fn: (${3:x}) => ${4:x * 2} },",
+      "\t$0",
+      "]);"
+    ],
+    "description": "Parallel pipeline with bun:pipeline"
+  },
+  "SIMD Vector Op": {
+    "prefix": "simd",
+    "body": [
+      "import { ${1|f32x4Add,f32x4Mul,f32x4Sub,f32x4Div|} } from \"bun:simd\";",
+      "",
+      "const result = ${1}(${2:a}, ${3:b});"
+    ],
+    "description": "SIMD vector operation with bun:simd"
+  }
+}

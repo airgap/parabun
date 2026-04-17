@@ -180,50 +180,123 @@ function getHoverInfo(content: string, line: number, character: number): { conte
   if (line >= lines.length) return null;
   const lineText = lines[line];
 
-  // Check if cursor is on a Parabun keyword/operator
   const wordAt = getWordAt(lineText, character);
 
   if (wordAt === "pure") {
     return {
       contents: [
-        "```parabun",
-        "pure function modifier",
-        "```",
-        "---",
-        "Marks a function as **pure** — it cannot access `this` or cause side effects.",
+        "### `pure` — function purity modifier",
         "",
-        "Desugars to a standard function at transpile time.",
+        "Marks a function as **pure**. The transpiler enforces:",
+        "- No `this` access",
+        "- No mutation of outer-scope variables",
+        "- Enables automatic inlining at `|>` call sites",
         "",
+        "#### Before (Parabun)",
         "```typescript",
-        "pure function add(a: number, b: number): number {",
+        "pure function add(a: number, b: number) {",
         "  return a + b;",
         "}",
+        "const result = 10 |> add.bind(null, 5);",
+        "```",
+        "",
+        "#### After (JavaScript)",
+        "```javascript",
+        "function add(a, b) {",
+        "  return a + b;",
+        "}",
+        "const result = add(5, 10);",
         "```",
       ].join("\n"),
     };
   }
 
-  // Check for operators at the cursor position
-  const around = lineText.slice(Math.max(0, character - 2), character + 2);
+  const around = lineText.slice(Math.max(0, character - 3), character + 3);
 
   if (around.includes("..=")) {
     return {
-      contents: "**`..=` await-assign** — Desugars `x ..= expr` to `const x = await expr`",
+      contents: [
+        "### `..=` — await-assign operator",
+        "",
+        "Synchronously resolves already-settled promises without a microtask tick.",
+        "Falls back to `await` for pending promises.",
+        "",
+        "#### Before (Parabun)",
+        "```typescript",
+        "const data ..= fetchUser(id);",
+        "```",
+        "",
+        "#### After (JavaScript)",
+        "```javascript",
+        "var __ref = __parabunPeek(fetchUser(id));",
+        "const data = __ref[0] ? __ref[1] : await __ref[1];",
+        "```",
+        "",
+        "> Settled promises resolve **immediately** — no microtask delay.",
+      ].join("\n"),
     };
   }
   if (around.includes("..!")) {
     return {
-      contents: "**`..!` catch operator** — Desugars `expr ..! handler` to `expr.catch(handler)`",
+      contents: [
+        "### `..!` — catch operator",
+        "",
+        "Attaches an error handler to a promise expression.",
+        "",
+        "#### Before (Parabun)",
+        "```typescript",
+        "const data = fetchUser(id) ..! (err) => fallback;",
+        "```",
+        "",
+        "#### After (JavaScript)",
+        "```javascript",
+        "const data = fetchUser(id).catch((err) => fallback);",
+        "```",
+        "",
+        "> Chainable: `expr ..! onError ..& onFinally`",
+      ].join("\n"),
     };
   }
   if (around.includes("..&")) {
     return {
-      contents: "**`..&` finally operator** — Desugars `expr ..& cleanup` to `expr.finally(cleanup)`",
+      contents: [
+        "### `..&` — finally operator",
+        "",
+        "Attaches a cleanup handler that runs regardless of outcome.",
+        "",
+        "#### Before (Parabun)",
+        "```typescript",
+        "const result = fetchUser(id) ..& () => cleanup();",
+        "```",
+        "",
+        "#### After (JavaScript)",
+        "```javascript",
+        "const result = fetchUser(id).finally(() => cleanup());",
+        "```",
+        "",
+        "> Chainable: `expr ..! onError ..& onFinally`",
+      ].join("\n"),
     };
   }
   if (around.includes("|>")) {
     return {
-      contents: "**`|>` pipeline operator** — Desugars `x |> f` to `f(x)`",
+      contents: [
+        "### `|>` — pipeline operator",
+        "",
+        "Pipes a value through a function. Chains read left-to-right.",
+        "",
+        "#### Before (Parabun)",
+        "```typescript",
+        "const result = data |> transform |> validate |> save;",
+        "```",
+        "",
+        "#### After (JavaScript)",
+        "```javascript",
+        "const result = save(validate(transform(data)));",
+        "```",
+        "",
+        "> With `pure` functions, the pipeline is **inlined** — zero call overhead.",
+      ].join("\n"),
     };
   }
 
@@ -236,6 +309,169 @@ function getWordAt(line: string, col: number): string {
   while (start > 0 && /\w/.test(line[start - 1])) start--;
   while (end < line.length && /\w/.test(line[end])) end++;
   return line.slice(start, end);
+}
+
+// ---------------------------------------------------------------------------
+// Code Actions — refactoring suggestions
+// ---------------------------------------------------------------------------
+
+interface TextEdit {
+  range: Range;
+  newText: string;
+}
+
+interface CodeAction {
+  title: string;
+  kind: string;
+  edit?: { changes: Record<string, TextEdit[]> };
+}
+
+function getCodeActions(uri: string, content: string, range: Range): CodeAction[] {
+  const actions: CodeAction[] = [];
+  const lines = content.split("\n");
+  const startLine = range.start.line;
+  const endLine = Math.min(range.end.line, lines.length - 1);
+
+  for (let i = startLine; i <= endLine; i++) {
+    const line = lines[i];
+
+    // "Convert await to ..=" — find `await expr` patterns
+    const awaitMatch = line.match(/\bawait\s+/);
+    if (awaitMatch && awaitMatch.index !== undefined) {
+      const col = awaitMatch.index;
+      const prefix = line.slice(0, col);
+      const assignMatch = prefix.match(/(const|let|var)\s+(\w+)\s*=\s*$/);
+      if (assignMatch) {
+        const keyword = assignMatch[1];
+        const varName = assignMatch[2];
+        const exprStart = col + awaitMatch[0].length;
+        const expr = line.slice(exprStart).replace(/;?\s*$/, "");
+        const lineStart = col - assignMatch[0].length;
+        actions.push({
+          title: `Convert to ${keyword} ${varName} ..= ${expr}`,
+          kind: "refactor.rewrite",
+          edit: {
+            changes: {
+              [uri]: [
+                {
+                  range: {
+                    start: { line: i, character: lineStart },
+                    end: { line: i, character: line.length },
+                  },
+                  newText: `${keyword} ${varName} ..= ${expr};`,
+                },
+              ],
+            },
+          },
+        });
+      }
+    }
+
+    // "Wrap in ..! catch" — find `.catch(` patterns
+    const catchMatch = line.match(/\.catch\(([^)]+)\)/);
+    if (catchMatch && catchMatch.index !== undefined) {
+      const before = line.slice(0, catchMatch.index);
+      const handler = catchMatch[1];
+      const afterEnd = catchMatch.index + catchMatch[0].length;
+      const after = line.slice(afterEnd);
+      actions.push({
+        title: "Convert .catch() to ..! operator",
+        kind: "refactor.rewrite",
+        edit: {
+          changes: {
+            [uri]: [
+              {
+                range: {
+                  start: { line: i, character: 0 },
+                  end: { line: i, character: line.length },
+                },
+                newText: `${before} ..! ${handler}${after}`,
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    // "Wrap in ..& finally" — find `.finally(` patterns
+    const finallyMatch = line.match(/\.finally\(([^)]+)\)/);
+    if (finallyMatch && finallyMatch.index !== undefined) {
+      const before = line.slice(0, finallyMatch.index);
+      const handler = finallyMatch[1];
+      const afterEnd = finallyMatch.index + finallyMatch[0].length;
+      const after = line.slice(afterEnd);
+      actions.push({
+        title: "Convert .finally() to ..& operator",
+        kind: "refactor.rewrite",
+        edit: {
+          changes: {
+            [uri]: [
+              {
+                range: {
+                  start: { line: i, character: 0 },
+                  end: { line: i, character: line.length },
+                },
+                newText: `${before} ..& ${handler}${after}`,
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    // "Add pure" — find function declarations without pure
+    const fnMatch = line.match(/^(\s*)(export\s+)?(async\s+)?function\b/);
+    if (fnMatch && !line.match(/\bpure\s/) && fnMatch.index !== undefined) {
+      const indent = fnMatch[1] || "";
+      const exportKw = fnMatch[2] || "";
+      const insertCol = indent.length + exportKw.length;
+      actions.push({
+        title: "Add pure modifier",
+        kind: "refactor.rewrite",
+        edit: {
+          changes: {
+            [uri]: [
+              {
+                range: {
+                  start: { line: i, character: insertCol },
+                  end: { line: i, character: insertCol },
+                },
+                newText: "pure ",
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    // "Convert f(x) to x |> f" — simple single-arg call
+    const callMatch = line.match(/\b([a-zA-Z_$]\w*)\(([a-zA-Z_$]\w*)\)/);
+    if (callMatch && callMatch.index !== undefined) {
+      const fnName = callMatch[1];
+      const argName = callMatch[2];
+      if (!["if", "for", "while", "switch", "return", "catch", "typeof", "require", "import"].includes(fnName)) {
+        actions.push({
+          title: `Convert ${fnName}(${argName}) to ${argName} |> ${fnName}`,
+          kind: "refactor.rewrite",
+          edit: {
+            changes: {
+              [uri]: [
+                {
+                  range: {
+                    start: { line: i, character: callMatch.index },
+                    end: { line: i, character: callMatch.index + callMatch[0].length },
+                  },
+                  newText: `${argName} |> ${fnName}`,
+                },
+              ],
+            },
+          },
+        });
+      }
+    }
+  }
+
+  return actions;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +530,9 @@ function handleMessage(msg: any) {
             triggerCharacters: [".", "|"],
           },
           hoverProvider: true,
+          codeActionProvider: {
+            codeActionKinds: ["refactor.rewrite"],
+          },
           semanticTokensProvider: {
             legend: {
               tokenTypes: SEMANTIC_TOKEN_TYPES,
@@ -361,6 +600,17 @@ function handleMessage(msg: any) {
         sendResponse(id, hover ? { contents: { kind: "markdown", value: hover.contents } } : null);
       } else {
         sendResponse(id, null);
+      }
+      break;
+    }
+
+    case "textDocument/codeAction": {
+      const uri = params.textDocument.uri;
+      const content = documents.get(uri);
+      if (content) {
+        sendResponse(id, getCodeActions(uri, content, params.range));
+      } else {
+        sendResponse(id, []);
       }
       break;
     }

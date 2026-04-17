@@ -127,6 +127,24 @@
         }
       }
     ],
+    "snippets": [
+      {
+        "language": "parabun-ts",
+        "path": "./snippets/parabun.json"
+      },
+      {
+        "language": "parabun-tsx",
+        "path": "./snippets/parabun.json"
+      },
+      {
+        "language": "parabun-js",
+        "path": "./snippets/parabun.json"
+      },
+      {
+        "language": "parabun-jsx",
+        "path": "./snippets/parabun.json"
+      }
+    ],
     "configuration": {
       "title": "Parabun",
       "properties": {
