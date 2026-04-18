@@ -22,7 +22,10 @@ export function transformParabunToTS(source: string): string {
   for (let i = 0; i < lines.length; i++) {
     lines[i] = transformLine(lines[i]);
   }
-  return lines.join("\n");
+
+  let result = lines.join("\n");
+  result = transformMultilinePipeline(result);
+  return result;
 }
 
 function transformLine(line: string): string {
@@ -106,4 +109,26 @@ function splitPipeline(expr: string): string[] {
   }
   if (current) parts.push(current);
   return parts;
+}
+
+function transformMultilinePipeline(source: string): string {
+  if (!source.includes("|>")) return source;
+
+  const lines = source.split("\n");
+  const joined: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    if (trimmed.startsWith("|>") && joined.length > 0) {
+      joined[joined.length - 1] += " " + trimmed;
+    } else {
+      joined.push(lines[i]);
+    }
+  }
+
+  for (let i = 0; i < joined.length; i++) {
+    if (joined[i].includes("|>")) {
+      joined[i] = transformPipeline(joined[i]);
+    }
+  }
+  return joined.join("\n");
 }

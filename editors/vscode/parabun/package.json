@@ -156,8 +156,8 @@
       "properties": {
         "parabun.lsp.path": {
           "type": "string",
-          "default": "parabun-lsp",
-          "description": "Path to the parabun-lsp executable"
+          "default": "parabun",
+          "description": "Path to the parabun binary (used to run the LSP server)"
         }
       }
     }
