@@ -139,7 +139,7 @@ pipeline {
                         script {
                             if (params.RUN_TESTS) {
                                 sh '''
-                                    ssh mac-mini "cd ${REMOTE_WS} && ./build/debug/bun-debug test ${TEST_FILTER}"
+                                    ssh mac-mini "cd ${REMOTE_WS} && ./build/release/bun test ${TEST_FILTER}"
                                 '''
                             }
                         }

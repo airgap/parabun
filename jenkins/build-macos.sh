@@ -63,5 +63,8 @@ echo "=== Smoke-test release binary ==="
 ./build/release/bun --revision
 ./build/release/bun -e 'console.log("hello from release/" + process.platform + "/" + process.arch)'
 
+echo "=== Cleaning post-build caches (free disk for next run) ==="
+rm -rf build/release/cache/zig build/release/obj
+
 echo "=== Build artifacts ==="
 ls -la build/release/bun
