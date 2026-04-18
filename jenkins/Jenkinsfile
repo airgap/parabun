@@ -45,7 +45,7 @@ pipeline {
         booleanParam(name: 'RUN_TESTS',     defaultValue: true,  description: 'Run parabun test suite on macOS after build')
         string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
                description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
-        booleanParam(name: 'PUBLISH_RELEASE', defaultValue: false,
+        booleanParam(name: 'PUBLISH_RELEASE', defaultValue: true,
                      description: 'Attach successful build/release binaries to a GitHub Release (parabun-<short-sha>)')
     }
 
