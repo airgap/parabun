@@ -29,7 +29,6 @@ echo "=== Refreshing node-fallbacks deps ==="
 echo "=== Cleaning stale PCH + codegen (incremental workspace may have stale artifacts) ==="
 rm -rf build/debug/pch/*.pch build/release/pch/*.pch build/debug/tmp_modules build/release/tmp_modules
 
-echo "=== Building Parabun (debug, no asan) ==="
 # We rsync without .git, so scripts/build/config.ts can't compute the
 # revision — it falls back to "unknown", which depVersionsHeader.ts then
 # filters out, leaving BUN_VERSION_UWS/USOCKETS undefined and BunProcess.cpp
@@ -37,17 +36,26 @@ echo "=== Building Parabun (debug, no asan) ==="
 # as an env var so we can hand it to the build.
 export GIT_SHA="${GIT_SHA:-unknown}"
 echo "GIT_SHA=${GIT_SHA}"
-# ASAN's dyld-shim is Linux-only (uses __dyld_get_dyld_header which macOS
-# doesn't expose). Use the noasan debug profile — it's also what we need
-# anyway since asan interferes with Metal/CUDA signal handlers.
-bun run build:debug:noasan
 
-echo "=== Smoke-test debug binary ==="
-./build/debug/bun-debug --version
-./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
+# Skip the debug build in CI by default: the mac-mini has limited disk
+# (~250 GB) and the debug + release builds together can exhaust it.
+# Set BUILD_DEBUG=1 if you want to reproduce the full CI shape locally.
+if [ "${BUILD_DEBUG:-0}" = "1" ]; then
+    echo "=== Building Parabun (debug, no asan) ==="
+    bun run build:debug:noasan
 
-# Release build — what gets published. Separate build/release/ tree so
-# debug and release don't clobber each other across runs.
+    echo "=== Smoke-test debug binary ==="
+    ./build/debug/bun-debug --version
+    ./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
+
+    # Free disk before release build
+    echo "=== Cleaning debug build artifacts to free disk ==="
+    rm -rf build/debug/cache build/debug/*.o build/debug/obj
+fi
+
+echo "=== Cleaning zig caches from previous builds ==="
+rm -rf build/release/cache/zig build/debug/cache/zig
+
 echo "=== Building Parabun (release) ==="
 bun run build:release
 
@@ -56,4 +64,4 @@ echo "=== Smoke-test release binary ==="
 ./build/release/bun -e 'console.log("hello from release/" + process.platform + "/" + process.arch)'
 
 echo "=== Build artifacts ==="
-ls -la build/debug/bun-debug build/release/bun
+ls -la build/release/bun
