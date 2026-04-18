@@ -11,6 +11,9 @@ export function activate(context: vscode.ExtensionContext) {
   const serverOptions: ServerOptions = {
     command: lspPath,
     args: ["run", lspScript, "--stdio"],
+    options: {
+      env: { ...process.env, BUN_DEBUG_QUIET_LOGS: "1" },
+    },
   };
 
   const clientOptions: LanguageClientOptions = {
