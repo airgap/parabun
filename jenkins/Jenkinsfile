@@ -213,7 +213,12 @@ pipeline {
                             export HOME="${WORKSPACE}"
                             export npm_config_cache="${WORKSPACE}/.npm"
                             mkdir -p "${npm_config_cache}"
-                            cd editors/vscode/parabun
+                            # Build the TS plugin first — copy-assets.js
+                            # copies its output into the VSIX.
+                            cd editors/ts-plugin
+                            npm install --ignore-scripts --no-audit --no-fund
+                            npm run build
+                            cd ../vscode/parabun
                             if [ -f package-lock.json ]; then
                                 npm ci --ignore-scripts --no-audit --no-fund
                             else
