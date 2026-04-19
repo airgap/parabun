@@ -2,36 +2,68 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Parabun JSX",
   "scopeName": "source.pjsx",
-  "patterns": [{ "include": "#parabun-pure" }, { "include": "#parabun-operators" }, { "include": "source.js.jsx" }],
+  "patterns": [
+    { "include": "#parabun-fun" },
+    { "include": "#parabun-pure" },
+    { "include": "#parabun-operators" },
+    { "include": "source.js.jsx" }
+  ],
   "repository": {
+    "parabun-fun": {
+      "patterns": [
+        {
+          "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
+          "captures": {
+            "1": { "name": "storage.type.function.js" }
+          }
+        }
+      ]
+    },
     "parabun-pure": {
       "patterns": [
         {
-          "match": "\\b(pure)\\s+(async)\\s+(function)\\b",
+          "match": "\\b(export)\\s+(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" },
+            "1": { "name": "keyword.control.export.js" },
+            "2": { "name": "keyword.other.pure.parabun" },
+            "3": { "name": "storage.modifier.async.js" },
+            "4": { "name": "storage.type.function.js" }
+          }
+        },
+        {
+          "match": "\\b(export)\\s+(pure)\\s+(fun(?:ction)?)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.export.js" },
+            "2": { "name": "keyword.other.pure.parabun" },
+            "3": { "name": "storage.type.function.js" }
+          }
+        },
+        {
+          "match": "\\b(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.pure.parabun" },
             "2": { "name": "storage.modifier.async.js" },
             "3": { "name": "storage.type.function.js" }
           }
         },
         {
-          "match": "\\b(pure)\\s+(function)\\b",
+          "match": "\\b(pure)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" },
+            "1": { "name": "keyword.other.pure.parabun" },
             "2": { "name": "storage.type.function.js" }
           }
         },
         {
           "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" },
+            "1": { "name": "keyword.other.pure.parabun" },
             "2": { "name": "storage.modifier.async.js" }
           }
         },
         {
           "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" }
+            "1": { "name": "keyword.other.pure.parabun" }
           }
         }
       ]

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Parabun Keyword Injection",
+  "scopeName": "inject.parabun-keywords",
+  "injectionSelector": "L:source.pts, L:source.ptsx, L:source.pjs, L:source.pjsx",
+  "patterns": [
+    {
+      "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
+      "captures": {
+        "1": { "name": "storage.type.function.parabun" }
+      }
+    },
+    {
+      "match": "\\b(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.pure.parabun" },
+        "2": { "name": "storage.modifier.async" },
+        "3": { "name": "storage.type.function.parabun" }
+      }
+    },
+    {
+      "match": "\\b(pure)\\s+(fun(?:ction)?)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.pure.parabun" },
+        "2": { "name": "storage.type.function.parabun" }
+      }
+    },
+    {
+      "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
+      "captures": {
+        "1": { "name": "keyword.other.pure.parabun" },
+        "2": { "name": "storage.modifier.async" }
+      }
+    },
+    {
+      "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
+      "captures": {
+        "1": { "name": "keyword.other.pure.parabun" }
+      }
+    }
+  ]
+}

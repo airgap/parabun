@@ -2,24 +2,59 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Parabun TypeScript",
   "scopeName": "source.pts",
-  "patterns": [{ "include": "#parabun-pure" }, { "include": "#parabun-operators" }, { "include": "source.ts" }],
+  "patterns": [
+    { "include": "#parabun-fun" },
+    { "include": "#parabun-pure" },
+    { "include": "#parabun-operators" },
+    { "include": "source.ts" }
+  ],
   "repository": {
+    "parabun-fun": {
+      "patterns": [
+        {
+          "comment": "fun keyword (shorthand for function)",
+          "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
+          "captures": {
+            "1": { "name": "storage.type.function.ts" }
+          }
+        }
+      ]
+    },
     "parabun-pure": {
       "patterns": [
         {
-          "comment": "pure async function declaration/expression",
-          "match": "\\b(pure)\\s+(async)\\s+(function)\\b",
+          "comment": "export pure async fun/function",
+          "match": "\\b(export)\\s+(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" },
+            "1": { "name": "keyword.control.export.ts" },
+            "2": { "name": "keyword.other.pure.parabun" },
+            "3": { "name": "storage.modifier.async.ts" },
+            "4": { "name": "storage.type.function.ts" }
+          }
+        },
+        {
+          "comment": "export pure fun/function",
+          "match": "\\b(export)\\s+(pure)\\s+(fun(?:ction)?)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.export.ts" },
+            "2": { "name": "keyword.other.pure.parabun" },
+            "3": { "name": "storage.type.function.ts" }
+          }
+        },
+        {
+          "comment": "pure async fun/function declaration/expression",
+          "match": "\\b(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.pure.parabun" },
             "2": { "name": "storage.modifier.async.ts" },
             "3": { "name": "storage.type.function.ts" }
           }
         },
         {
-          "comment": "pure function declaration/expression",
-          "match": "\\b(pure)\\s+(function)\\b",
+          "comment": "pure fun/function declaration/expression",
+          "match": "\\b(pure)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" },
+            "1": { "name": "keyword.other.pure.parabun" },
             "2": { "name": "storage.type.function.ts" }
           }
         },
@@ -27,7 +62,7 @@
           "comment": "pure async arrow (before async keyword)",
           "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" },
+            "1": { "name": "keyword.other.pure.parabun" },
             "2": { "name": "storage.modifier.async.ts" }
           }
         },
@@ -35,7 +70,7 @@
           "comment": "pure arrow (before parens or identifier)",
           "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "storage.modifier.pure.parabun" }
+            "1": { "name": "keyword.other.pure.parabun" }
           }
         }
       ]

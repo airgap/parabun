@@ -28,7 +28,10 @@ function init(modules: { typescript: typeof tslib }) {
       if (!original) return undefined;
 
       if (
-        (!fileName.endsWith(".ts") && !fileName.endsWith(".tsx")) ||
+        (!fileName.endsWith(".ts") &&
+          !fileName.endsWith(".tsx") &&
+          !fileName.endsWith(".pts") &&
+          !fileName.endsWith(".ptsx")) ||
         fileName.endsWith(".d.ts") ||
         fileName.includes("node_modules")
       ) {

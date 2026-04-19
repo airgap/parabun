@@ -1,12 +1,17 @@
 {
+  "Function (fun)": {
+    "prefix": "fun",
+    "body": ["fun ${1:name}(${2:params}) {", "\t$0", "}"],
+    "description": "Function declaration (fun shorthand)"
+  },
   "Pure Function": {
     "prefix": "pfn",
-    "body": ["pure function ${1:name}(${2:params}) {", "\t$0", "}"],
+    "body": ["pure fun ${1:name}(${2:params}) {", "\t$0", "}"],
     "description": "Pure function declaration"
   },
   "Pure Async Function": {
     "prefix": "pafn",
-    "body": ["pure async function ${1:name}(${2:params}) {", "\t$0", "}"],
+    "body": ["pure async fun ${1:name}(${2:params}) {", "\t$0", "}"],
     "description": "Pure async function declaration"
   },
   "Pure Arrow Function": {

@@ -9,7 +9,7 @@
  * actual compilation.  This only needs to satisfy the type checker.
  */
 
-const PARABUN_SYNTAX_RE = /\bpure\s|\.\.=|\.\.!|\.\.&|\|>/;
+const PARABUN_SYNTAX_RE = /\bpure\s|\bfun\b|\.\.=|\.\.!|\.\.&|\|>/;
 
 export function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -34,6 +34,7 @@ function transformLine(line: string): string {
 
   if (trimmed.startsWith("/*")) return line;
 
+  line = expandFun(line);
   line = stripPure(line);
   line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
@@ -42,9 +43,17 @@ function transformLine(line: string): string {
   return line;
 }
 
+// `fun` → `function` (only in declaration context, not as a variable name)
+function expandFun(line: string): string {
+  return line.replace(/(?<!\.)(\bfun)\b(?=\s*[a-zA-Z_$*(<])/g, "function");
+}
+
 // Replace `pure` keyword with same-length whitespace (position-preserving).
 function stripPure(line: string): string {
-  return line.replace(/\bpure(\s+)(?=function\b|async\s+function\b|\(|\w+\s*=>)/g, (_m, space) => "    " + space);
+  return line.replace(
+    /\bpure(\s+)(?=function\b|async\s+function\b|<[\w\s,=]+>\s*\(|\(|\w+\s*=>)/g,
+    (_m, space) => "    " + space,
+  );
 }
 
 // `const x ..= expr;` → `const x = await (expr);`

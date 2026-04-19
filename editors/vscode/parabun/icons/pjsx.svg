@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="4" fill="#1a1a2e"/>
+  <text x="16" y="13" text-anchor="middle" font-family="monospace" font-weight="bold" font-size="7" fill="#e94560">pure</text>
+  <text x="16" y="25" text-anchor="middle" font-family="monospace" font-weight="bold" font-size="9" fill="#f0db4f">.pjsx</text>
+</svg>

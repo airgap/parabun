@@ -35,6 +35,10 @@
         "extensions": [
           ".pts"
         ],
+        "icon": {
+          "light": "./icons/pts.svg",
+          "dark": "./icons/pts.svg"
+        },
         "configuration": "./language-configuration.json"
       },
       {
@@ -46,6 +50,10 @@
         "extensions": [
           ".ptsx"
         ],
+        "icon": {
+          "light": "./icons/ptsx.svg",
+          "dark": "./icons/ptsx.svg"
+        },
         "configuration": "./language-configuration.json"
       },
       {
@@ -57,6 +65,10 @@
         "extensions": [
           ".pjs"
         ],
+        "icon": {
+          "light": "./icons/pjs.svg",
+          "dark": "./icons/pjs.svg"
+        },
         "configuration": "./language-configuration.json"
       },
       {
@@ -68,6 +80,10 @@
         "extensions": [
           ".pjsx"
         ],
+        "icon": {
+          "light": "./icons/pjsx.svg",
+          "dark": "./icons/pjsx.svg"
+        },
         "configuration": "./language-configuration.json"
       }
     ],
@@ -91,6 +107,16 @@
         "language": "parabun-jsx",
         "scopeName": "source.pjsx",
         "path": "./syntaxes/parabun-jsx.tmLanguage.json"
+      },
+      {
+        "scopeName": "inject.parabun-keywords",
+        "path": "./syntaxes/parabun-inject.tmLanguage.json",
+        "injectTo": [
+          "source.pts",
+          "source.ptsx",
+          "source.pjs",
+          "source.pjsx"
+        ]
       }
     ],
     "semanticTokenScopes": [
@@ -98,7 +124,7 @@
         "language": "parabun-ts",
         "scopes": {
           "function.pure": [
-            "storage.modifier.pure.parabun"
+            "keyword.other.pure.parabun"
           ]
         }
       },
@@ -106,7 +132,7 @@
         "language": "parabun-tsx",
         "scopes": {
           "function.pure": [
-            "storage.modifier.pure.parabun"
+            "keyword.other.pure.parabun"
           ]
         }
       },
@@ -114,7 +140,7 @@
         "language": "parabun-js",
         "scopes": {
           "function.pure": [
-            "storage.modifier.pure.parabun"
+            "keyword.other.pure.parabun"
           ]
         }
       },
@@ -122,7 +148,7 @@
         "language": "parabun-jsx",
         "scopes": {
           "function.pure": [
-            "storage.modifier.pure.parabun"
+            "keyword.other.pure.parabun"
           ]
         }
       }
