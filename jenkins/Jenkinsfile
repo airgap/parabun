@@ -221,11 +221,14 @@ pipeline {
                             npm install --ignore-scripts --no-audit --no-fund
                             npm run build
                             cd ../vscode/parabun
-                            if [ -f package-lock.json ]; then
-                                npm ci --ignore-scripts --no-audit --no-fund
-                            else
-                                npm install --ignore-scripts --no-audit --no-fund
-                            fi
+                            # package-lock.json is gitignored — any lockfile
+                            # in the workspace is a leftover from a previous
+                            # run, not a committed source of truth. `npm ci`
+                            # would refuse to reconcile a package.json dep
+                            # bump against it (npm error "missing from lock
+                            # file"), so always do `npm install` and let it
+                            # rewrite the lockfile in place.
+                            npm install --ignore-scripts --no-audit --no-fund
                             npm run build
                             # Extension imports vscode-languageclient at runtime,
                             # so node_modules needs to ride along. .vscodeignore
