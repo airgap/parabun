@@ -1732,7 +1732,13 @@ fn NewLexer_(
                             // this code is so hot that if you save lexer.raw() into a temporary variable
                             // it shows up in profiling
                             lexer.identifier = lexer.raw();
-                            lexer.token = Keywords.get(lexer.identifier) orelse T.t_identifier;
+                            lexer.token = Keywords.get(lexer.identifier) orelse blk: {
+                                // Parabun: `fun` → `function` in .pts/.pjs files
+                                if (lexer.source.path.isParabunFile() and strings.eqlComptime(lexer.identifier, "fun")) {
+                                    break :blk T.t_function;
+                                }
+                                break :blk T.t_identifier;
+                            };
                         } else {
                             @branchHint(.unlikely);
                             const scan_result = try lexer.scanIdentifierWithEscapes(.normal);

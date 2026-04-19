@@ -491,11 +491,18 @@ pub fn ParseFn(
                     p,
                     args,
                 );
-                // Inherit the outer pure function's scope boundary for free-variable
-                // detection. Arrows don't create a new purity domain — they share
-                // the enclosing pure function's scope so locals captured via closure
-                // are not flagged as free variables.
-                data.pure_fn_scope = p.fn_or_arrow_data_parse.pure_fn_scope;
+                // Set scope boundary for free-variable detection. Explicitly-pure
+                // arrows (pure (...) =>) get their own boundary at the current scope.
+                // Inherited-pure arrows (non-pure arrows inside a pure function)
+                // share the enclosing pure function's boundary.
+                if (p.fn_or_arrow_data_parse.pure_fn_scope) |scope| {
+                    data.pure_fn_scope = scope;
+                } else {
+                    // pure_fn_scope is null when we came through parseParenExpr
+                    // with is_pure — it was nulled to suppress checks during param
+                    // parsing. Set the boundary to the current scope for the body.
+                    data.pure_fn_scope = p.current_scope;
+                }
             }
 
             if (p.lexer.token == .t_open_brace) {

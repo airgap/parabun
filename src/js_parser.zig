@@ -556,16 +556,32 @@ fn collectBindingIdents(p: anytype, binding: BindingNodeIndex, out: []string, st
     return idx;
 }
 
-// Parabun: check if `name` is declared within the pure function's scope chain.
-// Walks from `p.current_scope` up to (and including) `pure_fn_scope`.
-// Returns true if the name is found in any scope member table along the way.
+// Parabun: check if `name` is declared anywhere in the scope chain.
+// Walks from `p.current_scope` all the way up to module scope.
+// Module-scope const/function/import bindings are immutable, so
+// referencing them from a pure function is safe.
 pub fn isDeclaredInPureFnScope(p: anytype, name: string) bool {
-    const boundary = p.fn_or_arrow_data_parse.pure_fn_scope orelse return false;
     var scope: ?*Scope = p.current_scope;
     while (scope) |s| {
         if (s.members.contains(name)) return true;
-        if (s == boundary) break;
         scope = s.parent;
+    }
+    return false;
+}
+
+// Parabun: check if the pure function's scope is directly at module level.
+// Top-level pure functions may reference forward-declared functions,
+// imports, and other module-scope bindings not yet in the scope table
+// during the single-pass parse. Only applies to direct children of
+// module scope, not nested functions.
+pub fn isPureAtModuleLevel(p: anytype) bool {
+    const boundary = p.fn_or_arrow_data_parse.pure_fn_scope orelse return false;
+    return boundary.parent == p.module_scope;
+}
+
+pub fn isInPureParamNames(p: anytype, name: string) bool {
+    for (p.fn_or_arrow_data_parse.pure_param_names) |param| {
+        if (strings.eql(param, name)) return true;
     }
     return false;
 }

@@ -262,6 +262,11 @@ describe("Parabun Purity Validator", () => {
       );
     });
 
+    it("allows new Date(timestamp) in pure function (deterministic)", () => {
+      const out = transpiler.transformSync("pure function foo(ts) { return new Date(ts); }");
+      expect(out).toContain("new Date(ts)");
+    });
+
     it("allows Date() in non-pure function", () => {
       const out = transpiler.transformSync("function foo() { return Date(); }");
       expect(out).toContain("Date()");
@@ -483,34 +488,45 @@ describe("Parabun Purity Validator", () => {
   });
 
   describe("free variable detection in pure functions", () => {
-    it("rejects reference to outer let variable", () => {
-      expect(() => transpiler.transformSync("let x = 10; pure function foo() { return x; }")).toThrow(
-        /Cannot reference free variable "x"/,
-      );
+    it("allows reference to outer const variable", () => {
+      const out = transpiler.transformSync("const x = 10; pure function foo() { return x; }");
+      expect(out).toContain("return x");
     });
 
-    it("rejects reference to outer const variable", () => {
-      expect(() => transpiler.transformSync("const x = 10; pure function foo() { return x; }")).toThrow(
-        /Cannot reference free variable "x"/,
-      );
+    it("allows reference to outer let variable", () => {
+      const out = transpiler.transformSync("let x = 10; pure function foo() { return x; }");
+      expect(out).toContain("return x");
     });
 
-    it("rejects reference to outer var variable", () => {
-      expect(() => transpiler.transformSync("var x = 10; pure function foo() { return x; }")).toThrow(
-        /Cannot reference free variable "x"/,
-      );
+    it("allows reference to outer var variable", () => {
+      const out = transpiler.transformSync("var x = 10; pure function foo() { return x; }");
+      expect(out).toContain("return x");
     });
 
-    it("rejects reference to undeclared identifier", () => {
-      expect(() => transpiler.transformSync("pure function foo() { return someGlobal; }")).toThrow(
-        /Cannot reference free variable "someGlobal"/,
-      );
+    it("allows reference to outer function", () => {
+      const out = transpiler.transformSync("function bar() {} pure function foo() { return bar(); }");
+      expect(out).toContain("bar()");
     });
 
-    it("rejects reference to outer function", () => {
-      expect(() => transpiler.transformSync("function bar() {} pure function foo() { return bar(); }")).toThrow(
-        /Cannot reference free variable "bar"/,
-      );
+    it("allows inner arrow capturing outer-scope declared variable", () => {
+      const out = transpiler.transformSync("let outer = 1; pure function foo() { const f = () => outer; return f(); }");
+      expect(out).toContain("outer");
+    });
+
+    it("allows undeclared identifier at module level (forward ref / import)", () => {
+      const out = transpiler.transformSync("pure function foo() { return someGlobal; }");
+      expect(out).toContain("someGlobal");
+    });
+
+    it("allows undeclared identifier in top-level pure arrow", () => {
+      const out = transpiler.transformSync("const f = pure (x) => x + nope;");
+      expect(out).toContain("nope");
+    });
+
+    it("rejects undeclared identifier in nested pure function", () => {
+      expect(() =>
+        transpiler.transformSync("function outer() { pure function inner() { return unknownThing; } }"),
+      ).toThrow(/Cannot reference free variable "unknownThing"/);
     });
 
     it("allows parameter references", () => {
@@ -574,12 +590,6 @@ describe("Parabun Purity Validator", () => {
       expect(out).toContain("() => y");
     });
 
-    it("rejects inner arrow capturing outer-scope free variable", () => {
-      expect(() =>
-        transpiler.transformSync("let outer = 1; pure function foo() { const f = () => outer; return f(); }"),
-      ).toThrow(/Cannot reference free variable "outer"/);
-    });
-
     it("allows undefined, NaN, Infinity", () => {
       const out = transpiler.transformSync(
         "pure function foo(x) { return x === undefined || x !== NaN || x < Infinity; }",
@@ -590,6 +600,27 @@ describe("Parabun Purity Validator", () => {
     it("allows Intl and Reflect", () => {
       const out = transpiler.transformSync("pure function foo(x) { return Reflect.ownKeys(x); }");
       expect(out).toContain("Reflect.ownKeys");
+    });
+
+    it("allows module-scope const from nested pure arrow", () => {
+      const out = transpiler.transformSync(
+        "const EPOCH = 1420070400000n;\npure function toDate(id: bigint) { const ts = (id >> 22n) + EPOCH; return ts; }",
+      );
+      expect(out).toContain("EPOCH");
+    });
+
+    it("allows cross-function calls from pure function", () => {
+      const out = transpiler.transformSync(
+        "pure function double(x) { return x * 2; }\npure function quad(x) { return double(double(x)); }",
+      );
+      expect(out).toContain("double(double(x))");
+    });
+
+    it("allows closure over outer pure function locals", () => {
+      const out = transpiler.transformSync(
+        "pure function cfloor(decimals) { const imp = Math.pow(10, decimals); return pure (n) => Math.floor(n * imp) / imp; }",
+      );
+      expect(out).toContain("n * imp");
     });
   });
 });

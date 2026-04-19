@@ -220,7 +220,9 @@ pub fn ParsePrefix(
                     p.log.addRangeErrorFmt(p.source, name_range, p.allocator, "Cannot reference impure global \"{s}\" inside a pure function", .{name}) catch unreachable;
                 } else if (p.fn_or_arrow_data_parse.pure_fn_scope != null and
                     !js_parser.isPureSafeGlobal(name) and
-                    !js_parser.isDeclaredInPureFnScope(p, name))
+                    !js_parser.isDeclaredInPureFnScope(p, name) and
+                    !js_parser.isInPureParamNames(p, name) and
+                    !js_parser.isPureAtModuleLevel(p))
                 {
                     p.log.addRangeErrorFmt(p.source, name_range, p.allocator, "Cannot reference free variable \"{s}\" inside a pure function", .{name}) catch unreachable;
                 }
@@ -529,11 +531,12 @@ pub fn ParsePrefix(
                 new.data.e_new.args = .{};
             }
 
-            // Parabun: reject `new Date()` inside pure functions (returns current time)
+            // Parabun: reject `new Date()` (no args) inside pure functions — reads the clock.
+            // `new Date(timestamp)` with args is deterministic and allowed.
             if (p.fn_or_arrow_data_parse.is_pure) {
                 if (new.data.e_new.target.data == .e_identifier) {
                     const ctor_name = p.loadNameFromRef(new.data.e_new.target.data.e_identifier.ref);
-                    if (bun.strings.eqlComptime(ctor_name, "Date")) {
+                    if (bun.strings.eqlComptime(ctor_name, "Date") and new.data.e_new.args.len == 0) {
                         p.log.addRangeErrorFmt(p.source, .{ .loc = loc, .len = 8 }, p.allocator, "Cannot call \"new Date()\" inside a pure function — it returns the current time", .{}) catch unreachable;
                     }
                 }

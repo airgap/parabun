@@ -336,6 +336,12 @@ pub fn Parse(
             var old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
             p.fn_or_arrow_data_parse.arrow_arg_errors = arrowArgErrors;
             p.fn_or_arrow_data_parse.track_arrow_arg_errors = true;
+            // Parabun: suppress free-variable checks while parsing potential
+            // arrow params — identifiers here may become parameter bindings,
+            // not references. The arrow body will re-establish purity checking.
+            // This applies both to explicitly-pure arrows (pure (...) =>) and
+            // inherited-pure arrows (non-pure arrows inside a pure function).
+            if (opts.is_pure or p.fn_or_arrow_data_parse.is_pure) p.fn_or_arrow_data_parse.pure_fn_scope = null;
 
             // Scan over the comma-separated arguments or expressions
             while (p.lexer.token != .t_close_paren) {
@@ -1400,6 +1406,22 @@ pub fn Parse(
                         return p.parseParenExpr(pure_range.loc, level, ParenExprOpts{ .is_pure = true });
                     },
 
+                    // "pure <T>() => {}"
+                    .t_less_than => {
+                        if (is_typescript_enabled and (!is_jsx_enabled or try TypeScript.isTSArrowFnJSX(p))) {
+                            switch (p.trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking()) {
+                                .did_not_skip_anything => {},
+                                else => |result| {
+                                    try p.lexer.next();
+                                    return p.parseParenExpr(pure_range.loc, level, ParenExprOpts{
+                                        .is_pure = true,
+                                        .force_arrow_fn = result == .definitely_type_parameters,
+                                    });
+                                },
+                            }
+                        }
+                    },
+
                     else => {},
                 }
             }
@@ -1454,6 +1476,24 @@ pub fn Parse(
                             .is_pure = true,
                             .async_range = async_range,
                         });
+                    },
+
+                    // "pure async <T>() => {}"
+                    .t_less_than => {
+                        if (is_typescript_enabled and (!is_jsx_enabled or try TypeScript.isTSArrowFnJSX(p))) {
+                            switch (p.trySkipTypeScriptTypeParametersThenOpenParenWithBacktracking()) {
+                                .did_not_skip_anything => {},
+                                else => |result| {
+                                    try p.lexer.next();
+                                    return p.parseParenExpr(pure_range.loc, level, ParenExprOpts{
+                                        .is_async = true,
+                                        .is_pure = true,
+                                        .async_range = async_range,
+                                        .force_arrow_fn = result == .definitely_type_parameters,
+                                    });
+                                },
+                            }
+                        }
                     },
 
                     else => {},

@@ -81,6 +81,49 @@ describe("Parabun Pure Keyword", () => {
     });
   });
 
+  describe("nested pure arrow in pure function", () => {
+    it("allows arrow params inside pure function", () => {
+      const out = transpiler.transformSync(
+        "export pure function cfloor(decimals = 0) {\n" +
+          "  const imprecision = Math.pow(10, decimals);\n" +
+          "  return pure (n) => Math.floor(n * imprecision) / imprecision;\n" +
+          "}",
+      );
+      expect(out).toContain("function cfloor");
+      expect(out).toContain("Math.floor(n * imprecision)");
+    });
+
+    it("allows expression-body arrow params as non-free", () => {
+      const out = transpiler.transformSync("pure function f(x) { return pure (y) => x + y; }");
+      expect(out).toContain("x + y");
+    });
+  });
+
+  describe("pure generic arrow functions", () => {
+    it("parses pure <T>(array: T[]): T[] => expr", () => {
+      const out = transpiler.transformSync("export const unique = pure <T>(array: T[]): T[] => [...new Set(array)];");
+      expect(out).toContain("=>");
+      expect(out).toContain("new Set(array)");
+    });
+
+    it("parses pure <T, U>(a: T, b: U) => expr", () => {
+      const out = transpiler.transformSync("const pair = pure <T, U>(a: T, b: U) => [a, b] as const;");
+      expect(out).toContain("=>");
+      expect(out).toContain("[a, b]");
+    });
+
+    it("parses pure async <T>(x: T) => expr", () => {
+      const out = transpiler.transformSync("const wrap = pure async <T>(x: T) => x;");
+      expect(out).toContain("async");
+      expect(out).toContain("=>");
+    });
+
+    it("parses pure <T extends number>(x: T) => expr", () => {
+      const out = transpiler.transformSync("const id = pure <T extends number>(x: T) => x;");
+      expect(out).toContain("=>");
+    });
+  });
+
   describe("combinations with other Parabun operators", () => {
     it("pure function with ..= inside", () => {
       const out = transpiler.transformSync("pure async function getData(p) { const result ..= p; return result; }");
