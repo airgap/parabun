@@ -1,0 +1,33 @@
+{
+  "name": "parabun-svelte-preprocess",
+  "version": "0.1.0",
+  "description": "Svelte preprocessor that lets <script lang=\"parabun\"> blocks and imported .pts/.pjs modules use Parabun syntax (pure, ..!, ..&, ..=, |>)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/airgap/parabun",
+    "directory": "packages/parabun-svelte-preprocess"
+  },
+  "license": "MIT",
+  "type": "module",
+  "module": "src/index.ts",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check:types": "tsc --noEmit",
+    "build:types": "tsc --emitDeclarationOnly --declaration --declarationDir ./dist"
+  },
+  "devDependencies": {
+    "svelte": "^5.20.4",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "svelte": "^5"
+  },
+  "files": [
+    "README.md",
+    "src",
+    "dist"
+  ]
+}
