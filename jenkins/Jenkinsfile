@@ -47,6 +47,8 @@ pipeline {
                description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
         booleanParam(name: 'PUBLISH_RELEASE', defaultValue: true,
                      description: 'Attach successful build/release binaries to a GitHub Release (parabun-<short-sha>)')
+        booleanParam(name: 'PUBLISH_DOCKER', defaultValue: true,
+                     description: 'Build & push Docker image to registry.digitalocean.com/parabun/parabun (:latest, :<short-sha>)')
     }
 
     stages {
@@ -290,6 +292,60 @@ pipeline {
                                 --title "Parabun @ ${SHORT_SHA}" \
                                 --notes "Built by Jenkins from ${FULL_SHA}."
                         fi
+                    '''
+                }
+            }
+        }
+
+        stage('Publish Docker') {
+            // Requires the Linux build — we COPY the artifact into the image
+            // rather than curl-ing it from a release, so no Linux binary = no
+            // image to push. linux/amd64 only; add arm64 once an arm builder
+            // exists.
+            when {
+                expression { params.PUBLISH_DOCKER && params.BUILD_LINUX }
+            }
+            // Runs on the Jenkins controller, which already has docker (it
+            // builds the ci-linux dockerfile agent) and mounts
+            // /etc/default/jenkins-doppler. Mirrors the lyku workers pipeline's
+            // Doppler → DIGITALOCEAN_ACCESS_TOKEN path.
+            agent { label 'built-in' }
+            steps {
+                script {
+                    env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                }
+                unstash 'linux-bin'
+                sh '''
+                    set -eu
+                    install -m 0755 artifacts/parabun-linux-x64 dockerhub/parabun/bun
+                '''
+                sh '''
+                    set -eu
+                    set +x
+                    export DOPPLER_TOKEN=$(grep DOPPLER_TOKEN_CI_DEPLOY /etc/default/jenkins-doppler | cut -d= -f2)
+                    TEMP_HOME=$(mktemp -d)
+                    DO_TOKEN=$(HOME=$TEMP_HOME doppler secrets get DIGITALOCEAN_ACCESS_TOKEN --plain --project ci-deploy --config prd)
+                    rm -rf "$TEMP_HOME"
+                    echo "$DO_TOKEN" | docker login registry.digitalocean.com -u do --password-stdin
+                    set -x
+
+                    REGISTRY=registry.digitalocean.com/parabun
+                    docker build \
+                        -t "${REGISTRY}/parabun:latest" \
+                        -t "${REGISTRY}/parabun:${SHORT_SHA}" \
+                        dockerhub/parabun
+                    docker push "${REGISTRY}/parabun:latest"
+                    docker push "${REGISTRY}/parabun:${SHORT_SHA}"
+                '''
+            }
+            post {
+                always {
+                    // Don't leave a stale binary in the build context if the
+                    // workspace gets reused. docker logout also clears the
+                    // token from ~/.docker/config.json on the controller.
+                    sh '''
+                        rm -f dockerhub/parabun/bun
+                        docker logout registry.digitalocean.com >/dev/null 2>&1 || true
                     '''
                 }
             }
