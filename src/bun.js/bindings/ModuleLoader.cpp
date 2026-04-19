@@ -844,7 +844,7 @@ JSValue fetchCommonJSModuleNonBuiltin(
     } else if (res->result.value.tag == SyntheticModuleType::CommonJSCustomExtension) {
         if constexpr (isExtension) {
             ASSERT_NOT_REACHED();
-            JSC::throwException(globalObject, scope, JSC::createSyntaxError(globalObject, "Recursive extension. This is a bug in Bun"_s));
+            JSC::throwException(globalObject, scope, JSC::createSyntaxError(globalObject, "Recursive extension. This is a bug in Parabun"_s));
             RELEASE_AND_RETURN(scope, {});
         }
         evaluateCommonJSCustomExtension(globalObject, target, specifierWtfString, specifierValue, JSC::JSValue::decode(res->result.value.cjsCustomExtension));

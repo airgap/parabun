@@ -98,7 +98,7 @@ pub const CrashReason = union(enum) {
             .datatype_misalignment => try writer.writeAll("Unaligned memory access"),
             .stack_overflow => try writer.writeAll("Stack overflow"),
             .zig_error => |err| try writer.print("error.{s}", .{@errorName(err)}),
-            .out_of_memory => try writer.writeAll("Bun ran out of memory"),
+            .out_of_memory => try writer.writeAll("Parabun ran out of memory"),
         }
     }
 };
@@ -264,20 +264,20 @@ pub fn crashHandler(
                         const native_plugin_name = name;
                         const fmt =
                             \\
-                            \\Bun has encountered a crash while running the <red><d>"{s}"<r> native plugin.
+                            \\Parabun has encountered a crash while running the <red><d>"{s}"<r> native plugin.
                             \\
-                            \\This indicates either a bug in the native plugin or in Bun.
+                            \\This indicates either a bug in the native plugin or in Parabun.
                             \\
                         ;
                         writer.print(Output.prettyFmt(fmt, true), .{native_plugin_name}) catch std.posix.abort();
                     } else if (bun.analytics.Features.unsupported_uv_function > 0) {
                         const name = unsupported_uv_function orelse "<unknown>";
                         const fmt =
-                            \\Bun encountered a crash when running a NAPI module that tried to call
+                            \\Parabun encountered a crash when running a NAPI module that tried to call
                             \\the <red>{s}<r> libuv function.
                             \\
-                            \\Bun is actively working on supporting all libuv functions for POSIX
-                            \\systems, please see this issue to track our progress:
+                            \\Upstream Bun is actively working on supporting all libuv functions for POSIX
+                            \\systems, please see this issue to track progress:
                             \\
                             \\<cyan>https://github.com/oven-sh/bun/issues/18546<r>
                             \\
@@ -389,9 +389,9 @@ pub fn crashHandler(
                         if (inside_native_plugin) |name| {
                             const native_plugin_name = name;
                             writer.print(Output.prettyFmt(
-                                \\Bun has encountered a crash while running the <red><d>"{s}"<r> native plugin.
+                                \\Parabun has encountered a crash while running the <red><d>"{s}"<r> native plugin.
                                 \\
-                                \\To send a redacted crash report to Bun's team,
+                                \\To send a redacted crash report to Parabun's maintainers,
                                 \\please file a GitHub issue using the link below:
                                 \\
                                 \\
@@ -399,11 +399,11 @@ pub fn crashHandler(
                         } else if (bun.analytics.Features.unsupported_uv_function > 0) {
                             const name = unsupported_uv_function orelse "<unknown>";
                             const fmt =
-                                \\Bun encountered a crash when running a NAPI module that tried to call
+                                \\Parabun encountered a crash when running a NAPI module that tried to call
                                 \\the <red>{s}<r> libuv function.
                                 \\
-                                \\Bun is actively working on supporting all libuv functions for POSIX
-                                \\systems, please see this issue to track our progress:
+                                \\Upstream Bun is actively working on supporting all libuv functions for POSIX
+                                \\systems, please see this issue to track progress:
                                 \\
                                 \\<cyan>https://github.com/oven-sh/bun/issues/18546<r>
                                 \\
@@ -412,18 +412,18 @@ pub fn crashHandler(
                             writer.print(Output.prettyFmt(fmt, true), .{name}) catch std.posix.abort();
                         } else if (reason == .out_of_memory) {
                             writer.writeAll(
-                                \\Bun has run out of memory.
+                                \\Parabun has run out of memory.
                                 \\
-                                \\To send a redacted crash report to Bun's team,
+                                \\To send a redacted crash report to Parabun's maintainers,
                                 \\please file a GitHub issue using the link below:
                                 \\
                                 \\
                             ) catch std.posix.abort();
                         } else {
                             writer.writeAll(
-                                \\Bun has crashed. This indicates a bug in Bun, not your code.
+                                \\Parabun has crashed. This indicates a bug in Parabun, not your code.
                                 \\
-                                \\To send a redacted crash report to Bun's team,
+                                \\To send a redacted crash report to Parabun's maintainers,
                                 \\please file a GitHub issue using the link below:
                                 \\
                                 \\
@@ -477,7 +477,7 @@ pub fn crashHandler(
                 // attempt to prevent a double panic
                 bun.auto_reload_on_crash = false;
 
-                Output.prettyErrorln("<d>--- Bun is auto-restarting due to crash <d>[time: <b>{d}<r><d>] ---<r>", .{
+                Output.prettyErrorln("<d>--- Parabun is auto-restarting due to crash <d>[time: <b>{d}<r><d>] ---<r>", .{
                     @max(std.time.milliTimestamp(), 0),
                 });
                 Output.flush();
@@ -744,14 +744,14 @@ pub fn handleRootError(err: anyerror, error_return_trace: ?*std.builtin.StackTra
         error.ENOENT, error.FileNotFound => {
             Output.err(
                 "ENOENT",
-                "Bun could not find a file, and the code that produces this error is missing a better error.",
+                "Parabun could not find a file, and the code that produces this error is missing a better error.",
                 .{},
             );
         },
 
         error.MissingPackageJSON => {
             Output.errGeneric(
-                "Bun could not find a package.json file to install from",
+                "Parabun could not find a package.json file to install from",
                 .{},
             );
             Output.note("Run \"bun init\" to initialize a project", .{});
@@ -817,7 +817,7 @@ else
     "x64";
 
 const metadata_version_line = std.fmt.comptimePrint(
-    "Bun {s}v{s} {s} {s}{s}\n",
+    "Parabun {s}v{s} {s} {s}{s}\n",
     .{
         if (bun.Environment.isDebug) "Debug " else if (bun.Environment.is_canary) "Canary " else "",
         Global.package_json_version_with_sha,

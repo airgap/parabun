@@ -987,8 +987,8 @@ pub fn printWarning() void {
     if (bun.env_var.BUN_DEV_SERVER_TEST_RUNNER.get() == null) {
         bun.Output.warn(
             \\Be advised that Bun Bake is highly experimental, and its API
-            \\will have breaking changes. Join the <magenta>#bake<r> Discord
-            \\channel to help us find bugs: <blue>https://bun.com/discord<r>
+            \\will have breaking changes. Report issues you find at:
+            \\<blue>https://script.dev/parabun<r>
             \\
             \\
         , .{});

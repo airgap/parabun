@@ -293,7 +293,7 @@ pub const UpgradeCommand = struct {
             progress.?.end();
             refresher.?.refresh();
             if (version.name()) |name| {
-                Output.prettyErrorln("Bun v{s} is out, but not for this platform ({s}) yet.", .{
+                Output.prettyErrorln("Parabun v{s} is out, but not for this platform ({s}) yet.", .{
                     name, Version.triplet,
                 });
             }
@@ -650,13 +650,13 @@ pub const UpgradeCommand = struct {
                         } else |_| {}
                     }
 
-                    Output.prettyErrorln("<r><red>error<r><d>:<r> Failed to verify Bun (code: {s})<r>", .{@errorName(err)});
+                    Output.prettyErrorln("<r><red>error<r><d>:<r> Failed to verify Parabun (code: {s})<r>", .{@errorName(err)});
                     Global.exit(1);
                 };
 
                 if (result.term.Exited != 0) {
                     save_dir_.deleteTree(version_name) catch {};
-                    Output.prettyErrorln("<r><red>error<r><d>:<r> failed to verify Bun<r> (exit code: {d})", .{result.term.Exited});
+                    Output.prettyErrorln("<r><red>error<r><d>:<r> failed to verify Parabun<r> (exit code: {d})", .{result.term.Exited});
                     Global.exit(1);
                 }
 
@@ -677,7 +677,7 @@ pub const UpgradeCommand = struct {
                         save_dir_.deleteTree(version_name) catch {};
 
                         Output.prettyErrorln(
-                            "<r><red>error<r>: The downloaded version of Bun (<red>{s}<r>) doesn't match the expected version (<b>{s}<r>)<r>. Cancelled upgrade",
+                            "<r><red>error<r>: The downloaded version of Parabun (<red>{s}<r>) doesn't match the expected version (<b>{s}<r>)<r>. Cancelled upgrade",
                             .{
                                 version_string[0..@min(version_string.len, 512)],
                                 version_name,
@@ -738,7 +738,7 @@ pub const UpgradeCommand = struct {
                     if (target_hash == source_hash) {
                         save_dir_.deleteTree(version_name) catch {};
                         Output.prettyErrorln(
-                            \\<r><green>Congrats!<r> You're already on the latest <b>canary<r><green> build of Bun
+                            \\<r><green>Congrats!<r> You're already on the latest <b>canary<r><green> build of Parabun
                             \\
                             \\To downgrade to the latest stable release, run <b><cyan>bun upgrade --stable<r>
                             \\

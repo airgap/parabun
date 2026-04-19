@@ -164,12 +164,12 @@ pub const HelpCommand = struct {
         \\<b>Usage:<r> <b>bun \<command\> <cyan>[...flags]<r> <b>[...args]<r>
         \\
         \\<b>Commands:<r>
-        \\  <b><magenta>run<r>       <d>./my-script.ts<r>       Execute a file with Bun
+        \\  <b><magenta>run<r>       <d>./my-script.ts<r>       Execute a file with Parabun
         \\            <d>lint<r>                 Run a package.json script
-        \\  <b><magenta>test<r>                           Run unit tests with Bun
+        \\  <b><magenta>test<r>                           Run unit tests with Parabun
         \\  <b><magenta>x<r>         <d>{s:<16}<r>     Execute a package binary (CLI), installing if needed <d>(bunx)<r>
-        \\  <b><magenta>repl<r>                           Start a REPL session with Bun
-        \\  <b><magenta>exec<r>                           Run a shell script directly with Bun
+        \\  <b><magenta>repl<r>                           Start a REPL session with Parabun
+        \\  <b><magenta>exec<r>                           Run a shell script directly with Parabun
         \\
         \\  <b><blue>install<r>                        Install dependencies for a package.json <d>(bun i)<r>
         \\  <b><blue>add<r>       <d>{s:<16}<r>     Add a dependency to package.json <d>(bun a)<r>
@@ -187,18 +187,18 @@ pub const HelpCommand = struct {
         \\
         \\  <b><yellow>build<r>     <d>./a.ts ./b.jsx<r>       Bundle TypeScript & JavaScript into a single file
         \\
-        \\  <b><cyan>init<r>                           Start an empty Bun project from a built-in template
+        \\  <b><cyan>init<r>                           Start an empty Parabun project from a built-in template
         \\  <b><cyan>create<r>    <d>{s:<16}<r>     Create a new project from a template <d>(bun c)<r>
-        \\  <b><cyan>upgrade<r>                        Upgrade to latest version of Bun.
-        \\  <b><cyan>feedback<r>  <d>./file1 ./file2<r>      Provide feedback to the Bun team.
+        \\  <b><cyan>upgrade<r>                        Upgrade to latest version of Parabun.
+        \\  <b><cyan>feedback<r>  <d>./file1 ./file2<r>      Provide feedback to the Parabun maintainers.
         \\
         \\  <d>\<command\><r> <b><cyan>--help<r>               Print help text for command.
         \\
     ;
     const cli_helptext_footer =
         \\
-        \\Learn more about Bun:            <magenta>https://bun.com/docs<r>
-        \\Join our Discord community:      <blue>https://bun.com/discord<r>
+        \\Learn more about Parabun:        <magenta>https://script.dev/parabun<r>
+        \\Upstream Bun docs:               <magenta>https://bun.com/docs<r>
         \\
     ;
 
@@ -239,7 +239,7 @@ pub const HelpCommand = struct {
                 }
 
                 Output.pretty(
-                    "<r><b><magenta>Bun<r> is a fast JavaScript runtime, package manager, bundler, and test runner. <d>(" ++
+                    "<r><b><magenta>Parabun<r> is a Bun fork with pure functions, error chaining, and pipeline operators. <d>(" ++
                         Global.package_json_version_with_revision ++
                         ")<r>\n\n" ++
                         cli_helptext_fmt,

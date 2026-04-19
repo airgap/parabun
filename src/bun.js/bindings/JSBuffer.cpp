@@ -907,7 +907,7 @@ static JSC::EncodedJSValue jsBufferConstructorFunction_concatBody(JSC::JSGlobalO
     if (byteLength == 0) {
         RELEASE_AND_RETURN(throwScope, constructBufferEmpty(lexicalGlobalObject));
     } else if (byteLength > MAX_ARRAY_BUFFER_SIZE) [[unlikely]] {
-        throwRangeError(lexicalGlobalObject, throwScope, makeString("JavaScriptCore typed arrays are currently limited to "_s, MAX_ARRAY_BUFFER_SIZE, " bytes. To use an array this large, use an ArrayBuffer instead. If this is causing issues for you, please file an issue in Bun's GitHub repository."_s));
+        throwRangeError(lexicalGlobalObject, throwScope, makeString("JavaScriptCore typed arrays are currently limited to "_s, MAX_ARRAY_BUFFER_SIZE, " bytes. To use an array this large, use an ArrayBuffer instead. If this is causing issues for you, please file an issue in Parabun's GitHub repository."_s));
         return {};
     }
 

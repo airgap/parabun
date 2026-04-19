@@ -1511,7 +1511,7 @@ pub const CreateCommand = struct {
 
         Output.pretty(
             \\
-            \\<d>Come hang out in bun's Discord: https://bun.com/discord<r>
+            \\<d>Learn more about Parabun: https://script.dev/parabun<r>
             \\
         , .{});
 

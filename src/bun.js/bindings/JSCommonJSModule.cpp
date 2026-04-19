@@ -174,13 +174,13 @@ static bool evaluateCommonJSModuleOnce(JSC::VM& vm, Zig::GlobalObject* globalObj
 
     JSObject* fn = fnValue.getObject();
     if (!fn) [[unlikely]] {
-        scope.throwException(globalObject, createTypeError(globalObject, "Expected CommonJS module to have a function wrapper. If you weren't messing around with Bun's internals, this is a bug in Bun"_s));
+        scope.throwException(globalObject, createTypeError(globalObject, "Expected CommonJS module to have a function wrapper. If you weren't messing around with Parabun's internals, this is a bug in Parabun"_s));
         RELEASE_AND_RETURN(scope, false);
     }
 
     JSC::CallData callData = JSC::getCallData(fn);
     if (callData.type == CallData::Type::None) [[unlikely]] {
-        scope.throwException(globalObject, createTypeError(globalObject, "Expected CommonJS module to have a function wrapper. If you weren't messing around with Bun's internals, this is a bug in Bun"_s));
+        scope.throwException(globalObject, createTypeError(globalObject, "Expected CommonJS module to have a function wrapper. If you weren't messing around with Parabun's internals, this is a bug in Parabun"_s));
         RELEASE_AND_RETURN(scope, false);
     }
 
