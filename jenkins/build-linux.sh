@@ -8,6 +8,14 @@
 # catches it at the right step.
 set -euo pipefail
 
+# Jenkins runs the ci-linux container as the host jenkins UID (132), which
+# has no $HOME. scripts/build/config.ts falls back to homedir()/.bun for
+# BUN_INSTALL when unset, which resolves to `/.bun` under an empty HOME and
+# then fails `mkdir(.bun)` with EACCES. Pin HOME to the workspace so the
+# shared build-cache ($BUN_INSTALL/build-cache) lives inside /raid alongside
+# the incremental build dir, and survives between runs on the same agent.
+export HOME="${WORKSPACE:-$PWD}"
+
 echo "=== Host ==="
 uname -a
 echo "bun: $(bun --version)"
