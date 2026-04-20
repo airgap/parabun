@@ -56,6 +56,18 @@ type GenerateOptions = {
   // skip those tokens in prefill, and only run forward() over the
   // trailing tokens. Saves O(prefixLen * layer * d^2) FLOPs per call.
   prefix?: PrefixCache;
+  // Speculative decoding (Leviathan et al. 2023). On every round the
+  // draft model proposes `speculativeK` tokens; the target model scores
+  // them; each is accepted with prob min(1, p(x)/q(x)) and the first
+  // rejection resamples from (p - q)+. Committed tokens per round: at
+  // least 1 (on reject, the resampled token) up to k+1 (all accepted
+  // plus a bonus sample from the target's distribution at position
+  // pos+k). The draft must share the target's vocab — we check the
+  // vocabulary length; mismatched token ids would silently corrupt the
+  // sampling math. Grammar/schema/logitBias/topK/topP are not yet
+  // supported with speculative decoding and will throw at call time.
+  draft?: LLM;
+  speculativeK?: number;
 };
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -100,6 +112,72 @@ type ChatTemplate = "llama3" | "chatml" | "mistral" | null;
 // hard-coded families cover ~90% of instruction-tuned checkpoints in the
 // wild. If we can't identify the template, chat() throws and callers fall
 // back to plain generate() with their own string formatting.
+// Softmax with temperature. `temperature <= 0` collapses to a one-hot
+// at argmax — matches Sampler's greedy convention so speculative
+// decoding at temp=0 behaves like deterministic draft/target match
+// (accept iff argmax_p == proposal, resample to argmax_p on reject).
+// Returned array owns its storage; caller can keep it.
+function softmaxWithTemp(logits: Float32Array, temperature: number): Float32Array {
+  const n = logits.length;
+  const out = new Float32Array(n);
+  if (temperature <= 0) {
+    let best = -Infinity;
+    let bestI = 0;
+    for (let i = 0; i < n; i++) {
+      if (logits[i] > best) {
+        best = logits[i];
+        bestI = i;
+      }
+    }
+    out[bestI] = 1;
+    return out;
+  }
+  const invT = 1 / temperature;
+  let maxV = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const v = logits[i] * invT;
+    if (v > maxV) maxV = v;
+  }
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const e = Math.exp(logits[i] * invT - maxV);
+    out[i] = e;
+    sum += e;
+  }
+  const inv = 1 / sum;
+  for (let i = 0; i < n; i++) out[i] *= inv;
+  return out;
+}
+
+// Categorical sample from a distribution over [0, probs.length). Uses
+// the supplied rng closure so seeded speculative runs stay reproducible.
+function categorical(probs: Float32Array, rng: () => number): number {
+  const r = rng();
+  const n = probs.length;
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc += probs[i];
+    if (r < acc) return i;
+  }
+  return n - 1;
+}
+
+// mulberry32 PRNG. Identical algorithm to the one inside llama.Sampler
+// so a single `seed` can drive both the draft's direct sampling and the
+// speculative accept/reject coin flips when needed. When seed==0 we
+// fall back to Math.random for the "unseeded" convention.
+function mulberry32(seed: number): () => number {
+  if (seed === 0) return () => Math.random();
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 function detectChatTemplate(gguf: { metadata: Map<string, unknown> }): ChatTemplate {
   const tpl = gguf.metadata.get("tokenizer.chat_template");
   if (typeof tpl !== "string") return null;
@@ -424,6 +502,15 @@ class LLM {
 
   async *#generateFromIds(promptIds: number[], opts?: GenerateOptions): AsyncGenerator<string, void, void> {
     if (this.#disposed) throw new Error("bun:llm: LLM already disposed");
+
+    // Route speculative decoding to its own loop — the structure
+    // (round-based propose/verify, target+draft KV bookkeeping) doesn't
+    // fit into the normal per-token loop cleanly.
+    if (opts?.draft) {
+      yield* this.#speculativeFromIds(promptIds, opts.draft, opts);
+      return;
+    }
+
     const maxTokens = opts?.maxTokens ?? 256;
     const stopTokens = opts?.stopTokens ?? this.#defaultStop;
     const stopSet = new Set(stopTokens);
@@ -518,6 +605,187 @@ class LLM {
       yield this.tokenizer.decode([next]);
       logits = this.model.forward(next, pos, kv);
       pos++;
+    }
+  }
+
+  // Speculative decoding loop (Leviathan et al.). Each round:
+  //   1. Draft proposes k tokens x_0..x_{k-1}, recording its distribution
+  //      q_i at each step and advancing its own KV.
+  //   2. Target scores the same k tokens, producing distributions
+  //      p_0..p_k (p_k is the target's next-token distribution after
+  //      all k proposals) and advancing its KV.
+  //   3. For i in 0..k-1: accept x_i with prob min(1, p_i(x_i)/q_i(x_i)).
+  //      On reject: resample from (p_i - q_i)+ and abort the round.
+  //      If all accepted: bonus-sample from p_k and continue.
+  //
+  // Constraints we enforce here and not in the public docs:
+  //   - topK/topP/grammar/schema/logitBias would each have to be applied
+  //     to BOTH distributions to keep the sampling math sound. v0 doesn't
+  //     yet — we throw rather than silently produce biased outputs.
+  //   - The draft must share the target's vocabulary. We check vocab
+  //     length as a practical proxy; callers running wildly different
+  //     models will get nonsense long before the check matters.
+  //   - opts.prefix doesn't compose with speculative v0 (would need the
+  //     draft to hold its own matching prefix too).
+  async *#speculativeFromIds(
+    promptIds: number[],
+    draft: LLM,
+    opts: GenerateOptions,
+  ): AsyncGenerator<string, void, void> {
+    if (draft.#disposed) throw new Error("bun:llm: draft model already disposed");
+    if (draft.tokenizer.vocab.length !== this.tokenizer.vocab.length) {
+      throw new Error(
+        `bun:llm: draft vocab size ${draft.tokenizer.vocab.length} doesn't match target ${this.tokenizer.vocab.length}`,
+      );
+    }
+    if (opts.grammar !== undefined || opts.schema !== undefined || opts.logitBias !== undefined) {
+      throw new Error("bun:llm: grammar/schema/logitBias not yet supported with speculative decoding");
+    }
+    if ((opts.topK ?? 0) > 0 || (opts.topP ?? 0) > 0) {
+      throw new Error("bun:llm: topK/topP not yet supported with speculative decoding");
+    }
+    if (opts.prefix !== undefined) {
+      throw new Error("bun:llm: prefix caching not yet supported with speculative decoding");
+    }
+
+    const k = opts.speculativeK ?? 4;
+    if (!Number.isInteger(k) || k < 1) {
+      throw new Error(`bun:llm: speculativeK must be a positive integer, got ${k}`);
+    }
+    const maxTokens = opts.maxTokens ?? 256;
+    const temperature = opts.temperature ?? 0;
+    const stopTokens = opts.stopTokens ?? this.#defaultStop;
+    const stopSet = new Set(stopTokens);
+    const vocabSize = this.tokenizer.vocab.length;
+
+    // Shared RNG for both the draft's sampling and the target's
+    // accept/reject coin flips — lets a single `seed` option fully
+    // determine the output for reproducibility in tests.
+    const rng = mulberry32((opts.seed ?? 0) >>> 0);
+
+    const targetKV = this.model.newKVCache();
+    const draftKV = draft.model.newKVCache();
+    const maxCtx = Math.min(targetKV.maxContext(), draftKV.maxContext());
+
+    try {
+      if (promptIds.length >= maxCtx) {
+        throw new Error(`bun:llm: prompt of ${promptIds.length} tokens exceeds maxContext=${maxCtx}`);
+      }
+
+      // Prefill both models in lockstep. We need the last-position logits
+      // from each to kick off the first round.
+      let targetLogits: Float32Array | undefined;
+      let draftLogits: Float32Array | undefined;
+      for (let p = 0; p < promptIds.length; p++) {
+        targetLogits = this.model.forward(promptIds[p], p, targetKV);
+        draftLogits = draft.model.forward(promptIds[p], p, draftKV);
+      }
+
+      let pos = promptIds.length;
+      let emitted = 0;
+      while (emitted < maxTokens && pos < maxCtx) {
+        const roundK = Math.min(k, maxCtx - pos - 1);
+        if (roundK <= 0) break;
+
+        // 1. Draft proposes roundK tokens and advances its own KV.
+        const proposals: number[] = new Array(roundK);
+        const qDists: Float32Array[] = new Array(roundK);
+        for (let i = 0; i < roundK; i++) {
+          const q = softmaxWithTemp(draftLogits!, temperature);
+          const x = categorical(q, rng);
+          proposals[i] = x;
+          qDists[i] = q;
+          draftLogits = draft.model.forward(x, pos + i, draftKV);
+        }
+
+        // 2. Target scores the proposals sequentially. pDists[i] is the
+        //    target's distribution at position pos+i conditioned on the
+        //    accepted prefix + proposals[0..i-1]. pDists[roundK] is what
+        //    we bonus-sample if every proposal gets accepted.
+        const pDists: Float32Array[] = new Array(roundK + 1);
+        pDists[0] = softmaxWithTemp(targetLogits!, temperature);
+        for (let i = 0; i < roundK; i++) {
+          const next = this.model.forward(proposals[i], pos + i, targetKV);
+          pDists[i + 1] = softmaxWithTemp(next, temperature);
+          if (i === roundK - 1) targetLogits = next;
+        }
+
+        // 3. Accept/reject.
+        let acceptedInRound = 0;
+        let rejected = false;
+        for (let i = 0; i < roundK; i++) {
+          const x = proposals[i];
+          const p_x = pDists[i][x];
+          const q_x = qDists[i][x];
+          const ratio = q_x > 0 ? p_x / q_x : 1;
+          const accept = rng() < Math.min(1, ratio);
+          if (accept) {
+            yield this.tokenizer.decode([x]);
+            emitted++;
+            acceptedInRound++;
+            if (stopSet.has(x)) return;
+            if (emitted >= maxTokens) return;
+          } else {
+            // Resample from the residual (p - q)+. With prob 1, this is
+            // a valid distribution (mass p - q >= 0, normalized). The
+            // edge case where p <= q everywhere — impossible if p and q
+            // are both valid distributions over the same vocab and
+            // p(x) < q(x) for the x we just rejected — but guard anyway
+            // by falling back to p.
+            const adj = new Float32Array(vocabSize);
+            let sumAdj = 0;
+            const pi = pDists[i];
+            const qi = qDists[i];
+            for (let j = 0; j < vocabSize; j++) {
+              const diff = pi[j] - qi[j];
+              if (diff > 0) {
+                adj[j] = diff;
+                sumAdj += diff;
+              }
+            }
+            if (sumAdj > 0) {
+              const inv = 1 / sumAdj;
+              for (let j = 0; j < vocabSize; j++) adj[j] *= inv;
+            } else {
+              adj.set(pi);
+            }
+            const resampled = categorical(adj, rng);
+            // Commit the resampled token at position pos+acceptedInRound
+            // in both caches. This overwrites the stale KV slots the
+            // forwards above wrote for the rejected proposal and any
+            // proposals after it — we just re-run forward at the right
+            // position. Positions beyond pos+acceptedInRound stay stale
+            // but will be overwritten next round.
+            targetLogits = this.model.forward(resampled, pos + acceptedInRound, targetKV);
+            draftLogits = draft.model.forward(resampled, pos + acceptedInRound, draftKV);
+            yield this.tokenizer.decode([resampled]);
+            emitted++;
+            acceptedInRound++;
+            if (stopSet.has(resampled)) return;
+            if (emitted >= maxTokens) return;
+            rejected = true;
+            break;
+          }
+        }
+
+        if (!rejected) {
+          // All k accepted — bonus sample from p at position pos+roundK.
+          const bonus = categorical(pDists[roundK], rng);
+          // Commit: advance both caches to consume the bonus token and
+          // leave fresh logits for the next round.
+          targetLogits = this.model.forward(bonus, pos + roundK, targetKV);
+          draftLogits = draft.model.forward(bonus, pos + roundK, draftKV);
+          yield this.tokenizer.decode([bonus]);
+          emitted++;
+          acceptedInRound++;
+          if (stopSet.has(bonus)) return;
+        }
+
+        pos += acceptedInRound;
+      }
+    } finally {
+      targetKV.dispose();
+      draftKV.dispose();
     }
   }
 
