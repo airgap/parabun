@@ -9,14 +9,20 @@
   },
   "license": "MIT",
   "type": "module",
-  "module": "src/index.ts",
-  "main": "src/index.ts",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "check:types": "tsc --noEmit",
-    "build:types": "tsc --emitDeclarationOnly --declaration --declarationDir ./dist"
+    "build": "tsc"
   },
   "devDependencies": {
     "svelte": "^5.20.4",

@@ -81,6 +81,7 @@ cover
 coverage
 coverv
 dist
+!packages/parabun-svelte-preprocess/dist
 esbuilddir
 examples/lotta-modules/bun-nofscache
 examples/lotta-modules/bun-old
