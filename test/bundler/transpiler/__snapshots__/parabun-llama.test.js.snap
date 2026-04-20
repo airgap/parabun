@@ -1,0 +1,14 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Llama-3.2-1B forward pass greedy-generates a stable sequence for 'capital of France': greedy-ids 1`] = `
+[
+  12366,
+  13,
+  578,
+  469,
+  3168,
+  301,
+]
+`;
+
+exports[`Llama-3.2-1B forward pass greedy-generates a stable sequence for 'capital of France': greedy-text 1`] = `" Paris. The Eiffel"`;

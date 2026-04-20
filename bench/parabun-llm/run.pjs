@@ -1,0 +1,48 @@
+// Showcase: native LLM inference via `bun:llm`.
+//
+//   bun run build:release --asan=off bench/parabun-llm/run.pjs
+//
+// Loads a Llama-3.2-1B-Instruct Q8_0 GGUF checkpoint, streams a greedy
+// continuation, and reports tokens-per-second. CUDA (via bun:gpu) handles
+// every matmul on the forward pass when available; on CPU-only hosts the
+// same code falls through to bun:simd.matVec with no source changes.
+//
+// The fixture is a 1.3 GB file that lives outside the repo — set
+// LLM_FIXTURE to override, or put it at the default path below.
+
+import { LLM } from "bun:llm";
+import gpu from "bun:gpu";
+import { existsSync } from "node:fs";
+
+const FIXTURE = process.env.LLM_FIXTURE ?? "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q8_0.gguf";
+if (!existsSync(FIXTURE)) {
+  console.error(`missing fixture: ${FIXTURE}`);
+  console.error(`set LLM_FIXTURE=<path to .gguf> to point at a checkpoint.`);
+  process.exit(1);
+}
+
+const desc = gpu.describe();
+console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}`);
+
+const tLoadStart = Bun.nanoseconds();
+using llm = await LLM.load(FIXTURE);
+const loadMs = (Bun.nanoseconds() - tLoadStart) / 1e6;
+console.log(`loaded ${FIXTURE.split("/").pop()} in ${loadMs.toFixed(0)} ms`);
+console.log();
+
+const PROMPT = "The capital of France is";
+const MAX_TOKENS = 32;
+
+process.stdout.write(PROMPT);
+
+const tGenStart = Bun.nanoseconds();
+let generated = 0;
+for await (const piece of llm.generate(PROMPT, { maxTokens: MAX_TOKENS, stopTokens: [] })) {
+  process.stdout.write(piece);
+  generated++;
+}
+const genMs = (Bun.nanoseconds() - tGenStart) / 1e6;
+
+console.log("\n");
+console.log(`generated ${generated} tokens in ${genMs.toFixed(0)} ms`);
+console.log(`throughput: ${(generated / (genMs / 1000)).toFixed(2)} tok/s`);

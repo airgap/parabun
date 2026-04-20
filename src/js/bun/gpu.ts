@@ -46,6 +46,10 @@ export type GpuHandle = {
   readonly backend: BackendName;
   readonly type: "f32" | "f64";
   readonly length: number;
+  // Optional quant marker: if present, the device buffer holds raw quantized
+  // bytes (not fp32) and matVec dispatches to an on-chip dequant kernel. The
+  // `length` field remains the logical (dequantized) element count.
+  readonly qFormat?: "q4_K" | "q6_K";
   // Backend-internal fields (not part of the public contract):
   buffer: bigint;
   view: FArray;
@@ -137,6 +141,52 @@ class GpuFloat32Array {
 
 function isGpuFloat32Array(x: unknown): x is GpuFloat32Array {
   return x instanceof GpuFloat32Array;
+}
+
+// Lightweight wrapper around a pre-built GpuHandle (e.g. from holdQ4K or any
+// quant-format upload). Does not own a host Float32Array — the `.view`
+// accessor throws to prevent accidental fp32 reads of quantized bytes.
+// Callers use `.__handle` at dispatch sites (same shape as GpuFloat32Array)
+// so the forward-pass code can stay polymorphic.
+class GpuHandleArray {
+  readonly #handle: GpuHandle;
+  #disposed: boolean;
+
+  constructor(handle: GpuHandle) {
+    if (!isGpuHandle(handle)) {
+      throw new TypeError("GpuHandleArray: expected a GpuHandle");
+    }
+    this.#handle = handle;
+    this.#disposed = false;
+    gpuFinalizer.register(this, { handle }, this);
+  }
+
+  get length(): number {
+    return this.#handle.length;
+  }
+
+  get view(): Float32Array {
+    throw new Error(
+      `GpuHandleArray: .view is unavailable for ${this.#handle.qFormat ?? "quant"} handles — use the device path`,
+    );
+  }
+
+  get __handle(): GpuHandle {
+    if (this.#disposed) throw new Error("GpuHandleArray: already disposed");
+    return this.#handle;
+  }
+
+  release(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    gpuFinalizer.unregister(this);
+    const origin = backends[this.#handle.backend] ?? resolveActive();
+    origin.releaseHandle(this.#handle);
+  }
+
+  [Symbol.dispose](): void {
+    this.release();
+  }
 }
 
 // Normalize any accepted input shape to the raw FArray/GpuHandle the
@@ -477,6 +527,31 @@ function hold(arr: FArray): GpuHandle {
   return resolveActive().hold(arr);
 }
 
+// Hold a Q4_K-quantized tensor on the active backend. `blocks` is the raw
+// super-block byte stream as stored in GGUF (144 bytes per 256-element
+// super-block, row-major). `nElems` is the logical dequantized element count.
+// Only the CUDA backend currently implements this; other backends throw.
+// The returned handle carries `qFormat: "q4_K"` and matVec will dispatch to
+// the on-chip dequant kernel without ever materializing fp32 weights.
+function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
+  const b = resolveActive() as any;
+  if (typeof b.holdQ4K !== "function") {
+    throw new Error(`bun:gpu: backend ${b.name ?? "unknown"} does not support Q4_K residency`);
+  }
+  return b.holdQ4K(blocks, nElems);
+}
+
+// Hold a Q6_K-quantized tensor on the active backend. Same shape as holdQ4K
+// but for 210-byte super-blocks. Used for the higher-quality tensors
+// (token_embd, wv, wDown) in a Q4_K_M mix.
+function holdQ6K(blocks: Uint8Array, nElems: number): GpuHandle {
+  const b = resolveActive() as any;
+  if (typeof b.holdQ6K !== "function") {
+    throw new Error(`bun:gpu: backend ${b.name ?? "unknown"} does not support Q6_K residency`);
+  }
+  return b.holdQ6K(blocks, nElems);
+}
+
 function release(handle: GpuHandle): void {
   // Route to the handle's origin backend rather than the active one — if
   // the user switched backends after `hold`, the MTLBuffer we need to free
@@ -513,6 +588,16 @@ function describe(): {
   };
 }
 
+// Escape hatch to the active backend's device-resident kernel surface
+// (bun:llm forward-pass path). Returns null unless the active backend is
+// CUDA _and_ NVRTC is available to compile the device-ops module. See
+// src/js/bun/gpu/cuda.ts `DevOps` for the full shape.
+function getDevOps(): any {
+  const b = resolveActive();
+  const fn = (b as any).getDevOps;
+  return typeof fn === "function" ? fn() : null;
+}
+
 export default {
   dot,
   matVec,
@@ -521,9 +606,12 @@ export default {
   alloc,
   isAligned,
   hold,
+  holdQ4K,
+  holdQ6K,
   release,
   releasePinned,
   GpuFloat32Array,
+  GpuHandleArray,
   activeBackend,
   hasBackend,
   setBackend,
@@ -531,4 +619,5 @@ export default {
   calibrate,
   dispose,
   describe,
+  getDevOps,
 };

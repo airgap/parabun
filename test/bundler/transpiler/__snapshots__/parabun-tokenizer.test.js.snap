@@ -1,0 +1,11 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`Llama-3 BPE tokenizer tokenizes 'Hello, world!' to a stable ID sequence 1`] = `
+[
+  128000,
+  9906,
+  11,
+  1917,
+  0,
+]
+`;

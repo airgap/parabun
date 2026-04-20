@@ -595,6 +595,13 @@ type FArray = Float32Array | Float64Array;
 // from it and so release() knows what was wrapped. f64 arrays don't get a
 // device pointer today because no CUDA kernel consumes them yet — those
 // handles pass through to simd with a cheap view wrap.
+//
+// `qFormat` marks a quantized weight: the device buffer holds raw Q4_K
+// super-blocks rather than fp32 values, and matVec dispatches to a
+// format-specific dequant+dot kernel. `view` is set to an empty Float32Array
+// stub because the public GpuHandle contract requires it, but callers
+// should not read it for quantized handles (length still reflects the
+// logical element count so shape checks work).
 type GpuHandle = {
   __bunGpuHandle: true;
   backend: "metal" | "cuda" | "cpu";
@@ -603,6 +610,7 @@ type GpuHandle = {
   buffer: bigint;
   view: FArray;
   released: boolean;
+  qFormat?: "q4_K" | "q6_K";
 };
 
 function isGpuHandle(x: unknown): x is GpuHandle {
@@ -1850,6 +1858,1508 @@ function releaseHandle(handle: GpuHandle): void {
   handle.released = true;
 }
 
+// Hold a Q4_K quantized tensor on device. `blocks` contains raw 144-byte
+// super-blocks laid out row-major (one row's blocks contiguous, then
+// next row). `nElems` is the logical (dequantized) element count.
+// Returns a GpuHandle with qFormat="q4_K"; matVec will dispatch to the
+// on-chip dequant kernel. Does not retain the host bytes.
+const Q4K_BLOCK_BYTES = 144;
+const Q6K_BLOCK_BYTES = 210;
+
+// Hold a Q6_K quantized tensor on device. `blocks` is the raw 210-byte
+// super-block stream, row-major. `nElems` is the logical dequantized
+// element count. Mirror of `holdQ4K`.
+function holdQ6K(blocks: Uint8Array, nElems: number): GpuHandle {
+  if (!(blocks instanceof Uint8Array)) {
+    throw new TypeError(`holdQ6K requires Uint8Array; got ${(blocks as any)?.constructor?.name ?? typeof blocks}`);
+  }
+  if (!Number.isInteger(nElems) || nElems <= 0 || (nElems & 255) !== 0) {
+    throw new RangeError(`holdQ6K: nElems must be a positive multiple of 256; got ${nElems}`);
+  }
+  const expectedBytes = (nElems / 256) * Q6K_BLOCK_BYTES;
+  if (blocks.byteLength !== expectedBytes) {
+    throw new RangeError(`holdQ6K: expected ${expectedBytes} bytes for ${nElems} elements; got ${blocks.byteLength}`);
+  }
+  if (!probe()) throw new Error("bun:gpu cuda: not available");
+
+  const s = cudaLib!.symbols;
+  const p = ffiPtr!;
+  const dPtrBuf = new BigUint64Array(1);
+  const bytes = BigInt(blocks.byteLength);
+  if (s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
+    throw new Error("bun:gpu cuda: cuMemAlloc failed in holdQ6K");
+  }
+  const dPtr = dPtrBuf[0];
+  if (s.cuMemcpyHtoD_v2(dPtr, p(blocks), bytes) !== 0) {
+    s.cuMemFree_v2(dPtr);
+    throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in holdQ6K");
+  }
+  return {
+    __bunGpuHandle: true,
+    backend: "cuda",
+    type: "f32",
+    length: nElems,
+    buffer: dPtr,
+    view: new Float32Array(0),
+    released: false,
+    qFormat: "q6_K",
+  };
+}
+
+function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
+  if (!(blocks instanceof Uint8Array)) {
+    throw new TypeError(`holdQ4K requires Uint8Array; got ${(blocks as any)?.constructor?.name ?? typeof blocks}`);
+  }
+  if (!Number.isInteger(nElems) || nElems <= 0 || (nElems & 255) !== 0) {
+    throw new RangeError(`holdQ4K: nElems must be a positive multiple of 256; got ${nElems}`);
+  }
+  const expectedBytes = (nElems / 256) * Q4K_BLOCK_BYTES;
+  if (blocks.byteLength !== expectedBytes) {
+    throw new RangeError(`holdQ4K: expected ${expectedBytes} bytes for ${nElems} elements; got ${blocks.byteLength}`);
+  }
+  if (!probe()) throw new Error("bun:gpu cuda: not available");
+
+  const s = cudaLib!.symbols;
+  const p = ffiPtr!;
+  const dPtrBuf = new BigUint64Array(1);
+  const bytes = BigInt(blocks.byteLength);
+  if (s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
+    throw new Error("bun:gpu cuda: cuMemAlloc failed in holdQ4K");
+  }
+  const dPtr = dPtrBuf[0];
+  if (s.cuMemcpyHtoD_v2(dPtr, p(blocks), bytes) !== 0) {
+    s.cuMemFree_v2(dPtr);
+    throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in holdQ4K");
+  }
+  return {
+    __bunGpuHandle: true,
+    backend: "cuda",
+    type: "f32",
+    length: nElems,
+    buffer: dPtr,
+    view: new Float32Array(0), // stub: callers must not read .view on q-handles
+    released: false,
+    qFormat: "q4_K",
+  };
+}
+
+// ─── Device-resident kernel module (NVRTC-compiled) ───────────────────────
+//
+// The kernels above are the "cross-PCIe" API: every matVec / dot / matmul
+// call HtoDs its inputs and DtoH's its output. That's fine for one-shot
+// calls, but catastrophic for a transformer decode loop where the 8KB
+// residual stream ping-pongs across PCIe ~113 times per token. For
+// bun:llm (and future device-residency consumers) we expose a second
+// surface — `devOps` — where the caller explicitly allocates device
+// scratch buffers and drives ops with device pointers only. No HtoD/DtoH
+// in the hot path; the only host↔device traffic per token is the 4-byte
+// argmax result at the end.
+//
+// Implementation: one CUDA C source bundle compiled via NVRTC at first
+// use. PTX hand-coding for 11+ kernels would be unshippably painful,
+// and NVRTC's per-module compile time (~200ms) is paid exactly once
+// per process. If NVRTC isn't installed, `devOps` returns null and
+// bun:llm falls back to the old host-loop path.
+//
+// Kernel conventions:
+//   - All kernels operate on f32 only.
+//   - Device pointers are passed as u64 (cuLaunchKernel convention).
+//   - Scalar dims are u32; scales/eps are f32.
+//   - Layout matches the host-side code exactly (row-major, head-major
+//     for multi-head tensors) so parity is trivial to check.
+
+const DEV_CUDA_SOURCE = `
+// NVRTC ships without <math.h> / <limits>, so synthesize the constants.
+#define F_INF  __int_as_float(0x7f800000)
+#define F_NINF __int_as_float(0xff800000)
+
+// fp16 → fp32 without <cuda_fp16.h>. The PTX "cvt.f32.f16" instruction
+// handles subnormals/Inf/NaN identically to __half2float. Used in K-quant
+// dequant kernels (d and dmin are fp16).
+static __device__ __forceinline__ float fp16_to_fp32(unsigned short h) {
+    float r;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(r) : "h"(h));
+    return r;
+}
+
+// Embedding lookup: copy row tokenId of the f32 embedding table into x.
+extern "C" __global__ void embed_lookup_f32(
+    const float* __restrict__ embd,
+    float* __restrict__ x,
+    unsigned int tokenId,
+    unsigned int dModel
+) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < dModel) x[i] = embd[(size_t)tokenId * dModel + i];
+}
+
+// Q6_K embed_lookup: same byte layout as matvec_q6k_f32, but emits
+// dequantized fp32 instead of accumulating. 128 threads, single block.
+// dModel must be a multiple of 256. Caller guarantees k_sblocks >= 1.
+extern "C" __global__ void embed_lookup_q6k_f32(
+    const unsigned char* __restrict__ embd,
+    float* __restrict__ x,
+    unsigned int tokenId,
+    unsigned int dModel
+) {
+    __shared__ float sD;
+    __shared__ signed char sSc[16];
+    __shared__ unsigned char sQl[128];
+    __shared__ unsigned char sQh[64];
+
+    unsigned int tid = threadIdx.x;
+    unsigned int k_sblocks = dModel >> 8;
+    const unsigned char* rowBase = embd + (size_t)tokenId * k_sblocks * 210u;
+
+    for (unsigned int sb = 0; sb < k_sblocks; sb++) {
+        const unsigned char* blk = rowBase + (size_t)sb * 210u;
+        sQl[tid] = blk[tid];
+        if (tid < 64u) sQh[tid] = blk[128u + tid];
+        if (tid < 16u) sSc[tid] = (signed char)blk[192u + tid];
+        if (tid == 0) {
+            unsigned short dh = (unsigned short)blk[208] | ((unsigned short)blk[209] << 8);
+            sD = fp16_to_fp32(dh);
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int which_half = 0; which_half < 2; which_half++) {
+            unsigned int qi = tid + (which_half == 0 ? 0u : 128u);
+            unsigned int g = qi >> 7;
+            unsigned int i_in_g = qi & 127u;
+            unsigned int which = i_in_g >> 5;
+            unsigned int l = i_in_g & 31u;
+            unsigned int is = l >> 4;
+            unsigned int sc_idx = g * 8u + which * 2u + is;
+            unsigned int ql_idx = g * 64u + (which & 1u) * 32u + l;
+            unsigned int qh_idx = g * 32u + l;
+            unsigned int qh_shift = which * 2u;
+            unsigned int nibble = ((which >> 1) == 0u)
+                ? ((unsigned int)sQl[ql_idx] & 0xFu)
+                : ((unsigned int)sQl[ql_idx] >> 4);
+            unsigned int high2 = ((unsigned int)sQh[qh_idx] >> qh_shift) & 3u;
+            int q_byte = (int)(nibble | (high2 << 4));
+            int q_signed = q_byte - 32;
+            x[sb * 256u + qi] = sD * (float)sSc[sc_idx] * (float)q_signed;
+        }
+        __syncthreads();
+    }
+}
+
+// Q4_K embed_lookup: dequantizes a single row of Q4_K super-blocks.
+extern "C" __global__ void embed_lookup_q4k_f32(
+    const unsigned char* __restrict__ embd,
+    float* __restrict__ x,
+    unsigned int tokenId,
+    unsigned int dModel
+) {
+    __shared__ float sD;
+    __shared__ float sDmin;
+    __shared__ unsigned char sScales[12];
+    __shared__ unsigned char sQs[128];
+
+    unsigned int tid = threadIdx.x;
+    unsigned int k_sblocks = dModel >> 8;
+    const unsigned char* rowBase = embd + (size_t)tokenId * k_sblocks * 144u;
+
+    for (unsigned int sb = 0; sb < k_sblocks; sb++) {
+        const unsigned char* blk = rowBase + (size_t)sb * 144u;
+        if (tid == 0) {
+            unsigned short dh = (unsigned short)blk[0] | ((unsigned short)blk[1] << 8);
+            sD = fp16_to_fp32(dh);
+        } else if (tid == 1) {
+            unsigned short dmh = (unsigned short)blk[2] | ((unsigned short)blk[3] << 8);
+            sDmin = fp16_to_fp32(dmh);
+        } else if (tid < 14u) {
+            sScales[tid - 2u] = blk[2u + tid];
+        }
+        if (tid < 128u) sQs[tid] = blk[16u + tid];
+        __syncthreads();
+
+        #pragma unroll
+        for (int which = 0; which < 2; which++) {
+            unsigned int qi = tid + (which == 0 ? 0u : 128u);
+            unsigned int sb_idx = qi >> 5;
+            unsigned int element = qi & 31u;
+            unsigned int byte_idx = 32u * (sb_idx >> 1) + element;
+            unsigned char byte = sQs[byte_idx];
+            unsigned int q = (sb_idx & 1u) ? ((unsigned int)byte >> 4) : ((unsigned int)byte & 0xFu);
+
+            unsigned int sc, mn;
+            if (sb_idx < 4u) {
+                sc = (unsigned int)sScales[sb_idx] & 63u;
+                mn = (unsigned int)sScales[sb_idx + 4u] & 63u;
+            } else {
+                unsigned int s_jp4 = (unsigned int)sScales[sb_idx + 4u];
+                unsigned int s_jm4 = (unsigned int)sScales[sb_idx - 4u];
+                unsigned int s_j   = (unsigned int)sScales[sb_idx];
+                sc = (s_jp4 & 0xFu) | (((s_jm4 >> 6) & 3u) << 4);
+                mn = ((s_jp4 >> 4) & 0xFu) | (((s_j >> 6) & 3u) << 4);
+            }
+
+            x[sb * 256u + qi] = sD * (float)sc * (float)q - sDmin * (float)mn;
+        }
+        __syncthreads();
+    }
+}
+
+// RMSNorm: y = (x / sqrt(mean(x^2) + eps)) * weight. Single block; one
+// warp-reduce across the whole vector. Block size should be >= 32 and
+// <= 1024; caller picks 256 for dModel=2048 (8 elems/thread).
+extern "C" __global__ void rmsnorm_f32(
+    const float* __restrict__ x,
+    const float* __restrict__ w,
+    float* __restrict__ y,
+    unsigned int n,
+    float eps
+) {
+    __shared__ float warpSum[32];
+    __shared__ float sScale[1];
+
+    unsigned int tid = threadIdx.x;
+    unsigned int bs = blockDim.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+
+    float local = 0.0f;
+    for (unsigned int i = tid; i < n; i += bs) {
+        float v = x[i];
+        local += v * v;
+    }
+    for (int off = 16; off > 0; off >>= 1) local += __shfl_xor_sync(0xffffffff, local, off);
+    if (lane == 0) warpSum[warp] = local;
+    __syncthreads();
+
+    if (warp == 0) {
+        unsigned int nwarps = (bs + 31u) >> 5;
+        local = (tid < nwarps) ? warpSum[lane] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1) local += __shfl_xor_sync(0xffffffff, local, off);
+        if (tid == 0) sScale[0] = rsqrtf(local / (float)n + eps);
+    }
+    __syncthreads();
+    float scale = sScale[0];
+    for (unsigned int i = tid; i < n; i += bs) {
+        y[i] = x[i] * scale * w[i];
+    }
+}
+
+// y[i] = a[i] + b[i]
+extern "C" __global__ void add_f32(const float* a, const float* b, float* y, unsigned int n) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = a[i] + b[i];
+}
+
+// x[i] += d[i]   (residual add, in-place)
+extern "C" __global__ void accum_f32(float* __restrict__ x, const float* __restrict__ d, unsigned int n) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += d[i];
+}
+
+// x[i] += b[i]   (Q/K/V bias for Qwen2)
+extern "C" __global__ void bias_add_f32(float* __restrict__ x, const float* __restrict__ b, unsigned int n) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += b[i];
+}
+
+// SwiGLU fused: gate[i] = silu(gate[i]) * up[i]  =  (gate / (1+exp(-gate))) * up
+extern "C" __global__ void silu_mul_f32(float* __restrict__ gate, const float* __restrict__ up, unsigned int n) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float g = gate[i];
+        float sig = 1.0f / (1.0f + __expf(-g));
+        gate[i] = g * sig * up[i];
+    }
+}
+
+// RoPE NORM (interleaved pairs): for each head, rotate (x[2i], x[2i+1]).
+// Launch: grid(nHeads), block(headDim/2).
+extern "C" __global__ void rope_norm_f32(
+    float* __restrict__ x,
+    const float* __restrict__ invFreq,
+    unsigned int headDim,
+    unsigned int pos
+) {
+    unsigned int h = blockIdx.x;
+    unsigned int i = threadIdx.x;
+    unsigned int half = headDim >> 1;
+    if (i >= half) return;
+    unsigned int base = h * headDim + 2 * i;
+    float theta = (float)pos * invFreq[i];
+    float c, s;
+    __sincosf(theta, &s, &c);
+    float a = x[base];
+    float b = x[base + 1];
+    x[base]     = a * c - b * s;
+    x[base + 1] = a * s + b * c;
+}
+
+// RoPE NEOX (split halves): for each head, rotate (x[i], x[half+i]).
+// Launch: grid(nHeads), block(headDim/2).
+extern "C" __global__ void rope_neox_f32(
+    float* __restrict__ x,
+    const float* __restrict__ invFreq,
+    unsigned int headDim,
+    unsigned int pos
+) {
+    unsigned int h = blockIdx.x;
+    unsigned int i = threadIdx.x;
+    unsigned int half = headDim >> 1;
+    if (i >= half) return;
+    unsigned int base = h * headDim;
+    float theta = (float)pos * invFreq[i];
+    float c, s;
+    __sincosf(theta, &s, &c);
+    float a = x[base + i];
+    float b = x[base + half + i];
+    x[base + i]        = a * c - b * s;
+    x[base + half + i] = a * s + b * c;
+}
+
+// Copy src (length kvRowSize) into cache[pos*kvRowSize..].
+extern "C" __global__ void kv_store_f32(
+    const float* __restrict__ src,
+    float* __restrict__ cache,
+    unsigned int pos,
+    unsigned int kvRowSize
+) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < kvRowSize) cache[(size_t)pos * kvRowSize + i] = src[i];
+}
+
+// Attention scores for one head, one past-position. Grid(nHeads, ctxLen),
+// block(headDim). Each block reduces dot(Q[h], K[t][kvh]) * scale into
+// scores[h * scoreStride + t]. headDim must be a multiple of 32 (warp size).
+extern "C" __global__ void attn_scores_f32(
+    const float* __restrict__ q,
+    const float* __restrict__ kCache,
+    float* __restrict__ scores,
+    unsigned int headDim,
+    unsigned int kvRowSize,
+    unsigned int groupSize,
+    unsigned int scoreStride,
+    float scale
+) {
+    __shared__ float warpV[32];
+
+    unsigned int h = blockIdx.x;
+    unsigned int t = blockIdx.y;
+    unsigned int i = threadIdx.x;
+    unsigned int lane = i & 31u;
+    unsigned int warp = i >> 5;
+    unsigned int kvh = h / groupSize;
+    unsigned int qBase = h * headDim;
+    size_t kBase = (size_t)t * kvRowSize + kvh * headDim;
+
+    float v = (i < headDim) ? q[qBase + i] * kCache[kBase + i] : 0.0f;
+    for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffff, v, off);
+    if (lane == 0) warpV[warp] = v;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned int nwarps = (headDim + 31u) >> 5;
+        v = (i < nwarps) ? warpV[lane] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffff, v, off);
+        if (i == 0) scores[h * scoreStride + t] = v * scale;
+    }
+}
+
+// Row softmax (numerically stable). Grid(rows), block(bs). Row stride
+// allows scores to be sized to maxContext without copying the active
+// prefix. Writes softmaxed values back into the same row.
+extern "C" __global__ void softmax_row_f32(
+    float* __restrict__ scores,
+    unsigned int cols,
+    unsigned int stride
+) {
+    __shared__ float warpMax[32];
+    __shared__ float warpSum[32];
+    __shared__ float sMax[1];
+    __shared__ float sSum[1];
+
+    unsigned int r = blockIdx.x;
+    unsigned int tid = threadIdx.x;
+    unsigned int bs = blockDim.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+    float* row = scores + r * stride;
+
+    // Max reduction
+    float lmax = F_NINF;
+    for (unsigned int i = tid; i < cols; i += bs) {
+        float v = row[i];
+        if (v > lmax) lmax = v;
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+        float o = __shfl_xor_sync(0xffffffff, lmax, off);
+        if (o > lmax) lmax = o;
+    }
+    if (lane == 0) warpMax[warp] = lmax;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned int nwarps = (bs + 31u) >> 5;
+        lmax = (tid < nwarps) ? warpMax[lane] : F_NINF;
+        for (int off = 16; off > 0; off >>= 1) {
+            float o = __shfl_xor_sync(0xffffffff, lmax, off);
+            if (o > lmax) lmax = o;
+        }
+        if (tid == 0) sMax[0] = lmax;
+    }
+    __syncthreads();
+    float maxV = sMax[0];
+
+    // Exp + sum
+    float lsum = 0.0f;
+    for (unsigned int i = tid; i < cols; i += bs) {
+        float e = __expf(row[i] - maxV);
+        row[i] = e;
+        lsum += e;
+    }
+    for (int off = 16; off > 0; off >>= 1) lsum += __shfl_xor_sync(0xffffffff, lsum, off);
+    if (lane == 0) warpSum[warp] = lsum;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned int nwarps = (bs + 31u) >> 5;
+        lsum = (tid < nwarps) ? warpSum[lane] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1) lsum += __shfl_xor_sync(0xffffffff, lsum, off);
+        if (tid == 0) sSum[0] = lsum;
+    }
+    __syncthreads();
+    float invSum = 1.0f / sSum[0];
+    for (unsigned int i = tid; i < cols; i += bs) row[i] *= invSum;
+}
+
+// Attention output: out[h*headDim + i] = sum_t scores[h][t] * V[t][kvh][i]
+// Launch: grid(nHeads), block(headDim). Each thread accumulates one output dim.
+extern "C" __global__ void attn_output_f32(
+    const float* __restrict__ scores,
+    const float* __restrict__ vCache,
+    float* __restrict__ out,
+    unsigned int headDim,
+    unsigned int kvRowSize,
+    unsigned int groupSize,
+    unsigned int ctxLen,
+    unsigned int scoreStride
+) {
+    unsigned int h = blockIdx.x;
+    unsigned int i = threadIdx.x;
+    if (i >= headDim) return;
+    unsigned int kvh = h / groupSize;
+    unsigned int vHeadOff = kvh * headDim + i;
+    const float* srow = scores + h * scoreStride;
+    float acc = 0.0f;
+    for (unsigned int t = 0; t < ctxLen; t++) {
+        acc += srow[t] * vCache[(size_t)t * kvRowSize + vHeadOff];
+    }
+    out[h * headDim + i] = acc;
+}
+
+// Fused flash-attention: grid(nHeads), block(nthreads). One block per
+// head computes dot(q, K_t) for every past t, runs online softmax, and
+// weights V into out in a single pass — no scores buffer in global mem.
+//
+// Online softmax invariant (Rabe & Staats 2021): at iteration t, we keep
+//   runMax  = max_{t' <= t}(score_{t'})
+//   runSum  = sum_{t' <= t}(exp(score_{t'} - runMax))
+//   runOut  = sum_{t' <= t}(exp(score_{t'} - runMax) * V_{t'})
+// When score_t raises the max by Δ, we rescale runSum and runOut by
+// exp(oldMax - newMax) — numerically stable without two passes.
+//
+// Launch dims: block = max(headDim, 32) threads (must be multiple of 32).
+// Each thread owns one dim of q/V/out. headDim ≤ 256 required (shared
+// arrays sized for Llama-3 headDim=64; adjust sQ/sOut sizes if we ever
+// run a wider head). groupSize = nHead / nKvHead handles GQA.
+extern "C" __global__ void flash_attn_f32(
+    const float* __restrict__ q,
+    const float* __restrict__ kCache,
+    const float* __restrict__ vCache,
+    float* __restrict__ out,
+    unsigned int headDim,
+    unsigned int kvRowSize,
+    unsigned int groupSize,
+    unsigned int ctxLen,
+    float scale
+) {
+    __shared__ float sQ[256];
+    __shared__ float sOut[256];
+    __shared__ float sScore;
+    __shared__ float warpRed[8];
+
+    unsigned int h = blockIdx.x;
+    unsigned int tid = threadIdx.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+    unsigned int bs = blockDim.x;
+    unsigned int nwarps = (bs + 31u) >> 5;
+    unsigned int kvh = h / groupSize;
+
+    if (tid < headDim) {
+        sQ[tid] = q[h * headDim + tid];
+        sOut[tid] = 0.0f;
+    }
+    __syncthreads();
+
+    float runMax = F_NINF;
+    float runSum = 0.0f;
+
+    for (unsigned int t = 0; t < ctxLen; t++) {
+        // dot(q, K[t, kvh]).
+        float local = 0.0f;
+        if (tid < headDim) {
+            float k = kCache[(size_t)t * kvRowSize + kvh * headDim + tid];
+            local = sQ[tid] * k;
+        }
+        for (int off = 16; off > 0; off >>= 1)
+            local += __shfl_xor_sync(0xffffffff, local, off);
+        if (lane == 0) warpRed[warp] = local;
+        __syncthreads();
+        if (warp == 0) {
+            local = (tid < nwarps) ? warpRed[tid] : 0.0f;
+            for (int off = 16; off > 0; off >>= 1)
+                local += __shfl_xor_sync(0xffffffff, local, off);
+            if (tid == 0) sScore = local * scale;
+        }
+        __syncthreads();
+
+        float score = sScore;
+        float newMax = fmaxf(runMax, score);
+        float correction = __expf(runMax - newMax);
+        float e = __expf(score - newMax);
+        runSum = runSum * correction + e;
+        runMax = newMax;
+
+        if (tid < headDim) {
+            float vv = vCache[(size_t)t * kvRowSize + kvh * headDim + tid];
+            sOut[tid] = sOut[tid] * correction + e * vv;
+        }
+        // No trailing sync needed: warpRed writes happen before the next
+        // __syncthreads() inside the next iteration's warp==0 reduction.
+    }
+
+    if (tid < headDim) {
+        out[h * headDim + tid] = sOut[tid] / runSum;
+    }
+}
+
+// Q4_K direct matVec: reads raw 144-byte super-blocks, dequantizes on
+// chip, accumulates in fp32. k must be a multiple of 256 (super-block
+// size). Layout per row: (k/256) super-blocks × 144 bytes.
+//
+// Super-block layout (matches llama.cpp block_q4_K):
+//   +0..+1   fp16 d     (overall scale)
+//   +2..+3   fp16 dmin  (overall offset)
+//   +4..+15  12 bytes of packed 6-bit (scale, min) × 8 sub-blocks
+//   +16..+143  128 bytes of 4-bit quants (8 groups of 32 elements)
+//
+// Dequant formula per element (sb = sub-block 0..7, i = 0..31):
+//   q  = qs[32*(sb/2) + i] either low or high nibble (sb even → low)
+//   sc = 6-bit scale for sub-block sb (packed in scales[0..11])
+//   mn = 6-bit min   for sub-block sb
+//   w  = d * sc * q - dmin * mn
+//
+// Layout: 1 warp (32 threads) per row; 4 warps per block (128 threads,
+// 4 rows per block). Each lane handles 8 elements/sb (one per sub-block
+// sb_idx 0..7, at column = lane). No __syncthreads (warp-local), warp
+// reduction at the end, lane 0 writes the output.
+//
+// Why not shared memory for the super-block: each warp handles a
+// different row, so nothing is shared between warps. Reading super-block
+// bytes directly from global memory hits L1 (32 threads read 32
+// consecutive bytes → one cache line), and we avoid the per-sb sync
+// barrier that was serializing the old kernel.
+
+extern "C" __global__ void matvec_q4k_f32(
+    const unsigned char* __restrict__ mat,
+    const float* __restrict__ vec,
+    float* __restrict__ out,
+    unsigned int m,
+    unsigned int k_sblocks          // k / 256
+) {
+    unsigned int tid = threadIdx.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp_in_block = tid >> 5;         // 0..3
+    unsigned int row = blockIdx.x * 4u + warp_in_block;
+    if (row >= m) return;
+
+    const unsigned char* rowBase = mat + (size_t)row * k_sblocks * 144u;
+
+    float acc = 0.0f;
+    for (unsigned int sb = 0; sb < k_sblocks; sb++) {
+        const unsigned char* blk = rowBase + (size_t)sb * 144u;
+
+        // Load metadata — each lane reads redundantly (cheap: L1 cached,
+        // 32 lanes ask for same 4 bytes → one memory load).
+        unsigned short dh  = (unsigned short)blk[0] | ((unsigned short)blk[1] << 8);
+        unsigned short dmh = (unsigned short)blk[2] | ((unsigned short)blk[3] << 8);
+        float d    = fp16_to_fp32(dh);
+        float dmin = fp16_to_fp32(dmh);
+
+        // Load the 12 scale bytes once into registers. Each lane reads
+        // redundantly; 32 lanes × 12 bytes = 384 byte reads, all L1-resident.
+        unsigned int sc0_3 = (unsigned int)blk[4] | ((unsigned int)blk[5] << 8)
+                           | ((unsigned int)blk[6] << 16) | ((unsigned int)blk[7] << 24);
+        unsigned int sc4_7 = (unsigned int)blk[8] | ((unsigned int)blk[9] << 8)
+                           | ((unsigned int)blk[10] << 16) | ((unsigned int)blk[11] << 24);
+        unsigned int sc8_11 = (unsigned int)blk[12] | ((unsigned int)blk[13] << 8)
+                            | ((unsigned int)blk[14] << 16) | ((unsigned int)blk[15] << 24);
+        // Handy byte extraction: byte k (0..11) from packed dwords.
+        //   sc0_3  → bytes 0..3
+        //   sc4_7  → bytes 4..7
+        //   sc8_11 → bytes 8..11
+
+        // Each lane owns column = lane; within this super-block we do
+        // 8 FMAs (one per sub-block sb_idx=0..7).
+        #pragma unroll 8
+        for (unsigned int k = 0; k < 8u; k++) {
+            unsigned int sb_idx  = k;
+            unsigned int qi      = sb_idx * 32u + lane;                 // 0..255
+            unsigned int byte_idx = 32u * (sb_idx >> 1) + lane;         // into qs[128]
+            unsigned char byte   = blk[16u + byte_idx];
+            unsigned int q = (sb_idx & 1u) ? ((unsigned int)byte >> 4) : ((unsigned int)byte & 0xFu);
+
+            unsigned int sc, mn;
+            if (sb_idx < 4u) {
+                // scales[0..3] → sc for sbs 0..3; scales[4..7] → mn for sbs 0..3.
+                unsigned int s_sc = (sc0_3 >> (sb_idx * 8u)) & 0xFFu;
+                unsigned int s_mn = (sc4_7 >> (sb_idx * 8u)) & 0xFFu;
+                sc = s_sc & 63u;
+                mn = s_mn & 63u;
+            } else {
+                // llama.cpp get_scale_min_k4: for j = sb_idx (4..7),
+                //   sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4)
+                //   mn = (scales[j+4] >> 4) | ((scales[j]   >> 6) << 4)
+                unsigned int s_jp4 = (sc8_11 >> ((sb_idx - 4u) * 8u)) & 0xFFu;   // scales[8..11]
+                unsigned int s_jm4 = (sc0_3 >> ((sb_idx - 4u) * 8u)) & 0xFFu;    // scales[0..3]
+                unsigned int s_j   = (sc4_7 >> ((sb_idx - 4u) * 8u)) & 0xFFu;    // scales[4..7]
+                sc = (s_jp4 & 0xFu) | (((s_jm4 >> 6) & 3u) << 4);
+                mn = ((s_jp4 >> 4) & 0xFu) | (((s_j >> 6) & 3u) << 4);
+            }
+
+            float w = d * (float)sc * (float)q - dmin * (float)mn;
+            float v = vec[sb * 256u + qi];
+            acc = fmaf(w, v, acc);
+        }
+    }
+
+    // Warp reduction.
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
+    if (lane == 0) out[row] = acc;
+}
+
+// Q6_K direct matVec: reads raw 210-byte super-blocks, dequantizes on
+// chip, accumulates in fp32. k must be a multiple of 256 (super-block
+// size). Layout per row: (k/256) super-blocks × 210 bytes.
+//
+// Super-block layout (matches llama.cpp block_q6_K):
+//   +0..+127   ql[128]   4 low bits of 256 quants (packed two per byte)
+//   +128..+191 qh[64]    2 high bits of 256 quants (packed four per byte)
+//   +192..+207 sc[16]    int8 scales, one per 16 elements
+//   +208..+209 fp16 d    super-block scale
+//
+// Dequant (matches ggml-quants.c dequantize_row_q6_K): for output index
+// i in [0, 256), decompose i into g = i/128, i' = i%128, l = i'%32,
+// which = i'/32 (0..3):
+//   nibble = (which < 2) ? ql[g*64 + (which&1)*32 + l] & 0xF
+//                        : ql[g*64 + (which&1)*32 + l] >> 4
+//   high2  = (qh[g*32 + l] >> (which*2)) & 3
+//   q      = (int)(nibble | (high2 << 4)) - 32         // signed 6-bit
+//   sc_i   = sc[g*8 + which*2 + (l>>4)]                // int8
+//   w      = d * sc_i * q
+// Layout: 1 warp per row, 4 warps per block. Same structure as
+// matvec_q4k_f32 above — warp-local, no inter-warp sync.
+extern "C" __global__ void matvec_q6k_f32(
+    const unsigned char* __restrict__ mat,
+    const float* __restrict__ vec,
+    float* __restrict__ out,
+    unsigned int m,
+    unsigned int k_sblocks         // k / 256
+) {
+    unsigned int tid = threadIdx.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp_in_block = tid >> 5;
+    unsigned int row = blockIdx.x * 4u + warp_in_block;
+    if (row >= m) return;
+
+    const unsigned char* rowBase = mat + (size_t)row * k_sblocks * 210u;
+
+    float acc = 0.0f;
+    for (unsigned int sb = 0; sb < k_sblocks; sb++) {
+        const unsigned char* blk = rowBase + (size_t)sb * 210u;
+
+        // Super-block scale (fp16 at offset 208).
+        unsigned short dh = (unsigned short)blk[208] | ((unsigned short)blk[209] << 8);
+        float d = fp16_to_fp32(dh);
+
+        // Each lane processes output indices qi = lane, lane+32, ..., lane+224
+        // (8 outputs, one per k=0..7). Mapping back to ql/qh/sc indices:
+        //   g = k >> 2, which = k & 3, l = lane (since lane is 0..31).
+        #pragma unroll 8
+        for (unsigned int k = 0; k < 8u; k++) {
+            unsigned int qi = lane + k * 32u;
+            unsigned int g      = k >> 2;                  // 0 for k=0..3, 1 for k=4..7
+            unsigned int which  = k & 3u;                  // 0..3
+            unsigned int ql_idx = g * 64u + (which & 1u) * 32u + lane;  // 0..127
+            unsigned int qh_idx = g * 32u + lane;                        // 0..63
+            unsigned int sc_idx = g * 8u + which * 2u + (lane >> 4);     // 0..15
+
+            unsigned int qlv = blk[ql_idx];
+            unsigned int qhv = blk[128u + qh_idx];
+            signed char scv = (signed char)blk[192u + sc_idx];
+
+            unsigned int nibble = (which < 2u) ? (qlv & 0xFu) : (qlv >> 4);
+            unsigned int high2  = (qhv >> (which * 2u)) & 3u;
+            int q_signed = (int)(nibble | (high2 << 4)) - 32;   // [-32, 31]
+
+            float w = d * (float)scv * (float)q_signed;
+            float v = vec[sb * 256u + qi];
+            acc = fmaf(w, v, acc);
+        }
+    }
+
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
+    if (lane == 0) out[row] = acc;
+}
+
+// Bandwidth-optimized matVec: float4 loads, 128 threads per row.
+// Requires k % 4 == 0 (caller asserts). m rows × (k/4) float4 cols.
+extern "C" __global__ void matvec_f32x4(
+    const float4* __restrict__ mat,
+    const float4* __restrict__ vec,
+    float* __restrict__ out,
+    unsigned int m,
+    unsigned int k_div4
+) {
+    __shared__ float warpSum[4];
+    unsigned int row = blockIdx.x;
+    unsigned int tid = threadIdx.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+    if (row >= m) return;
+
+    const float4* mrow = mat + (size_t)row * k_div4;
+    float acc = 0.0f;
+    for (unsigned int i = tid; i < k_div4; i += 128u) {
+        float4 m4 = mrow[i];
+        float4 v4 = vec[i];
+        acc = fmaf(m4.x, v4.x, acc);
+        acc = fmaf(m4.y, v4.y, acc);
+        acc = fmaf(m4.z, v4.z, acc);
+        acc = fmaf(m4.w, v4.w, acc);
+    }
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
+    if (lane == 0) warpSum[warp] = acc;
+    __syncthreads();
+    if (warp == 0) {
+        acc = (tid < 4) ? warpSum[tid] : 0.0f;
+        for (int off = 2; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
+        if (tid == 0) out[row] = acc;
+    }
+}
+
+// Argmax. Single block; tie-break toward lower index (matches host argmax).
+// Writes the winning index to outIdx[0].
+extern "C" __global__ void argmax_f32(
+    const float* __restrict__ logits,
+    int* __restrict__ outIdx,
+    unsigned int n
+) {
+    __shared__ float warpV[32];
+    __shared__ int warpI[32];
+
+    unsigned int tid = threadIdx.x;
+    unsigned int bs = blockDim.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+
+    float bestV = F_NINF;
+    int bestI = 0;
+    for (unsigned int i = tid; i < n; i += bs) {
+        float v = logits[i];
+        if (v > bestV || (v == bestV && (int)i < bestI)) { bestV = v; bestI = (int)i; }
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+        float ov = __shfl_xor_sync(0xffffffff, bestV, off);
+        int oi = __shfl_xor_sync(0xffffffff, bestI, off);
+        if (ov > bestV || (ov == bestV && oi < bestI)) { bestV = ov; bestI = oi; }
+    }
+    if (lane == 0) { warpV[warp] = bestV; warpI[warp] = bestI; }
+    __syncthreads();
+    if (warp == 0) {
+        unsigned int nwarps = (bs + 31u) >> 5;
+        bestV = (tid < nwarps) ? warpV[lane] : F_NINF;
+        bestI = (tid < nwarps) ? warpI[lane] : 0;
+        for (int off = 16; off > 0; off >>= 1) {
+            float ov = __shfl_xor_sync(0xffffffff, bestV, off);
+            int oi = __shfl_xor_sync(0xffffffff, bestI, off);
+            if (ov > bestV || (ov == bestV && oi < bestI)) { bestV = ov; bestI = oi; }
+        }
+        if (tid == 0) outIdx[0] = bestI;
+    }
+}
+`;
+
+type DevOpsFns = {
+  embedLookup: bigint;
+  rmsnorm: bigint;
+  add: bigint;
+  accum: bigint;
+  biasAdd: bigint;
+  siluMul: bigint;
+  ropeNorm: bigint;
+  ropeNeox: bigint;
+  kvStore: bigint;
+  attnScores: bigint;
+  softmaxRow: bigint;
+  attnOutput: bigint;
+  argmax: bigint;
+  matVec: bigint;
+  matVecQ4K: bigint;
+  matVecQ6K: bigint;
+  embedLookupQ4K: bigint;
+  embedLookupQ6K: bigint;
+  flashAttn: bigint;
+};
+
+let devOpsProbed = false;
+let devOpsMod: bigint | null = null;
+let devOpsFns: DevOpsFns | null = null;
+
+function probeDevOps(): boolean {
+  if (devOpsProbed) return devOpsFns !== null;
+  devOpsProbed = true;
+
+  if (!probe()) return false;
+  if (!tryLoadNvrtc()) return false;
+
+  const ns = nvrtcLib!.symbols;
+  const cs = cudaLib!.symbols;
+  const p = ffiPtr!;
+
+  const srcBytes = new TextEncoder().encode(DEV_CUDA_SOURCE + "\0");
+  const nameBytes = new TextEncoder().encode("parabun_devops.cu\0");
+  const progBuf = new BigUint64Array(1);
+  if (ns.nvrtcCreateProgram(p(progBuf), p(srcBytes), p(nameBytes), 0, null, null) !== 0) return false;
+  const prog = progBuf[0];
+
+  // --use_fast_math enables __expf/__sincosf intrinsics + FTZ — fine for
+  // inference, matches ollama/llama.cpp's default build flags.
+  const optStrs = ["--use_fast_math\0", "--std=c++14\0"].map(s => new TextEncoder().encode(s));
+  const optPtrs = new BigUint64Array(optStrs.map(a => BigInt(p(a))));
+  const compileResult = ns.nvrtcCompileProgram(prog, optStrs.length, p(optPtrs));
+  if (compileResult !== 0) {
+    const logSizeBuf = new BigUint64Array(1);
+    if (ns.nvrtcGetProgramLogSize(prog, p(logSizeBuf)) === 0) {
+      const logBytes = new Uint8Array(Number(logSizeBuf[0]));
+      ns.nvrtcGetProgramLog(prog, p(logBytes));
+      const end = logBytes.indexOf(0);
+      console.error(
+        `bun:gpu cuda: devOps NVRTC compile failed:\n${new TextDecoder().decode(logBytes.subarray(0, end < 0 ? logBytes.length : end))}`,
+      );
+    }
+    ns.nvrtcDestroyProgram(p(progBuf));
+    return false;
+  }
+
+  const ptxSizeBuf = new BigUint64Array(1);
+  if (ns.nvrtcGetPTXSize(prog, p(ptxSizeBuf)) !== 0) {
+    ns.nvrtcDestroyProgram(p(progBuf));
+    return false;
+  }
+  const ptxBuf = new Uint8Array(Number(ptxSizeBuf[0]));
+  if (ns.nvrtcGetPTX(prog, p(ptxBuf)) !== 0) {
+    ns.nvrtcDestroyProgram(p(progBuf));
+    return false;
+  }
+  ns.nvrtcDestroyProgram(p(progBuf));
+
+  const modBuf = new BigUint64Array(1);
+  if (cs.cuModuleLoadData(p(modBuf), p(ptxBuf)) !== 0) return false;
+  devOpsMod = modBuf[0];
+
+  const getFn = (name: string): bigint | null => {
+    const nameBytes = new TextEncoder().encode(name + "\0");
+    const fnBuf = new BigUint64Array(1);
+    if (cs.cuModuleGetFunction(p(fnBuf), devOpsMod!, p(nameBytes)) !== 0) return null;
+    return fnBuf[0];
+  };
+
+  const names: (keyof DevOpsFns)[] = [
+    "embedLookup",
+    "rmsnorm",
+    "add",
+    "accum",
+    "biasAdd",
+    "siluMul",
+    "ropeNorm",
+    "ropeNeox",
+    "kvStore",
+    "attnScores",
+    "softmaxRow",
+    "attnOutput",
+    "argmax",
+    "matVec",
+    "matVecQ4K",
+    "matVecQ6K",
+    "embedLookupQ4K",
+    "embedLookupQ6K",
+    "flashAttn",
+  ];
+  const kernelNames: Record<keyof DevOpsFns, string> = {
+    embedLookup: "embed_lookup_f32",
+    rmsnorm: "rmsnorm_f32",
+    add: "add_f32",
+    accum: "accum_f32",
+    biasAdd: "bias_add_f32",
+    siluMul: "silu_mul_f32",
+    ropeNorm: "rope_norm_f32",
+    ropeNeox: "rope_neox_f32",
+    kvStore: "kv_store_f32",
+    attnScores: "attn_scores_f32",
+    softmaxRow: "softmax_row_f32",
+    attnOutput: "attn_output_f32",
+    argmax: "argmax_f32",
+    matVec: "matvec_f32x4",
+    matVecQ4K: "matvec_q4k_f32",
+    matVecQ6K: "matvec_q6k_f32",
+    embedLookupQ4K: "embed_lookup_q4k_f32",
+    embedLookupQ6K: "embed_lookup_q6k_f32",
+    flashAttn: "flash_attn_f32",
+  };
+
+  const fns = {} as DevOpsFns;
+  for (const k of names) {
+    const fn = getFn(kernelNames[k]);
+    if (fn === null) {
+      cs.cuModuleUnload(devOpsMod!);
+      devOpsMod = null;
+      console.error(`bun:gpu cuda: devOps missing kernel ${kernelNames[k]}`);
+      return false;
+    }
+    fns[k] = fn;
+  }
+  devOpsFns = fns;
+  return true;
+}
+
+// ─── GpuScratch: pure device buffer with no host view ─────────────────────
+//
+// Separate from GpuHandle because the residency story is opposite: a
+// GpuHandle always has a host-side typed array (we `hold` a user's weight
+// tensor); a GpuScratch is purely on device, allocated by us, never
+// mirrored to host. Kept as a distinct type so we never accidentally try
+// to read `.view` from scratch (would NPE), and so typechecks at the
+// boundary catch misuse.
+
+type GpuScratch = {
+  __bunGpuScratch: true;
+  backend: "cuda";
+  type: "f32" | "i32";
+  length: number;
+  buffer: bigint;
+  released: boolean;
+  // Logical slice into another GpuScratch — shares the underlying device
+  // allocation, so freeScratch() is a no-op.
+  isSlice?: boolean;
+};
+
+function isGpuScratch(x: unknown): x is GpuScratch {
+  return typeof x === "object" && x !== null && (x as any).__bunGpuScratch === true;
+}
+
+function devPtr(x: GpuScratch | GpuHandle): bigint {
+  if (isGpuScratch(x)) {
+    if (x.released) throw new Error("bun:gpu cuda: op on released scratch");
+    return x.buffer;
+  }
+  if (x.released) throw new Error("bun:gpu cuda: op on released handle");
+  if (x.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer");
+  return x.buffer;
+}
+
+function allocScratch(length: number, type: "f32" | "i32" = "f32"): GpuScratch {
+  if (!Number.isInteger(length) || length < 0) {
+    throw new RangeError(`length must be a non-negative integer; got ${length}`);
+  }
+  if (!probe()) throw new Error("bun:gpu cuda: not available");
+  const s = cudaLib!.symbols;
+  const p = ffiPtr!;
+  const bytes = BigInt(length * 4);
+  const dPtrBuf = new BigUint64Array(1);
+  if (length > 0 && s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
+    throw new Error("bun:gpu cuda: cuMemAlloc(scratch) failed");
+  }
+  return {
+    __bunGpuScratch: true,
+    backend: "cuda",
+    type,
+    length,
+    buffer: length > 0 ? dPtrBuf[0] : 0n,
+    released: false,
+  };
+}
+
+function scratchSlice(s: GpuScratch, elemOffset: number, length: number): GpuScratch {
+  if (s.released) throw new Error("bun:gpu cuda: slice on released scratch");
+  if (elemOffset < 0 || length < 0 || elemOffset + length > s.length) {
+    throw new RangeError(`slice out of bounds: offset=${elemOffset}, length=${length}, total=${s.length}`);
+  }
+  return {
+    __bunGpuScratch: true,
+    backend: "cuda",
+    type: s.type,
+    length,
+    buffer: s.buffer + BigInt(elemOffset * 4),
+    released: false,
+    isSlice: true,
+  };
+}
+
+function freeScratch(s: GpuScratch): void {
+  if (!isGpuScratch(s)) throw new TypeError("freeScratch expected a GpuScratch");
+  if (s.released) return;
+  if (s.isSlice) {
+    s.released = true;
+    return;
+  }
+  if (s.buffer !== 0n && cudaLib) cudaLib.symbols.cuMemFree_v2(s.buffer);
+  s.buffer = 0n;
+  s.released = true;
+}
+
+function uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOffset = 0): void {
+  if (s.released) throw new Error("bun:gpu cuda: uploadScratch on released");
+  if (dstElemOffset + src.length > s.length) {
+    throw new RangeError(`uploadScratch: ${src.length} elems at offset ${dstElemOffset} > scratch length ${s.length}`);
+  }
+  if (src.length === 0) return;
+  const sym = cudaLib!.symbols;
+  const p = ffiPtr!;
+  const bytes = BigInt(src.byteLength);
+  const dst = s.buffer + BigInt(dstElemOffset * 4);
+  if (sym.cuMemcpyHtoD_v2(dst, p(src), bytes) !== 0) {
+    throw new Error("bun:gpu cuda: cuMemcpyHtoD(scratch) failed");
+  }
+}
+
+function downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemOffset = 0): void {
+  if (s.released) throw new Error("bun:gpu cuda: downloadScratch on released");
+  if (srcElemOffset + dst.length > s.length) {
+    throw new RangeError(
+      `downloadScratch: ${dst.length} elems at offset ${srcElemOffset} > scratch length ${s.length}`,
+    );
+  }
+  if (dst.length === 0) return;
+  const sym = cudaLib!.symbols;
+  const p = ffiPtr!;
+  const bytes = BigInt(dst.byteLength);
+  const src = s.buffer + BigInt(srcElemOffset * 4);
+  if (sym.cuMemcpyDtoH_v2(p(dst), src, bytes) !== 0) {
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(scratch) failed");
+  }
+}
+
+// ─── Device-resident launch wrappers ──────────────────────────────────────
+//
+// Every launcher here takes device pointers (bigint) only — no HtoD/DtoH.
+// Synchronization is the caller's responsibility; we only sync inside
+// downloadScratch or argmax-result readback. The launcher helper inlines
+// the FFI boilerplate so each kernel is five lines.
+
+// ─── Fast launch path ─────────────────────────────────────────────────────
+//
+// Per-token the model launches ~350 kernels. Allocating typed-array param
+// slots on every call burns ~3-7ms on GC + ffiPtr resolution. Instead each
+// launcher owns a small pre-allocated bundle: 1 BigUint64Array per ptr slot,
+// 1 Uint32Array per u32, 1 Float32Array per f32, plus cached BigInt
+// pointers into each slot. cuLaunchKernel takes a single paramPtrs array
+// (shared across all launchers — only the driver reads it synchronously).
+//
+// The address of paramPtrs is resolved once at init, and the scalar slot
+// addresses are frozen at first-call lazy init. Each launcher mutates only
+// scalar slot values + writes the N paramPtrs entries before calling
+// cuLaunchKernel. Zero allocations per launch after warmup.
+
+const PARAM_PTRS_MAX = 16;
+let paramPtrs: BigUint64Array | null = null;
+let paramPtrsAddr: number = 0;
+
+type SlotKind = "ptr" | "u32" | "f32";
+type KernelSlots = {
+  nSlots: number;
+  views: ArrayBufferView[];
+  addrs: bigint[]; // addrs[i] === BigInt(ffiPtr(views[i]))
+};
+
+function makeSlots(kinds: SlotKind[]): KernelSlots {
+  const p = ffiPtr!;
+  if (!paramPtrs) {
+    paramPtrs = new BigUint64Array(PARAM_PTRS_MAX);
+    paramPtrsAddr = p(paramPtrs);
+  }
+  const views: ArrayBufferView[] = [];
+  const addrs: bigint[] = [];
+  for (const k of kinds) {
+    const view: ArrayBufferView =
+      k === "ptr" ? new BigUint64Array(1) : k === "u32" ? new Uint32Array(1) : new Float32Array(1);
+    views.push(view);
+    addrs.push(BigInt(p(view)));
+  }
+  return { nSlots: kinds.length, views, addrs };
+}
+
+function launchWith(
+  fn: bigint,
+  gx: number,
+  gy: number,
+  gz: number,
+  bx: number,
+  by: number,
+  bz: number,
+  s: KernelSlots,
+): void {
+  const pp = paramPtrs!;
+  const addrs = s.addrs;
+  for (let i = 0; i < s.nSlots; i++) pp[i] = addrs[i];
+  const r = cudaLib!.symbols.cuLaunchKernel(fn, gx, gy, gz, bx, by, bz, 0, 0n, paramPtrsAddr, null);
+  if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel failed (${r})`);
+}
+
+function syncCtx(): void {
+  if (cudaLib!.symbols.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+}
+
+let slEmbed: KernelSlots | null = null;
+let slEmbedQ4K: KernelSlots | null = null;
+let slEmbedQ6K: KernelSlots | null = null;
+function launchEmbedLookupDev(embd: GpuHandle, x: GpuScratch, tokenId: number, dModel: number): void {
+  if (embd.qFormat === "q6_K") {
+    const s = slEmbedQ6K ?? (slEmbedQ6K = makeSlots(["ptr", "ptr", "u32", "u32"]));
+    (s.views[0] as BigUint64Array)[0] = devPtr(embd);
+    (s.views[1] as BigUint64Array)[0] = devPtr(x);
+    (s.views[2] as Uint32Array)[0] = tokenId;
+    (s.views[3] as Uint32Array)[0] = dModel;
+    launchWith(devOpsFns!.embedLookupQ6K, 1, 1, 1, 128, 1, 1, s);
+    return;
+  }
+  if (embd.qFormat === "q4_K") {
+    const s = slEmbedQ4K ?? (slEmbedQ4K = makeSlots(["ptr", "ptr", "u32", "u32"]));
+    (s.views[0] as BigUint64Array)[0] = devPtr(embd);
+    (s.views[1] as BigUint64Array)[0] = devPtr(x);
+    (s.views[2] as Uint32Array)[0] = tokenId;
+    (s.views[3] as Uint32Array)[0] = dModel;
+    launchWith(devOpsFns!.embedLookupQ4K, 1, 1, 1, 128, 1, 1, s);
+    return;
+  }
+  const s = slEmbed ?? (slEmbed = makeSlots(["ptr", "ptr", "u32", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(embd);
+  (s.views[1] as BigUint64Array)[0] = devPtr(x);
+  (s.views[2] as Uint32Array)[0] = tokenId;
+  (s.views[3] as Uint32Array)[0] = dModel;
+  launchWith(devOpsFns!.embedLookup, ((dModel + 255) / 256) | 0, 1, 1, 256, 1, 1, s);
+}
+
+let slRmsnorm: KernelSlots | null = null;
+function launchRmsnormDev(x: GpuScratch, w: GpuHandle | GpuScratch, y: GpuScratch, n: number, eps: number): void {
+  const s = slRmsnorm ?? (slRmsnorm = makeSlots(["ptr", "ptr", "ptr", "u32", "f32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(x);
+  (s.views[1] as BigUint64Array)[0] = devPtr(w);
+  (s.views[2] as BigUint64Array)[0] = devPtr(y);
+  (s.views[3] as Uint32Array)[0] = n;
+  (s.views[4] as Float32Array)[0] = eps;
+  // Single block. Pick size so there's plenty of work per thread but the
+  // warp-reduce tree stays two-level (≤32 warps). dModel=2048 ⇒ 8 elems/thread.
+  const bs = Math.min(1024, Math.max(32, 1 << Math.ceil(Math.log2(Math.max(32, Math.min(1024, n))))));
+  launchWith(devOpsFns!.rmsnorm, 1, 1, 1, bs, 1, 1, s);
+}
+
+let slAccum: KernelSlots | null = null;
+function launchAccumDev(x: GpuScratch, d: GpuScratch, n: number): void {
+  const s = slAccum ?? (slAccum = makeSlots(["ptr", "ptr", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(x);
+  (s.views[1] as BigUint64Array)[0] = devPtr(d);
+  (s.views[2] as Uint32Array)[0] = n;
+  launchWith(devOpsFns!.accum, ((n + 255) / 256) | 0, 1, 1, 256, 1, 1, s);
+}
+
+let slBiasAdd: KernelSlots | null = null;
+function launchBiasAddDev(x: GpuScratch, b: GpuHandle | GpuScratch, n: number): void {
+  const s = slBiasAdd ?? (slBiasAdd = makeSlots(["ptr", "ptr", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(x);
+  (s.views[1] as BigUint64Array)[0] = devPtr(b);
+  (s.views[2] as Uint32Array)[0] = n;
+  launchWith(devOpsFns!.biasAdd, ((n + 255) / 256) | 0, 1, 1, 256, 1, 1, s);
+}
+
+let slSiluMul: KernelSlots | null = null;
+function launchSiluMulDev(gate: GpuScratch, up: GpuScratch, n: number): void {
+  const s = slSiluMul ?? (slSiluMul = makeSlots(["ptr", "ptr", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(gate);
+  (s.views[1] as BigUint64Array)[0] = devPtr(up);
+  (s.views[2] as Uint32Array)[0] = n;
+  launchWith(devOpsFns!.siluMul, ((n + 255) / 256) | 0, 1, 1, 256, 1, 1, s);
+}
+
+let slRope: KernelSlots | null = null;
+function launchRopeDev(
+  x: GpuScratch,
+  invFreq: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  pos: number,
+  mode: "norm" | "neox",
+): void {
+  const s = slRope ?? (slRope = makeSlots(["ptr", "ptr", "u32", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(x);
+  (s.views[1] as BigUint64Array)[0] = devPtr(invFreq);
+  (s.views[2] as Uint32Array)[0] = headDim;
+  (s.views[3] as Uint32Array)[0] = pos;
+  const fn = mode === "neox" ? devOpsFns!.ropeNeox : devOpsFns!.ropeNorm;
+  launchWith(fn, nHeads, 1, 1, headDim >> 1, 1, 1, s);
+}
+
+let slKVStore: KernelSlots | null = null;
+function launchKVStoreDev(src: GpuScratch, cache: GpuScratch, pos: number, kvRowSize: number): void {
+  const s = slKVStore ?? (slKVStore = makeSlots(["ptr", "ptr", "u32", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(src);
+  (s.views[1] as BigUint64Array)[0] = devPtr(cache);
+  (s.views[2] as Uint32Array)[0] = pos;
+  (s.views[3] as Uint32Array)[0] = kvRowSize;
+  launchWith(devOpsFns!.kvStore, ((kvRowSize + 255) / 256) | 0, 1, 1, 256, 1, 1, s);
+}
+
+let slAttnScores: KernelSlots | null = null;
+function launchAttnScoresDev(
+  q: GpuScratch,
+  kCache: GpuScratch,
+  scores: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  kvRowSize: number,
+  groupSize: number,
+  scoreStride: number,
+  ctxLen: number,
+  scale: number,
+): void {
+  const s = slAttnScores ?? (slAttnScores = makeSlots(["ptr", "ptr", "ptr", "u32", "u32", "u32", "u32", "f32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(q);
+  (s.views[1] as BigUint64Array)[0] = devPtr(kCache);
+  (s.views[2] as BigUint64Array)[0] = devPtr(scores);
+  (s.views[3] as Uint32Array)[0] = headDim;
+  (s.views[4] as Uint32Array)[0] = kvRowSize;
+  (s.views[5] as Uint32Array)[0] = groupSize;
+  (s.views[6] as Uint32Array)[0] = scoreStride;
+  (s.views[7] as Float32Array)[0] = scale;
+  launchWith(devOpsFns!.attnScores, nHeads, ctxLen, 1, headDim, 1, 1, s);
+}
+
+let slSoftmax: KernelSlots | null = null;
+function launchSoftmaxRowDev(scores: GpuScratch, rows: number, cols: number, stride: number): void {
+  const s = slSoftmax ?? (slSoftmax = makeSlots(["ptr", "u32", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(scores);
+  (s.views[1] as Uint32Array)[0] = cols;
+  (s.views[2] as Uint32Array)[0] = stride;
+  // Pick a sensible block: next pow-2 ≥ cols, clamped to [32, 1024].
+  const bs = Math.min(1024, Math.max(32, 1 << Math.ceil(Math.log2(Math.max(32, Math.min(1024, cols))))));
+  launchWith(devOpsFns!.softmaxRow, rows, 1, 1, bs, 1, 1, s);
+}
+
+let slAttnOutput: KernelSlots | null = null;
+function launchAttnOutputDev(
+  scores: GpuScratch,
+  vCache: GpuScratch,
+  out: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  kvRowSize: number,
+  groupSize: number,
+  ctxLen: number,
+  scoreStride: number,
+): void {
+  const s = slAttnOutput ?? (slAttnOutput = makeSlots(["ptr", "ptr", "ptr", "u32", "u32", "u32", "u32", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(scores);
+  (s.views[1] as BigUint64Array)[0] = devPtr(vCache);
+  (s.views[2] as BigUint64Array)[0] = devPtr(out);
+  (s.views[3] as Uint32Array)[0] = headDim;
+  (s.views[4] as Uint32Array)[0] = kvRowSize;
+  (s.views[5] as Uint32Array)[0] = groupSize;
+  (s.views[6] as Uint32Array)[0] = ctxLen;
+  (s.views[7] as Uint32Array)[0] = scoreStride;
+  launchWith(devOpsFns!.attnOutput, nHeads, 1, 1, headDim, 1, 1, s);
+}
+
+// Fused flash-attention launcher. Replaces the attnScores + softmaxRow +
+// attnOutput trio with a single dispatch: grid(nHeads), block aligned to a
+// warp multiple ≥ headDim. Caller still owns Q, KV caches, and the output
+// buffer; we never touch a scores scratch buffer.
+let slFlashAttn: KernelSlots | null = null;
+function launchFlashAttnDev(
+  q: GpuScratch,
+  kCache: GpuScratch,
+  vCache: GpuScratch,
+  out: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  kvRowSize: number,
+  groupSize: number,
+  ctxLen: number,
+  scale: number,
+): void {
+  const s = slFlashAttn ?? (slFlashAttn = makeSlots(["ptr", "ptr", "ptr", "ptr", "u32", "u32", "u32", "u32", "f32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(q);
+  (s.views[1] as BigUint64Array)[0] = devPtr(kCache);
+  (s.views[2] as BigUint64Array)[0] = devPtr(vCache);
+  (s.views[3] as BigUint64Array)[0] = devPtr(out);
+  (s.views[4] as Uint32Array)[0] = headDim;
+  (s.views[5] as Uint32Array)[0] = kvRowSize;
+  (s.views[6] as Uint32Array)[0] = groupSize;
+  (s.views[7] as Uint32Array)[0] = ctxLen;
+  (s.views[8] as Float32Array)[0] = scale;
+  // Block size: round headDim up to a warp multiple. The kernel uses
+  // sQ[256]/sOut[256] — headDim must be ≤ 256.
+  const block = Math.max(32, ((headDim + 31) >> 5) << 5);
+  launchWith(devOpsFns!.flashAttn, nHeads, 1, 1, block, 1, 1, s);
+}
+
+let slArgmax: KernelSlots | null = null;
+function launchArgmaxDev(logits: GpuScratch, outIdx: GpuScratch, n: number): void {
+  const s = slArgmax ?? (slArgmax = makeSlots(["ptr", "ptr", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(logits);
+  (s.views[1] as BigUint64Array)[0] = devPtr(outIdx);
+  (s.views[2] as Uint32Array)[0] = n;
+  launchWith(devOpsFns!.argmax, 1, 1, 1, 1024, 1, 1, s);
+}
+
+// Device-resident matVec: y[r] = sum_c M[r*K + c] * x[c]. Uses the NVRTC-
+// compiled matvec_f32x4 kernel: 128 threads per row, float4 loads (k must
+// be a multiple of 4 — all Llama/Qwen2 dims we target already satisfy this).
+// Falls back to the PTX matVecF32 if k is not aligned.
+let slMatVec: KernelSlots | null = null;
+let slMatVecPtx: KernelSlots | null = null;
+let slMatVecQ4K: KernelSlots | null = null;
+let slMatVecQ6K: KernelSlots | null = null;
+function launchMatVecDev(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number, k: number): void {
+  if (mat.qFormat === "q4_K") {
+    // On-chip dequant: 1 warp (32 threads) per row, 4 warps per block =
+    // 128 threads per block, ⌈m/4⌉ blocks. Requires k % 256 == 0 —
+    // validated at holdQ4K() time. m must be divisible by 4 for the
+    // current kernel (all Llama projection rows match).
+    const s = slMatVecQ4K ?? (slMatVecQ4K = makeSlots(["ptr", "ptr", "ptr", "u32", "u32"]));
+    (s.views[0] as BigUint64Array)[0] = devPtr(mat);
+    (s.views[1] as BigUint64Array)[0] = devPtr(x);
+    (s.views[2] as BigUint64Array)[0] = devPtr(y);
+    (s.views[3] as Uint32Array)[0] = m;
+    (s.views[4] as Uint32Array)[0] = k >> 8;
+    launchWith(devOpsFns!.matVecQ4K, (m + 3) >> 2, 1, 1, 128, 1, 1, s);
+    return;
+  }
+  if (mat.qFormat === "q6_K") {
+    const s = slMatVecQ6K ?? (slMatVecQ6K = makeSlots(["ptr", "ptr", "ptr", "u32", "u32"]));
+    (s.views[0] as BigUint64Array)[0] = devPtr(mat);
+    (s.views[1] as BigUint64Array)[0] = devPtr(x);
+    (s.views[2] as BigUint64Array)[0] = devPtr(y);
+    (s.views[3] as Uint32Array)[0] = m;
+    (s.views[4] as Uint32Array)[0] = k >> 8;
+    launchWith(devOpsFns!.matVecQ6K, (m + 3) >> 2, 1, 1, 128, 1, 1, s);
+    return;
+  }
+  if ((k & 3) !== 0) {
+    const s = slMatVecPtx ?? (slMatVecPtx = makeSlots(["ptr", "ptr", "ptr", "u32", "u32"]));
+    (s.views[0] as BigUint64Array)[0] = devPtr(mat);
+    (s.views[1] as BigUint64Array)[0] = devPtr(x);
+    (s.views[2] as BigUint64Array)[0] = devPtr(y);
+    (s.views[3] as Uint32Array)[0] = m;
+    (s.views[4] as Uint32Array)[0] = k;
+    launchWith(fnMatVecF32!, m, 1, 1, 32, 1, 1, s);
+    return;
+  }
+  const s = slMatVec ?? (slMatVec = makeSlots(["ptr", "ptr", "ptr", "u32", "u32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(mat);
+  (s.views[1] as BigUint64Array)[0] = devPtr(x);
+  (s.views[2] as BigUint64Array)[0] = devPtr(y);
+  (s.views[3] as Uint32Array)[0] = m;
+  (s.views[4] as Uint32Array)[0] = k >> 2;
+  launchWith(devOpsFns!.matVec, m, 1, 1, 128, 1, 1, s);
+}
+
+// Exposed devOps namespace. Returns null if NVRTC is unavailable — callers
+// (bun:llm) must then fall back to the host-loop path.
+function getDevOps(): DevOps | null {
+  if (!probeDevOps()) return null;
+  return {
+    allocScratch,
+    freeScratch,
+    scratchSlice,
+    uploadScratch,
+    downloadScratch,
+    sync: syncCtx,
+    matVec: launchMatVecDev,
+    embedLookup: launchEmbedLookupDev,
+    rmsnorm: launchRmsnormDev,
+    accum: launchAccumDev,
+    biasAdd: launchBiasAddDev,
+    siluMul: launchSiluMulDev,
+    rope: launchRopeDev,
+    kvStore: launchKVStoreDev,
+    attnScores: launchAttnScoresDev,
+    softmaxRow: launchSoftmaxRowDev,
+    attnOutput: launchAttnOutputDev,
+    flashAttn: launchFlashAttnDev,
+    argmax: launchArgmaxDev,
+  };
+}
+
+export type DevOps = {
+  allocScratch(length: number, type?: "f32" | "i32"): GpuScratch;
+  freeScratch(s: GpuScratch): void;
+  scratchSlice(s: GpuScratch, elemOffset: number, length: number): GpuScratch;
+  uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOffset?: number): void;
+  downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemOffset?: number): void;
+  sync(): void;
+  matVec(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number, k: number): void;
+  embedLookup(embd: GpuHandle, x: GpuScratch, tokenId: number, dModel: number): void;
+  rmsnorm(x: GpuScratch, w: GpuHandle | GpuScratch, y: GpuScratch, n: number, eps: number): void;
+  accum(x: GpuScratch, d: GpuScratch, n: number): void;
+  biasAdd(x: GpuScratch, b: GpuHandle | GpuScratch, n: number): void;
+  siluMul(gate: GpuScratch, up: GpuScratch, n: number): void;
+  rope(x: GpuScratch, invFreq: GpuScratch, nHeads: number, headDim: number, pos: number, mode: "norm" | "neox"): void;
+  kvStore(src: GpuScratch, cache: GpuScratch, pos: number, kvRowSize: number): void;
+  attnScores(
+    q: GpuScratch,
+    kCache: GpuScratch,
+    scores: GpuScratch,
+    nHeads: number,
+    headDim: number,
+    kvRowSize: number,
+    groupSize: number,
+    scoreStride: number,
+    ctxLen: number,
+    scale: number,
+  ): void;
+  softmaxRow(scores: GpuScratch, rows: number, cols: number, stride: number): void;
+  attnOutput(
+    scores: GpuScratch,
+    vCache: GpuScratch,
+    out: GpuScratch,
+    nHeads: number,
+    headDim: number,
+    kvRowSize: number,
+    groupSize: number,
+    ctxLen: number,
+    scoreStride: number,
+  ): void;
+  flashAttn(
+    q: GpuScratch,
+    kCache: GpuScratch,
+    vCache: GpuScratch,
+    out: GpuScratch,
+    nHeads: number,
+    headDim: number,
+    kvRowSize: number,
+    groupSize: number,
+    ctxLen: number,
+    scale: number,
+  ): void;
+  argmax(logits: GpuScratch, outIdx: GpuScratch, n: number): void;
+};
+
 export default {
   name: "cuda" as const,
   probe,
@@ -1861,9 +3371,12 @@ export default {
   alloc,
   isAligned,
   hold,
+  holdQ4K,
+  holdQ6K,
   releaseHandle,
   releasePinned,
   dispose,
   getDeviceName,
   calibrate,
+  getDevOps,
 };
