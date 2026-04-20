@@ -21,6 +21,7 @@ const tokenizer = require("./llm/tokenizer.ts");
 const llama = require("./llm/llama.ts");
 const grammarModule = require("./llm/grammar.ts");
 const schemaModule = require("./llm/schema.ts");
+const bertModule = require("./llm/bert.ts");
 
 type GenerateOptions = {
   maxTokens?: number;
@@ -830,4 +831,12 @@ export default {
   // exported so tests can type-check references and advanced callers
   // can hold their own (e.g. serialize, compose).
   PrefixCache,
+  // BERT-family sentence encoders (BGE / E5 / MiniLM). Use `Encoder.load`
+  // for the high-level path; `BertModel` / `BertTokenizer` / `bertFromGGUF`
+  // are exposed for callers that want to drive the forward pass themselves.
+  Encoder: bertModule.Encoder,
+  BertModel: bertModule.BertModel,
+  BertTokenizer: bertModule.BertTokenizer,
+  bertFromGGUF: bertModule.fromGGUF,
+  bertTokenizerFromGGUF: bertModule.tokenizerFromGGUF,
 };
