@@ -161,6 +161,68 @@ class KVCache {
     return this.#maxContext;
   }
 
+  // Snapshot the first `length` populated rows from every layer into host
+  // Float32Arrays. The returned object is a plain blob owned by the caller
+  // — detached from this cache, safe to persist across dispose(), and
+  // cloneable across workers if ever needed. The device path round-trips
+  // through host memory because DevOps doesn't currently expose a
+  // device-to-device memcpy; prefix cache amortizes the transfer across
+  // many reuses so even at ~MB/layer it's dramatically cheaper than
+  // re-running prefill.
+  snapshot(length: number): KVSnapshot {
+    if (this.#disposed) throw new Error("bun:llm: KVCache already disposed");
+    if (length < 0 || length > this.#maxContext) {
+      throw new RangeError(`bun:llm: snapshot length ${length} out of range [0, ${this.#maxContext}]`);
+    }
+    const rows = length * this.#rowSize;
+    const nLayer = (this.k ?? this.kDev!).length;
+    const k: Float32Array[] = new Array(nLayer);
+    const v: Float32Array[] = new Array(nLayer);
+    for (let l = 0; l < nLayer; l++) {
+      k[l] = new Float32Array(rows);
+      v[l] = new Float32Array(rows);
+      if (rows === 0) continue;
+      if (this.#devOps && this.kDev && this.vDev) {
+        this.#devOps.downloadScratch(this.kDev[l], k[l]);
+        this.#devOps.downloadScratch(this.vDev[l], v[l]);
+      } else if (this.k && this.v) {
+        k[l].set(this.k[l].subarray(0, rows));
+        v[l].set(this.v[l].subarray(0, rows));
+      }
+    }
+    return { k, v, length, rowSize: this.#rowSize };
+  }
+
+  // Load a snapshot into this cache's first `snap.length * rowSize` slots.
+  // Errors if dimensions don't match (different model or different
+  // maxContext). After restore, the caller generates starting at
+  // pos = snap.length; KV rows past that point are whatever this cache
+  // held before and will be overwritten by forward() as it advances.
+  restore(snap: KVSnapshot): void {
+    if (this.#disposed) throw new Error("bun:llm: KVCache already disposed");
+    if (snap.rowSize !== this.#rowSize) {
+      throw new Error(`bun:llm: snapshot rowSize ${snap.rowSize} != cache rowSize ${this.#rowSize}`);
+    }
+    if (snap.length > this.#maxContext) {
+      throw new RangeError(`bun:llm: snapshot length ${snap.length} > maxContext ${this.#maxContext}`);
+    }
+    const nLayer = (this.k ?? this.kDev!).length;
+    if (snap.k.length !== nLayer || snap.v.length !== nLayer) {
+      throw new Error(`bun:llm: snapshot layer count ${snap.k.length} != cache layer count ${nLayer}`);
+    }
+    const rows = snap.length * this.#rowSize;
+    if (rows === 0) return;
+    for (let l = 0; l < nLayer; l++) {
+      if (this.#devOps && this.kDev && this.vDev) {
+        this.#devOps.uploadScratch(snap.k[l], this.kDev[l]);
+        this.#devOps.uploadScratch(snap.v[l], this.vDev[l]);
+      } else if (this.k && this.v) {
+        this.k[l].set(snap.k[l]);
+        this.v[l].set(snap.v[l]);
+      }
+    }
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -173,6 +235,17 @@ class KVCache {
     this.dispose();
   }
 }
+
+// Host-resident KV snapshot. Opaque to callers — they only pass it back to
+// restore() or KVCache construction. `length` is the number of populated
+// rows (= token positions), `rowSize` is nKvHead * headDim for the model
+// that produced it (used to reject restore onto a mismatched cache).
+type KVSnapshot = {
+  k: Float32Array[];
+  v: Float32Array[];
+  length: number;
+  rowSize: number;
+};
 
 class LlamaModel {
   readonly cfg: LlamaConfig;

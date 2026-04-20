@@ -50,9 +50,48 @@ type GenerateOptions = {
   // { 13: -5 } to discourage newlines, or { 128009: 2 } to make Llama-3's
   // <|eot_id|> slightly more attractive for short-form responses.
   logitBias?: Record<number, number>;
+  // Reuse a precomputed KV prefix (see `llm.prefix()` / `llm.prefixChat()`).
+  // The prompt passed to this generate/chat call must begin with the
+  // tokens captured in the prefix; we restore the prefix's KV state,
+  // skip those tokens in prefill, and only run forward() over the
+  // trailing tokens. Saves O(prefixLen * layer * d^2) FLOPs per call.
+  prefix?: PrefixCache;
 };
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+
+// Opaque handle returned by `llm.prefix()` / `llm.prefixChat()`. Captures
+// the KV state and last-position logits produced by prefilling a token
+// sequence, so future generate/chat calls that start with the same
+// tokens can skip that prefill. Construction is async (runs the prefill);
+// reuse is synchronous. Reference-equality against `#owner` is how we
+// detect cross-model misuse — the snapshot's row shape would not match.
+class PrefixCache {
+  readonly tokens: number[];
+  readonly snapshot: { k: Float32Array[]; v: Float32Array[]; length: number; rowSize: number };
+  readonly logits: Float32Array;
+  readonly #owner: InstanceType<typeof llama.LlamaModel>;
+
+  constructor(
+    tokens: number[],
+    snapshot: { k: Float32Array[]; v: Float32Array[]; length: number; rowSize: number },
+    logits: Float32Array,
+    owner: InstanceType<typeof llama.LlamaModel>,
+  ) {
+    this.tokens = tokens;
+    this.snapshot = snapshot;
+    this.logits = logits;
+    this.#owner = owner;
+  }
+
+  // Internal: check that `model` is the same LlamaModel that built this
+  // prefix. Defends against passing a prefix built on model A to model B
+  // of the same architecture — the snapshot shape would coincidentally
+  // match but the KV contents are invalid.
+  __matches(model: InstanceType<typeof llama.LlamaModel>): boolean {
+    return this.#owner === model;
+  }
+}
 
 type ChatTemplate = "llama3" | "chatml" | "mistral" | null;
 
@@ -121,7 +160,17 @@ class LLM {
   // stopTokens hit, on reaching maxTokens, or when the position would
   // overflow the KV cache.
   async *generate(prompt: string, opts?: GenerateOptions): AsyncGenerator<string, void, void> {
-    const promptIds = this.tokenizer.encode(prompt);
+    let promptIds: number[];
+    if (opts?.prefix) {
+      // Prefix IS the prelude — `prompt` is the continuation, encoded
+      // without BOS and appended to the prefix's token ids. We do NOT
+      // re-tokenize (prefix_text + prompt) because BPE merges across
+      // the seam would silently shift tokens and break the KV match.
+      const contIds = this.tokenizer.encode(prompt, { addBos: false });
+      promptIds = opts.prefix.tokens.concat(contIds);
+    } else {
+      promptIds = this.tokenizer.encode(prompt);
+    }
     const includePrompt = opts?.includePrompt ?? false;
     if (includePrompt) yield prompt;
     yield* this.#generateFromIds(promptIds, opts);
@@ -136,7 +185,20 @@ class LLM {
     if (this.chatTemplate === null) {
       throw new Error("bun:llm: no chat template detected for this model; use generate() with explicit framing");
     }
-    const promptIds = this.encodeChat(messages);
+    let promptIds = this.encodeChat(messages);
+    if (opts?.prefix) {
+      // Chat prefixes are built from a prefix message list; the full
+      // message list must start with those same messages so its encoded
+      // token stream begins with the prefix tokens. We verify here and
+      // bypass re-prefilling the shared part — #generateFromIds does
+      // the actual match check.
+      const pre = opts.prefix.tokens;
+      if (promptIds.length < pre.length) {
+        throw new Error(
+          `bun:llm: chat prompt (${promptIds.length} tokens) is shorter than prefix (${pre.length}) — was the prefix built from a superset of these messages?`,
+        );
+      }
+    }
     yield* this.#generateFromIds(promptIds, opts);
   }
 
@@ -152,6 +214,52 @@ class LLM {
     let out = "";
     for await (const chunk of this.chat(messages, opts)) out += chunk;
     return out;
+  }
+
+  // Build a reusable KV prefix from a plaintext prompt. Tokenizes (with
+  // BOS), runs prefill once, snapshots the KV and the last-position
+  // logits, and returns a handle. Pass the handle as `opts.prefix` on a
+  // future generate() call whose prompt begins with the same text to
+  // skip the prefill. Saves the full prefill FLOPs; on the device path
+  // the snapshot round-trips KV through host memory once here, but
+  // subsequent restores are amortized across many reuses.
+  async prefix(text: string): Promise<PrefixCache> {
+    const ids = this.tokenizer.encode(text);
+    return this.#buildPrefix(ids);
+  }
+
+  // Build a reusable KV prefix from a chat conversation. Same idea as
+  // `prefix()` but frames the messages with the model's detected chat
+  // template first — useful for caching a long system prompt across
+  // many user turns.
+  async prefixChat(messages: ChatMessage[]): Promise<PrefixCache> {
+    if (this.chatTemplate === null) {
+      throw new Error("bun:llm: no chat template detected for this model; use prefix() with explicit framing");
+    }
+    // Don't emit the assistant-turn opener — follow-up chat() calls will
+    // add more user/assistant turns before that opener, so including it
+    // here would make the encoded stream diverge from the full chat.
+    const ids = this.encodeChat(messages, { openAssistant: false });
+    return this.#buildPrefix(ids);
+  }
+
+  async #buildPrefix(ids: number[]): Promise<PrefixCache> {
+    if (this.#disposed) throw new Error("bun:llm: LLM already disposed");
+    if (ids.length === 0) throw new Error("bun:llm: cannot build prefix from empty token sequence");
+    const kv = this.model.newKVCache();
+    try {
+      if (ids.length >= kv.maxContext()) {
+        throw new Error(`bun:llm: prefix of ${ids.length} tokens exceeds maxContext=${kv.maxContext()}`);
+      }
+      let logits: Float32Array | undefined;
+      for (let p = 0; p < ids.length; p++) {
+        logits = this.model.forward(ids[p], p, kv);
+      }
+      const snap = kv.snapshot(ids.length);
+      return new PrefixCache(ids.slice(), snap, logits!, this.model);
+    } finally {
+      kv.dispose();
+    }
   }
 
   // Sentence embedding from a causal LM. Runs the transformer forward across
@@ -205,10 +313,18 @@ class LLM {
   // detected template. Exposed so callers can inspect/tweak (e.g. to add
   // a continuation prefix to the assistant turn). Throws if no template
   // was detected.
-  encodeChat(messages: ChatMessage[]): number[] {
+  //
+  // `openAssistant` (default true) appends the assistant turn opener so
+  // sampling continues straight into the reply. Set to false when
+  // building a prefix KV over shared history — the follow-up encoded
+  // conversation (which includes user turns after this point) must
+  // remain byte-identical up to the same boundary, and the opener
+  // doesn't belong there.
+  encodeChat(messages: ChatMessage[], opts?: { openAssistant?: boolean }): number[] {
     if (this.chatTemplate === null) {
       throw new Error("bun:llm: no chat template detected for this model");
     }
+    const openAssistant = opts?.openAssistant ?? true;
     const tok = this.tokenizer;
     const ids: number[] = [];
     const pushPiece = (piece: string): void => {
@@ -229,11 +345,12 @@ class LLM {
         pushText("\n\n" + msg.content);
         pushPiece("<|eot_id|>");
       }
-      // Open the assistant turn so the model continues straight into its reply.
-      pushPiece("<|start_header_id|>");
-      pushText("assistant");
-      pushPiece("<|end_header_id|>");
-      pushText("\n\n");
+      if (openAssistant) {
+        pushPiece("<|start_header_id|>");
+        pushText("assistant");
+        pushPiece("<|end_header_id|>");
+        pushText("\n\n");
+      }
     } else if (this.chatTemplate === "chatml") {
       for (const msg of messages) {
         pushPiece("<|im_start|>");
@@ -241,8 +358,10 @@ class LLM {
         pushPiece("<|im_end|>");
         pushText("\n");
       }
-      pushPiece("<|im_start|>");
-      pushText("assistant\n");
+      if (openAssistant) {
+        pushPiece("<|im_start|>");
+        pushText("assistant\n");
+      }
     } else if (this.chatTemplate === "mistral") {
       // Mistral Instruct framing: <s>[INST] user [/INST] assistant </s>[INST] ...
       // System messages are folded into the first user turn, per Mistral's
@@ -342,11 +461,40 @@ class LLM {
       throw new Error(`bun:llm: prompt of ${promptIds.length} tokens exceeds maxContext=${maxCtx}`);
     }
 
+    // Restore prefix KV if one was supplied. The prompt must begin with
+    // the prefix's exact token sequence — we verify here rather than
+    // trust the caller because a silent mismatch would produce garbage
+    // conditioned on the wrong context.
+    let prefillStart = 0;
+    let logits: Float32Array | undefined;
+    if (opts?.prefix) {
+      const p = opts.prefix;
+      if (!p.__matches(this.model)) {
+        throw new Error("bun:llm: prefix was built for a different model instance");
+      }
+      if (p.tokens.length > promptIds.length) {
+        throw new Error(`bun:llm: prompt of ${promptIds.length} tokens is shorter than prefix of ${p.tokens.length}`);
+      }
+      for (let i = 0; i < p.tokens.length; i++) {
+        if (promptIds[i] !== p.tokens[i]) {
+          throw new Error(`bun:llm: prompt does not start with prefix tokens (diverges at index ${i})`);
+        }
+      }
+      kv.restore(p.snapshot);
+      prefillStart = p.tokens.length;
+      // If the prompt IS the prefix (nothing new to prefill), seed logits
+      // from the snapshot so the first sampled token uses the correct
+      // distribution. We clone because the sampling loop mutates logits
+      // in place (logit bias, grammar mask).
+      if (prefillStart === promptIds.length) {
+        logits = new Float32Array(p.logits);
+      }
+    }
+
     // Prefill — run the prompt through the model one token at a time. v0
     // doesn't do batched prefill, so this is O(promptLen * layer * d^2);
     // swap to a prefill kernel once we have one.
-    let logits: Float32Array | undefined;
-    for (let p = 0; p < promptIds.length; p++) {
+    for (let p = prefillStart; p < promptIds.length; p++) {
       logits = this.model.forward(promptIds[p], p, kv);
     }
 
@@ -409,4 +557,9 @@ export default {
   parseGBNF: grammarModule.parseGBNF,
   compileSchema: schemaModule.compileSchema,
   Grammar: grammarModule.Grammar,
+  // KV prefix cache — callers normally acquire one via `llm.prefix()`
+  // or `llm.prefixChat()` and pass it as `opts.prefix`; the class is
+  // exported so tests can type-check references and advanced callers
+  // can hold their own (e.g. serialize, compose).
+  PrefixCache,
 };
