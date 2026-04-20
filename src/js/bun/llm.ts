@@ -19,6 +19,8 @@
 const gguf = require("./llm/gguf.ts");
 const tokenizer = require("./llm/tokenizer.ts");
 const llama = require("./llm/llama.ts");
+const grammarModule = require("./llm/grammar.ts");
+const schemaModule = require("./llm/schema.ts");
 
 type GenerateOptions = {
   maxTokens?: number;
@@ -36,6 +38,18 @@ type GenerateOptions = {
   topK?: number;
   topP?: number;
   seed?: number;
+  // Constrained decoding. Exactly one of `grammar` (GBNF source) or `schema`
+  // (JSON-schema object) may be set — tokens that would take the grammar
+  // off-accept are masked to -Infinity before sampling, so the generation
+  // is guaranteed to conform. EOS and chat-template stop tokens are only
+  // allowed once the grammar reaches an accepting state.
+  grammar?: string;
+  schema?: object;
+  // Additive bias in logit space, indexed by token id. Useful to nudge
+  // specific tokens without perturbing the full distribution — e.g.
+  // { 13: -5 } to discourage newlines, or { 128009: 2 } to make Llama-3's
+  // <|eot_id|> slightly more attractive for short-form responses.
+  logitBias?: Record<number, number>;
 };
 
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -62,6 +76,8 @@ class LLM {
   readonly chatTemplate: ChatTemplate;
   readonly #defaultStop: number[];
   #disposed = false;
+  #tokenBytes: Uint8Array[] | null = null;
+  #specialIds: Set<number> | null = null;
 
   constructor(
     model: InstanceType<typeof llama.LlamaModel>,
@@ -256,11 +272,61 @@ class LLM {
     return ids;
   }
 
+  // Lazily build the (vocab-size) table of UTF-8 bytes each token contributes
+  // when decoded, plus the set of control/special token ids to mask out
+  // during constrained decoding. Built once on first use and cached — the
+  // full scan of 128k entries costs ~50ms, not worth paying at load time
+  // when most callers never need it.
+  #getTokenBytes(): { tokenBytes: Uint8Array[]; specialIds: Set<number> } {
+    if (this.#tokenBytes !== null && this.#specialIds !== null) {
+      return { tokenBytes: this.#tokenBytes, specialIds: this.#specialIds };
+    }
+    const tok = this.tokenizer;
+    const n = tok.vocab.length;
+    const bytes: Uint8Array[] = new Array(n);
+    const special = new Set<number>();
+    const enc = new TextEncoder();
+    for (let i = 0; i < n; i++) {
+      if (tok.tokenType[i] === 3) {
+        special.add(i);
+        bytes[i] = new Uint8Array(0);
+        continue;
+      }
+      try {
+        bytes[i] = enc.encode(tok.decode([i]));
+      } catch {
+        bytes[i] = new Uint8Array(0);
+      }
+    }
+    this.#tokenBytes = bytes;
+    this.#specialIds = special;
+    return { tokenBytes: bytes, specialIds: special };
+  }
+
   async *#generateFromIds(promptIds: number[], opts?: GenerateOptions): AsyncGenerator<string, void, void> {
     if (this.#disposed) throw new Error("bun:llm: LLM already disposed");
     const maxTokens = opts?.maxTokens ?? 256;
     const stopTokens = opts?.stopTokens ?? this.#defaultStop;
     const stopSet = new Set(stopTokens);
+    const logitBias = opts?.logitBias;
+
+    if (opts?.grammar !== undefined && opts?.schema !== undefined) {
+      throw new Error("bun:llm: pass either `grammar` or `schema`, not both");
+    }
+    let grammar: InstanceType<typeof grammarModule.Grammar> | null = null;
+    if (opts?.grammar !== undefined || opts?.schema !== undefined) {
+      const rules =
+        opts!.grammar !== undefined
+          ? grammarModule.parseGBNF(opts!.grammar)
+          : schemaModule.compileSchema(opts!.schema as Record<string, unknown>);
+      const { tokenBytes, specialIds } = this.#getTokenBytes();
+      grammar = new grammarModule.Grammar(rules, {
+        tokenBytes,
+        specialIds,
+        eos: this.tokenizer.eos,
+        stopIds: [...stopSet].filter(id => id !== this.tokenizer.eos),
+      });
+    }
 
     const sampler = new llama.Sampler({
       temperature: opts?.temperature,
@@ -286,8 +352,21 @@ class LLM {
 
     let pos = promptIds.length;
     for (let n = 0; n < maxTokens && pos < maxCtx; n++) {
+      if (logitBias) {
+        for (const key in logitBias) {
+          const id = +key;
+          if (id >= 0 && id < logits!.length) logits![id] += logitBias[key];
+        }
+      }
+      if (grammar) {
+        const mask = grammar.allowedMask();
+        for (let i = 0; i < logits!.length; i++) {
+          if (!mask[i]) logits![i] = -Infinity;
+        }
+      }
       const next = sampler.sample(logits!);
       if (stopSet.has(next)) return;
+      if (grammar) grammar.accept(next);
       yield this.tokenizer.decode([next]);
       logits = this.model.forward(next, pos, kv);
       pos++;
@@ -326,4 +405,8 @@ export default {
   sample: llama.sample,
   LlamaTokenizer: tokenizer.LlamaTokenizer,
   tokenizerFromGGUF: tokenizer.fromGGUF,
+  // Constrained decoding primitives — precompile once, reuse across calls.
+  parseGBNF: grammarModule.parseGBNF,
+  compileSchema: schemaModule.compileSchema,
+  Grammar: grammarModule.Grammar,
 };
