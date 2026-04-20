@@ -6,7 +6,7 @@
 
 ## What is Parabun?
 
-Parabun is a **Bun fork** that adds syntax sugar to JavaScript/TypeScript. All extensions desugar to standard JS at parse time — no runtime magic, no new semantics. Your code stays fast, your tooling stays compatible, and your functions get honest.
+Parabun is a **Bun fork** that adds syntax sugar to JavaScript/TypeScript plus a set of runtime modules for parallelism, SIMD, GPU compute, and on-device LLM inference. All syntax extensions desugar to standard JS at parse time — no runtime magic, no new semantics. Your code stays fast, your tooling stays compatible, and your functions get honest.
 
 Parabun introduces two new file extensions:
 - **`.pts`** — Parabun TypeScript (superset of TypeScript)
@@ -168,6 +168,38 @@ const out    = gpu.simdMap(x => x * 3 + 7, big);     // affine — dispatched to
 Two thresholds, not one: a **dispatch** threshold lets the GPU kernel run (so tests exercise the real path), and a **wins** threshold (`gpu.winsForSize(op, n, elemBytes)`) tells callers when routing through `bun:gpu` actually beats `bun:simd`. Today `simdMap` wins at ≥ 1<<18 f32 elements; `matVec` is compiled and correct but not yet winning (the naive MSL kernel is bandwidth-bound on M1/M2).
 
 `bun:pipeline`'s fusion tier reads `winsForSize` automatically — a fused affine chain over a large enough `Float32Array` promotes from stacked `simd.mulScalar`+`simd.addScalar` to `gpu.simdMap` without user code changes.
+
+### LLM Inference (`bun:llm`)
+
+`bun:llm` is a from-scratch GGUF runtime — file loader, byte-level BPE tokenizer, Llama/Qwen2 transformer forward pass, greedy and nucleus sampling — behind a small `load`/`generate`/`chat` surface. Weights stream off disk via `mmap`; the residual stream, KV cache, and all matmuls stay on-device. Only the 4-byte argmax crosses PCIe per token.
+
+```pts
+import llm from "bun:llm";
+
+using m = await llm.LLM.load("./Llama-3.2-1B-Instruct-Q4_K_M.gguf");
+
+for await (const piece of m.chat([
+  { role: "system", content: "You are helpful and concise." },
+  { role: "user", content: "What is the capital of France?" },
+])) {
+  process.stdout.write(piece);
+}
+```
+
+- **Quant formats**: F32, F16, Q8_0, Q2_K, Q3_K, **Q4_K**, Q5_K, **Q6_K**. Q4_K/Q6_K matVec kernels use a 1-warp-per-row / 4-warps-per-block layout.
+- **Fused projections**: QKV and Gate+Up are byte-concatenated at load time (same quant, contiguous rows) and dispatched as a single matVec per layer. Worth ~20 tok/s on Llama-3.2-1B.
+- **Chat templates**: Llama-3, ChatML, and Mistral-Instruct auto-detected from the GGUF's `tokenizer.chat_template`. Fall back to `generate()` with your own framing if none match.
+- **Backends**: CUDA on Linux/Windows (via `bun:gpu`'s driver + NVRTC path), CPU fallback on any host. Metal kernels not yet wired.
+
+Llama-3.2-1B-Instruct Q4_K_M on RTX 4070 Ti (release build, best-of-5):
+
+| workload                    | parabun   | ollama   |
+|-----------------------------|----------:|---------:|
+| greedy decode, device-only  | **340 tok/s** | ~350 tok/s |
+| greedy decode, logits DtoH  | ~275 tok/s | n/a      |
+| prompt prefill              | ~295 tok/s | n/a      |
+
+At ollama parity on this model/hardware. `bench/llm-tps.ts` reproduces the numbers; `bench/parabun-llm/run.pjs` is the end-user-style harness.
 
 ## Install
 
