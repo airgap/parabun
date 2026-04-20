@@ -138,6 +138,53 @@ class LLM {
     return out;
   }
 
+  // Sentence embedding from a causal LM. Runs the transformer forward across
+  // all tokens and pools the post-output-norm hidden states. The last-token
+  // pooling is the natural choice for a decoder (it's the only position that
+  // saw the whole prompt) — `mean` is provided for symmetry with BERT-style
+  // embedders but is numerically less useful for causal models because
+  // earlier positions couldn't see later ones. Returns a Float32Array of
+  // length dModel; L2-normalized by default so cosine similarity = dot
+  // product.
+  async embed(text: string, opts?: { pool?: "last" | "mean"; normalize?: boolean }): Promise<Float32Array> {
+    if (this.#disposed) throw new Error("bun:llm: LLM already disposed");
+    const pool = opts?.pool ?? "last";
+    const normalize = opts?.normalize ?? true;
+    const ids = this.tokenizer.encode(text);
+    if (ids.length === 0) throw new Error("bun:llm: cannot embed empty text");
+
+    const dModel = this.model.cfg.dModel;
+    const kv = this.model.newKVCache();
+    try {
+      if (ids.length > kv.maxContext()) {
+        throw new Error(`bun:llm: text has ${ids.length} tokens, exceeds maxContext=${kv.maxContext()}`);
+      }
+
+      const out = new Float32Array(dModel);
+      if (pool === "last") {
+        for (let p = 0; p < ids.length - 1; p++) this.model.forwardHidden(ids[p], p, kv);
+        const last = this.model.forwardHidden(ids[ids.length - 1], ids.length - 1, kv);
+        out.set(last);
+      } else {
+        for (let p = 0; p < ids.length; p++) {
+          const h = this.model.forwardHidden(ids[p], p, kv);
+          for (let i = 0; i < dModel; i++) out[i] += h[i];
+        }
+        const invN = 1.0 / ids.length;
+        for (let i = 0; i < dModel; i++) out[i] *= invN;
+      }
+      if (normalize) {
+        let n2 = 0;
+        for (let i = 0; i < dModel; i++) n2 += out[i] * out[i];
+        const inv = 1.0 / Math.sqrt(n2 + 1e-30);
+        for (let i = 0; i < dModel; i++) out[i] *= inv;
+      }
+      return out;
+    } finally {
+      kv.dispose();
+    }
+  }
+
   // Build the token-id sequence for a chat conversation using the model's
   // detected template. Exposed so callers can inspect/tweak (e.g. to add
   // a continuation prefix to the assistant turn). Throws if no template

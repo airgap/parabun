@@ -348,7 +348,32 @@ class LlamaModel {
     return argmax(logits);
   }
 
+  // Run the full transformer stack and return the post-output-norm hidden
+  // state (dModel floats) without the lm_head projection. Used by the
+  // embeddings path: decoder-LM sentence embeddings are typically mean- or
+  // last-pooled post-norm hidden states. KV cache is updated in place, so
+  // callers feeding a prompt should call this sequentially over all tokens.
+  forwardHidden(tokenId: number, pos: number, kv: KVCache): Float32Array {
+    if (this.#devOps) {
+      this.#forwardDevHidden(tokenId, pos, kv);
+      const out = new Float32Array(this.cfg.dModel);
+      this.#devOps.sync();
+      this.#devOps.downloadScratch(this.#xnDev, out);
+      return out;
+    }
+    return this.#forwardHostHidden(tokenId, pos, kv).slice();
+  }
+
   #forwardHost(tokenId: number, pos: number, kv: KVCache): Float32Array {
+    const xn = this.#forwardHostHidden(tokenId, pos, kv);
+    const lm = this.weights.lmHead ?? this.weights.tokenEmbd;
+    return gpu.matVec(lm, xn, this.cfg.vocabSize, this.cfg.dModel);
+  }
+
+  // Host path up through the final output_norm. Returns a live view of the
+  // internal scratch buffer — callers must copy before the next forward*
+  // call if they want to retain it.
+  #forwardHostHidden(tokenId: number, pos: number, kv: KVCache): Float32Array {
     const { cfg, weights } = this;
     const { dModel, nLayer, nHead, nKvHead, headDim, dFfn, rmsEps } = cfg;
 
@@ -461,8 +486,7 @@ class LlamaModel {
     }
 
     rmsnormInto(xn, x, weights.outputNorm.view, rmsEps);
-    const lm = weights.lmHead ?? weights.tokenEmbd;
-    return gpu.matVec(lm, xn, cfg.vocabSize, dModel);
+    return xn;
   }
 
   // Device-path forward that returns full host logits (DtoH at the end).
@@ -493,6 +517,15 @@ class LlamaModel {
   // or a full DtoH readback. No cuCtxSynchronize here — the caller is
   // the last op in the chain and syncs itself.
   #forwardDevCore(tokenId: number, pos: number, kv: KVCache): void {
+    this.#forwardDevHidden(tokenId, pos, kv);
+    const lm = this.weights.lmHead ?? this.weights.tokenEmbd;
+    this.#devOps.matVec(lm.__handle, this.#xnDev, this.#logitsDev, this.cfg.vocabSize, this.cfg.dModel);
+  }
+
+  // Runs the transformer stack up through the final output_norm, leaving the
+  // result in #xnDev on device. Same as #forwardDevCore but skips lm_head —
+  // used by the embeddings path.
+  #forwardDevHidden(tokenId: number, pos: number, kv: KVCache): void {
     const { cfg, weights } = this;
     const { dModel, nLayer, nHead, nKvHead, headDim, dFfn, rmsEps, maxContext } = cfg;
     if (tokenId < 0 || tokenId >= cfg.vocabSize) {
@@ -515,7 +548,6 @@ class LlamaModel {
     const gateDev = this.#gateDev;
     const upDev = this.#upDev;
     const scoresDev = this.#scoresDev;
-    const logitsDev = this.#logitsDev;
     const invFreqDev = this.#invFreqDev;
 
     // Embedding lookup — copy row of token_embd (device-resident) into x.
@@ -577,10 +609,8 @@ class LlamaModel {
       d.accum(xDev, xnDev, dModel);
     }
 
-    // Final RMSNorm + lm_head projection.
+    // Final RMSNorm; lm_head projection is tacked on by #forwardDevCore.
     d.rmsnorm(xDev, weights.outputNorm.__handle, xnDev, dModel, rmsEps);
-    const lm = weights.lmHead ?? weights.tokenEmbd;
-    d.matVec(lm.__handle, xnDev, logitsDev, cfg.vocabSize, dModel);
   }
 }
 
