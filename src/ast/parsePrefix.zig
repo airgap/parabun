@@ -802,6 +802,51 @@ pub fn ParsePrefix(
         }
 
         // Before splitting this up, this used 3 KB of stack space per call.
+        // Parabun: throw as expression. Desugars `throw E` to `(() => { throw E; })()`
+        // so `throw` can appear on the RHS of `??`, `||`, `&&`, `?:`, etc.
+        fn t_throw_expr(noalias p: *P) anyerror!Expr {
+            const loc = p.lexer.loc();
+            try p.lexer.next();
+            if (p.lexer.has_newline_before) {
+                try p.log.addError(p.source, logger.Loc{
+                    .start = loc.start + 5,
+                }, "Unexpected newline after \"throw\"");
+                return error.SyntaxError;
+            }
+
+            // The synthesized IIFE needs the same two scopes a real arrow
+            // gets during the parse pass. Push them BEFORE parsing the thrown
+            // expression — scope locations must be monotonically increasing,
+            // and the thrown expression may itself contain nested arrows
+            // whose scopes would be pushed at greater loc offsets. function_args
+            // goes at the `throw` keyword position, function_body at the start
+            // of the operand (guaranteed to be later because `throw` is 5 chars).
+            const body_loc = p.lexer.loc();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            // Parse at assign level per TC39 throw-expression proposal — do not
+            // absorb a trailing comma operator.
+            const value = try p.parseExpr(.assign);
+
+            p.popScope();
+            p.popScope();
+
+            const stmts = p.allocator.alloc(Stmt, 1) catch bun.outOfMemory();
+            stmts[0] = p.s(S.Throw{ .value = value }, loc);
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = stmts },
+                .is_async = false,
+            }, loc);
+
+            return p.newExpr(E.Call{
+                .target = arrow,
+                .args = ExprNodeList.empty,
+            }, loc);
+        }
+
         pub fn parsePrefix(noalias p: *P, level: Level, noalias errors: ?*DeferredErrors, flags: Expr.EFlags) anyerror!Expr {
             return switch (p.lexer.token) {
                 .t_open_bracket => t_open_bracket(p, errors),
@@ -834,6 +879,8 @@ pub fn ParsePrefix(
                 .t_at => t_at(p),
                 .t_new => t_new(p, flags),
                 .t_super => t_super(p, level),
+                // Parabun extension: throw in expression position
+                .t_throw => t_throw_expr(p),
                 else => {
                     @branchHint(.cold);
                     try p.lexer.unexpected();
@@ -853,8 +900,10 @@ const strings = bun.strings;
 const js_ast = bun.ast;
 const B = js_ast.B;
 const E = js_ast.E;
+const S = js_ast.S;
 const Expr = js_ast.Expr;
 const ExprNodeList = js_ast.ExprNodeList;
+const Stmt = js_ast.Stmt;
 const LocRef = js_ast.LocRef;
 
 const G = js_ast.G;

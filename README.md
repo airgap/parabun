@@ -158,6 +158,8 @@ Drops the latest release binary into `~/.parabun/bin/parabun` and symlinks `pb` 
 
 Supported targets: `linux-x64`, `macos-arm64`, `windows-x64` (MinGW). Releases: [github.com/airgap/parabun/releases](https://github.com/airgap/parabun/releases).
 
+The Parabun release binary is less than 1% larger than stock Bun built from the same upstream commit — all the added modules and syntax extensions together add negligible weight.
+
 ## Benchmarks
 
 See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfolio with per-bench workload, methodology, and analysis. Headline numbers (best-of-N medians on release builds, verified bit-identical or within-tolerance against each baseline):
@@ -192,10 +194,6 @@ cd editors/ts-plugin && npm install && npm run build
 cd ../vscode/parabun && npm install && npm run build
 ./editors/install-vsix.sh
 ```
-
-### E Editor
-
-Built-in support. Open any `.pts`/`.pjs` file — Parabun syntax decoration and LSP diagnostics work automatically.
 
 ### Other Editors (LSP)
 
@@ -301,6 +299,19 @@ const output = rawData
 
 Pair it with [`bun:pipeline`](#pipeline-fusion-bunpipeline) for fused typed-array map chains.
 
+### Throw Expressions
+
+`throw E` works in any expression position — on the right of `??`, `||`, `&&`, inside ternary branches, inside arrow bodies. Evaluation is lazy: the throw only fires if the surrounding expression actually reaches it.
+
+```pts
+const port = parseInt(env.PORT) || throw new Error("PORT required");
+const user = maybeUser ?? throw "missing";
+const level = cond ? "debug" : throw new Error("no fallback");
+const fail = (msg: string) => throw new Error(msg);
+```
+
+Regular `throw E;` statements are unaffected. ASI rules still apply — a newline between `throw` and its operand is a syntax error.
+
 ### Operator Precedence
 
 | Operator | Precedence | Desugars to |
@@ -309,6 +320,7 @@ Pair it with [`bun:pipeline`](#pipeline-fusion-bunpipeline) for fused typed-arra
 | `..!` | conditional | `.catch(f)` |
 | `..&` | conditional | `.finally(f)` |
 | `..=` | assignment | `await expr` |
+| `throw E` | assignment (prefix) | `(() => { throw E; })()` |
 
 Operators bind tighter-to-looser in the order listed, so `data |> transform ..! handler ..& cleanup` parses as `transform(data).catch(handler).finally(cleanup)`.
 

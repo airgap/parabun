@@ -46,6 +46,18 @@ Desugars `expr ..& cleanup` to `expr.finally(cleanup)`. Precedence: conditional 
 
 Desugars `x |> f` to `f(x)`. Precedence: nullish coalescing level (tighter than `..!`/`..&`).
 
+### `throw` as expression
+
+`throw E` is legal in any expression position (RHS of `??`, `||`, `&&`, ternary branches, arrow bodies, etc.). Desugars to `(() => { throw E; })()`. The operand is parsed at AssignmentExpression level — a trailing comma is not absorbed. Evaluation is lazy: the IIFE only runs (and throws) when the surrounding expression actually reaches the throw branch.
+
+```
+const port = parseInt(env.PORT) || throw new Error("PORT required");
+const user = maybeUser ?? throw "missing";
+const fail = x => throw new Error(x);
+```
+
+Regular `throw E;` statements are unaffected. ASI still applies: a newline between `throw` and its operand is a syntax error.
+
 ### Chaining
 
 Operators compose naturally:
@@ -67,7 +79,7 @@ All extensions are implemented as parse-time desugaring in `src/ast/`:
 | File | Purpose |
 |------|---------|
 | `parseSuffix.zig` | `..!`, `..&`, `|>` operator handlers |
-| `parsePrefix.zig` | `pure` keyword detection in expressions, `this` restriction check |
+| `parsePrefix.zig` | `pure` keyword detection in expressions, `this` restriction check, `throw` as expression |
 | `parseStmt.zig` | `pure` in statement/export contexts |
 | `parse.zig` | `parsePurePrefixExpr`, `parsePureAsyncPrefixExpr` |
 | `parseFn.zig` | `is_pure` flag threading, arrow purity inheritance |
@@ -106,9 +118,10 @@ Errors from `Bun.Transpiler` are `BuildMessage` objects with structured position
 ### Tests
 
 ```
-test/bundler/transpiler/parabun-parser.test.js  — 16 tests: operator desugaring
-test/bundler/transpiler/parabun-pure.test.js    — 13 tests: pure keyword parsing
-test/bundler/transpiler/parabun-purity.test.js  — 16 tests: purity enforcement
+test/bundler/transpiler/parabun-parser.test.js      — operator desugaring
+test/bundler/transpiler/parabun-pure.test.js        — pure keyword parsing
+test/bundler/transpiler/parabun-purity.test.js      — purity enforcement
+test/bundler/transpiler/parabun-throw-expr.test.js  — throw as expression
 ```
 
 ## Runtime
