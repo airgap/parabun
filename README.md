@@ -307,6 +307,16 @@ const name = user |> .profile.displayName;
 
 `x |> .method(args)` desugars to `x.method(args)`. Chained calls, property access, and indexing after the first `.ident` work because they get picked up by the regular suffix parse.
 
+**Placeholder.** When the RHS is a call and one of its top-level args is `_`, the piped value goes there — so multi-arg functions flow through the pipeline the same way unary ones do:
+
+```pts
+const active = users |> filter(_, isActive) |> map(_, .name);
+const n = input |> parseInt(_, 10);
+const entry = buffer |> lodash.find(_, predicate);
+```
+
+Multiple `_` placeholders copy the LHS structurally (`n |> add(_, _)` → `add(n, n)`); bind side-effectful LHS to a const first if that matters. Calls with no `_` keep the function-target form (`x |> f(y)` still means `f(y)(x)`).
+
 Pair it with [`bun:pipeline`](#pipeline-fusion-bunpipeline) for fused typed-array map chains.
 
 ### Throw Expressions

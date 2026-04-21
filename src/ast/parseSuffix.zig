@@ -900,6 +900,15 @@ pub fn ParseSuffix(
 
             const rhs = try p.parseExpr(.nullish_coalescing);
 
+            // Parabun: placeholder substitution — `x |> f(_, 2)` → `f(x, 2)`.
+            // When the RHS is a call with `_` identifiers in its top-level args,
+            // replace each `_` with the piped value. Multiple `_` copy the LHS
+            // structurally; users with side-effectful LHS + multiple `_` should
+            // bind to a const first.
+            if (tryPipelinePlaceholder(p, left, rhs)) {
+                return .next;
+            }
+
             // Parabun: pipeline inline fusion — inline pure function bodies
             if (tryInlinePipeline(p, left, rhs)) {
                 return .next;
@@ -913,6 +922,36 @@ pub fn ParseSuffix(
                 .close_paren_loc = p.lexer.loc(),
             }, left.loc);
             return .next;
+        }
+
+        fn isUnderscorePlaceholder(p: *P, expr: Expr) bool {
+            if (expr.data != .e_identifier) return false;
+            const name = p.loadNameFromRef(expr.data.e_identifier.ref);
+            return bun.strings.eqlComptime(name, "_");
+        }
+
+        fn tryPipelinePlaceholder(p: *P, left: *Expr, rhs: Expr) bool {
+            if (rhs.data != .e_call) return false;
+            const call = rhs.data.e_call;
+
+            var placeholder_count: usize = 0;
+            for (call.args.slice()) |arg| {
+                if (isUnderscorePlaceholder(p, arg)) placeholder_count += 1;
+            }
+            if (placeholder_count == 0) return false;
+
+            const new_args_slice = p.allocator.alloc(Expr, call.args.len) catch return false;
+            for (call.args.slice(), 0..) |arg, i| {
+                new_args_slice[i] = if (isUnderscorePlaceholder(p, arg)) left.* else arg;
+            }
+
+            left.* = p.newExpr(E.Call{
+                .target = call.target,
+                .args = ExprNodeList.fromOwnedSlice(new_args_slice),
+                .close_paren_loc = call.close_paren_loc,
+                .optional_chain = call.optional_chain,
+            }, rhs.loc);
+            return true;
         }
 
         /// Try to inline a pure function body at a pipeline call site.

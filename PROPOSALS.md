@@ -17,7 +17,7 @@ Design rules (ethos — don't break these):
 Ordered by value-per-unit-effort, skewed toward things that **compose with extensions we already shipped** (so they compound):
 
 1. `[x]` **Throw expressions** — `?? throw E` — proves the pattern, tiny blast radius. **SHIPPED** (15 new tests; 146 parser/pure/purity tests still green)
-2. `[ ]` **Placeholder in `|>`** — `x |> f(_, 2)` — makes the pipeline actually useful with multi-arg APIs
+2. `[x]` **Placeholder in `|>`** — `x |> f(_, 2)` — makes the pipeline actually useful with multi-arg APIs. **SHIPPED** (18 new tests; 244 parser-side tests total green)
 3. `[x]` **Method shorthand in `|>`** — `x |> .trim()` — pairs with placeholder, kills the arrow-wrap tax. **SHIPPED** (17 new tests; 176 total parser-side tests green)
 4. `[ ]` **`defer`** — composes with our `using`-based resource story; real pain relief
 5. `[ ]` **`memo pure fn`** — headline-level feature; safe *only* because we already prove purity

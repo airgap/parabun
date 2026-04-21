@@ -57,6 +57,18 @@ input |> .trim() |> parseInt            →  parseInt(input.trim())
 
 Trailing calls / property access / indexing after `.ident` are handled by the regular suffix loop — the shorthand only synthesizes the first member access, the rest falls out. The method runs with the piped value as `this`.
 
+**Placeholder substitution.** When the RHS of `|>` is a call expression and its top-level argument list contains one or more `_` identifiers, each `_` is replaced with the piped value:
+
+```
+users  |> filter(_, isActive)        →  filter(users, isActive)
+input  |> parseInt(_, 10)            →  parseInt(input, 10)
+buffer |> write(_, "hi", { f: 1 })   →  write(buffer, "hi", { f: 1 })
+arr    |> lodash.filter(_, pred)     →  lodash.filter(arr, pred)
+users  |> filter(_, a) |> map(_, b)  →  map(filter(users, a), b)
+```
+
+Zero `_` falls back to the function-target form (`x |> f(y)` means `f(y)(x)`). Multiple `_` copy the LHS structurally — if the LHS has side effects, bind it to a const first to avoid double evaluation. `_` is treated as a placeholder only at the top level of a pipeline RHS call; nested `_` (e.g. inside an inner arrow body) is left as a regular identifier. Outside `|>`, `_` remains a normal identifier and is not reserved.
+
 ### `throw` as expression
 
 `throw E` is legal in any expression position (RHS of `??`, `||`, `&&`, ternary branches, arrow bodies, etc.). Desugars to `(() => { throw E; })()`. The operand is parsed at AssignmentExpression level — a trailing comma is not absorbed. Evaluation is lazy: the IIFE only runs (and throws) when the surrounding expression actually reaches the throw branch.
@@ -132,8 +144,9 @@ Errors from `Bun.Transpiler` are `BuildMessage` objects with structured position
 test/bundler/transpiler/parabun-parser.test.js      — operator desugaring
 test/bundler/transpiler/parabun-pure.test.js        — pure keyword parsing
 test/bundler/transpiler/parabun-purity.test.js      — purity enforcement
-test/bundler/transpiler/parabun-throw-expr.test.js      — throw as expression
-test/bundler/transpiler/parabun-pipeline-method.test.js — pipeline method shorthand
+test/bundler/transpiler/parabun-throw-expr.test.js           — throw as expression
+test/bundler/transpiler/parabun-pipeline-method.test.js      — pipeline method shorthand
+test/bundler/transpiler/parabun-pipeline-placeholder.test.js — pipeline placeholder (_)
 ```
 
 ## Runtime
