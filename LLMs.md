@@ -46,6 +46,17 @@ Desugars `expr ..& cleanup` to `expr.finally(cleanup)`. Precedence: conditional 
 
 Desugars `x |> f` to `f(x)`. Precedence: nullish coalescing level (tighter than `..!`/`..&`).
 
+**Method shorthand.** If the token after `|>` is `.`, treat it as a member expression on the LHS instead of a function to call with the LHS:
+
+```
+response |> .json()                     →  response.json()
+csv |> .trim() |> .split(",")           →  csv.trim().split(",")
+user |> .name                           →  user.name
+input |> .trim() |> parseInt            →  parseInt(input.trim())
+```
+
+Trailing calls / property access / indexing after `.ident` are handled by the regular suffix loop — the shorthand only synthesizes the first member access, the rest falls out. The method runs with the piped value as `this`.
+
 ### `throw` as expression
 
 `throw E` is legal in any expression position (RHS of `??`, `||`, `&&`, ternary branches, arrow bodies, etc.). Desugars to `(() => { throw E; })()`. The operand is parsed at AssignmentExpression level — a trailing comma is not absorbed. Evaluation is lazy: the IIFE only runs (and throws) when the surrounding expression actually reaches the throw branch.
@@ -121,7 +132,8 @@ Errors from `Bun.Transpiler` are `BuildMessage` objects with structured position
 test/bundler/transpiler/parabun-parser.test.js      — operator desugaring
 test/bundler/transpiler/parabun-pure.test.js        — pure keyword parsing
 test/bundler/transpiler/parabun-purity.test.js      — purity enforcement
-test/bundler/transpiler/parabun-throw-expr.test.js  — throw as expression
+test/bundler/transpiler/parabun-throw-expr.test.js      — throw as expression
+test/bundler/transpiler/parabun-pipeline-method.test.js — pipeline method shorthand
 ```
 
 ## Runtime

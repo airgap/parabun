@@ -297,6 +297,16 @@ const output = rawData
 // Equivalent to: JSON.stringify(transform(JSON.parse(rawData)))
 ```
 
+**Method shorthand.** When the RHS starts with `.`, the piped value becomes the receiver — call methods and access properties on it without the arrow-wrap tax:
+
+```pts
+const data ..= (await fetch("/api")) |> .json();
+const tokens = csv |> .trim() |> .split(",");
+const name = user |> .profile.displayName;
+```
+
+`x |> .method(args)` desugars to `x.method(args)`. Chained calls, property access, and indexing after the first `.ident` work because they get picked up by the regular suffix parse.
+
 Pair it with [`bun:pipeline`](#pipeline-fusion-bunpipeline) for fused typed-array map chains.
 
 ### Throw Expressions

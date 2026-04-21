@@ -876,6 +876,28 @@ pub fn ParseSuffix(
 
             try p.lexer.next();
 
+            // Parabun: method shorthand — `x |> .foo` builds `x.foo` directly.
+            // Any trailing `(args)` / `.prop` / `[idx]` is handled by the regular
+            // suffix loop because the resulting member expression lands in `left`.
+            //   x |> .json()        →  x.json()
+            //   x |> .trim().split(",")  →  x.trim().split(",")
+            //   x |> .a.b.c         →  x.a.b.c
+            if (p.lexer.token == .t_dot) {
+                try p.lexer.next();
+                if (!p.lexer.isIdentifierOrKeyword()) {
+                    try p.lexer.expect(.t_identifier);
+                }
+                const name = p.lexer.identifier;
+                const name_loc = p.lexer.loc();
+                try p.lexer.next();
+                left.* = p.newExpr(E.Dot{
+                    .target = left.*,
+                    .name = name,
+                    .name_loc = name_loc,
+                }, left.loc);
+                return .next;
+            }
+
             const rhs = try p.parseExpr(.nullish_coalescing);
 
             // Parabun: pipeline inline fusion — inline pure function bodies
