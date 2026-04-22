@@ -1536,24 +1536,46 @@ function getCodeActions(uri: string, content: string, range: LspRange, params?: 
 // Semantic Tokens — pure keyword highlighting
 // ---------------------------------------------------------------------------
 
-const SEMANTIC_TOKEN_TYPES = ["function"];
-const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "pure"];
+const SEMANTIC_TOKEN_TYPES = ["function", "variable"];
+const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "pure", "signal"];
+
+// Collect names declared with `signal NAME = ...` (including multi-declarator
+// forms like `signal a = 1, b = 2`). Used to semantic-highlight signal-bound
+// identifier references so readers can spot reactive reads/writes at a
+// glance. Conservative: matches the declaration line only — doesn't follow
+// re-exports, and doesn't handle `let x = signal(0)` (unsugared form —
+// there's no parse-time marker the LSP can see from a regex).
+function collectSignalNames(content: string): Set<string> {
+  const names = new Set<string>();
+  // `signal NAME` followed by `=`, `,`, `;`, `:` (TS annotation), `!` (TS
+  // definite-assignment), or EOL. The leading context must be non-identifier
+  // to avoid matching `mySignal foo` or `signals`.
+  const declRe = /(?:^|[^A-Za-z0-9_$])signal\s+([A-Za-z_$][\w$]*)(?=\s*[=,;:!]|\s*$)/gm;
+  for (const m of content.matchAll(declRe)) names.add(m[1]);
+
+  // Multi-declarator tail: `signal a = 1, b = 2, c = 3`. Walk each `signal`
+  // statement line and collect subsequent `, NAME =` bindings until the
+  // trailing semicolon or newline. The initial-name regex above catches `a`;
+  // this loop catches `b`, `c`.
+  const stmtRe = /(?:^|[^A-Za-z0-9_$])signal\s+[A-Za-z_$][\w$]*\s*(?::[^=,;]*)?=(.*)$/gm;
+  for (const m of content.matchAll(stmtRe)) {
+    const tail = m[1];
+    const tailRe = /,\s*([A-Za-z_$][\w$]*)(?=\s*[=,;:!]|\s*$)/g;
+    for (const tm of tail.matchAll(tailRe)) names.add(tm[1]);
+  }
+  return names;
+}
 
 function computeSemanticTokens(uri: string, content: string): number[] {
-  const data: number[] = [];
+  // Collect every token as {line, col, len, type, modifiers}, then sort and
+  // emit. Multiple passes (pure / signal) touch different regions but may
+  // overlap per line in any order — LSP requires strictly-ascending output.
+  type Token = { line: number; col: number; len: number; type: number; modifiers: number };
+  const tokens: Token[] = [];
   const lines = content.split("\n");
-  let prevLine = 0;
-  let prevChar = 0;
 
   const pureFns = getAllPureFns(uri, content);
-
-  function pushToken(line: number, col: number, len: number, type: number, modifiers: number) {
-    const deltaLine = line - prevLine;
-    const deltaChar = deltaLine === 0 ? col - prevChar : col;
-    data.push(deltaLine, deltaChar, len, type, modifiers);
-    prevLine = line;
-    prevChar = col;
-  }
+  const signalNames = collectSignalNames(content);
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -1562,7 +1584,7 @@ function computeSemanticTokens(uri: string, content: string): number[] {
     const pureRe = /\b(pure)\s*(?=function\b|fun\b|async\b|\(|<[\w\s,=]+>\s*\(|\w+\s*=>)/g;
     let m: RegExpExecArray | null;
     while ((m = pureRe.exec(line)) !== null) {
-      pushToken(i, m.index, 4, 0, 0b10); // type=function, modifier=pure
+      tokens.push({ line: i, col: m.index, len: 4, type: 0, modifiers: 0b010 }); // function + pure
     }
 
     // Pure function call sites
@@ -1570,10 +1592,48 @@ function computeSemanticTokens(uri: string, content: string): number[] {
       const callRe = /\b(\w+)\s*(?:\(|<[\w\s,=<>[\]|&]+>\s*\()/g;
       while ((m = callRe.exec(line)) !== null) {
         if (pureFns.has(m[1]) && !JS_KEYWORDS.test(m[1])) {
-          pushToken(i, m.index, m[1].length, 0, 0b10); // type=function, modifier=pure
+          tokens.push({ line: i, col: m.index, len: m[1].length, type: 0, modifiers: 0b010 });
         }
       }
     }
+
+    // Signal-bound identifier references. Every occurrence of a name declared
+    // via `signal NAME = ...` — declaration site included — gets the "signal"
+    // modifier. Covers reads, writes, method calls (`count.get()` still gets
+    // highlighted on the `count` part). Strings/comments aren't stripped;
+    // accept the occasional false-positive inside a string literal to keep
+    // the impl regex-only, matching the `pure` pass's style.
+    if (signalNames.size > 0) {
+      const idRe = /[A-Za-z_$][\w$]*/g;
+      while ((m = idRe.exec(line)) !== null) {
+        const name = m[0];
+        if (!signalNames.has(name)) continue;
+        // Skip property-access position: `foo.count` — `count` there is a
+        // property, not a reference to the outer signal binding.
+        if (m.index > 0 && line[m.index - 1] === ".") continue;
+        tokens.push({ line: i, col: m.index, len: name.length, type: 1, modifiers: 0b100 });
+      }
+    }
+  }
+
+  tokens.sort((a, b) => a.line - b.line || a.col - b.col);
+
+  // Dedup exact-overlap tokens (same line+col+len) — keep the first, OR-
+  // combine modifiers. Rare in practice but guards against double-emission.
+  const data: number[] = [];
+  let prevLine = 0;
+  let prevChar = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (i > 0) {
+      const prev = tokens[i - 1];
+      if (prev.line === t.line && prev.col === t.col && prev.len === t.len && prev.type === t.type) continue;
+    }
+    const deltaLine = t.line - prevLine;
+    const deltaChar = deltaLine === 0 ? t.col - prevChar : t.col;
+    data.push(deltaLine, deltaChar, t.len, t.type, t.modifiers);
+    prevLine = t.line;
+    prevChar = t.col;
   }
 
   return data;
