@@ -10,7 +10,7 @@
 // Plus batch(fn) to group synchronous writes into a single flush, and
 // untrack(fn) to read signals without subscribing.
 //
-// The language surface (`signal let x = 0`, `effect { ... }`) desugars to
+// The language surface (`signal x = 0`, `effect { ... }`) desugars to
 // calls against this module — same play as `arena { ... }` → bun:arena.
 
 let currentTarget: ComputedSignal<any> | EffectImpl | null = null;
