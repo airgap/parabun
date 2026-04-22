@@ -3,7 +3,7 @@ import { bunEnv, bunExe, tempDir } from "harness";
 
 // Parabun `bun:signals` — fine-grained reactive primitives.
 // Exposed API: signal(v), derived(fn), effect(fn), batch(fn), untrack(fn).
-// The language-level `signal let x` / `effect { }` sugar (not yet shipped) will
+// The language-level `signal x` / `effect { }` sugar (not yet shipped) will
 // desugar to calls into this module; these tests cover the runtime surface.
 async function runFixture(prefix, source) {
   // .pjs enables Parabun parser — needed for `effect { }` block sugar. The
@@ -365,18 +365,19 @@ describe("parabun: effect { } block", () => {
   });
 });
 
-// Language-level sugar: `signal let NAME = RHS` / `signal const NAME = RHS`
-// desugars to `const NAME = require("bun:signals").signal(RHS)` at parse
-// time, and NAME is marked signal-bound so bare reads become `NAME.get()`
-// and writes become `NAME.set(...)` during visit. These M3b tests use
-// explicit `.get()` / `.set()` calls to isolate the declaration desugar
-// from the read/write rewriting (covered in M3c+).
+// Language-level sugar: `signal NAME = RHS` desugars to
+// `const NAME = require("bun:signals").signal(RHS)` at parse time, and NAME
+// is marked signal-bound so bare reads become `NAME.get()` and writes become
+// `NAME.set(...)` during visit. `signal` always implies `const` — there's no
+// `signal let` or `signal var`. These M3b tests use explicit `.get()` /
+// `.set()` calls to isolate the declaration desugar from the read/write
+// rewriting (covered in M3c+).
 describe("parabun: signal declaration", () => {
-  it("signal let: desugars to a writable signal", async () => {
+  it("signal: desugars to a writable signal", async () => {
     const { stdout, exitCode } = await runFixture(
-      "signal-decl-let",
+      "signal-decl-basic",
       `
-        signal let x = 0;
+        signal x = 0;
         console.log(x.get());
         x.set(5);
         console.log(x.get());
@@ -386,37 +387,11 @@ describe("parabun: signal declaration", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("signal const: also desugars to a writable signal (v1)", async () => {
-    const { stdout, exitCode } = await runFixture(
-      "signal-decl-const",
-      `
-        signal const y = 10;
-        console.log(y.get());
-        y.set(99);
-        console.log(y.get());
-      `,
-    );
-    expect(stdout).toBe("10\n99");
-    expect(exitCode).toBe(0);
-  });
-
-  it("signal var: also accepted", async () => {
-    const { stdout, exitCode } = await runFixture(
-      "signal-decl-var",
-      `
-        signal var z = 3;
-        console.log(z.get());
-      `,
-    );
-    expect(stdout).toBe("3");
-    expect(exitCode).toBe(0);
-  });
-
-  it("signal let: multiple declarators", async () => {
+  it("signal: multiple declarators", async () => {
     const { stdout, exitCode } = await runFixture(
       "signal-decl-multi",
       `
-        signal let a = 1, b = 2;
+        signal a = 1, b = 2;
         console.log(a.get() + "," + b.get());
         a.set(10);
         b.set(20);
@@ -427,18 +402,7 @@ describe("parabun: signal declaration", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("signal let: destructuring binding is rejected", async () => {
-    const { stderr, exitCode } = await runFixture(
-      "signal-decl-destructure",
-      `
-        signal let { a, b } = { a: 1, b: 2 };
-      `,
-    );
-    expect(stderr).toContain("simple identifier");
-    expect(exitCode).not.toBe(0);
-  });
-
-  it("signal as plain identifier: unchanged when not before let/const/var", async () => {
+  it("signal as plain identifier: unchanged when not before an identifier", async () => {
     const { stdout, exitCode } = await runFixture(
       "signal-as-ident-import",
       `
@@ -476,7 +440,7 @@ describe("parabun: signal declaration", () => {
   });
 });
 
-// Language-level sugar: when NAME was declared with `signal let/const/var`,
+// Language-level sugar: when NAME was declared with `signal`,
 // bare reads of NAME are auto-rewritten to `NAME.get()`. The reserved method
 // names get/set/peek/subscribe/update stay as direct method calls (allow
 // list). Everything else (`.foo`, `[key]`) goes through `.get()` first.
@@ -485,7 +449,7 @@ describe("parabun: signal-bound identifier rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-rw-bare-read",
       `
-        signal let x = 42;
+        signal x = 42;
         console.log(x);
       `,
     );
@@ -497,7 +461,7 @@ describe("parabun: signal-bound identifier rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-rw-allowlist",
       `
-        signal let n = 1;
+        signal n = 1;
         console.log(n.get());          // 1
         n.set(5);
         console.log(n.peek());         // 5
@@ -516,7 +480,7 @@ describe("parabun: signal-bound identifier rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-rw-prop-access",
       `
-        signal let obj = { foo: 7, hello() { return "hi"; } };
+        signal obj = { foo: 7, hello() { return "hi"; } };
         console.log(obj.foo);       // obj.get().foo = 7
         console.log(obj.hello());   // obj.get().hello() = "hi"
       `,
@@ -529,8 +493,8 @@ describe("parabun: signal-bound identifier rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-rw-arith",
       `
-        signal let a = 3;
-        signal let b = 4;
+        signal a = 3;
+        signal b = 4;
         console.log(a + b);        // 7
         console.log(a * 10 + b);   // 34
       `,
@@ -543,7 +507,7 @@ describe("parabun: signal-bound identifier rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-rw-effect-auto",
       `
-        signal let x = 1;
+        signal x = 1;
         const log = [];
         effect {
           log.push(x);             // auto-rewrites to x.get() → tracks dep
@@ -561,7 +525,7 @@ describe("parabun: signal-bound identifier rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-rw-template",
       `
-        signal let name = "world";
+        signal name = "world";
         console.log(\`hello, \${name}!\`);
       `,
     );
@@ -579,7 +543,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-assign-bare",
       `
-        signal let x = 1;
+        signal x = 1;
         x = 42;
         console.log(x);
       `,
@@ -592,7 +556,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-assign-compound-arith",
       `
-        signal let n = 10;
+        signal n = 10;
         n += 5;
         console.log(n);      // 15
         n -= 3;
@@ -613,7 +577,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-assign-compound-bitwise",
       `
-        signal let b = 0b1100;
+        signal b = 0b1100;
         b |= 0b0011;
         console.log(b);     // 15
         b &= 0b1010;
@@ -634,15 +598,15 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-assign-logical",
       `
-        signal let a = 0;
+        signal a = 0;
         a ||= 5;
         console.log(a);     // 5 (was falsy)
         a ||= 99;
         console.log(a);     // still 5
-        signal let b = 1;
+        signal b = 1;
         b &&= 7;
         console.log(b);     // 7 (was truthy)
-        signal let c = null;
+        signal c = null;
         c ??= 42;
         console.log(c);     // 42
         c ??= 99;
@@ -657,7 +621,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-assign-reactive",
       `
-        signal let x = 1;
+        signal x = 1;
         const log = [];
         effect {
           log.push(x);
@@ -675,7 +639,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-incdec",
       `
-        signal let n = 5;
+        signal n = 5;
         console.log(++n);        // pre-inc: 6
         console.log(n);          // 6
         console.log(--n);        // pre-dec: 5
@@ -694,7 +658,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-incdec-expr",
       `
-        signal let i = 0;
+        signal i = 0;
         const arr = [10, 20, 30];
         console.log(arr[i++]);     // reads arr[0]=10, i becomes 1
         console.log(arr[i++]);     // reads arr[1]=20, i becomes 2
@@ -709,7 +673,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-incdec-reactive",
       `
-        signal let count = 0;
+        signal count = 0;
         const log = [];
         effect { log.push(count); }
         count++;
@@ -726,7 +690,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-assign-noop",
       `
-        signal let x = 7;
+        signal x = 7;
         let runs = 0;
         effect {
           x;
@@ -741,7 +705,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     expect(exitCode).toBe(0);
   });
 
-  // M3f: RHS-sniff auto-derive. When `signal let/const NAME = RHS` references
+  // M3f: RHS-sniff auto-derive. When `signal NAME = RHS` references
   // another in-scope signal-bound name, the RHS is wrapped as
   // `derived(() => RHS)` instead of `signal(RHS)`. The file-level pragma
   // `// @parabun-strict-signals` opts out.
@@ -750,9 +714,9 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-autoderive-basic",
       `
-        signal let a = 2;
-        signal let b = 3;
-        signal const sum = a + b;
+        signal a = 2;
+        signal b = 3;
+        signal sum = a + b;
         console.log(sum);   // 5 — reads via .get()
         a = 10;
         console.log(sum);   // 13 — dep invalidation recomputes
@@ -763,13 +727,13 @@ describe("parabun: signal-bound assignment rewriting", () => {
   });
 
   it("auto-derive: non-signal refs on RHS don't trigger derive", async () => {
-    // Plain `signal let x = y` where y is NOT signal-bound stays a writable
+    // Plain `signal x = y` where y is NOT signal-bound stays a writable
     // signal — proved here by writing to it.
     const { stdout, exitCode } = await runFixture(
       "sig-autoderive-nondep",
       `
         const seed = 42;
-        signal let n = seed;       // seed is a const, not a signal — writable
+        signal n = seed;       // seed is a const, not a signal — writable
         console.log(n);            // 42
         n = 100;                   // would throw if derived (read-only)
         console.log(n);            // 100
@@ -783,8 +747,8 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, stderr, exitCode } = await runFixture(
       "sig-autoderive-readonly",
       `
-        signal let base = 1;
-        signal const doubled = base * 2;
+        signal base = 1;
+        signal doubled = base * 2;
         try { doubled = 99; } catch (e) { console.log("err:" + e.message); }
       `,
     );
@@ -796,9 +760,9 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-autoderive-chain",
       `
-        signal let a = 1;
-        signal const b = a + 1;     // derived(() => a + 1)
-        signal const c = b + 1;     // derived(() => b + 1)
+        signal a = 1;
+        signal b = a + 1;     // derived(() => a + 1)
+        signal c = b + 1;     // derived(() => b + 1)
         console.log(c);             // 3
         a = 10;
         console.log(c);             // 12
@@ -809,15 +773,15 @@ describe("parabun: signal-bound assignment rewriting", () => {
   });
 
   it("@parabun-strict-signals pragma disables auto-derive", async () => {
-    // With the pragma, `signal const sum = a + b` stays a writable signal
+    // With the pragma, `signal sum = a + b` stays a writable signal
     // holding the *snapshot* value — no dep tracking. Proved by writing to it.
     const { stdout, exitCode } = await runFixture(
       "sig-strict-pragma",
       `
         // @parabun-strict-signals
-        signal let a = 2;
-        signal let b = 3;
-        signal let sum = a + b;    // signal(a.get() + b.get()) — snapshot 5
+        signal a = 2;
+        signal b = 3;
+        signal sum = a + b;    // signal(a.get() + b.get()) — snapshot 5
         console.log(sum);          // 5
         sum = 99;                  // writable, no throw
         console.log(sum);          // 99
@@ -833,8 +797,8 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-autoderive-effect",
       `
-        signal let a = 1;
-        signal const doubled = a * 2;
+        signal a = 1;
+        signal doubled = a * 2;
         const log = [];
         effect { log.push(doubled); }
         a = 5;
@@ -850,10 +814,10 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-autoderive-shapes",
       `
-        signal let x = 5;
-        signal const pos = x > 0 ? "pos" : "neg";
-        signal const msg = \`x=\${x}\`;
-        signal const absCall = Math.abs(x);
+        signal x = 5;
+        signal pos = x > 0 ? "pos" : "neg";
+        signal msg = \`x=\${x}\`;
+        signal absCall = Math.abs(x);
         console.log(pos);      // pos
         console.log(msg);      // x=5
         console.log(absCall);  // 5
@@ -875,9 +839,9 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-int-counter",
       `
-        signal let count = 0;
-        signal const doubled = count * 2;
-        signal const label = \`count=\${count} x2=\${doubled}\`;
+        signal count = 0;
+        signal doubled = count * 2;
+        signal label = \`count=\${count} x2=\${doubled}\`;
         const log = [];
         effect { log.push(label); }
         count++;
@@ -895,7 +859,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
       "sig-int-fn-scope",
       `
         function makeCounter() {
-          signal let n = 0;
+          signal n = 0;
           return {
             inc() { n++; },
             read() { return n; },
@@ -915,7 +879,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
       "sig-int-block",
       `
         {
-          signal let inner = 42;
+          signal inner = 42;
           console.log(inner);
           inner = 99;
           console.log(inner);
@@ -931,8 +895,8 @@ describe("parabun: signal-bound assignment rewriting", () => {
       "sig-int-batch",
       `
         import { batch } from "bun:signals";
-        signal let a = 1;
-        signal let b = 2;
+        signal a = 1;
+        signal b = 2;
         let runs = 0;
         effect { a; b; runs++; }
         batch(() => {
@@ -953,8 +917,8 @@ describe("parabun: signal-bound assignment rewriting", () => {
       "sig-int-untrack",
       `
         import { untrack } from "bun:signals";
-        signal let tracked = 1;
-        signal let silent = 0;
+        signal tracked = 1;
+        signal silent = 0;
         let runs = 0;
         effect {
           tracked;
@@ -975,7 +939,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
       "sig-int-cleanup",
       `
         import { effect as effectFn } from "bun:signals";
-        signal let v = 0;
+        signal v = 0;
         const log = [];
         const stop = effectFn(() => {
           const snapshot = v;
@@ -992,18 +956,6 @@ describe("parabun: signal-bound assignment rewriting", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("integration: signal destructuring is a parse error", async () => {
-    const { stdout, stderr, exitCode } = await runFixture(
-      "sig-int-destructure",
-      `
-        signal const { a, b } = { a: 1, b: 2 };
-        console.log(a, b);
-      `,
-    );
-    expect(stderr).toContain("simple identifier binding");
-    expect(exitCode).not.toBe(0);
-  });
-
   it("integration: signal with TypeScript annotation", async () => {
     // The .pjs loader accepts TS syntax via skipTypeScriptType. Since the
     // test runs .pjs not .pts, TS may be off — but the feature should still
@@ -1012,7 +964,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     // We smoke-test with .pts instead by renaming the fixture.
     using dir = tempDir("sig-int-ts", {
       "index.pts": `
-        signal let n: number = 7;
+        signal n: number = 7;
         console.log(n + 1);
         n = 100;
         console.log(n);
@@ -1034,7 +986,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-int-multi-decl",
       `
-        signal let a = 1, b = 2, c = 3;
+        signal a = 1, b = 2, c = 3;
         console.log(a + "," + b + "," + c);
         a = 10; b = 20; c = 30;
         console.log(a + "," + b + "," + c);
@@ -1048,9 +1000,9 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-int-chain",
       `
-        signal let x = 1;
-        signal const y = x * 10;
-        signal const z = y + x;   // depends on both
+        signal x = 1;
+        signal y = x * 10;
+        signal z = y + x;   // depends on both
         const log = [];
         effect { log.push(z); }
         x = 2;   // y: 20, z: 22

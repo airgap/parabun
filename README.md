@@ -6,7 +6,7 @@
 
 ## What is Parabun?
 
-Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, buffer pooling, and fine-grained reactivity — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges, `signal let`/`effect { }`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
+Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, buffer pooling, and fine-grained reactivity — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges, `signal`/`effect { }`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
 
 Parabun introduces two new file extensions:
 - **`.pts`** — Parabun TypeScript (superset of TypeScript)
@@ -175,7 +175,7 @@ stop();                  // tear down the effect
 - **`untrack(fn)`** — read inside a reactive context without registering a dep.
 - **Set-to-same-value is a no-op** — writes only propagate on `!Object.is(old, new)`, so idempotent assigns don't refire effects.
 
-Pair with the [`signal let` + `effect { }` sugar](#signals-signal-let--effect---) for a more direct feel — the sugar rewrites to this module at parse time.
+Pair with the [`signal` + `effect { }` sugar](#signals-signal--effect---) for a more direct feel — the sugar rewrites to this module at parse time.
 
 ## Install
 
@@ -436,25 +436,25 @@ Desugars to `require("bun:arena").scope(() => { ... })`. This is **latency-smoot
 
 The block body is lifted into a synchronous arrow, so `return` / `break` / `continue` are arrow-local (same semantics as `.forEach(cb)`). To produce a value, assign to an outer `let`. `await` is rejected inside the body: microtasks fire after the deferral releases, so `await` wouldn't actually run with GC deferred. `arena` as a plain identifier is unaffected — the keyword path only triggers when `arena` is immediately followed (no newline) by `{`.
 
-### Signals (`signal let` / `effect { }`)
+### Signals (`signal` / `effect { }`)
 
-Language sugar layered over [`bun:signals`](#fine-grained-reactivity-bunsignals) that removes the `.get()` / `.set()` noise. A `signal let NAME = RHS` declaration binds `NAME` as a reactive signal; bare reads rewrite to `NAME.get()`, assignments and `++`/`--` rewrite to a read-modify-write via `NAME.set(...)`, and an `effect { body }` block lifts its body into a tracked arrow:
+Language sugar layered over [`bun:signals`](#fine-grained-reactivity-bunsignals) that removes the `.get()` / `.set()` noise. A `signal NAME = RHS` declaration binds `NAME` as a reactive signal; bare reads rewrite to `NAME.get()`, assignments and `++`/`--` rewrite to a read-modify-write via `NAME.set(...)`, and an `effect { body }` block lifts its body into a tracked arrow:
 
 ```pts
-signal let count = 0;
-signal const doubled = count * 2;     // auto-derive — RHS references `count`
+signal count = 0;
+signal doubled = count * 2;     // auto-derive — RHS references `count`
 
 effect { console.log(`count=${count} x2=${doubled}`); }
 
-count++;                              // count=1 x2=2
-count = 10;                           // count=10 x2=20
+count++;                        // count=1 x2=2
+count = 10;                     // count=10 x2=20
 ```
 
-- **`signal let/const/var NAME = RHS`** — declares a signal. If `RHS` references another in-scope signal name the decl auto-promotes to `derived(() => RHS)`; otherwise it's a plain `signal(RHS)`. Only simple identifier bindings in v1 (`signal const { a } = ...` is a parse error).
+- **`signal NAME = RHS`** — declares a reactive binding. `signal` always implies `const`; there's no `signal let`/`var` form. If `RHS` references another in-scope signal name the decl auto-promotes to `derived(() => RHS)`; otherwise it's a plain `signal(RHS)`. Only simple identifier bindings in v1.
 - **`effect { body }`** — statement-level effect. The body is lifted into an arrow, so `return` / `break` / `continue` are arrow-local. `await` is rejected — the flush loop is synchronous.
 - **Method allow-list**: `.get`, `.set`, `.peek`, `.subscribe`, `.update` stay as real `Signal` methods. Every other `NAME.foo` rewrites as `NAME.get().foo`, so `.trim()` on a string signal, `.length` on an array signal, etc. all do what you'd expect.
-- **Pragma opt-out**: `// @parabun-strict-signals` at the top of a file disables auto-derive — every `signal let` becomes a plain `signal(RHS)` regardless of what `RHS` references. Use it when you want the snapshot semantics.
-- **`signal` / `effect` as plain identifiers are unaffected** — the keyword path only triggers when `signal` is immediately followed by `let`/`const`/`var`, or `effect` by `{`.
+- **Pragma opt-out**: `// @parabun-strict-signals` at the top of a file disables auto-derive — every `signal` decl becomes a plain `signal(RHS)` regardless of what `RHS` references. Use it when you want the snapshot semantics.
+- **`signal` / `effect` as plain identifiers are unaffected** — the keyword path only triggers when `signal` is immediately followed by an identifier, or `effect` by `{`.
 
 ### Throw Expressions
 
@@ -480,7 +480,7 @@ Regular `throw E;` statements are unaffected. ASI rules still apply — a newlin
 | `..` / `..=` (range) | between shift and comparison | `__parabunRange(a, b)` |
 | `arena { ... }` | statement-level | `require("bun:arena").scope(() => { ... })` |
 | `effect { ... }` | statement-level | `require("bun:signals").effect(() => { ... })` |
-| `signal let x = v` | statement-level | `const x = require("bun:signals").signal(v)` (or `.derived(() => v)`) |
+| `signal x = v` | statement-level | `const x = require("bun:signals").signal(v)` (or `.derived(() => v)`) |
 | `throw E` | assignment (prefix) | `(() => { throw E; })()` |
 
 Operators bind tighter-to-looser in the order listed, so `data |> transform ..! handler ..& cleanup` parses as `transform(data).catch(handler).finally(cleanup)`.

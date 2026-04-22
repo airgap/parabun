@@ -1490,36 +1490,30 @@ pub fn ParseStmt(
             return p.s(S.SExpr{ .value = arena_call }, arena_range.loc);
         }
 
-        // Parabun: parse a `signal let NAME = RHS` / `signal const NAME = RHS`
-        // declaration. Each RHS is wrapped in
+        // Parabun: parse a `signal NAME = RHS` declaration. `signal` implies
+        // `const` — there's no `signal let`/`const`/`var` form. Each RHS is
+        // wrapped in
         //   require("bun:signals").signal(RHS)
         // by default, or
         //   require("bun:signals").derived(() => RHS)
-        // when the RHS references another in-scope `signal let/const` name
-        // (auto-derive). The file-level pragma `// @parabun-strict-signals`
-        // disables auto-derive, making every decl a plain `signal(RHS)`.
+        // when the RHS references another in-scope signal name (auto-derive).
+        // The file-level pragma `// @parabun-strict-signals` disables
+        // auto-derive, making every decl a plain `signal(RHS)`.
         //
         // Each declared ref is recorded in p.signal_bound_refs so the visit
         // pass rewrites bare reads into `.get()` calls and assignments into
         // `.set(...)` calls. The declared name is also counted in
         // p.signal_bound_names so later decls can auto-derive from it.
-        // `signal var` is also accepted.
         //
         // Only simple identifier bindings are allowed in v1 — destructuring
-        // (`signal let { a, b } = ...`) reports an error.
+        // (`signal { a, b } = ...`) reports an error.
         //
-        // On entry, the lexer is on `let`, `const`, or `var`.
+        // On entry, the lexer is on the binding name (t_identifier).
         fn parseSignalStmt(p: *P, signal_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
             if (!p.parabun_strict_signals_scanned) {
                 p.parabun_strict_signals_scanned = true;
                 p.parabun_strict_signals = strings.contains(p.source.contents, "@parabun-strict-signals");
             }
-
-            const symbol_kind: Symbol.Kind = switch (p.lexer.token) {
-                .t_var => .hoisted,
-                else => .constant,
-            };
-            try p.lexer.next();
 
             // Parse binding list manually so we can push an arrow scope-pair
             // around each RHS — needed because auto-derive wraps the RHS as
@@ -1531,12 +1525,8 @@ pub fn ParseStmt(
             var decls = ListManaged(G.Decl).init(p.allocator);
 
             while (true) {
-                if (p.lexer.isContextualKeyword("let") and symbol_kind == .constant) {
-                    p.log.addRangeError(p.source, p.lexer.range(), "Cannot use \"let\" as an identifier here") catch unreachable;
-                }
-
                 var local = try p.parseBinding(.{});
-                p.declareBinding(symbol_kind, &local, opts) catch unreachable;
+                p.declareBinding(.constant, &local, opts) catch unreachable;
 
                 if (comptime is_typescript_enabled) {
                     const is_definite_assignment_assertion = p.lexer.token == .t_exclamation and !p.lexer.has_newline_before;
@@ -1874,25 +1864,21 @@ pub fn ParseStmt(
                 // identifier (`const arena = 1; arena + 1;`).
                 p.lexer.restore(&saved);
             }
-            // Parabun: "signal let/const/var NAME = RHS" declaration — each
-            // RHS is wrapped in `require("bun:signals").signal(RHS)` and the
-            // declared ref is marked as signal-bound so the visit pass
-            // rewrites reads/assigns accordingly.
+            // Parabun: "signal NAME = RHS" declaration — each RHS is wrapped
+            // in `require("bun:signals").signal(RHS)` and the declared ref is
+            // marked as signal-bound so the visit pass rewrites reads/assigns
+            // accordingly. `signal` implies `const` — there's no `signal let`
+            // or `signal var`.
             //
             // Only triggers when `signal` is immediately followed (no newline)
-            // by `let`, `const`, or `var`. Any other continuation leaves
-            // `signal` as a plain identifier.
+            // by an identifier. Any other continuation leaves `signal` as a
+            // plain identifier.
             if (is_identifier and strings.eqlComptime(p.lexer.raw(), "signal")) {
                 const signal_range = p.lexer.range();
                 const saved = p.lexer;
                 try p.lexer.next();
-                if (!p.lexer.has_newline_before) {
-                    const t = p.lexer.token;
-                    if (t == .t_const or t == .t_var or
-                        (t == .t_identifier and strings.eqlComptime(p.lexer.raw(), "let")))
-                    {
-                        return try parseSignalStmt(p, signal_range, opts);
-                    }
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseSignalStmt(p, signal_range, opts);
                 }
                 // Not a signal declaration — rewind so `signal` works as a
                 // plain identifier (`import { signal } from "bun:signals"; signal(0);`).
