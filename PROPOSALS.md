@@ -20,7 +20,7 @@ Ordered by value-per-unit-effort, skewed toward things that **compose with exten
 2. `[x]` **Placeholder in `|>`** — `x |> f(_, 2)` — makes the pipeline actually useful with multi-arg APIs. **SHIPPED** (18 new tests; 244 parser-side tests total green)
 3. `[x]` **Method shorthand in `|>`** — `x |> .trim()` — pairs with placeholder, kills the arrow-wrap tax. **SHIPPED** (17 new tests; 176 total parser-side tests green)
 4. `[ ]` **`defer`** — composes with our `using`-based resource story; real pain relief
-5. `[ ]` **`memo pure fn`** — headline-level feature; safe *only* because we already prove purity
+5. `[x]` **`memo pure fn`** — headline-level feature; safe *only* because we already prove purity. **SHIPPED** (20 new tests; 282 parser-side tests total green)
 6. `[ ]` **Function composition `>>`** — trivial, makes pipelines point-free
 7. `[ ]` **Do-blocks** — statement-as-expression; enables cleaner match later
 8. `[ ]` **Range literals `1..10` / `1..=10`** — cheap ergonomics, safe desugar
@@ -165,7 +165,7 @@ Strategy A is preferred: it's a direct lowering to `using`, which is now ES2024 
 
 ---
 
-## 5. `memo pure fn`
+## 5. `memo pure fn` — SHIPPED
 
 **Syntax:**
 ```pts
@@ -175,38 +175,29 @@ memo pure function fib(n) {
 }
 ```
 
-**Desugar:**
+**Desugar (as shipped):**
 ```js
-const fib = (() => {
-  const __cache = new Map();
-  return function fib(n) {
-    const __key = n; // or JSON.stringify for multi-arg
-    if (__cache.has(__key)) return __cache.get(__key);
-    const __val = (n < 2) ? n : fib(n - 1) + fib(n - 2);
-    __cache.set(__key, __val);
-    return __val;
-  };
-})();
+const fib = __parabunMemo(function(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}, 1);
 ```
 
-**Rationale:** Memoization is only safe for pure functions. We already prove purity at parse time. Making this a one-keyword opt-in turns a compiler-checked property into a performance feature. Nothing else in JS/TS can offer this safely — a JS lib can memoize, but it can't *prove* the function it's memoizing is pure.
+The inner function is rendered anonymous so recursive references (`fib(n-1)`) resolve to the outer `const` — the memoized wrapper — instead of binding to a named-function-expression self-reference that would bypass the cache.
 
-**Semantics:** `memo` is a modifier only valid in front of `pure`. `memo function` without `pure` is a parse error ("memo requires pure"). The cache is per-function, unbounded by default (document this), keyed by `JSON.stringify(args)` — fine for primitive-arg functions which is the 90% case.
+**Key strategy (as shipped — exceeds the original v1 plan):**
+- **Arity 0** — singleton cache, first result is reused forever.
+- **Arity 1, no rest** — direct `Map` keyed by the argument (object identity for non-primitives, no stringify cost).
+- **Arity ≥2 or rest** — nested `Map` chain, one level per arg. Terminal values sit under a private `Symbol` sentinel at each depth so different-arity calls sharing a prefix don't collide.
 
-**Key strategy:**
-- **Single primitive arg:** direct Map key. Fast path.
-- **Multiple args:** nested Map-of-Maps (keeps keys typed, avoids JSON cost).
-- **Object args:** WeakMap fallback (auto-GC, no leak). Mixed arg types get a runtime check.
+**Async semantics:** in-flight promises are shared between concurrent callers (natural dedupe). Rejected promises are evicted; fulfilled promises stay cached.
 
-Keep the desugar simple in v1 (single-arg only), ship multi-arg in v2 once we see usage.
+**`memo` without `pure`** is a parse error. `memo` in other positions (variable names, property accesses) is unaffected.
 
-**Cost:** ~60 lines parser + a tiny runtime helper in `src/js/internal/` + 10 tests. 1-2 days.
-
-**Open questions:**
-- **Cache size.** Unbounded is dangerous for long-running processes. Default cap? (e.g., 10k entries, LRU.) Or an annotation `memo(1000) pure fn`? Probably yes — add `memo(N)` for bounded LRU in v2.
-- **Per-call-site caches vs global.** Each function gets its own cache. Good.
-- **Interaction with `pmap`.** If `pmap` ships a memoized pure function to workers, each worker gets its own cache (not shared). Document as a performance note.
-- **Recursion.** The example above (`fib`) works because the closed-over name resolves to the memoized version. Verify in tests.
+**Resolved notes:**
+- **Cache size.** Unbounded in v1. Add `memo(N)` bounded-LRU when a real use-case comes in.
+- **Interaction with `pmap`.** Each worker sees its own cache — not shared (workers run the desugared wrapper independently).
+- **Recursion.** Verified: `fib(20)` invokes the body 21 times, not 21,891.
 
 ---
 

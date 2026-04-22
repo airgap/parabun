@@ -85,6 +85,20 @@ pub fn ParseStmt(
                         }
                     }
 
+                    // Parabun: "export memo pure function" / "export memo pure async function"
+                    if (p.lexer.isContextualKeyword("memo")) {
+                        const memo_range = p.lexer.range();
+                        const saved = p.lexer;
+                        try p.lexer.next();
+                        if (!p.lexer.has_newline_before and p.lexer.isContextualKeyword("pure")) {
+                            opts.is_export = true;
+                            return try parseMemoFnStmt(p, opts, memo_range);
+                        }
+                        p.lexer.restore(&saved);
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
                     // Parabun: "export pure function" / "export pure async function"
                     if (p.lexer.isContextualKeyword("pure")) {
                         const pure_range = p.lexer.range();
@@ -1180,11 +1194,137 @@ pub fn ParseStmt(
             }, loc);
         }
 
+        // Parabun: parse a `memo pure [async] function <name>(...) { ... }` statement.
+        // Caller has seen `memo` but NOT consumed it yet? No — caller has consumed
+        // `memo` already (so p.lexer is positioned at the `pure` token) and asserts
+        // that the current token is the `pure` identifier.
+        //
+        // Desugar:
+        //   memo pure function fib(n) { ...body... }
+        // becomes:
+        //   const fib = __parabunMemo(function(n) { ...body... }, 1);
+        //
+        // The inner function is rendered anonymous (func.name = null) so that
+        // recursive references to `fib` inside the body resolve to the outer
+        // `const fib`, which is the memoized wrapper — otherwise a named function
+        // expression would bind `fib` inside its own scope and bypass memoization.
+        //
+        // Arity passed to the runtime helper controls cache layout:
+        //   0 args, no rest  → 0 (singleton cache)
+        //   1 arg, no rest   → 1 (direct Map)
+        //   otherwise        → 2 (nested Maps — also handles rest args correctly)
+        fn parseMemoFnStmt(p: *P, opts: *ParseStatementOptions, memo_range: logger.Range) anyerror!Stmt {
+            // At entry: p.lexer is on the `pure` identifier.
+            const pure_range = p.lexer.range();
+            try p.lexer.next();
+            if (p.lexer.has_newline_before) {
+                try p.log.addRangeError(p.source, pure_range, "Unexpected newline after \"pure\"");
+                return error.SyntaxError;
+            }
+
+            var async_range: ?logger.Range = null;
+            if (p.lexer.isContextualKeyword("async")) {
+                async_range = p.lexer.range();
+                try p.lexer.next();
+                if (p.lexer.has_newline_before) {
+                    try p.log.addRangeError(p.source, async_range.?, "Unexpected newline after \"async\"");
+                    return error.SyntaxError;
+                }
+            }
+
+            if (p.lexer.token != .t_function) {
+                try p.log.addRangeError(p.source, memo_range, "`memo` must be followed by `pure [async] function` — only declared pure functions can be memoized");
+                return error.SyntaxError;
+            }
+            try p.lexer.next();
+
+            if (p.lexer.token != .t_identifier) {
+                try p.log.addRangeError(p.source, memo_range, "`memo pure function` requires a name — anonymous memoized functions aren't supported");
+                return error.SyntaxError;
+            }
+
+            // Remember whether the declaration is exported; parseFnStmt consults
+            // opts.is_export and will bake it into the resulting symbol. We move
+            // that onto the S.Local we emit instead, so clear it locally.
+            const is_export = opts.is_export;
+            opts.is_export = false;
+            defer opts.is_export = is_export;
+
+            const fn_stmt = try p.parseFnStmt(memo_range.loc, opts, async_range, true);
+            // parseFnStmt may return S.TypeScript for forward declarations — memo on
+            // those makes no sense, so reject it.
+            if (fn_stmt.data != .s_function) {
+                try p.log.addRangeError(p.source, memo_range, "`memo` cannot be applied to a TypeScript forward declaration");
+                return error.SyntaxError;
+            }
+
+            var func = fn_stmt.data.s_function.func;
+            const name_loc_ref = func.name.?;
+            const name_ref = name_loc_ref.ref.?;
+
+            // The function was declared as .hoisted_function by parseFnStmt;
+            // demote to .constant so later passes treat it as a const binding.
+            p.symbols.items[name_ref.innerIndex()].kind = .constant;
+
+            // Strip the inner name so recursive references inside the body
+            // resolve to the outer const (the memoized wrapper).
+            func.name = null;
+
+            const has_rest = func.flags.contains(.has_rest_arg);
+            const arity: f64 = blk: {
+                if (has_rest) break :blk 2;
+                if (func.args.len == 0) break :blk 0;
+                if (func.args.len == 1) break :blk 1;
+                break :blk 2;
+            };
+
+            // When visit traverses an E.Function, it pushes the function_args
+            // scope at the expression's own loc; when it traversed an S.Function,
+            // it pushed at func.open_parens_loc. To keep the visit-pass scope
+            // order consistent with what the parse pass recorded, emit the
+            // E.Function at open_parens_loc.
+            const fn_loc = func.open_parens_loc;
+            const fn_expr = p.newExpr(E.Function{ .func = func }, fn_loc);
+
+            const memo_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+            memo_args[0] = fn_expr;
+            memo_args[1] = p.newExpr(E.Number{ .value = arity }, fn_loc);
+            const memo_call = p.callRuntime(memo_range.loc, "__parabunMemo", memo_args);
+
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc_ref.loc),
+                .value = memo_call,
+            };
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = is_export,
+            }, memo_range.loc);
+        }
+
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             const is_identifier = p.lexer.token == .t_identifier;
             const name = p.lexer.identifier;
             // Parse either a pure function, an async function, an async expression, or a normal expression
             var expr: Expr = Expr{ .loc = loc, .data = Expr.Data{ .e_missing = .{} } };
+            // Parabun: "memo pure function" / "memo pure async function" statements —
+            // desugars to `const <name> = __parabunMemo(<anonymous fn>, <arity>);`
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "memo")) {
+                const memo_range = p.lexer.range();
+                // Tentatively consume `memo`; if it's not followed by `pure`, restore
+                // and treat as a normal identifier expression.
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier and
+                    strings.eqlComptime(p.lexer.raw(), "pure"))
+                {
+                    return try parseMemoFnStmt(p, opts, memo_range);
+                }
+                // Not a memo declaration — rewind and fall through to expression parsing.
+                p.lexer.restore(&saved);
+            }
             // Parabun: "pure function" or "pure async function" statements
             if (is_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
                 const pure_range = p.lexer.range();
@@ -1426,7 +1566,9 @@ const logger = bun.logger;
 const strings = bun.strings;
 
 const js_ast = bun.ast;
+const B = js_ast.B;
 const Binding = js_ast.Binding;
+const E = js_ast.E;
 const Expr = js_ast.Expr;
 const LocRef = js_ast.LocRef;
 const S = js_ast.S;

@@ -30,6 +30,31 @@ declarations are unrestricted; arrow functions inherit purity.
 
 Desugars to a standard function. The `is_pure` flag is stored on `Flags.Function` (for declarations) and `E.Arrow` (for arrows) in the AST. The flag is accessible during parsing via `fn_or_arrow_data_parse.is_pure`.
 
+### `memo` keyword
+
+Memoizes a pure function by wrapping its declaration in a cache. Only applies to `pure` (and `pure async`) function declarations — `memo` without `pure` is a parse error, because memoizing an impure function would silently cache side effects.
+
+```
+memo pure function fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+memo pure function add(a, b) { return a + b; }
+memo pure async function load(key) { return await db.get(key); }
+export memo pure function normalize(s) { return s.trim().toLowerCase(); }
+```
+
+Desugars to `const name = __parabunMemo(anonymous_fn, arity);`. The inner function is rendered anonymous so recursive self-references (`fib(n-1)` above) resolve through the outer `const`, which is the memoized wrapper — a named inner function expression would create a local self-binding and bypass the cache.
+
+Cache layout (selected from the declared arity — rest parameters always land in the multi-arg path):
+
+- **0 args** — singleton cache, first call's result is reused forever.
+- **1 arg, no rest** — `Map` keyed directly by the argument (object identity for non-primitives, no stringify cost).
+- **≥2 args or rest** — nested `Map` chain, one level per argument. The terminal value at each depth is stored under a private `Symbol` sentinel so that calls with different argument counts sharing a prefix don't collide.
+
+Async memoization dedupes concurrent in-flight calls (the first call's promise is returned to later callers) and evicts the entry if the promise rejects, so the next call retries fresh. Fulfilled promises stay cached.
+
 ### `..=` (await-assign)
 
 Desugars `const x ..= expr` to `const x = await expr`. Requires async context.
@@ -116,7 +141,7 @@ File extension registration: `src/options.zig` (loaders, extension orders, all 1
 Lightweight LSP that runs with the Parabun binary. Provides:
 
 - **Diagnostics** — Real parse errors from `Bun.Transpiler` (purity violations, syntax errors)
-- **Completions** — `pure`, `pure function`, `pure async function`, `..=`, `..!`, `..&`, `|>`
+- **Completions** — `pure`, `pure function`, `pure async function`, `memo pure function`, `..=`, `..!`, `..&`, `|>`
 - **Hover** — Markdown docs for `pure` keyword and all operators
 - **Semantic tokens** — `pure` keyword tagged as `function` type with `pure` modifier
 
@@ -147,6 +172,7 @@ test/bundler/transpiler/parabun-purity.test.js      — purity enforcement
 test/bundler/transpiler/parabun-throw-expr.test.js           — throw as expression
 test/bundler/transpiler/parabun-pipeline-method.test.js      — pipeline method shorthand
 test/bundler/transpiler/parabun-pipeline-placeholder.test.js — pipeline placeholder (_)
+test/bundler/transpiler/parabun-memo.test.js                 — memo pure function
 ```
 
 ## Runtime

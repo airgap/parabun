@@ -376,6 +376,8 @@ pub const Runtime = struct {
         __jsonParse: ?Ref = null,
         __promiseAll: ?Ref = null,
         __parabunPeek: ?Ref = null,
+        __parabunMemo: ?Ref = null,
+        __parabunDefer: ?Ref = null,
 
         pub const all = [_][]const u8{
             "__name",
@@ -404,6 +406,8 @@ pub const Runtime = struct {
             "__jsonParse",
             "__promiseAll",
             "__parabunPeek",
+            "__parabunMemo",
+            "__parabunDefer",
         };
         const all_sorted: [all.len]string = brk: {
             @setEvalBranchQuota(1000000);

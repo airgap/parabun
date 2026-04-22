@@ -259,6 +259,27 @@ pure function valid() {
 
 Editors with the Parabun LSP highlight `pure` functions with a distinct style, making it immediately obvious which functions are side-effect-free.
 
+### Memoized Pure Functions (`memo`)
+
+Prefix a `pure` function declaration with `memo` to cache results by argument. Memoization is only allowed on pure functions — `memo` without `pure` is a parse error, because caching results of an impure function would silently cache side effects.
+
+```pts
+memo pure function fib(n: number): number {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+memo pure function normalize(s: string) {
+  return s.trim().toLowerCase();
+}
+
+memo pure async function fetchProfile(id: string) {
+  return await db.users.get(id);
+}
+```
+
+The cache adapts to the function's arity: a 0-arg function becomes a singleton; a 1-arg function uses a `Map` keyed by the single argument; multi-arg and rest-arg functions use a nested `Map` chain. Async variants dedupe concurrent in-flight calls (one shared promise) and evict entries whose promises reject, so retries happen naturally. Recursive calls route through the memoized wrapper automatically — `fib(20)` above invokes the function body only 21 times, not 21,891.
+
 ### Await-Assign (`..=`)
 
 Desugars `const x ..= expr` to `const x = await expr`. Requires an async context.

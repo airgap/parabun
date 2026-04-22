@@ -23,6 +23,88 @@ export var __parabunPeek = v => {
   return s === "fulfilled" ? [1, Bun.peek(v)] : [0, v];
 };
 
+// Parabun: memoize a pure function. Safe only because `pure` is parse-time
+// proven — no `this`, no global side effects, no impure reads.
+//
+// Keying:
+//   arity 0: singleton cache — first call's result is reused forever
+//   arity 1: Map keyed directly by the single argument (object identity for
+//            non-primitives; no stringify cost)
+//   arity ≥2 (or rest-arg): nested Maps, one level per argument. The terminal
+//            value for a given arg sequence is stored at a private sentinel
+//            Symbol on the deepest Map — this separates "intermediate level
+//            descends further" from "terminal at this depth" so that calls
+//            with different argument counts sharing a prefix don't collide
+//            (e.g. `f("a","b","c")` vs `f("a","b")`).
+//
+// Promise rejection eviction: if the cached value is a thenable and it
+// rejects, the entry is deleted so the next call re-runs. Fulfilled promises
+// stay cached (that's the point — in-flight dedupe + memoized result).
+var __parabunMemoTerminal = Symbol("parabun.memo.terminal");
+export var __parabunMemo = (fn, arity) => {
+  if (arity === 0) {
+    var __has = false,
+      __cached;
+    return function () {
+      if (__has) return __cached;
+      __cached = fn.apply(this, arguments);
+      __has = true;
+      if (__cached && typeof __cached.then === "function") {
+        __cached.then(undefined, () => {
+          __has = false;
+          __cached = undefined;
+        });
+      }
+      return __cached;
+    };
+  }
+  if (arity === 1) {
+    var __cache1 = new Map();
+    return function (a) {
+      if (__cache1.has(a)) return __cache1.get(a);
+      var v = fn.apply(this, arguments);
+      __cache1.set(a, v);
+      if (v && typeof v.then === "function") {
+        v.then(undefined, () => __cache1.delete(a));
+      }
+      return v;
+    };
+  }
+  var __root = new Map();
+  var TERMINAL = __parabunMemoTerminal;
+  return function () {
+    var args = arguments;
+    var m = __root;
+    for (var i = 0; i < args.length; i++) {
+      var k = args[i];
+      var next = m.get(k);
+      if (!(next instanceof Map)) {
+        next = new Map();
+        m.set(k, next);
+      }
+      m = next;
+    }
+    if (m.has(TERMINAL)) return m.get(TERMINAL);
+    var v = fn.apply(this, args);
+    m.set(TERMINAL, v);
+    if (v && typeof v.then === "function") {
+      v.then(undefined, () => m.delete(TERMINAL));
+    }
+    return v;
+  };
+};
+
+// Parabun: defer stack primitive. `defer expr;` inside a function body
+// desugars to `__parabunDefer(__stack, () => expr);`. On scope exit the
+// stack is drained in LIFO order. Async variant (`defer await expr;`) is
+// handled by emitting `await using` with `__using` + `__callDispose` — see
+// those helpers. `__parabunDefer` is for the synchronous / fire-and-forget
+// case where we don't want to plumb `using` through every scope.
+export var __parabunDefer = (stack, thunk) => {
+  stack.push(thunk);
+  return stack;
+};
+
 export var __callDispose = (stack, error, hasError) => {
   let fail = e =>
       (error = hasError
