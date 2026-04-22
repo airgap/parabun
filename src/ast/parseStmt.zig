@@ -1490,6 +1490,296 @@ pub fn ParseStmt(
             return p.s(S.SExpr{ .value = arena_call }, arena_range.loc);
         }
 
+        // Parabun: parse a `signal let NAME = RHS` / `signal const NAME = RHS`
+        // declaration. Each RHS is wrapped in
+        //   require("bun:signals").signal(RHS)
+        // by default, or
+        //   require("bun:signals").derived(() => RHS)
+        // when the RHS references another in-scope `signal let/const` name
+        // (auto-derive). The file-level pragma `// @parabun-strict-signals`
+        // disables auto-derive, making every decl a plain `signal(RHS)`.
+        //
+        // Each declared ref is recorded in p.signal_bound_refs so the visit
+        // pass rewrites bare reads into `.get()` calls and assignments into
+        // `.set(...)` calls. The declared name is also counted in
+        // p.signal_bound_names so later decls can auto-derive from it.
+        // `signal var` is also accepted.
+        //
+        // Only simple identifier bindings are allowed in v1 — destructuring
+        // (`signal let { a, b } = ...`) reports an error.
+        //
+        // On entry, the lexer is on `let`, `const`, or `var`.
+        fn parseSignalStmt(p: *P, signal_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
+            if (!p.parabun_strict_signals_scanned) {
+                p.parabun_strict_signals_scanned = true;
+                p.parabun_strict_signals = strings.contains(p.source.contents, "@parabun-strict-signals");
+            }
+
+            const symbol_kind: Symbol.Kind = switch (p.lexer.token) {
+                .t_var => .hoisted,
+                else => .constant,
+            };
+            try p.lexer.next();
+
+            // Parse binding list manually so we can push an arrow scope-pair
+            // around each RHS — needed because auto-derive wraps the RHS as
+            // `() => RHS` and E.Arrow requires scopes that are visible to the
+            // visit pass via scopes_in_order. We push the scopes unconditionally
+            // and always wrap the RHS in an arrow; for the non-derive case
+            // the arrow is immediately invoked (`signal((() => RHS)())`), so
+            // the scopes stay consistent either way.
+            var decls = ListManaged(G.Decl).init(p.allocator);
+
+            while (true) {
+                if (p.lexer.isContextualKeyword("let") and symbol_kind == .constant) {
+                    p.log.addRangeError(p.source, p.lexer.range(), "Cannot use \"let\" as an identifier here") catch unreachable;
+                }
+
+                var local = try p.parseBinding(.{});
+                p.declareBinding(symbol_kind, &local, opts) catch unreachable;
+
+                if (comptime is_typescript_enabled) {
+                    const is_definite_assignment_assertion = p.lexer.token == .t_exclamation and !p.lexer.has_newline_before;
+                    if (is_definite_assignment_assertion) try p.lexer.next();
+                    if (is_definite_assignment_assertion or p.lexer.token == .t_colon) {
+                        try p.lexer.expect(.t_colon);
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                }
+
+                var value: ?Expr = null;
+                if (p.lexer.token == .t_equals) {
+                    try p.lexer.next();
+                    // Arrow and body need distinct, strictly-increasing locs
+                    // so the scopes_in_order assertion holds (and so multiple
+                    // decls in one signal stmt don't collide).
+                    const arrow_loc = p.lexer.loc();
+                    const body_loc = logger.Loc{ .start = arrow_loc.start + 1 };
+
+                    _ = p.pushScopeForParsePass(.function_args, arrow_loc) catch bun.outOfMemory();
+                    _ = p.pushScopeForParsePass(.function_body, body_loc) catch bun.outOfMemory();
+
+                    const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+                    var arrow_data = p.fn_or_arrow_data_parse;
+                    arrow_data.allow_await = .allow_ident;
+                    arrow_data.allow_yield = .allow_ident;
+                    p.fn_or_arrow_data_parse = arrow_data;
+
+                    const rhs = try p.parseExpr(.comma);
+
+                    p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+                    p.popScope();
+                    p.popScope();
+
+                    switch (local.data) {
+                        .b_identifier => |id| {
+                            bun.handleOom(p.signal_bound_refs.put(p.allocator, id.ref, {}));
+
+                            const name = p.symbols.items[id.ref.innerIndex()].original_name;
+                            const should_derive = !p.parabun_strict_signals and rhsHasSignalName(p, rhs);
+
+                            const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                            arrow_stmts[0] = p.s(S.Return{ .value = rhs }, body_loc);
+                            const arrow = p.newExpr(E.Arrow{
+                                .args = &.{},
+                                .body = .{ .loc = body_loc, .stmts = arrow_stmts },
+                                .prefer_expr = true,
+                                .is_async = false,
+                            }, arrow_loc);
+
+                            const require_ref = p.storeNameInRef("require") catch unreachable;
+                            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, signal_range.loc);
+                            const require_call = p.newExpr(E.Call{
+                                .target = p.newExpr(E.Identifier{ .ref = require_ref }, signal_range.loc),
+                                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+                            }, signal_range.loc);
+
+                            const wrap_name: []const u8 = if (should_derive) "derived" else "signal";
+                            const wrap_dot = p.newExpr(E.Dot{
+                                .target = require_call,
+                                .name = wrap_name,
+                                .name_loc = signal_range.loc,
+                            }, signal_range.loc);
+
+                            const wrap_arg: Expr = if (should_derive) arrow else blk: {
+                                // Non-derive: invoke the arrow immediately so
+                                // `signal()` sees a concrete value. The arrow
+                                // wrapper exists only to keep scopes_in_order
+                                // consistent at parse time.
+                                const invoke_args = js_ast.ExprNodeList.empty;
+                                break :blk p.newExpr(E.Call{
+                                    .target = arrow,
+                                    .args = invoke_args,
+                                }, arrow_loc);
+                            };
+
+                            const wrap_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                            wrap_args[0] = wrap_arg;
+                            const wrap_call = p.newExpr(E.Call{
+                                .target = wrap_dot,
+                                .args = js_ast.ExprNodeList.fromOwnedSlice(wrap_args),
+                            }, signal_range.loc);
+                            value = wrap_call;
+
+                            const gop = bun.handleOom(p.signal_bound_names.getOrPut(p.allocator, name));
+                            if (!gop.found_existing) gop.value_ptr.* = 0;
+                            gop.value_ptr.* += 1;
+                        },
+                        else => {
+                            p.log.addRangeError(p.source, signal_range, "\"signal\" declarations must use a simple identifier binding (no destructuring)") catch unreachable;
+                            value = rhs;
+                        },
+                    }
+                }
+
+                decls.append(G.Decl{ .binding = local, .value = value }) catch unreachable;
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (!opts.is_typescript_declare) {
+                try p.requireInitializers(.k_const, decls.items);
+            }
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.moveFromList(&decls),
+                .is_export = opts.is_export,
+            }, signal_range.loc);
+        }
+
+        // Parabun: best-effort walk of `expr` looking for any `e_identifier`
+        // whose name appears in `p.signal_bound_names`. Stops at nested
+        // arrows/functions/classes — those introduce new scopes and it's
+        // safer to not auto-derive than to over-promote. If detection misses
+        // a dep, the user can switch to explicit `derived(() => ...)` or
+        // the `@parabun-strict-signals` pragma.
+        fn rhsHasSignalName(p: *P, expr: Expr) bool {
+            return switch (expr.data) {
+                .e_identifier => |id| blk: {
+                    const name = p.loadNameFromRef(id.ref);
+                    break :blk p.signal_bound_names.contains(name);
+                },
+                .e_binary => |e| rhsHasSignalName(p, e.left) or rhsHasSignalName(p, e.right),
+                .e_unary => |e| rhsHasSignalName(p, e.value),
+                .e_call => |e| blk: {
+                    if (rhsHasSignalName(p, e.target)) break :blk true;
+                    for (e.args.slice()) |arg| {
+                        if (rhsHasSignalName(p, arg)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_new => |e| blk: {
+                    if (rhsHasSignalName(p, e.target)) break :blk true;
+                    for (e.args.slice()) |arg| {
+                        if (rhsHasSignalName(p, arg)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_dot => |e| rhsHasSignalName(p, e.target),
+                .e_index => |e| rhsHasSignalName(p, e.target) or rhsHasSignalName(p, e.index),
+                .e_if => |e| rhsHasSignalName(p, e.test_) or rhsHasSignalName(p, e.yes) or rhsHasSignalName(p, e.no),
+                .e_template => |e| blk: {
+                    if (e.tag) |tag| {
+                        if (rhsHasSignalName(p, tag)) break :blk true;
+                    }
+                    for (e.parts) |part| {
+                        if (rhsHasSignalName(p, part.value)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_array => |e| blk: {
+                    for (e.items.slice()) |item| {
+                        if (rhsHasSignalName(p, item)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_object => |e| blk: {
+                    for (e.properties.slice()) |prop| {
+                        if (prop.key) |k| if (rhsHasSignalName(p, k)) break :blk true;
+                        if (prop.value) |v| if (rhsHasSignalName(p, v)) break :blk true;
+                        if (prop.initializer) |init| if (rhsHasSignalName(p, init)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_spread => |e| rhsHasSignalName(p, e.value),
+                .e_await => |e| rhsHasSignalName(p, e.value),
+                .e_yield => |e| if (e.value) |v| rhsHasSignalName(p, v) else false,
+                // Opaque: nested scopes (arrow, function, class) — don't peek
+                // inside. Primitives (string/number/bool/etc) — no names.
+                else => false,
+            };
+        }
+
+        // Parabun: parse an `effect { ...body... }` block statement. Desugars to
+        //   require("bun:signals").effect(() => { ...body... });
+        // The runtime wraps the arrow in an EffectImpl which runs once eagerly,
+        // tracks any signal `.get()` reads as deps, and re-runs on invalidation.
+        // Return a function from the body for cleanup (React-style); it fires
+        // before the next run and on dispose.
+        //
+        // The body is lifted into an arrow, so `return`/`break`/`continue`
+        // inside the body are arrow-local. Await is forbidden — effects are
+        // synchronous (the flush loop assumes so).
+        //
+        // At entry: `effect` has already been consumed; p.lexer is on the `{`.
+        fn parseEffectStmt(p: *P, effect_range: logger.Range) anyerror!Stmt {
+            const arrow_loc = effect_range.loc;
+            const body_loc = p.lexer.loc();
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            try p.lexer.expect(.t_open_brace);
+            var body_opts = ParseStatementOptions{};
+            const body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts);
+            try p.lexer.expect(.t_close_brace);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, arrow_loc);
+
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, effect_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, effect_range.loc);
+            const effect_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "effect",
+                .name_loc = effect_range.loc,
+            }, effect_range.loc);
+            const effect_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            effect_args[0] = arrow;
+            const effect_call = p.newExpr(E.Call{
+                .target = effect_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(effect_args),
+            }, effect_range.loc);
+
+            return p.s(S.SExpr{ .value = effect_call }, effect_range.loc);
+        }
+
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             const is_identifier = p.lexer.token == .t_identifier;
             const name = p.lexer.identifier;
@@ -1582,6 +1872,46 @@ pub fn ParseStmt(
                 }
                 // Not an arena block — rewind so `arena` works as a plain
                 // identifier (`const arena = 1; arena + 1;`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "signal let/const/var NAME = RHS" declaration — each
+            // RHS is wrapped in `require("bun:signals").signal(RHS)` and the
+            // declared ref is marked as signal-bound so the visit pass
+            // rewrites reads/assigns accordingly.
+            //
+            // Only triggers when `signal` is immediately followed (no newline)
+            // by `let`, `const`, or `var`. Any other continuation leaves
+            // `signal` as a plain identifier.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "signal")) {
+                const signal_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before) {
+                    const t = p.lexer.token;
+                    if (t == .t_const or t == .t_var or
+                        (t == .t_identifier and strings.eqlComptime(p.lexer.raw(), "let")))
+                    {
+                        return try parseSignalStmt(p, signal_range, opts);
+                    }
+                }
+                // Not a signal declaration — rewind so `signal` works as a
+                // plain identifier (`import { signal } from "bun:signals"; signal(0);`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "effect { ...body... }" block statement — desugars to
+            //   require("bun:signals").effect(() => { ...body... });
+            // Only triggers when `effect` is immediately followed (no newline)
+            // by `{`. Any other token means `effect` is a plain identifier
+            // (including `effect(fn)` — that's a regular call expression).
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "effect")) {
+                const effect_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
+                    return try parseEffectStmt(p, effect_range);
+                }
+                // Not an effect block — rewind so `effect` works as a plain
+                // identifier (`import { effect } from "bun:signals"; effect(fn);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "pure function" or "pure async function" statements

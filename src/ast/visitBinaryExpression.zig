@@ -530,6 +530,68 @@ pub fn CreateBinaryExpressionVisitor(
                     else => {},
                 }
 
+                // Parabun: rewrite assignments to signal-bound identifiers.
+                //   NAME = X      → NAME.set(X)
+                //   NAME += X     → NAME.set(NAME.get() + X)      (and every
+                //                  other compound-assign op likewise)
+                // The visit pass skipped the NAME → NAME.get() rewrite on the
+                // left side because assign_target was not .none, so e_.left
+                // is still a bare e_identifier.
+                if (e_.left.data == .e_identifier and
+                    p.signal_bound_refs.contains(e_.left.data.e_identifier.ref))
+                {
+                    const base_op: ?js_ast.Op.Code = switch (e_.op) {
+                        .bin_assign => null,
+                        .bin_add_assign => .bin_add,
+                        .bin_sub_assign => .bin_sub,
+                        .bin_mul_assign => .bin_mul,
+                        .bin_div_assign => .bin_div,
+                        .bin_rem_assign => .bin_rem,
+                        .bin_pow_assign => .bin_pow,
+                        .bin_shl_assign => .bin_shl,
+                        .bin_shr_assign => .bin_shr,
+                        .bin_u_shr_assign => .bin_u_shr,
+                        .bin_bitwise_or_assign => .bin_bitwise_or,
+                        .bin_bitwise_and_assign => .bin_bitwise_and,
+                        .bin_bitwise_xor_assign => .bin_bitwise_xor,
+                        .bin_nullish_coalescing_assign => .bin_nullish_coalescing,
+                        .bin_logical_or_assign => .bin_logical_or,
+                        .bin_logical_and_assign => .bin_logical_and,
+                        else => return Expr{ .loc = v.loc, .data = .{ .e_binary = e_ } },
+                    };
+
+                    const name_loc = e_.left.loc;
+                    const ident = e_.left;
+                    const new_value: Expr = if (base_op) |op| blk: {
+                        const get_dot = p.newExpr(E.Dot{
+                            .target = ident,
+                            .name = "get",
+                            .name_loc = name_loc,
+                        }, name_loc);
+                        const get_call = p.newExpr(E.Call{
+                            .target = get_dot,
+                            .args = js_ast.ExprNodeList.empty,
+                        }, name_loc);
+                        break :blk p.newExpr(E.Binary{
+                            .op = op,
+                            .left = get_call,
+                            .right = e_.right,
+                        }, v.loc);
+                    } else e_.right;
+
+                    const set_dot = p.newExpr(E.Dot{
+                        .target = ident,
+                        .name = "set",
+                        .name_loc = name_loc,
+                    }, name_loc);
+                    const set_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                    set_args[0] = new_value;
+                    return p.newExpr(E.Call{
+                        .target = set_dot,
+                        .args = js_ast.ExprNodeList.fromOwnedSlice(set_args),
+                    }, v.loc);
+                }
+
                 return Expr{ .loc = v.loc, .data = .{ .e_binary = e_ } };
             }
 

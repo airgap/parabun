@@ -99,7 +99,15 @@ pub fn VisitExpr(
 
                 // Handle assigning to a constant
                 if (in.assign_target != .none) {
-                    if (p.symbols.items[result.ref.innerIndex()].kind == .constant) { // TODO: silence this for runtime transpiler
+                    // Parabun: signal-bound identifiers are declared as JS
+                    // constants (the binding is never reassigned; only the
+                    // signal object's .set()/.update() methods mutate), but
+                    // source-level assignments like `NAME = X` / `NAME += X`
+                    // are rewritten later to `.set(...)` calls in e_binary /
+                    // e_unary. Skip the const-assign error here so the
+                    // rewrite can happen.
+                    const is_signal_bound = p.signal_bound_refs.contains(result.ref);
+                    if (p.symbols.items[result.ref.innerIndex()].kind == .constant and !is_signal_bound) { // TODO: silence this for runtime transpiler
                         const r = js_lexer.rangeOfIdentifier(p.source, expr.loc);
                         var notes = p.allocator.alloc(logger.Data, 1) catch unreachable;
                         notes[0] = logger.Data{
@@ -182,12 +190,40 @@ pub fn VisitExpr(
                     }
                 }
 
-                return p.handleIdentifier(expr.loc, e_, original_name, IdentifierOpts{
+                const handled = p.handleIdentifier(expr.loc, e_, original_name, IdentifierOpts{
                     .assign_target = in.assign_target,
                     .is_delete_target = is_delete_target,
                     .is_call_target = @as(Expr.Tag, p.call_target) == .e_identifier and expr.data.e_identifier.ref.eql(p.call_target.e_identifier.ref),
                     .was_originally_identifier = true,
                 });
+
+                // Parabun: rewrite a bare read of a signal-bound identifier
+                // into `NAME.get()`. Skipped when the parent context has
+                // suppressed it (a reserved method-name dot access) or when
+                // the identifier is on the LHS of an assignment / used as a
+                // delete target (those rewrites live in e_binary / e_unary
+                // and e_dot handles member access). Only fires when
+                // `handleIdentifier` kept the expression as an identifier —
+                // if defines or TS-namespace substitution replaced it with
+                // something else, leave it alone.
+                if (!in.suppress_signal_get and
+                    in.assign_target == .none and
+                    !is_delete_target and
+                    handled.data == .e_identifier and
+                    p.signal_bound_refs.contains(handled.data.e_identifier.ref))
+                {
+                    const get_dot = p.newExpr(E.Dot{
+                        .target = handled,
+                        .name = "get",
+                        .name_loc = expr.loc,
+                    }, expr.loc);
+                    return p.newExpr(E.Call{
+                        .target = get_dot,
+                        .args = js_ast.ExprNodeList.empty,
+                    }, expr.loc);
+                }
+
+                return handled;
             }
             pub fn e_jsx_element(p: *P, expr: Expr, _: ExprIn) Expr {
                 const e_ = expr.data.e_jsx_element;
@@ -779,17 +815,89 @@ pub fn VisitExpr(
 
                             ////////////////////////////////////////////////////////////////////////////////
 
-                            .un_pre_dec => {
+                            .un_pre_dec, .un_pre_inc, .un_post_dec, .un_post_inc => {
                                 // TODO: private fields
-                            },
-                            .un_pre_inc => {
-                                // TODO: private fields
-                            },
-                            .un_post_dec => {
-                                // TODO: private fields
-                            },
-                            .un_post_inc => {
-                                // TODO: private fields
+
+                                // Parabun: rewrite ++/-- on signal-bound
+                                // identifiers. For pre-ops, the result is the
+                                // new value; for post-ops, the result is the
+                                // old value. In both cases we synthesize a
+                                // comma expression so we can return a value
+                                // from the expression position.
+                                //
+                                //   ++x  →  (x.set(x.get() + 1), x.get())
+                                //   --x  →  (x.set(x.get() - 1), x.get())
+                                //   x++  →  (x.set(x.get() + 1), x.get() - 1)
+                                //   x--  →  (x.set(x.get() - 1), x.get() + 1)
+                                //
+                                // Post-op "un-does" the +/-1 on the read-back
+                                // to recover the old numeric value — correct
+                                // for Numbers; BigInt/string operands behave
+                                // like JS `x + 1` / `x - 1` without the
+                                // ToNumeric coercion that `++`/`--` normally
+                                // apply (documented limitation).
+                                if (e_.value.data == .e_identifier and
+                                    p.signal_bound_refs.contains(e_.value.data.e_identifier.ref))
+                                {
+                                    const ident = e_.value;
+                                    const name_loc = ident.loc;
+
+                                    const is_inc = e_.op == .un_pre_inc or e_.op == .un_post_inc;
+                                    const is_post = e_.op == .un_post_inc or e_.op == .un_post_dec;
+
+                                    const mut_op: js_ast.Op.Code = if (is_inc) .bin_add else .bin_sub;
+                                    const unmut_op: js_ast.Op.Code = if (is_inc) .bin_sub else .bin_add;
+
+                                    const one = p.newExpr(E.Number{ .value = 1 }, name_loc);
+
+                                    // NAME.get()
+                                    const get1 = p.newExpr(E.Call{
+                                        .target = p.newExpr(E.Dot{
+                                            .target = ident,
+                                            .name = "get",
+                                            .name_loc = name_loc,
+                                        }, name_loc),
+                                        .args = js_ast.ExprNodeList.empty,
+                                    }, name_loc);
+
+                                    // NAME.get() <mut_op> 1
+                                    const mutated = p.newExpr(E.Binary{
+                                        .op = mut_op,
+                                        .left = get1,
+                                        .right = one,
+                                    }, name_loc);
+
+                                    // NAME.set(mutated)
+                                    const set_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                                    set_args[0] = mutated;
+                                    const set_call = p.newExpr(E.Call{
+                                        .target = p.newExpr(E.Dot{
+                                            .target = ident,
+                                            .name = "set",
+                                            .name_loc = name_loc,
+                                        }, name_loc),
+                                        .args = js_ast.ExprNodeList.fromOwnedSlice(set_args),
+                                    }, name_loc);
+
+                                    // Second NAME.get() for the result
+                                    const get2 = p.newExpr(E.Call{
+                                        .target = p.newExpr(E.Dot{
+                                            .target = ident,
+                                            .name = "get",
+                                            .name_loc = name_loc,
+                                        }, name_loc),
+                                        .args = js_ast.ExprNodeList.empty,
+                                    }, name_loc);
+
+                                    // For post-ops we need to un-apply the +/-1
+                                    const result_value: Expr = if (is_post) p.newExpr(E.Binary{
+                                        .op = unmut_op,
+                                        .left = get2,
+                                        .right = p.newExpr(E.Number{ .value = 1 }, name_loc),
+                                    }, name_loc) else get2;
+
+                                    return Expr.joinWithComma(set_call, result_value, p.allocator);
+                                }
                             },
                             else => {},
                         }
@@ -873,8 +981,20 @@ pub fn VisitExpr(
                     }
                 }
 
+                // Parabun: if the target is a bare identifier and the dot
+                // accesses one of the reserved signal method names, suppress
+                // the NAME → NAME.get() rewrite on the target so the call
+                // pattern `NAME.set(v)` / `NAME.get()` stays intact.
+                const suppress_signal_get = e_.target.data == .e_identifier and
+                    (strings.eqlComptime(e_.name, "get") or
+                        strings.eqlComptime(e_.name, "set") or
+                        strings.eqlComptime(e_.name, "peek") or
+                        strings.eqlComptime(e_.name, "subscribe") or
+                        strings.eqlComptime(e_.name, "update"));
+
                 e_.target = p.visitExprInOut(e_.target, .{
                     .property_access_for_method_call_maybe_should_replace_with_undefined = in.property_access_for_method_call_maybe_should_replace_with_undefined,
+                    .suppress_signal_get = suppress_signal_get,
                 });
 
                 // 'require.resolve' -> .e_require_resolve_call_target

@@ -483,6 +483,33 @@ pub fn NewParser_(
         /// associated with that namespace or namespace member: "ref_to_ts_namespace_member".
         /// This gives enough info to be able to resolve queries into the namespace.
         ref_to_ts_namespace_member: std.AutoHashMapUnmanaged(Ref, js_ast.TSNamespaceMember.Data) = .{},
+
+        /// Parabun: refs declared by `signal let` / `signal const` / `signal var`.
+        /// Visit pass rewrites bare reads of these refs into `.get()` calls and
+        /// assignments into `.set(...)` calls. Populated during parse, consumed
+        /// during visit.
+        signal_bound_refs: std.AutoHashMapUnmanaged(Ref, void) = .{},
+
+        /// Parabun: names of in-scope signal-bound bindings — keyed by name
+        /// (not ref) because at parse time, identifiers in the RHS of a
+        /// `signal let` decl are still name-refs pending visit-pass
+        /// resolution. Used for auto-derive detection: if the RHS of a
+        /// `signal let/const NAME = RHS` references any name already in this
+        /// set, the decl is promoted from `signal(RHS)` to `derived(() => RHS)`.
+        ///
+        /// Tracks a depth count (not a bool) because the same name may be
+        /// declared in nested scopes. We don't prune on scope exit — v1
+        /// accepts occasional over-promotion when an outer signal name is
+        /// shadowed by a non-signal decl in a nested scope.
+        signal_bound_names: std.StringHashMapUnmanaged(u32) = .{},
+
+        /// Parabun: file-level `// @parabun-strict-signals` pragma opts out
+        /// of auto-derive detection — every `signal let/const NAME = RHS`
+        /// becomes a plain `signal(RHS)` regardless of RHS content.
+        parabun_strict_signals: bool = false,
+        /// Set after the first time `parabun_strict_signals` is computed
+        /// from `p.source.contents`.
+        parabun_strict_signals_scanned: bool = false,
         /// When visiting expressions, namespace metadata is associated with the most
         /// recently visited node. If namespace metadata is present, "tsNamespaceTarget"
         /// will be set to the most recently visited node (as a way to mark that this

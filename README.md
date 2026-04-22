@@ -1,12 +1,12 @@
 <h1 align="center">Parabun</h1>
 
 <p align="center">
-  A fork of <a href="https://bun.com">Bun</a> with on-device LLMs, GPU compute, and parallel primitives — plus optional language extensions for purity and ergonomics.
+  A fork of <a href="https://bun.com">Bun</a> with on-device LLMs, GPU compute, parallel primitives, and fine-grained reactivity — plus optional language extensions for purity and ergonomics.
 </p>
 
 ## What is Parabun?
 
-Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, and buffer pooling — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
+Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, buffer pooling, and fine-grained reactivity — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges, `signal let`/`effect { }`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
 
 Parabun introduces two new file extensions:
 - **`.pts`** — Parabun TypeScript (superset of TypeScript)
@@ -148,6 +148,35 @@ parabun (bun:arena Pool)    248.8 ms      → 2.85×
 
 This is a microbench by design — it isolates the allocator/zero-init/GC-tracking cost. If your handler spends 10 ms of real CPU per request and 20 µs on allocation, pooling won't move the needle. The win shows up where allocation is a measurable fraction of the workload (binary protocol gateways, columnar pre-processing, tight encode/decode loops). Pass `clear: true` if recycled buffers must not carry old bytes — defaults to off, since skipping the zero-init is the point of a pool.
 
+### Fine-Grained Reactivity (`bun:signals`)
+
+`bun:signals` is a reactive primitive — signals, computed derivations, and side-effects that re-run automatically when their reads change. Reads inside an `effect` or `derived` register a dep edge; writes invalidate downstream, and a microtask-scheduled flush re-runs only what observed a changed value.
+
+```ts
+import { signal, derived, effect, batch } from "bun:signals";
+
+const count = signal(0);
+const doubled = derived(() => count.get() * 2);
+
+const stop = effect(() => console.log(`count=${count.get()} x2=${doubled.get()}`));
+
+count.set(1);            // logs: count=1 x2=2
+batch(() => {
+  count.set(5);
+  count.set(10);         // one re-run, not two
+});
+stop();                  // tear down the effect
+```
+
+- **Signal methods**: `.get()`, `.set(v)`, `.peek()` (read without registering a dep), `.update(fn)` (atomic read-modify-write), `.subscribe(fn)` (observe changes outside an effect).
+- **`derived(fn)`** — lazy-computed read-only signal. Recomputes on next `.get()` after a dep changes; caches until then.
+- **`effect(fn)`** — runs `fn` eagerly, tracks dep reads, re-runs on invalidation. Return a function to register a cleanup that fires before the next run and on dispose. The call returns a stop function.
+- **`batch(fn)`** — coalesces multiple writes into one effect pass. Nests correctly.
+- **`untrack(fn)`** — read inside a reactive context without registering a dep.
+- **Set-to-same-value is a no-op** — writes only propagate on `!Object.is(old, new)`, so idempotent assigns don't refire effects.
+
+Pair with the [`signal let` + `effect { }` sugar](#signals-signal-let--effect---) for a more direct feel — the sugar rewrites to this module at parse time.
+
 ## Install
 
 ```sh
@@ -216,6 +245,7 @@ bun bd
 bun bd test test/bundler/transpiler/parabun-parser.test.js
 bun bd test test/bundler/transpiler/parabun-pure.test.js
 bun bd test test/bundler/transpiler/parabun-purity.test.js
+bun bd test test/bundler/transpiler/parabun-signals.test.js
 
 # Symlink for editor integration (installs both 'parabun' and short 'pb')
 sudo ln -sf $(pwd)/build/debug/bun-debug /usr/local/bin/parabun
@@ -406,6 +436,26 @@ Desugars to `require("bun:arena").scope(() => { ... })`. This is **latency-smoot
 
 The block body is lifted into a synchronous arrow, so `return` / `break` / `continue` are arrow-local (same semantics as `.forEach(cb)`). To produce a value, assign to an outer `let`. `await` is rejected inside the body: microtasks fire after the deferral releases, so `await` wouldn't actually run with GC deferred. `arena` as a plain identifier is unaffected — the keyword path only triggers when `arena` is immediately followed (no newline) by `{`.
 
+### Signals (`signal let` / `effect { }`)
+
+Language sugar layered over [`bun:signals`](#fine-grained-reactivity-bunsignals) that removes the `.get()` / `.set()` noise. A `signal let NAME = RHS` declaration binds `NAME` as a reactive signal; bare reads rewrite to `NAME.get()`, assignments and `++`/`--` rewrite to a read-modify-write via `NAME.set(...)`, and an `effect { body }` block lifts its body into a tracked arrow:
+
+```pts
+signal let count = 0;
+signal const doubled = count * 2;     // auto-derive — RHS references `count`
+
+effect { console.log(`count=${count} x2=${doubled}`); }
+
+count++;                              // count=1 x2=2
+count = 10;                           // count=10 x2=20
+```
+
+- **`signal let/const/var NAME = RHS`** — declares a signal. If `RHS` references another in-scope signal name the decl auto-promotes to `derived(() => RHS)`; otherwise it's a plain `signal(RHS)`. Only simple identifier bindings in v1 (`signal const { a } = ...` is a parse error).
+- **`effect { body }`** — statement-level effect. The body is lifted into an arrow, so `return` / `break` / `continue` are arrow-local. `await` is rejected — the flush loop is synchronous.
+- **Method allow-list**: `.get`, `.set`, `.peek`, `.subscribe`, `.update` stay as real `Signal` methods. Every other `NAME.foo` rewrites as `NAME.get().foo`, so `.trim()` on a string signal, `.length` on an array signal, etc. all do what you'd expect.
+- **Pragma opt-out**: `// @parabun-strict-signals` at the top of a file disables auto-derive — every `signal let` becomes a plain `signal(RHS)` regardless of what `RHS` references. Use it when you want the snapshot semantics.
+- **`signal` / `effect` as plain identifiers are unaffected** — the keyword path only triggers when `signal` is immediately followed by `let`/`const`/`var`, or `effect` by `{`.
+
 ### Throw Expressions
 
 `throw E` works in any expression position — on the right of `??`, `||`, `&&`, inside ternary branches, inside arrow bodies. Evaluation is lazy: the throw only fires if the surrounding expression actually reaches it.
@@ -429,6 +479,8 @@ Regular `throw E;` statements are unaffected. ASI rules still apply — a newlin
 | `..=` | assignment | `await expr` |
 | `..` / `..=` (range) | between shift and comparison | `__parabunRange(a, b)` |
 | `arena { ... }` | statement-level | `require("bun:arena").scope(() => { ... })` |
+| `effect { ... }` | statement-level | `require("bun:signals").effect(() => { ... })` |
+| `signal let x = v` | statement-level | `const x = require("bun:signals").signal(v)` (or `.derived(() => v)`) |
 | `throw E` | assignment (prefix) | `(() => { throw E; })()` |
 
 Operators bind tighter-to-looser in the order listed, so `data |> transform ..! handler ..& cleanup` parses as `transform(data).catch(handler).finally(cleanup)`.

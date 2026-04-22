@@ -688,6 +688,13 @@ pub const ExprIn = struct {
     is_immediately_assigned_to_decl: bool = false,
 
     property_access_for_method_call_maybe_should_replace_with_undefined: bool = false,
+
+    // Parabun: set when the parent `e_dot` is accessing one of the reserved
+    // signal method names (get/set/peek/subscribe/update) on what might be a
+    // signal-bound identifier. Suppresses the bare-read NAME → NAME.get()
+    // rewrite so `NAME.get()` / `NAME.set(v)` / etc. stay as-is instead of
+    // becoming `NAME.get().get()`.
+    suppress_signal_get: bool = false,
 };
 
 // This function exists to tie all of these checks together in one place
