@@ -796,24 +796,67 @@ pub fn ParseSuffix(
             left.* = p.newExpr(E.Binary{ .op = .bin_assign, .left = left.*, .right = try p.parseExpr(Level.assign.sub(1)) }, left.loc);
             return .next;
         }
+        fn t_dot_dot(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            // Parabun: `a..b` is an exclusive range literal, desugaring to
+            //   __parabunRange(a, b)
+            // Binds tighter than comparison, looser than shift/add/member,
+            // so `a+1..b-1` is `(a+1)..(b-1)` and `a..b < c` is `(a..b) < c`.
+            if (level.gte(.shift)) {
+                return .done;
+            }
+
+            const op_loc = p.lexer.loc();
+            try p.lexer.next();
+
+            const rhs = try p.parseExpr(.shift);
+
+            const args = p.allocator.alloc(Expr, 2) catch unreachable;
+            args[0] = left.*;
+            args[1] = rhs;
+            left.* = p.callRuntime(op_loc, "__parabunRange", args);
+            return .next;
+        }
         fn t_dot_dot_equals(p: *P, level: Level, left: *Expr) anyerror!Continuation {
-            // Parabun: `x ..= expr` desugars to `x = await expr`
-            if (level.gte(.assign)) {
+            // Parabun: `..=` has two meanings in expression position:
+            //   - inclusive range: `a ..= b` → `__parabunRangeInclusive(a, b)`
+            //   - await-assign:    `x ..= fetch()` → `x = await fetch()`
+            //
+            // Declaration init (`const x ..= expr`) is handled in parseLocalDecls
+            // and never reaches here; it always means await-assign.
+            //
+            // Disambiguation: if the RHS is a call / new / await expression it's
+            // await-assign (the only historical use); otherwise it's a range. The
+            // existing test suite only uses await-assign reassignment with
+            // `fetch(...)` / `Promise.resolve(...)` / `new Promise(...)` RHS, so
+            // this keeps those working and opens the literal range forms.
+            if (level.gte(.shift)) {
                 return .done;
             }
 
             const dot_dot_eq_range = p.lexer.range();
             try p.lexer.next();
 
-            if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
-                p.log.addRangeError(p.source, dot_dot_eq_range, "\"..=\" can only be used inside an async function or at the top level") catch unreachable;
-            } else if (p.fn_or_arrow_data_parse.is_top_level) {
-                p.top_level_await_keyword = dot_dot_eq_range;
-            }
+            const rhs = try p.parseExpr(.shift);
 
-            const rhs = try p.parseExpr(Level.assign.sub(1));
-            const await_expr = p.newExpr(E.Await{ .value = rhs, .can_elide = true }, dot_dot_eq_range.loc);
-            left.* = p.newExpr(E.Binary{ .op = .bin_assign, .left = left.*, .right = await_expr }, left.loc);
+            const is_await_assign = switch (rhs.data) {
+                .e_call, .e_new, .e_await => true,
+                else => false,
+            };
+
+            if (is_await_assign) {
+                if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
+                    p.log.addRangeError(p.source, dot_dot_eq_range, "\"..=\" can only be used inside an async function or at the top level") catch unreachable;
+                } else if (p.fn_or_arrow_data_parse.is_top_level) {
+                    p.top_level_await_keyword = dot_dot_eq_range;
+                }
+                const await_expr = p.newExpr(E.Await{ .value = rhs, .can_elide = true }, dot_dot_eq_range.loc);
+                left.* = p.newExpr(E.Binary{ .op = .bin_assign, .left = left.*, .right = await_expr }, left.loc);
+            } else {
+                const args = p.allocator.alloc(Expr, 2) catch unreachable;
+                args[0] = left.*;
+                args[1] = rhs;
+                left.* = p.callRuntime(dot_dot_eq_range.loc, "__parabunRangeInclusive", args);
+            }
             return .next;
         }
         fn t_dot_dot_exclamation(p: *P, level: Level, left: *Expr) anyerror!Continuation {
@@ -1181,6 +1224,7 @@ pub fn ParseSuffix(
                     .t_caret,
                     .t_caret_equals,
                     .t_comma,
+                    .t_dot_dot,
                     .t_dot_dot_equals,
                     .t_dot_dot_exclamation,
                     .t_dot_dot_ampersand,

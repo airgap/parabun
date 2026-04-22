@@ -1410,6 +1410,86 @@ pub fn ParseStmt(
             }, defer_range.loc);
         }
 
+        // Parabun: parse an `arena { ...body... }` block statement. Desugars to
+        //   __parabunArena(() => { ...body... });
+        // which delegates to bun:arena's `scope` — running the body with JSC
+        // GC deferred, then requesting an Eden collection on scope exit.
+        // Latency-smoothing, not a bump allocator.
+        //
+        // The body is a block of statements lifted into an arrow; therefore
+        // `return`, `break`, and `continue` inside the body are arrow-local
+        // (same semantics as forEach callbacks). This is documented — if the
+        // caller needs a value out, assign to an outer-let from inside.
+        //
+        // At entry: `arena` has already been consumed; p.lexer is on the `{`.
+        fn parseArenaStmt(p: *P, arena_range: logger.Range) anyerror!Stmt {
+            const arrow_loc = arena_range.loc;
+            const body_loc = p.lexer.loc();
+
+            // The synthesized arrow needs function_args and function_body
+            // scopes at distinct locs, same shape real arrows get.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            // Swap fn_or_arrow_data_parse to sync-arrow defaults — await is
+            // forbidden inside the arena body (DeferGC is sync-only anyway:
+            // microtasks fire after scope releases).
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            // Consume `{`, parse statements up to `}`.
+            try p.lexer.expect(.t_open_brace);
+            var body_opts = ParseStatementOptions{};
+            const body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts);
+            try p.lexer.expect(.t_close_brace);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, arrow_loc);
+
+            // Build `require("bun:arena").scope(arrow)` via the user-typed
+            // require identifier shape. During the visit pass the parser's
+            // transposeRequire path rewrites the literal require call into
+            // an E.RequireString with correct part-level import-record
+            // bookkeeping; emitting E.RequireString directly from the parse
+            // pass skips that and breaks ESM runtime loads.
+            //
+            // `require_ref` isn't declared yet during parse — user code also
+            // lands identifiers through storeNameInRef, which the visit pass
+            // resolves via findSymbol to whatever `require` is bound to.
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "bun:arena" }, arena_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, arena_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, arena_range.loc);
+            const scope_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "scope",
+                .name_loc = arena_range.loc,
+            }, arena_range.loc);
+            const arena_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            arena_args[0] = arrow;
+            const arena_call = p.newExpr(E.Call{
+                .target = scope_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(arena_args),
+            }, arena_range.loc);
+
+            return p.s(S.SExpr{ .value = arena_call }, arena_range.loc);
+        }
+
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             const is_identifier = p.lexer.token == .t_identifier;
             const name = p.lexer.identifier;
@@ -1486,6 +1566,22 @@ pub fn ParseStmt(
                 }
                 // Not a defer declaration — rewind and fall through so `defer`
                 // works as a plain identifier (`const defer = 1; defer + 1;`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "arena { ...body... }" block statement — desugars to
+            //   __parabunArena(() => { ...body... });
+            // Only triggers when `arena` is immediately followed (no newline) by
+            // `{`. Any other token (`.`, `(`, `=`, `++`, etc.) means `arena` is
+            // a plain identifier.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "arena")) {
+                const arena_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
+                    return try parseArenaStmt(p, arena_range);
+                }
+                // Not an arena block — rewind so `arena` works as a plain
+                // identifier (`const arena = 1; arena + 1;`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "pure function" or "pure async function" statements

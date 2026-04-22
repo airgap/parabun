@@ -104,6 +104,22 @@ export var __parabunMemo = (fn, arity) => {
 export var __parabunDefer0 = thunk => ({ [Symbol.dispose]: thunk });
 export var __parabunAsyncDefer0 = thunk => ({ [Symbol.asyncDispose]: thunk });
 
+// Parabun: range literals. `a..b` (exclusive) and `a..=b` (inclusive) desugar
+// to __parabunRange / __parabunRangeInclusive. V1 is integer-only / step=1;
+// empty/inverted ranges return an empty array.
+export var __parabunRange = (s, e) => {
+  var n = e > s ? (e - s) | 0 : 0;
+  var out = new Array(n);
+  for (var i = 0; i < n; i++) out[i] = s + i;
+  return out;
+};
+export var __parabunRangeInclusive = (s, e) => {
+  var n = e >= s ? ((e - s) | 0) + 1 : 0;
+  var out = new Array(n);
+  for (var i = 0; i < n; i++) out[i] = s + i;
+  return out;
+};
+
 export var __callDispose = (stack, error, hasError) => {
   let fail = e =>
       (error = hasError

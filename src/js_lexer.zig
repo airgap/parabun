@@ -2718,7 +2718,7 @@ fn NewLexer_(
 
             // Dot without a digit after it;
             if (first == '.' and (lexer.code_point < '0' or lexer.code_point > '9')) {
-                // ".." prefix — check for "...", "..=", "..!", "..&"
+                // ".." prefix — check for "...", "..=", "..!", "..&", ".."
                 if (lexer.code_point == '.' and lexer.current < lexer.source.contents.len) {
                     const third = lexer.source.contents[lexer.current];
                     if (third == '.') {
@@ -2745,6 +2745,16 @@ fn NewLexer_(
                             lexer.token = T.t_dot_dot_ampersand;
                             return;
                         }
+                        // Parabun: ".." (exclusive range). Reached in cases
+                        // like `1..10` — the number lexer bails on the first
+                        // `.` when the next char is also `.`, leaving both
+                        // dots here. Baseline JS `1..toString()` tokenizes as
+                        // `numeric_literal(1) dot_dot identifier(toString)`
+                        // rather than `numeric_literal(1.) dot identifier`;
+                        // this intentional break is documented in PROPOSALS.
+                        lexer.step();
+                        lexer.token = T.t_dot_dot;
+                        return;
                     }
                 }
 
@@ -2918,7 +2928,14 @@ fn NewLexer_(
                 }
 
                 // Fractional digits;
-                if (first != '.' and lexer.code_point == '.') {
+                // Parabun: `1..10` is a range literal, not a number with a
+                // dangling decimal. If the next char is also `.`, leave the
+                // dot for the next lex call so it tokenizes as `t_dot_dot`.
+                const is_range_dot = !is_json and
+                    lexer.code_point == '.' and
+                    lexer.current < lexer.source.contents.len and
+                    lexer.source.contents[lexer.current] == '.';
+                if (first != '.' and lexer.code_point == '.' and !is_range_dot) {
                     // An underscore must not come last;
                     if (lastUnderscoreEnd > 0 and lexer.end == lastUnderscoreEnd + 1) {
                         lexer.end -= 1;

@@ -35,7 +35,8 @@ pub const T = enum(u8) {
     t_dot,
     t_dot_dot_dot,
     // Parabun operators
-    t_dot_dot_equals, // ..=
+    t_dot_dot, // .. (exclusive range)
+    t_dot_dot_equals, // ..= (inclusive range OR await-assign initializer; disambiguated by parser)
     t_dot_dot_exclamation, // ..!
     t_dot_dot_ampersand, // ..&
     t_bar_greater_than, // |>
@@ -290,6 +291,7 @@ pub const tokenToString = brk: {
     const TDot = "\".\"".*;
     const TDotDotDot = "\"...\"".*;
     // Parabun operators
+    const TDotDot = "\"..\"".*;
     const TDotDotEquals = "\"..=\"".*;
     const TDotDotExclamation = "\"..!\"".*;
     const TDotDotAmpersand = "\"..&\"".*;
@@ -419,6 +421,7 @@ pub const tokenToString = brk: {
     tokenEnums.set(T.t_dot, &TDot);
     tokenEnums.set(T.t_dot_dot_dot, &TDotDotDot);
     // Parabun operators
+    tokenEnums.set(T.t_dot_dot, &TDotDot);
     tokenEnums.set(T.t_dot_dot_equals, &TDotDotEquals);
     tokenEnums.set(T.t_dot_dot_exclamation, &TDotDotExclamation);
     tokenEnums.set(T.t_dot_dot_ampersand, &TDotDotAmpersand);

@@ -6,7 +6,7 @@
 
 ## What is Parabun?
 
-Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, and buffer pooling — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
+Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, and buffer pooling — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
 
 Parabun introduces two new file extensions:
 - **`.pts`** — Parabun TypeScript (superset of TypeScript)
@@ -340,6 +340,24 @@ Multiple `_` placeholders copy the LHS structurally (`n |> add(_, _)` → `add(n
 
 Pair it with [`bun:pipeline`](#pipeline-fusion-bunpipeline) for fused typed-array map chains.
 
+### Range Literals (`..` and `..=`)
+
+Integer ranges desugar to arrays at parse time, step 1:
+
+```pts
+for (const i of 0..5) console.log(i);     // 0 1 2 3 4
+for (const i of 1..=3) console.log(i);    // 1 2 3
+
+const squares = [...(0..=10)].map(x => x * x);
+const sum = 1..=100 |> _.reduce((a, b) => a + b, 0);
+```
+
+`a..b` is exclusive of `b`, `a..=b` is inclusive. Empty / inverted ranges produce `[]` rather than throw. Precedence sits between shift and comparison so `a+1..b-1` and `0..n < m` both parse the way you'd expect.
+
+Disambiguation with await-assign: `x ..= fetch()` (call / `new` / `await` RHS) is still await-assign; `x ..= 10` is a range. Ranges are integer + step-1 only; use a counter `for` loop for millions of iterations or stride != 1.
+
+> Note: Parabun deviates from baseline JS on one obscure idiom — `1..toString()`. It now parses as the range `1..toString` followed by a call, not `(1.).toString()`. Use `(1).toString()`.
+
 ### Deferred Cleanup (`defer`)
 
 `defer EXPR` schedules `EXPR` to run when the enclosing block exits — on normal fall-through, early `return`, or a thrown exception. Multiple defers dispose in LIFO order, matching Go / Zig / Swift conventions.
@@ -368,6 +386,26 @@ async function withConnection(url: string) {
 
 Outside an async function, `defer await` is a parse error. `defer` as a plain identifier (variable name, property access, assignment target) is unaffected — the keyword path only triggers when `defer` is immediately followed by something that starts an expression.
 
+### GC-Deferred Blocks (`arena`)
+
+`arena { ... }` runs a block with JSC garbage collection deferred for its synchronous duration, then requests an Eden collection on block exit. Use it to pull GC pauses out of a short allocation-heavy section and line them up at a predictable point.
+
+```pts
+function encodeFrame(samples: Float32Array) {
+  let out;
+  arena {
+    const scratch = new Uint8Array(samples.length * 4);
+    writeSamples(scratch, samples);
+    out = finalize(scratch);
+  }
+  return out;
+}
+```
+
+Desugars to `require("bun:arena").scope(() => { ... })`. This is **latency-smoothing, not a bump allocator** — the heap still pays the eventual collection cost, just at a time of the caller's choosing.
+
+The block body is lifted into a synchronous arrow, so `return` / `break` / `continue` are arrow-local (same semantics as `.forEach(cb)`). To produce a value, assign to an outer `let`. `await` is rejected inside the body: microtasks fire after the deferral releases, so `await` wouldn't actually run with GC deferred. `arena` as a plain identifier is unaffected — the keyword path only triggers when `arena` is immediately followed (no newline) by `{`.
+
 ### Throw Expressions
 
 `throw E` works in any expression position — on the right of `??`, `||`, `&&`, inside ternary branches, inside arrow bodies. Evaluation is lazy: the throw only fires if the surrounding expression actually reaches it.
@@ -389,6 +427,8 @@ Regular `throw E;` statements are unaffected. ASI rules still apply — a newlin
 | `..!` | conditional | `.catch(f)` |
 | `..&` | conditional | `.finally(f)` |
 | `..=` | assignment | `await expr` |
+| `..` / `..=` (range) | between shift and comparison | `__parabunRange(a, b)` |
+| `arena { ... }` | statement-level | `require("bun:arena").scope(() => { ... })` |
 | `throw E` | assignment (prefix) | `(() => { throw E; })()` |
 
 Operators bind tighter-to-looser in the order listed, so `data |> transform ..! handler ..& cleanup` parses as `transform(data).catch(handler).finally(cleanup)`.

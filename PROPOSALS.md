@@ -24,7 +24,7 @@ Ordered by value-per-unit-effort, skewed toward things that **compose with exten
 6. `[ ]` **Function composition `>>`** — trivial, makes pipelines point-free
 7. `[ ]` **Do-blocks** — statement-as-expression; enables cleaner match later
 8. `[ ]` **Range literals `1..10` / `1..=10`** — cheap ergonomics, safe desugar
-9. `[ ]` **Arena blocks** — composes with `bun:arena`, scope-based cleanup
+9. `[x]` **Arena blocks** ✅ SHIPPED — `arena { body }` → `require("bun:arena").scope(() => body)`
 10. `[ ]` **`pure { ... }` blocks** — purity scope inside impure functions
 11. `[ ]` **Match expressions** — biggest surface area; ship last
 
@@ -277,7 +277,22 @@ TC39 has a stage-1 proposal for this exact thing. We ship the same semantics.
 
 ---
 
-## 8. Range literals
+## 8. Range literals ✅ SHIPPED
+
+Implemented as binary operators `..` / `..=` at a precedence between shift and comparison. Desugars to `__parabunRange(a, b)` / `__parabunRangeInclusive(a, b)` runtime helpers in `bun:wrap` that eagerly build an array. Tests in `test/bundler/transpiler/parabun-range.test.js`, docs in `LLMs.md` and `README.md`.
+
+Disambiguation with `..=` await-assign: declaration-init (`const x ..= expr`) always means await-assign; in expression position, a call / `new` / `await` RHS means await-assign, anything else is an inclusive range. The obscure `1..toString()` idiom from baseline JS changes meaning — it is now a range followed by a call. Documented as an intentional break.
+
+**v1 scope shipped:** integer-only, step-1, eager allocation. For hot counter loops prefer `for (let i = 0; i < n; i++)`. For-of specialization (zero-alloc counter desugar) was deferred — `Array.from`-style allocation ships first, can be added later without breaking the AST.
+
+**Open for future work:**
+- Zero-alloc `for-of` specialization when the iterable is a range literal.
+- Step syntax (`a..b by 2`).
+- Real lazy iterables so `.map` / `.filter` chain without intermediate arrays.
+
+Original proposal preserved below.
+
+---
 
 **Syntax:**
 ```pts
@@ -317,38 +332,41 @@ Actually — `..=` is already our await-assign operator, and `1..=10` looks very
 
 ---
 
-## 9. Arena blocks
+## 9. Arena blocks ✅ SHIPPED
 
 **Syntax:**
 ```pts
-import { withArena } from "bun:arena";
-
-arena (a) {
-  const buf = a.alloc(Float32Array, 1024);
-  const result = process(buf);
-  return result; // buf reclaimed at end of block
+let out;
+arena {
+  const scratch = new Uint8Array(samples.length * 4);
+  writeSamples(scratch, samples);
+  out = finalize(scratch);
 }
 ```
 
 **Desugar:**
 ```js
-await withArena((a) => {
-  const buf = a.alloc(Float32Array, 1024);
-  const result = process(buf);
-  return result;
+require("bun:arena").scope(() => {
+  const scratch = new Uint8Array(samples.length * 4);
+  writeSamples(scratch, samples);
+  out = finalize(scratch);
 });
 ```
 
-**Rationale:** `bun:arena` already exists as a runtime module, but using it requires wrapping everything in a callback. `arena (a) { ... }` makes it a first-class scope, matching how people think about arenas ("this region, these allocations, freed when I leave"). Composes with the existing `bun:arena` primitive — pure sugar, no runtime addition.
+**What shipped vs the v1 sketch.**
+- **No bound variable.** The original sketch had `arena (a) { ... }` with an arena parameter. The actual `bun:arena` runtime doesn't expose a per-scope arena handle — `scope(fn)` just runs `fn` with `JSC::DeferGC` active and requests an Eden collection on exit. Since there's no handle to bind, v1 is `arena { body }` — a bare block. Desugars to `require("bun:arena").scope(() => { body })`.
+- **Latency-smoothing, not a bump allocator.** What shipped defers the JSC GC for the block's synchronous duration. The heap still pays the eventual collection cost — at the caller's chosen point, not at unpredictable allocation thresholds. Allocations don't get reclaimed at scope exit; they survive it. This matched the actual `bun:arena.scope` runtime, not the "allocations reclaimed at end of block" sketch.
+- **Arrow-local return/break/continue.** The body is lifted into a synchronous arrow. `return` / `break` / `continue` are arrow-local (same as inside `.forEach(cb)`). To get a value out, assign to an outer `let`. Documented.
+- **No await inside the body.** Parser forbids `await` because microtasks fire *after* the deferral releases, so an async body wouldn't actually run with GC deferred — the parser's `fn_or_arrow_data` swap makes this a parse-time error instead of a silent runtime footgun.
+- **Require-shape desugar, not a `__parabunArena` runtime helper.** `bun:wrap` (where runtime helpers live) is pre-bundled by esbuild, which can't resolve `bun:*` specifiers at build time; adding a helper that requires `bun:arena` fails with esbuild's dynamic-require shim. Emitting `require("bun:arena").scope(arrow)` directly at parse time (via `storeNameInRef("require")`, so the visit pass's `transposeRequire` handles bookkeeping) avoids the runtime-bundling layer entirely.
 
-**Parser change:** `parseStmt.zig` — recognize `arena` as a keyword only when followed by `(identifier)` and a block. Low collision risk (`arena` isn't a reserved word and isn't a common variable). Desugar to an `await withArena(async (a) => { ... })` call. Needs the arena module to be imported — we can auto-inject the import at desugar time, or require users to import it explicitly and error otherwise. Prefer explicit import (simpler, more predictable).
+**Detection.** `parseStmtFallthrough` in `src/ast/parseStmt.zig` tentatively consumes `arena` and triggers only when the next token (no newline) is `{`. Any other token (`.`, `(`, `=`, `++`, etc.) rewinds so `arena` remains a plain identifier.
 
-**Cost:** ~70 lines + 6 tests. 1 day.
+**Tests.** 13 in `test/bundler/transpiler/parabun-arena-block.test.js` — desugar shape, identifier-context fallbacks, newline-to-block ASI, basic/nested/top-level body, throw propagation, arrow-local return, outer-let value capture, in-loop use.
 
-**Open questions:**
-- **Sync vs async.** `bun:arena` is async-friendly (workers, etc.). Do we need both `arena` and `sync arena`? v1: always async. Document.
-- **Nested arenas.** Each gets its own scope. Falls out of the desugar.
-- **Return values.** The block's return value is the arena's return value. Must not be an arena-allocated reference (it'd be freed on exit). Document the hazard; can't catch it statically without effects typing.
+**Deferred.**
+- **Allocator-exposed arena.** If we ever add a real bump allocator (reset at scope exit), the `arena (a) { ... }` shape with a bound handle becomes meaningful. v1 skipped this because the `bun:arena` runtime doesn't offer a per-scope handle.
+- **`arena async { ... }`.** A real async arena would need a different underlying API than `DeferGC`. Not blocked by syntax; blocked by the runtime.
 
 ---
 

@@ -59,6 +59,23 @@ Async memoization dedupes concurrent in-flight calls (the first call's promise i
 
 Desugars `const x ..= expr` to `const x = await expr`. Requires async context.
 
+In expression position (non-declaration), `..=` is disambiguated by the RHS shape: a call / `new` / `await` expression keeps the await-assign meaning (`x ..= fetch()` → `x = await fetch()`), anything else is an inclusive range literal (see next section). Await-assign reassignment with a non-call RHS is no longer supported — write `x = await promiseVar` directly.
+
+### `..` / `..=` (range literals)
+
+Integer ranges, step 1.
+
+```
+0..5     →  [0, 1, 2, 3, 4]   (exclusive end)
+1..=5    →  [1, 2, 3, 4, 5]   (inclusive end)
+```
+
+Desugars to `__parabunRange(a, b)` / `__parabunRangeInclusive(a, b)`. Empty / inverted ranges (`5..3`, `0..0`) produce an empty array — never throw. Precedence: tighter than comparison, looser than shift / add / multiply, so `a+1..b-1` groups as `(a+1)..(b-1)` and `0..n < m` groups as `(0..n) < m`. Left-associative; `1..2..3` does not chain.
+
+V1 is integer-only with step 1. For large ranges prefer a counter `for` loop — ranges allocate an array up front. For ranges with non-literal operands, each side is evaluated once.
+
+**Break from baseline JS.** The idiom `1..toString()` previously parsed as `(1.).toString()` (the first `.` was a decimal-point terminator on `1`). In Parabun it parses as the range `1..toString` followed by a call. Write `(1).toString()` or `1.0.toString()` when you want the baseline behaviour — the one idiom that breaks is an obscure stylistic variant already avoided in modern code.
+
 ### `..!` (catch operator)
 
 Desugars `expr ..! handler` to `expr.catch(handler)`. Precedence: conditional level.
@@ -134,6 +151,24 @@ async function open(path) {
 **Late binding.** The deferred expression is re-evaluated at dispose time in a closure over the surrounding scope, so captured locals see their final values — `defer console.log(x)` after `x = 3` prints `3`, not the value at the defer statement.
 
 `defer` as a plain identifier (variable name, property, assignment target) is unaffected — the keyword path only triggers when `defer` is immediately followed (no newline) by something that starts an expression.
+
+### `arena { ... }` (GC-deferred block)
+
+Runs a block of statements with JSC garbage collection deferred for its synchronous duration, then requests an Eden collection on block exit. Desugars to:
+
+```
+arena { body }
+  →  require("bun:arena").scope(() => { body });
+```
+
+Use for short, allocation-heavy sections where mid-work GC pauses hurt latency — the collector's work shifts to the end of the block instead of firing at unpredictable thresholds. This is **latency-smoothing, not a bump allocator**: the heap still pays the eventual collection cost, just at a time of the caller's choosing.
+
+**Semantics caveats.**
+- Body is a synchronous arrow. `return`, `break`, `continue` inside the block are arrow-local — same as inside `.forEach(() => ...)`. To get a value out, assign to an outer `let`.
+- `await` is rejected inside the body. Microtasks queued from the arrow fire *after* the deferral releases, so `scope(async () => ...)` would not actually run the async work with GC deferred — the parser forbids it to prevent that footgun.
+- DeferGC has no upper safety threshold; unbounded allocation inside the block can OOM before the scope dtor releases. Keep the block bounded.
+
+`arena` as a plain identifier (`const arena = 1; arena + 1`) is unaffected — the keyword path only triggers when `arena` is immediately followed (no newline) by `{`.
 
 ### `throw` as expression
 
