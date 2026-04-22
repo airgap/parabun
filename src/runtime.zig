@@ -377,7 +377,8 @@ pub const Runtime = struct {
         __promiseAll: ?Ref = null,
         __parabunPeek: ?Ref = null,
         __parabunMemo: ?Ref = null,
-        __parabunDefer: ?Ref = null,
+        __parabunDefer0: ?Ref = null,
+        __parabunAsyncDefer0: ?Ref = null,
 
         pub const all = [_][]const u8{
             "__name",
@@ -407,7 +408,8 @@ pub const Runtime = struct {
             "__promiseAll",
             "__parabunPeek",
             "__parabunMemo",
-            "__parabunDefer",
+            "__parabunDefer0",
+            "__parabunAsyncDefer0",
         };
         const all_sorted: [all.len]string = brk: {
             @setEvalBranchQuota(1000000);

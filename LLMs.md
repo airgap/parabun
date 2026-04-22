@@ -94,6 +94,47 @@ users  |> filter(_, a) |> map(_, b)  →  map(filter(users, a), b)
 
 Zero `_` falls back to the function-target form (`x |> f(y)` means `f(y)(x)`). Multiple `_` copy the LHS structurally — if the LHS has side effects, bind it to a const first to avoid double evaluation. `_` is treated as a placeholder only at the top level of a pipeline RHS call; nested `_` (e.g. inside an inner arrow body) is left as a regular identifier. Outside `|>`, `_` remains a normal identifier and is not reserved.
 
+### `defer`
+
+Schedules an expression to run when the enclosing block exits — on normal fall-through, early return, or a thrown exception. Multiple defers dispose in LIFO order (reverse of declaration).
+
+```
+function readConfig(path) {
+  const fd = fs.openSync(path);
+  defer fs.closeSync(fd);
+  const data = fs.readFileSync(fd);
+  defer log("config-read");
+  return JSON.parse(data);
+}
+```
+
+Desugars to an ES2024 `using` declaration whose initializer wraps a thunk in a disposable shape:
+
+```
+defer fs.closeSync(fd);
+  →  using __parabun_defer_0$ = __parabunDefer0(() => fs.closeSync(fd));
+```
+
+**`defer await` (async defer).** Inside an async function, `defer await EXPR` schedules an awaited dispose. Uses `await using` + `__parabunAsyncDefer0`. Outside an async function, `defer await` is a parse error.
+
+```
+async function open(path) {
+  const h = await api.open(path);
+  defer await h.close();
+  return await h.read();
+}
+```
+
+**Semantics that fall out of `using`.**
+- LIFO disposal: reverse of declaration order.
+- Early return / throw: dispose runs regardless of how the scope exits.
+- Loop body: each iteration's defers dispose before the next iteration starts.
+- Multiple throwing defers chain via `SuppressedError`, matching ES2024.
+
+**Late binding.** The deferred expression is re-evaluated at dispose time in a closure over the surrounding scope, so captured locals see their final values — `defer console.log(x)` after `x = 3` prints `3`, not the value at the defer statement.
+
+`defer` as a plain identifier (variable name, property, assignment target) is unaffected — the keyword path only triggers when `defer` is immediately followed (no newline) by something that starts an expression.
+
 ### `throw` as expression
 
 `throw E` is legal in any expression position (RHS of `??`, `||`, `&&`, ternary branches, arrow bodies, etc.). Desugars to `(() => { throw E; })()`. The operand is parsed at AssignmentExpression level — a trailing comma is not absorbed. Evaluation is lazy: the IIFE only runs (and throws) when the surrounding expression actually reaches the throw branch.
@@ -141,7 +182,7 @@ File extension registration: `src/options.zig` (loaders, extension orders, all 1
 Lightweight LSP that runs with the Parabun binary. Provides:
 
 - **Diagnostics** — Real parse errors from `Bun.Transpiler` (purity violations, syntax errors)
-- **Completions** — `pure`, `pure function`, `pure async function`, `memo pure function`, `..=`, `..!`, `..&`, `|>`
+- **Completions** — `pure`, `pure function`, `pure async function`, `memo pure function`, `defer`, `defer await`, `..=`, `..!`, `..&`, `|>`
 - **Hover** — Markdown docs for `pure` keyword and all operators
 - **Semantic tokens** — `pure` keyword tagged as `function` type with `pure` modifier
 
@@ -173,6 +214,7 @@ test/bundler/transpiler/parabun-throw-expr.test.js           — throw as expres
 test/bundler/transpiler/parabun-pipeline-method.test.js      — pipeline method shorthand
 test/bundler/transpiler/parabun-pipeline-placeholder.test.js — pipeline placeholder (_)
 test/bundler/transpiler/parabun-memo.test.js                 — memo pure function
+test/bundler/transpiler/parabun-defer.test.js                — defer / defer await
 ```
 
 ## Runtime

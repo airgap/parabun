@@ -19,7 +19,7 @@ Ordered by value-per-unit-effort, skewed toward things that **compose with exten
 1. `[x]` **Throw expressions** — `?? throw E` — proves the pattern, tiny blast radius. **SHIPPED** (15 new tests; 146 parser/pure/purity tests still green)
 2. `[x]` **Placeholder in `|>`** — `x |> f(_, 2)` — makes the pipeline actually useful with multi-arg APIs. **SHIPPED** (18 new tests; 244 parser-side tests total green)
 3. `[x]` **Method shorthand in `|>`** — `x |> .trim()` — pairs with placeholder, kills the arrow-wrap tax. **SHIPPED** (17 new tests; 176 total parser-side tests green)
-4. `[ ]` **`defer`** — composes with our `using`-based resource story; real pain relief
+4. `[x]` **`defer`** — composes with our `using`-based resource story; real pain relief. **SHIPPED** (20 new tests; 313 parser-side tests total green)
 5. `[x]` **`memo pure fn`** — headline-level feature; safe *only* because we already prove purity. **SHIPPED** (20 new tests; 282 parser-side tests total green)
 6. `[ ]` **Function composition `>>`** — trivial, makes pipelines point-free
 7. `[ ]` **Do-blocks** — statement-as-expression; enables cleaner match later
@@ -122,46 +122,43 @@ csv.trim().split(",").map(s => s.toUpperCase())
 
 ---
 
-## 4. `defer`
+## 4. `defer` — SHIPPED
 
 **Syntax:**
 ```pts
-function readConfig() {
+function readConfig(path) {
   const fd = fs.openSync(path);
   defer fs.closeSync(fd);
   const data = fs.readFileSync(fd);
-  defer clock.tick("config-read");
+  defer log("config-read");
   return JSON.parse(data);
 }
 ```
 
-**Desugar strategy A (using-based, preferred):**
+**Desugar (as shipped, Strategy A — using-based):**
 ```js
-function readConfig() {
+import { __parabunDefer0, __callDispose, __using } from "bun:wrap";
+function readConfig(path) {
   const fd = fs.openSync(path);
-  using __defer_0 = { [Symbol.dispose]() { fs.closeSync(fd); } };
+  using __parabun_defer_1$ = __parabunDefer0(() => fs.closeSync(fd));
   const data = fs.readFileSync(fd);
-  using __defer_1 = { [Symbol.dispose]() { clock.tick("config-read"); } };
+  using __parabun_defer_2$ = __parabunDefer0(() => log("config-read"));
   return JSON.parse(data);
 }
 ```
 
-**Desugar strategy B (try/finally wrapping rest of scope):**
-More invasive — rewrites the rest of the scope into a nested try/finally. Correct LIFO, but hurts source maps.
+The runtime helper is a one-liner: `thunk => ({ [Symbol.dispose]: thunk })`. `__parabunAsyncDefer0` is the `await using` counterpart returning `{ [Symbol.asyncDispose]: thunk }`. Everything else — LIFO order, early-return dispose, throw propagation, per-iteration loop scoping, `SuppressedError` chaining — is plain ES2024 `using` semantics.
 
-Strategy A is preferred: it's a direct lowering to `using`, which is now ES2024 and supported natively by V8/JSC. LIFO order falls out of `using`'s reverse-declaration-order disposal. Async version: `await using` for `defer await foo()`.
+**`defer await`.** Inside an async function, `defer await EXPR` desugars to `await using X = __parabunAsyncDefer0(async () => EXPR)`. Outside an async function, `defer await` is a parse error.
 
-**Rationale:** `try/finally` is verbose and indents the entire rest of the function. `using` solves this but requires building a disposable-shaped object every time — boilerplate for a one-liner cleanup. `defer x.close()` is the common case and deserves a one-liner. Matches Go / Zig expectations for users coming from those ecosystems. Composes with `bun:llm` / `bun:gpu` / `bun:arena` (all have dispose methods).
+**`defer` as an identifier.** Keyword trigger requires `defer` be immediately followed (no newline) by something that starts an expression. A newline, `=`, `;`, `.`, `,`, `)`, etc. keeps `defer` as a plain identifier — `const defer = 1; defer;` still works.
 
-**Parser change:** `parseStmt.zig` — recognize `defer` as a statement-starting keyword when `experimental_defer` is enabled (behind a feature flag while we stabilize). Parse as `S.Local` with a synthesized `using` binding and a lambda-wrapped dispose.
+**Resolved notes:**
+- **Loop body:** each iteration's defers dispose before the next — follows directly from `using` scoping.
+- **Throws:** exceptions propagate; multiple throwing defers chain via `SuppressedError`.
+- **Late binding:** the deferred expression evaluates in a closure over the surrounding scope, so captured locals see their value *at dispose time*, not at defer-site.
 
-**Cost:** ~100 lines + 10 tests. 1-2 days. Edge cases (returns, throws, loops) need careful testing.
-
-**Open questions:**
-- **`defer` inside a loop.** Each iteration should defer independently and dispose at end of iteration, which matches `using` inside a loop body. Fine.
-- **`defer await`.** Async defer must use `await using`. If the enclosing function isn't async, parse error.
-- **Early returns.** `using` handles this — dispose runs when scope exits. No extra work.
-- **Throw in defer body.** Matches `using`: exceptions propagate. If multiple defers throw, they chain via `SuppressedError`. Standard ES2024 semantics.
+**Tests:** `test/bundler/transpiler/parabun-defer.test.js` — 20 tests covering parse-time desugar, LIFO disposal, early-return, throw propagation, loop-per-iteration, async defer ordering, SuppressedError chaining, and `defer` as a plain identifier in non-keyword positions.
 
 ---
 

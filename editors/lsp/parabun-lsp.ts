@@ -1299,6 +1299,27 @@ const parabunCompletions = [
     insertTextFormat: 2,
   },
   {
+    label: "memo pure fun",
+    kind: 15,
+    detail: "Parabun: memoized pure function declaration",
+    insertText: "memo pure fun ${1:name}(${2:params}) {\n\t${0}\n}",
+    insertTextFormat: 2,
+  },
+  {
+    label: "defer",
+    kind: 14,
+    detail: "Parabun: schedule disposal on block exit",
+    insertText: "defer ${0};",
+    insertTextFormat: 2,
+  },
+  {
+    label: "defer await",
+    kind: 14,
+    detail: "Parabun: schedule async disposal on block exit (async fn only)",
+    insertText: "defer await ${0};",
+    insertTextFormat: 2,
+  },
+  {
     label: "..=",
     kind: 24,
     detail: "Parabun: await-assign operator",

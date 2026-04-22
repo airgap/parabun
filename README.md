@@ -340,6 +340,34 @@ Multiple `_` placeholders copy the LHS structurally (`n |> add(_, _)` → `add(n
 
 Pair it with [`bun:pipeline`](#pipeline-fusion-bunpipeline) for fused typed-array map chains.
 
+### Deferred Cleanup (`defer`)
+
+`defer EXPR` schedules `EXPR` to run when the enclosing block exits — on normal fall-through, early `return`, or a thrown exception. Multiple defers dispose in LIFO order, matching Go / Zig / Swift conventions.
+
+```pts
+function readConfig(path: string) {
+  const fd = fs.openSync(path);
+  defer fs.closeSync(fd);
+  const data = fs.readFileSync(fd);
+  defer log("config-read");
+  return JSON.parse(data);
+}
+```
+
+`defer` desugars to an ES2024 `using` declaration whose disposer runs the deferred expression, so all the guarantees fall out for free: early returns, `throw`, loop-per-iteration cleanup, and `SuppressedError` chaining when multiple disposers throw.
+
+**`defer await`.** Inside an async function, `defer await EXPR` awaits the deferred expression during disposal (via `await using`):
+
+```pts
+async function withConnection(url: string) {
+  const conn = await pool.acquire(url);
+  defer await conn.release();
+  return await conn.query("SELECT 1");
+}
+```
+
+Outside an async function, `defer await` is a parse error. `defer` as a plain identifier (variable name, property access, assignment target) is unaffected — the keyword path only triggers when `defer` is immediately followed by something that starts an expression.
+
 ### Throw Expressions
 
 `throw E` works in any expression position — on the right of `??`, `||`, `&&`, inside ternary branches, inside arrow bodies. Evaluation is lazy: the throw only fires if the surrounding expression actually reaches it.

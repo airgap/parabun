@@ -1304,6 +1304,112 @@ pub fn ParseStmt(
             }, memo_range.loc);
         }
 
+        // Parabun: parse a `defer <expr>;` or `defer await <expr>;` statement.
+        // Desugars to an ES2024 `using` / `await using` declaration whose
+        // initializer wraps a thunk in a disposable shape:
+        //
+        //   defer fs.closeSync(fd);
+        //     → using __parabun_defer_0$ = __parabunDefer0(() => fs.closeSync(fd));
+        //
+        //   defer await client.disconnect();
+        //     → await using __parabun_defer_0$ = __parabunAsyncDefer0(async () => client.disconnect());
+        //
+        // Disposal order (LIFO), early-return, throw, loop-per-iteration, and
+        // SuppressedError chaining all come for free from `using` semantics.
+        //
+        // At entry: `defer` has already been consumed; p.lexer is on the token
+        // following it.
+        fn parseDeferStmt(p: *P, opts: *ParseStatementOptions, defer_range: logger.Range) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(defer_range.loc);
+            }
+
+            // Optional `await` for async defer. Requires the enclosing function
+            // to allow await expressions — otherwise the synthesized async arrow
+            // body couldn't await anyway, so we reject at parse time with a
+            // clearer message than "unexpected await" deep inside the arrow.
+            const is_async = blk: {
+                if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
+                    strings.eqlComptime(p.lexer.raw(), "await"))
+                {
+                    if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
+                        try p.log.addRangeError(p.source, p.lexer.range(), "\"defer await\" can only be used inside an async function");
+                        return error.SyntaxError;
+                    }
+                    try p.lexer.next();
+                    break :blk true;
+                }
+                break :blk false;
+            };
+
+            // The synthesized arrow needs the same two scopes a real arrow gets
+            // during the parse pass so the visit pass finds them at matching
+            // locs. function_args goes at `defer`; function_body uses a
+            // synthetic offset inside the `defer` keyword itself so it remains
+            // strictly less than any loc the operand's own parsing will push
+            // (critical for operands that synthesize their own scopes, like
+            // `defer throw EXPR` which is itself an IIFE).
+            const arrow_loc = defer_range.loc;
+            const body_loc = logger.Loc{ .start = defer_range.loc.start + 1 };
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            // Swap fn_or_arrow_data_parse to match the arrow's async-ness so
+            // `await` inside the body is valid only when `defer await` was used.
+            // A sync arrow body forbids await even if the outer function is async.
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = if (is_async) .allow_expr else .allow_ident;
+            // Arrows don't allow yield regardless of enclosing generator.
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            const expr = try p.parseExpr(.lowest);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            // Build `() => EXPR` (or `async () => EXPR`) as a single-return arrow.
+            const stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            stmts[0] = p.s(S.Return{ .value = expr }, body_loc);
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = stmts },
+                .prefer_expr = true,
+                .is_async = is_async,
+            }, arrow_loc);
+
+            const defer_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            defer_args[0] = arrow;
+            const defer_call = if (is_async)
+                p.callRuntime(defer_range.loc, "__parabunAsyncDefer0", defer_args)
+            else
+                p.callRuntime(defer_range.loc, "__parabunDefer0", defer_args);
+
+            // Synthesize a unique binding name. We bump temp_ref_count so names
+            // can't collide across multiple defers in the same scope. The symbol
+            // is declared in the outer scope (current_scope after the two pops).
+            p.temp_ref_count += 1;
+            const name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__parabun_defer_{x}$", .{p.temp_ref_count}));
+            const binding_ref = try p.declareSymbol(.constant, defer_range.loc, name);
+
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = binding_ref }, defer_range.loc),
+                .value = defer_call,
+            };
+
+            return p.s(S.Local{
+                .kind = if (is_async) .k_await_using else .k_using,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = false,
+            }, defer_range.loc);
+        }
+
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             const is_identifier = p.lexer.token == .t_identifier;
             const name = p.lexer.identifier;
@@ -1323,6 +1429,63 @@ pub fn ParseStmt(
                     return try parseMemoFnStmt(p, opts, memo_range);
                 }
                 // Not a memo declaration — rewind and fall through to expression parsing.
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "defer <expr>;" / "defer await <expr>;" statements —
+            // desugars to `using __parabun_defer_N$ = __parabunDefer0(() => <expr>);`.
+            // Only triggers when `defer` is immediately followed (no newline) by a
+            // non-operator token that could start an expression — if the next
+            // token is `=`, `.`, `;`, etc., `defer` is a plain identifier.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "defer")) {
+                const defer_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                // Heuristic: if the token after `defer` starts a statement-level
+                // expression (no newline, not a punctuator that'd bind `defer`
+                // as a normal identifier), treat this as a defer declaration.
+                // An identifier, keyword-expr (`await`, `new`, `function`,
+                // `throw`, `class`, `this`), literal, prefix op, or open paren /
+                // bracket all qualify.
+                if (!p.lexer.has_newline_before) {
+                    const t = p.lexer.token;
+                    const starts_expr = switch (t) {
+                        .t_identifier,
+                        .t_open_paren,
+                        .t_open_bracket,
+                        .t_open_brace,
+                        .t_new,
+                        .t_function,
+                        .t_throw,
+                        .t_class,
+                        .t_this,
+                        .t_null,
+                        .t_true,
+                        .t_false,
+                        .t_void,
+                        .t_typeof,
+                        .t_delete,
+                        .t_plus,
+                        .t_minus,
+                        .t_tilde,
+                        .t_exclamation,
+                        .t_plus_plus,
+                        .t_minus_minus,
+                        .t_numeric_literal,
+                        .t_big_integer_literal,
+                        .t_string_literal,
+                        .t_no_substitution_template_literal,
+                        .t_template_head,
+                        .t_super,
+                        .t_import,
+                        => true,
+                        else => false,
+                    };
+                    if (starts_expr) {
+                        return try parseDeferStmt(p, opts, defer_range);
+                    }
+                }
+                // Not a defer declaration — rewind and fall through so `defer`
+                // works as a plain identifier (`const defer = 1; defer + 1;`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "pure function" or "pure async function" statements

@@ -94,16 +94,15 @@ export var __parabunMemo = (fn, arity) => {
   };
 };
 
-// Parabun: defer stack primitive. `defer expr;` inside a function body
-// desugars to `__parabunDefer(__stack, () => expr);`. On scope exit the
-// stack is drained in LIFO order. Async variant (`defer await expr;`) is
-// handled by emitting `await using` with `__using` + `__callDispose` — see
-// those helpers. `__parabunDefer` is for the synchronous / fire-and-forget
-// case where we don't want to plumb `using` through every scope.
-export var __parabunDefer = (stack, thunk) => {
-  stack.push(thunk);
-  return stack;
-};
+// Parabun: defer disposers. `defer expr;` desugars to
+//   using __parabun_defer_N$ = __parabunDefer0(() => expr);
+// and `defer await expr;` to
+//   await using __parabun_defer_N$ = __parabunAsyncDefer0(async () => expr);
+// The runtime `using` semantics take care of LIFO disposal, early returns,
+// throws, and `SuppressedError` chaining for exceptions from multiple
+// disposers — we only need to wrap the thunk in a disposable shape.
+export var __parabunDefer0 = thunk => ({ [Symbol.dispose]: thunk });
+export var __parabunAsyncDefer0 = thunk => ({ [Symbol.asyncDispose]: thunk });
 
 export var __callDispose = (stack, error, hasError) => {
   let fail = e =>
