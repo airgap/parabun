@@ -111,6 +111,23 @@ users  |> filter(_, a) |> map(_, b)  →  map(filter(users, a), b)
 
 Zero `_` falls back to the function-target form (`x |> f(y)` means `f(y)(x)`). Multiple `_` copy the LHS structurally — if the LHS has side effects, bind it to a const first to avoid double evaluation. `_` is treated as a placeholder only at the top level of a pipeline RHS call; nested `_` (e.g. inside an inner arrow body) is left as a regular identifier. Outside `|>`, `_` remains a normal identifier and is not reserved.
 
+### `~>` (reactive binding operator)
+
+Desugars `A ~> B` to `require("bun:signals").effect(() => { B = A; })` — an `effect` that evaluates `A` in a tracked context and re-assigns `B` whenever any signal read by `A` changes. Precedence: assign level (lower than `|>`, so `a |> f ~> sink` parses as `(a |> f) ~> sink`).
+
+```
+signal count = 0;
+count ~> elem.innerHTML;               // elem mirrors count
+count |> Math.abs ~> obj.absValue;     // pipeline composes with ~>
+const stop = count ~> other;           // capture disposer
+```
+
+`B` must be assignable — an identifier, property access (`obj.prop`), or index (`arr[i]`). Other RHS shapes — calls, literals, arrow functions — are rejected at parse time with `requires an assignable target on the right (identifier or property access)`.
+
+When `B` is a signal, the existing signal-assignment sugar rewrites `B = A` to `B.set(A)`, so `src ~> dst` between two signals wires them together cleanly. When `A` contains signal reads, the bare-read sugar rewrites each to `.get()` inside the effect body, enrolling them as tracked deps.
+
+The expression evaluates to the disposer returned by `effect()`, so users can capture it (`const stop = ...`) or ignore it (fire-and-forget at statement scope).
+
 ### `defer`
 
 Schedules an expression to run when the enclosing block exits — on normal fall-through, early return, or a thrown exception. Multiple defers dispose in LIFO order (reverse of declaration).
@@ -202,7 +219,7 @@ All extensions are implemented as parse-time desugaring in `src/ast/`:
 
 | File | Purpose |
 |------|---------|
-| `parseSuffix.zig` | `..!`, `..&`, `|>` operator handlers |
+| `parseSuffix.zig` | `..!`, `..&`, `|>`, `~>` operator handlers |
 | `parsePrefix.zig` | `pure` keyword detection in expressions, `this` restriction check, `throw` as expression |
 | `parseStmt.zig` | `pure` in statement/export contexts |
 | `parse.zig` | `parsePurePrefixExpr`, `parsePureAsyncPrefixExpr` |

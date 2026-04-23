@@ -967,6 +967,90 @@ pub fn ParseSuffix(
             return .next;
         }
 
+        // Parabun: `A ~> B` reactive binding — desugars to
+        //   require("bun:signals").effect(() => { B = A; })
+        //
+        // The body is an arrow that evaluates A (tracking any signal reads) and
+        // assigns to B. If B is a signal, the existing assignment-sugar pass
+        // rewrites `B = A` to `B.set(A)`. If B is a plain property (e.g.
+        // `elem.innerHTML`), it stays a property assignment. The overall
+        // expression evaluates to the disposer returned by `effect()`, so users
+        // can capture it: `const stop = src ~> dst;`.
+        //
+        // RHS must be assignable (identifier, dot, index). Anything else — call,
+        // literal, arrow — is rejected with a parse error. Binds weakest of the
+        // suffix operators (at `.assign` level), so `a |> f ~> sink` parses as
+        // `(a |> f) ~> sink`.
+        fn t_tilde_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            if (level.gte(.assign)) {
+                return .done;
+            }
+
+            const op_loc = p.lexer.loc();
+            try p.lexer.next();
+            const body_loc = p.lexer.loc();
+
+            const rhs = try p.parseExpr(.assign);
+
+            switch (rhs.data) {
+                .e_identifier, .e_dot, .e_index => {},
+                else => {
+                    try p.log.addError(
+                        p.source,
+                        rhs.loc,
+                        "`~>` requires an assignable target on the right (identifier or property access)",
+                    );
+                    return .done;
+                },
+            }
+
+            const assign = p.newExpr(E.Binary{
+                .op = .bin_assign,
+                .left = rhs,
+                .right = left.*,
+            }, body_loc);
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            body_stmts[0] = p.s(S.SExpr{ .value = assign }, body_loc);
+
+            // Register arrow scopes so the visit pass can pop them in order.
+            // We don't parse anything inside these scopes — the RHS and LHS
+            // were parsed in the enclosing scope — but the arrow AST node
+            // still needs matching scope markers at its loc and body_loc.
+            // op_loc and body_loc are distinct (latter is after `~>` consumed).
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, op_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, op_loc);
+
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, op_loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, op_loc),
+                .args = ExprNodeList.fromOwnedSlice(require_args),
+            }, op_loc);
+            const effect_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "effect",
+                .name_loc = op_loc,
+            }, op_loc);
+            const effect_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            effect_args[0] = arrow;
+            left.* = p.newExpr(E.Call{
+                .target = effect_dot,
+                .args = ExprNodeList.fromOwnedSlice(effect_args),
+                .close_paren_loc = p.lexer.loc(),
+            }, left.loc);
+            return .next;
+        }
+
         fn isUnderscorePlaceholder(p: *P, expr: Expr) bool {
             if (expr.data != .e_identifier) return false;
             const name = p.loadNameFromRef(expr.data.e_identifier.ref);
@@ -1229,6 +1313,7 @@ pub fn ParseSuffix(
                     .t_dot_dot_exclamation,
                     .t_dot_dot_ampersand,
                     .t_bar_greater_than,
+                    .t_tilde_greater_than,
                     .t_equals,
                     .t_equals_equals,
                     .t_equals_equals_equals,
@@ -1302,9 +1387,14 @@ const string = []const u8;
 
 const bun = @import("bun");
 
+const logger = bun.logger;
+const strings = bun.strings;
+
 const js_ast = bun.ast;
 const E = js_ast.E;
+const S = js_ast.S;
 const Expr = js_ast.Expr;
+const Stmt = js_ast.Stmt;
 const ExprNodeList = js_ast.ExprNodeList;
 const OptionalChain = js_ast.OptionalChain;
 

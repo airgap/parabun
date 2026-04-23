@@ -69,7 +69,7 @@ interface LspPosition {
 // Parabun → TypeScript transform (inlined from ts-plugin/transform.ts)
 // ---------------------------------------------------------------------------
 
-const PARABUN_SYNTAX_RE = /\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>/;
+const PARABUN_SYNTAX_RE = /\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -96,8 +96,18 @@ function transformLine(line: string): string {
   line = transformArena(line);
   line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
+  line = transformRbind(line);
   line = transformPipeline(line);
   return line;
+}
+
+// `A ~> B` → `A = B` (column-preserving: both `~>` and `= ` are 2 chars).
+// TS then sees an assignment between two references, which is enough for
+// identifier resolution, hover, and go-to-def. The direction is reversed
+// compared to the real desugar (`B = A`), but TS doesn't care about that
+// for symbol lookup, and we avoid rewriting A/B positions in a regex pass.
+function transformRbind(line: string): string {
+  return line.replace(/~>/g, "= ");
 }
 
 // `signal NAME = RHS` → `let    NAME = RHS`. The `signal` keyword is replaced
@@ -1248,6 +1258,26 @@ function getParabunHover(content: string, line: number, character: number): stri
       "```typescript",
       "fetchUser(id) ..& () => cleanup()",
       "// → fetchUser(id).finally(() => cleanup())",
+      "```",
+    ].join("\n");
+  }
+  if (around.includes("~>")) {
+    return [
+      "### `~>` — reactive binding operator",
+      "",
+      "`A ~> B` creates a reactive binding: whenever the signals read by `A`",
+      "change, `B` gets re-assigned with `A`'s new value. `B` must be",
+      "assignable — an identifier or property access.",
+      "",
+      "Desugars to `require('bun:signals').effect(() => { B = A; })` —",
+      "evaluating `A` in a tracked context and returning the disposer, so",
+      "you can capture it: `const stop = src ~> dst;`.",
+      "",
+      "```typescript",
+      "signal count = 0;",
+      "count ~> elem.innerHTML;           // UI mirrors count",
+      "count |> Math.abs ~> obj.absValue; // composes with |>",
+      "const stop = count ~> other;       // capture disposer",
       "```",
     ].join("\n");
   }

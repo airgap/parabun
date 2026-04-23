@@ -1236,7 +1236,13 @@ fn NewLexer_(
                         }
 
                         lexer.step();
-                        lexer.token = T.t_tilde;
+                        if (lexer.code_point == '>') {
+                            // Parabun: `~>` reactive-binding operator.
+                            lexer.step();
+                            lexer.token = T.t_tilde_greater_than;
+                        } else {
+                            lexer.token = T.t_tilde;
+                        }
                     },
                     '?' => {
                         // '?' or '?.' or '??' or '??='

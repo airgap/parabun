@@ -76,6 +76,10 @@
       "captures": {
         "1": { "name": "keyword.control.defer.parabun" }
       }
+    },
+    {
+      "match": "~>",
+      "name": "keyword.operator.rbind.parabun"
     }
   ]
 }
