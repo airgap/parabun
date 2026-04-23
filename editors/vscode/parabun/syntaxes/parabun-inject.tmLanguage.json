@@ -57,6 +57,7 @@
       }
     },
     {
+      "comment": "memo async NAME(  — statement-form async memoized fn",
       "match": "\\b(memo)\\s+(async)\\s+(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
       "captures": {
         "1": { "name": "keyword.other.memo.parabun" },
@@ -64,7 +65,23 @@
       }
     },
     {
-      "match": "\\b(memo)\\s+(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
+      "comment": "memo NAME(  — statement-form memoized fn",
+      "match": "\\b(memo)\\s+(?!async\\b)(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
+      "captures": {
+        "1": { "name": "keyword.other.memo.parabun" }
+      }
+    },
+    {
+      "comment": "memo async (   or   memo async NAME =>  — async arrow form",
+      "match": "\\b(memo)\\s+(async)\\s+(?=\\(|[A-Za-z_$][\\w$]*\\s*=>)",
+      "captures": {
+        "1": { "name": "keyword.other.memo.parabun" },
+        "2": { "name": "storage.modifier.async" }
+      }
+    },
+    {
+      "comment": "memo (   or   memo <T>(   or   memo NAME =>  — arrow form (sync)",
+      "match": "\\b(memo)\\s+(?=\\(|<[\\w\\s,=]+>\\s*\\(|[A-Za-z_$][\\w$]*\\s*=>)",
       "captures": {
         "1": { "name": "keyword.other.memo.parabun" }
       }
