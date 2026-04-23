@@ -114,6 +114,16 @@ pub fn ParsePrefix(
                 return try p.parsePurePrefixExpr(name_range, level);
             }
 
+            // Parabun: Handle "memo" prefix expressions — memoized pure arrow.
+            if (strings.eqlComptime(name, "memo") and (raw.ptr == name.ptr and raw.len == name.len)) {
+                if (!p.lexer.has_newline_before and p.lexer.isContextualKeyword("async")) {
+                    const async_range = p.lexer.range();
+                    try p.lexer.next();
+                    return try p.parseMemoAsyncPrefixExpr(name_range, async_range, level);
+                }
+                return try p.parseMemoPrefixExpr(name_range, level);
+            }
+
             // Handle async and await expressions
             switch (AsyncPrefixExpression.find(name)) {
                 .is_async => {

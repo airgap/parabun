@@ -45,7 +45,18 @@ memo async load(key) { return await db.get(key); }
 export memo normalize(s) { return s.trim().toLowerCase(); }
 ```
 
-Desugars to `const name = __parabunMemo(anonymous_fn, arity);`. The inner function is rendered anonymous so recursive self-references (`fib(n-1)` above) resolve through the outer `const`, which is the memoized wrapper — a named inner function expression would create a local self-binding and bypass the cache.
+Arrow form — `memo` also works as an expression prefix on an arrow, producing a memoized pure arrow:
+
+```
+const dbl = memo (x) => x * 2;
+const fib = memo (n) => n < 2 ? n : fib(n - 1) + fib(n - 2);
+const load = memo async (k) => k;
+const shorthand = memo x => x * 2;           // 1-arg shorthand
+```
+
+`memo` before `(...)` is disambiguated from a call: `memo(5)` / `memo(a, b)` — where no `=>` follows the matching `)` — keeps `memo` as a plain identifier and parses as a call. Any arrow continuation (`=>` or a TS return-type annotation `:T =>`) activates the memo prefix.
+
+Both forms desugar to `const name = __parabunMemo(anonymous_fn, arity);`. The inner function (or arrow) is rendered anonymous so recursive self-references (`fib(n-1)` above) resolve through the outer `const`, which is the memoized wrapper — a named inner function expression would create a local self-binding and bypass the cache.
 
 Cache layout (selected from the declared arity — rest parameters always land in the multi-arg path):
 

@@ -1506,6 +1506,105 @@ pub fn Parse(
                 pure_range.loc,
             );
         }
+
+        // Parabun: parse `memo (params) => body` / `memo x => body` / `memo <T>(x) => body`
+        // as an expression — wrapping the resulting (pure) arrow in __parabunMemo.
+        // `memo function ...` / `memo fun ...` here is rejected with the same
+        // migration hint as the statement form; fresh callers should always use
+        // the arrow form (or the statement form).
+        pub fn parseMemoPrefixExpr(p: *P, memo_range: logger.Range, level: Level) !Expr {
+            if (!p.lexer.has_newline_before and p.lexer.token == T.t_function) {
+                try p.log.addRangeError(p.source, p.lexer.range(), "`memo` introduces a function declaration — drop the `function`/`fun` keyword (write `memo (params) => ...`)");
+                return error.SyntaxError;
+            }
+
+            // For the `(` form, we can't commit to arrow parsing without a
+            // lookahead — otherwise `const x = memo(5);` (a plain call to the
+            // `memo` identifier) gets mis-parsed: parseParenExpr would consume
+            // `(5)` as a grouping, discarding the call. Peek first.
+            if (!p.lexer.has_newline_before and p.lexer.token == .t_open_paren and !isArrowParenForm(p)) {
+                return p.newExpr(
+                    E.Identifier{ .ref = try p.storeNameInRef("memo") },
+                    memo_range.loc,
+                );
+            }
+
+            // Delegate to the pure-arrow parser, then wrap.
+            const inner = try p.parsePurePrefixExpr(memo_range, level);
+            if (inner.data == .e_arrow) {
+                return wrapArrowAsMemo(p, inner, memo_range);
+            }
+            // parsePurePrefixExpr fell back to identifier — memo didn't head an
+            // arrow. Return memo as a plain identifier so `memo.x` etc. still
+            // work when `memo` is a user-defined binding.
+            return p.newExpr(
+                E.Identifier{ .ref = try p.storeNameInRef("memo") },
+                memo_range.loc,
+            );
+        }
+
+        // Parabun: parse `memo async (x) => body` / `memo async x => body`.
+        pub fn parseMemoAsyncPrefixExpr(p: *P, memo_range: logger.Range, async_range: logger.Range, level: Level) !Expr {
+            if (!p.lexer.has_newline_before and p.lexer.token == T.t_function) {
+                try p.log.addRangeError(p.source, p.lexer.range(), "`memo` introduces a function declaration — drop the `function`/`fun` keyword (write `memo async (params) => ...`)");
+                return error.SyntaxError;
+            }
+
+            // Same paren lookahead as the non-async form.
+            if (!p.lexer.has_newline_before and p.lexer.token == .t_open_paren and !isArrowParenForm(p)) {
+                return p.newExpr(
+                    E.Identifier{ .ref = try p.storeNameInRef("memo") },
+                    memo_range.loc,
+                );
+            }
+
+            const inner = try p.parsePureAsyncPrefixExpr(memo_range, async_range, level);
+            if (inner.data == .e_arrow) {
+                return wrapArrowAsMemo(p, inner, memo_range);
+            }
+            return p.newExpr(
+                E.Identifier{ .ref = try p.storeNameInRef("memo") },
+                memo_range.loc,
+            );
+        }
+
+        /// Peek-only: at the `(` of a potential `(...)=>` arrow, is `=>` actually
+        /// going to follow the matching `)`? Restores the lexer before returning.
+        /// Used to disambiguate `memo (x) => x` (arrow) from `memo(5)` (call).
+        fn isArrowParenForm(p: *P) bool {
+            const saved = p.lexer;
+            defer p.lexer.restore(&saved);
+            // Paren-depth only. Braces and brackets inside arg lists (destructures,
+            // object/array defaults) don't affect whether the outer `)` closes the
+            // arg list, because they must be balanced by the inner parser anyway.
+            p.lexer.next() catch return false;
+            var depth: u32 = 1;
+            while (depth > 0) {
+                switch (p.lexer.token) {
+                    .t_end_of_file, .t_syntax_error => return false,
+                    .t_open_paren => depth += 1,
+                    .t_close_paren => depth -= 1,
+                    else => {},
+                }
+                p.lexer.next() catch return false;
+            }
+            return p.lexer.token == .t_equals_greater_than or
+                (is_typescript_enabled and p.lexer.token == .t_colon);
+        }
+
+        fn wrapArrowAsMemo(p: *P, arrow_expr: Expr, memo_range: logger.Range) !Expr {
+            const arrow = arrow_expr.data.e_arrow;
+            const arity: f64 = blk: {
+                if (arrow.has_rest_arg) break :blk 2;
+                if (arrow.args.len == 0) break :blk 0;
+                if (arrow.args.len == 1) break :blk 1;
+                break :blk 2;
+            };
+            const memo_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+            memo_args[0] = arrow_expr;
+            memo_args[1] = p.newExpr(E.Number{ .value = arity }, memo_range.loc);
+            return p.callRuntime(memo_range.loc, "__parabunMemo", memo_args);
+        }
     };
 }
 

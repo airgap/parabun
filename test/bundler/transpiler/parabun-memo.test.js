@@ -96,6 +96,51 @@ describe("Parabun memo", () => {
     });
   });
 
+  describe("arrow expression form", () => {
+    it("memo (x) => body wraps the arrow as arity 1", () => {
+      const out = transpiler.transformSync(`const dbl = memo (x) => x * 2;`);
+      expect(out).toContain("__parabunMemo");
+      expect(out).toContain("const dbl =");
+      expect(out).toContain(", 1)");
+    });
+
+    it("memo x => body (shorthand) also wraps as arity 1", () => {
+      const out = transpiler.transformSync(`const dbl = memo x => x * 2;`);
+      expect(out).toContain("__parabunMemo");
+      expect(out).toMatch(/\(x\)\s*=>/);
+      expect(out).toContain(", 1)");
+    });
+
+    it("memo (a, b) => body wraps as arity 2", () => {
+      const out = transpiler.transformSync(`const sum = memo (a, b) => a + b;`);
+      expect(out).toContain(", 2)");
+    });
+
+    it("memo async (k) => body preserves async", () => {
+      const out = transpiler.transformSync(`const load = memo async (k) => k;`);
+      expect(out).toContain("async (k)");
+      expect(out).toContain(", 1)");
+    });
+
+    it("memo rest arg arrow lands in arity 2", () => {
+      const out = transpiler.transformSync(`const f = memo (...xs) => xs.length;`);
+      expect(out).toContain(", 2)");
+    });
+
+    it("memo(x) as a call is NOT treated as an arrow", () => {
+      const out = transpiler.transformSync(`const v = memo(5);`);
+      expect(out).toContain("memo(5)");
+      expect(out).not.toContain("__parabunMemo");
+    });
+
+    it("memo used as an identifier is preserved", () => {
+      const out = transpiler.transformSync(`const v = memo; const w = memo.foo;`);
+      expect(out).toContain("const v = memo");
+      expect(out).toContain("memo.foo");
+      expect(out).not.toContain("__parabunMemo");
+    });
+  });
+
   describe("runtime behavior", () => {
     async function runScript(src) {
       await using proc = Bun.spawn({

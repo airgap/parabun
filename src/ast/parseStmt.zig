@@ -1212,6 +1212,40 @@ pub fn ParseStmt(
         //   0 args, no rest  → 0 (singleton cache)
         //   1 arg, no rest   → 1 (direct Map)
         //   otherwise        → 2 (nested Maps — also handles rest args correctly)
+        /// Peek-only check: does what follows the already-consumed `memo` keyword
+        /// look like a statement-form declaration (`memo name(` / `memo async name(` /
+        /// `memo name<` / legacy `memo function` / `memo fun` / `memo pure`)?
+        /// If not, the caller should treat `memo` as an expression prefix so
+        /// `memo (x) => ...` / `memo x => ...` arrows still parse correctly.
+        /// Restores the lexer to its current position on return.
+        fn isMemoStmtForm(p: *P) !bool {
+            const saved = p.lexer;
+            defer p.lexer.restore(&saved);
+
+            if (p.lexer.has_newline_before) return false;
+
+            // Legacy forms route into parseMemoFnStmt for a helpful error.
+            if (p.lexer.token == .t_function) return true;
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) return true;
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "fun")) return true;
+
+            // Optional `async` modifier before the name.
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "async")) {
+                try p.lexer.next();
+                if (p.lexer.has_newline_before) return false;
+                // After async, only stmt form has `name(` / `name<`. `async (` or
+                // `async x =>` should fall through to the expression path.
+            }
+
+            if (p.lexer.token != .t_identifier) return false;
+
+            // Peek one more token to see if this identifier is followed by `(` or `<`
+            // — which means it's a function declaration (stmt) rather than an arrow
+            // expression like `memo x => x`.
+            try p.lexer.next();
+            return p.lexer.token == .t_open_paren or p.lexer.token == .t_less_than;
+        }
+
         fn parseMemoFnStmt(p: *P, opts: *ParseStatementOptions, memo_range: logger.Range) anyerror!Stmt {
             // Reject legacy `memo pure function ...` with a helpful migration hint.
             if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
@@ -1782,16 +1816,12 @@ pub fn ParseStmt(
             // and function-ness (no `pure` / `function` / `fun` keyword).
             if (is_identifier and strings.eqlComptime(p.lexer.raw(), "memo")) {
                 const memo_range = p.lexer.range();
-                // Tentatively consume `memo`; if the next token can't start a
-                // memo declaration, restore and treat as a normal identifier.
+                // Tentatively consume `memo`; if what follows doesn't look like
+                // a statement-form declaration, restore and treat as expression
+                // (the prefix parser handles `memo (x) => ...` arrow form).
                 const saved = p.lexer;
                 try p.lexer.next();
-                // A memo decl must be followed by an identifier (the function
-                // name, or `async`) or `function`/`fun` (legacy — rejected with
-                // a helpful error by parseMemoFnStmt).
-                if (!p.lexer.has_newline_before and
-                    (p.lexer.token == .t_identifier or p.lexer.token == .t_function))
-                {
+                if (!p.lexer.has_newline_before and try isMemoStmtForm(p)) {
                     return try parseMemoFnStmt(p, opts, memo_range);
                 }
                 p.lexer.restore(&saved);
