@@ -983,6 +983,10 @@ function collectLocals(params: string[], body: string): Set<string> {
   while ((m = forRe.exec(body)) !== null) {
     if (m[1]) locals.add(m[1]);
   }
+  const typeDeclRe = /\b(?:type|interface)\s+(\w+)/g;
+  while ((m = typeDeclRe.exec(body)) !== null) {
+    if (m[1]) locals.add(m[1]);
+  }
   return locals;
 }
 
