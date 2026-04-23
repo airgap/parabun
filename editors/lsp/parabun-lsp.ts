@@ -69,7 +69,8 @@ interface LspPosition {
 // Parabun → TypeScript transform (inlined from ts-plugin/transform.ts)
 // ---------------------------------------------------------------------------
 
-const PARABUN_SYNTAX_RE = /\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
+const PARABUN_SYNTAX_RE =
+  /\bmemo\s+pure\b|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -90,6 +91,7 @@ function transformLine(line: string): string {
   const trimmed = line.trimStart();
   if (trimmed.startsWith("//") || trimmed.startsWith("/*")) return line;
   line = expandFun(line);
+  line = stripMemo(line);
   line = stripPure(line);
   line = transformSignal(line);
   line = transformEffect(line);
@@ -143,6 +145,12 @@ function stripPure(line: string): string {
     /\bpure(\s+)(?=function\b|async\s+function\b|<[\w\s,=]+>\s*\(|\(|\w+\s*=>)/g,
     (_m, space) => "    " + space,
   );
+}
+
+// `memo pure function` → `     pure function` — four spaces replace `memo`,
+// preserving columns so hover/go-to-def on `pure`/function name still work.
+function stripMemo(line: string): string {
+  return line.replace(/\bmemo(\s+)(?=pure\b)/g, (_m, space) => "    " + space);
 }
 
 function transformAwaitAssign(line: string): string {
@@ -1177,6 +1185,31 @@ function getParabunHover(content: string, line: number, character: number): stri
       "pure fun add(a: number, b: number) {",
       "  return a + b;",
       "}",
+      "```",
+    ].join("\n");
+  }
+
+  if (wordAt === "memo") {
+    return [
+      "### `memo` — memoize a pure function",
+      "",
+      "Caches results by argument. Only valid before `pure` (or `pure async`) —",
+      "memoizing an impure function would silently cache side effects, so",
+      "`memo` without `pure` is a parse error.",
+      "",
+      "Cache shape is picked from arity:",
+      "- **0 args** — singleton, first result reused forever.",
+      "- **1 arg** — `Map` keyed by the argument (object identity, no stringify).",
+      "- **≥2 args / rest** — nested `Map` chain, one level per argument.",
+      "",
+      "Async calls dedupe concurrent in-flight invocations (later callers get",
+      "the first call's promise); rejected promises evict.",
+      "",
+      "```typescript",
+      "memo pure fun fib(n: number): number {",
+      "  return n < 2 ? n : fib(n - 1) + fib(n - 2);",
+      "}",
+      "memo pure async fun load(key: string) { return await db.get(key); }",
       "```",
     ].join("\n");
   }
