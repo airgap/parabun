@@ -809,15 +809,19 @@ function findPureViolations(uri: string, content: string): LspDiagnostic[] {
   // Collect impure same-file function names
   const impureFns = new Set<string>();
   for (const line of lines) {
-    const pureFnMatch = line.match(/\bpure\s+(?:async\s+)?fun(?:ction)?\s+(\w+)/);
-    if (pureFnMatch) continue; // already in allPureFns
+    if (/\bpure\s+(?:async\s+)?fun(?:ction)?\s+\w+/.test(line)) continue; // already in allPureFns
+    if (/\bmemo\s+(?:async\s+)?\w+\s*[(<]/.test(line)) continue; // memo is pure
     const fnMatch = line.match(/(?:^|export\s+)(?:async\s+)?fun(?:ction)?\s+(\w+)/);
     if (fnMatch) impureFns.add(fnMatch[1]);
   }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const pureMatch = line.match(/^(\s*(?:export\s+)?)(pure)\s+(?:async\s+)?fun(?:ction)?\b/);
+    // Enter purity-check for `pure function name(` or `memo name(` bodies.
+    // `memo` implies pure and gets the same enforcement.
+    const pureMatch = line.match(
+      /^(\s*(?:export\s+)?)(pure\s+(?:async\s+)?fun(?:ction)?|memo\s+(?:async\s+)?(?=\w+\s*[(<]))\b/,
+    );
     if (!pureMatch || pureMatch.index === undefined) continue;
 
     const sigAndBody = extractFunctionSignatureAndBody(lines, i);
@@ -1037,6 +1041,11 @@ function collectPureFnNames(content: string): Set<string> {
   // Named declaration: pure function foo / pure async fun foo / export pure function foo
   const declRe = /\bpure\s+(?:async\s+)?fun(?:ction)?\s+(\w+)/g;
   for (const m of content.matchAll(declRe)) fns.add(m[1]);
+
+  // `memo` declarator: memo foo(...) / memo async foo(...) / export memo foo(...).
+  // `memo` implies pure, so its names belong in the pure-fn set.
+  const memoRe = /\bmemo\s+(?:async\s+)?(\w+)(?=\s*(?:<|\())/g;
+  for (const m of content.matchAll(memoRe)) fns.add(m[1]);
 
   // Expression form: const foo = pure (...) / const foo = pure <T>(...)
   // Also tolerates a multi-line generic-parameter block between `=` and `pure`
