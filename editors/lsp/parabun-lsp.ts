@@ -668,6 +668,64 @@ function findPureEligibleHints(content: string): LspDiagnostic[] {
   return hints;
 }
 
+/** Replace line comments, block comments, and '/"-quoted string contents
+ * with spaces so later regex scans don't false-positive on the word "this",
+ * "arguments", or an identifier that looks like an assignment inside a
+ * comment or string. Newlines are preserved; column offsets are unchanged;
+ * template literals are left intact so their ${...} interpolations still
+ * get scanned. */
+function maskCommentsAndStrings(src: string): string {
+  const out: string[] = [];
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < n && src[i] !== "\n") {
+        out.push(" ");
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      out.push("  ");
+      i += 2;
+      while (i < n && !(src[i] === "*" && src[i + 1] === "/")) {
+        out.push(src[i] === "\n" ? "\n" : " ");
+        i++;
+      }
+      if (i < n) {
+        out.push("  ");
+        i += 2;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const quote = c;
+      out.push(quote);
+      i++;
+      while (i < n && src[i] !== quote && src[i] !== "\n") {
+        if (src[i] === "\\" && i + 1 < n) {
+          out.push("  ");
+          i += 2;
+          continue;
+        }
+        out.push(" ");
+        i++;
+      }
+      if (i < n && src[i] === quote) {
+        out.push(quote);
+        i++;
+      }
+      continue;
+    }
+    out.push(c);
+    i++;
+  }
+  return out.join("");
+}
+
 function extractFunctionSignatureAndBody(lines: string[], fnLine: number): { params: string[]; body: string } | null {
   let braceDepth = 0;
   let started = false;
@@ -708,7 +766,8 @@ function extractFunctionSignatureAndBody(lines: string[], fnLine: number): { par
   return null;
 }
 
-function bodyHasSideEffects(params: string[], body: string): boolean {
+function bodyHasSideEffects(params: string[], rawBody: string): boolean {
+  const body = maskCommentsAndStrings(rawBody);
   if (/\bthis\b/.test(body) || /\barguments\b/.test(body)) return true;
 
   const locals = collectLocals(params, body);
@@ -827,7 +886,10 @@ function findPureViolations(uri: string, content: string): LspDiagnostic[] {
     const sigAndBody = extractFunctionSignatureAndBody(lines, i);
     if (!sigAndBody) continue;
 
-    const { params, body } = sigAndBody;
+    const { params, body: rawBody } = sigAndBody;
+    // Mask comments and string literals so regex scans don't false-positive
+    // on the word `this` in a `// ...` comment (or inside `"..."`).
+    const body = maskCommentsAndStrings(rawBody);
     const locals = collectLocals(params, body);
 
     // Find the body start line (first { after the function line)
