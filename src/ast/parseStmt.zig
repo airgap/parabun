@@ -85,18 +85,16 @@ pub fn ParseStmt(
                         }
                     }
 
-                    // Parabun: "export memo pure function" / "export memo pure async function"
+                    // Parabun: "export memo name(...)" / "export memo async name(...)"
                     if (p.lexer.isContextualKeyword("memo")) {
                         const memo_range = p.lexer.range();
-                        const saved = p.lexer;
                         try p.lexer.next();
-                        if (!p.lexer.has_newline_before and p.lexer.isContextualKeyword("pure")) {
-                            opts.is_export = true;
-                            return try parseMemoFnStmt(p, opts, memo_range);
+                        if (p.lexer.has_newline_before) {
+                            try p.log.addRangeError(p.source, memo_range, "Unexpected newline after \"memo\"");
+                            return error.SyntaxError;
                         }
-                        p.lexer.restore(&saved);
-                        try p.lexer.unexpected();
-                        return error.SyntaxError;
+                        opts.is_export = true;
+                        return try parseMemoFnStmt(p, opts, memo_range);
                     }
 
                     // Parabun: "export pure function" / "export pure async function"
@@ -1194,13 +1192,14 @@ pub fn ParseStmt(
             }, loc);
         }
 
-        // Parabun: parse a `memo pure [async] function <name>(...) { ... }` statement.
-        // Caller has seen `memo` but NOT consumed it yet? No — caller has consumed
-        // `memo` already (so p.lexer is positioned at the `pure` token) and asserts
-        // that the current token is the `pure` identifier.
+        // Parabun: parse a `memo <name>(...) { ... }` statement (sync) or
+        // `memo async <name>(...) { ... }` statement. `memo` is a standalone
+        // declarator — it implies both purity and function-ness, so no `pure`
+        // or `function` keywords. At entry, p.lexer is positioned on the token
+        // immediately after `memo` (either `async` or the function name).
         //
         // Desugar:
-        //   memo pure function fib(n) { ...body... }
+        //   memo fib(n) { ...body... }
         // becomes:
         //   const fib = __parabunMemo(function(n) { ...body... }, 1);
         //
@@ -1214,11 +1213,17 @@ pub fn ParseStmt(
         //   1 arg, no rest   → 1 (direct Map)
         //   otherwise        → 2 (nested Maps — also handles rest args correctly)
         fn parseMemoFnStmt(p: *P, opts: *ParseStatementOptions, memo_range: logger.Range) anyerror!Stmt {
-            // At entry: p.lexer is on the `pure` identifier.
-            const pure_range = p.lexer.range();
-            try p.lexer.next();
-            if (p.lexer.has_newline_before) {
-                try p.log.addRangeError(p.source, pure_range, "Unexpected newline after \"pure\"");
+            // Reject legacy `memo pure function ...` with a helpful migration hint.
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
+                try p.log.addRangeError(p.source, memo_range, "`memo` now implies `pure` and drops `function`/`fun` — write `memo name(...)` (or `memo async name(...)`)");
+                return error.SyntaxError;
+            }
+            // Reject `memo function ...` / `memo fun ...` — `function`/`fun` is
+            // redundant because `memo` itself introduces a function declaration.
+            if (p.lexer.token == .t_function or
+                (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "fun")))
+            {
+                try p.log.addRangeError(p.source, memo_range, "`memo` introduces a function declaration — drop the `function`/`fun` keyword (write `memo name(...)`)");
                 return error.SyntaxError;
             }
 
@@ -1232,14 +1237,8 @@ pub fn ParseStmt(
                 }
             }
 
-            if (p.lexer.token != .t_function) {
-                try p.log.addRangeError(p.source, memo_range, "`memo` must be followed by `pure [async] function` — only declared pure functions can be memoized");
-                return error.SyntaxError;
-            }
-            try p.lexer.next();
-
             if (p.lexer.token != .t_identifier) {
-                try p.log.addRangeError(p.source, memo_range, "`memo pure function` requires a name — anonymous memoized functions aren't supported");
+                try p.log.addRangeError(p.source, memo_range, "`memo` requires a name — anonymous memoized functions aren't supported");
                 return error.SyntaxError;
             }
 
@@ -1775,20 +1774,24 @@ pub fn ParseStmt(
             const name = p.lexer.identifier;
             // Parse either a pure function, an async function, an async expression, or a normal expression
             var expr: Expr = Expr{ .loc = loc, .data = Expr.Data{ .e_missing = .{} } };
-            // Parabun: "memo pure function" / "memo pure async function" statements —
-            // desugars to `const <name> = __parabunMemo(<anonymous fn>, <arity>);`
+            // Parabun: "memo name(...)" / "memo async name(...)" statements —
+            // desugars to `const <name> = __parabunMemo(<anonymous fn>, <arity>);`.
+            // `memo` alone is a memoized-function declarator; it implies purity
+            // and function-ness (no `pure` / `function` / `fun` keyword).
             if (is_identifier and strings.eqlComptime(p.lexer.raw(), "memo")) {
                 const memo_range = p.lexer.range();
-                // Tentatively consume `memo`; if it's not followed by `pure`, restore
-                // and treat as a normal identifier expression.
+                // Tentatively consume `memo`; if the next token can't start a
+                // memo declaration, restore and treat as a normal identifier.
                 const saved = p.lexer;
                 try p.lexer.next();
-                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier and
-                    strings.eqlComptime(p.lexer.raw(), "pure"))
+                // A memo decl must be followed by an identifier (the function
+                // name, or `async`) or `function`/`fun` (legacy — rejected with
+                // a helpful error by parseMemoFnStmt).
+                if (!p.lexer.has_newline_before and
+                    (p.lexer.token == .t_identifier or p.lexer.token == .t_function))
                 {
                     return try parseMemoFnStmt(p, opts, memo_range);
                 }
-                // Not a memo declaration — rewind and fall through to expression parsing.
                 p.lexer.restore(&saved);
             }
             // Parabun: "defer <expr>;" / "defer await <expr>;" statements —

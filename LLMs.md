@@ -30,19 +30,19 @@ declarations are unrestricted; arrow functions inherit purity.
 
 Desugars to a standard function. The `is_pure` flag is stored on `Flags.Function` (for declarations) and `E.Arrow` (for arrows) in the AST. The flag is accessible during parsing via `fn_or_arrow_data_parse.is_pure`.
 
-### `memo` keyword
+### `memo` declarator
 
-Memoizes a pure function by wrapping its declaration in a cache. Only applies to `pure` (and `pure async`) function declarations — `memo` without `pure` is a parse error, because memoizing an impure function would silently cache side effects.
+`memo` is a first-class declarator for memoized pure functions. It implies both **pure** (no outer mutation, no `this`, same purity-check rules as `pure fun`) and **function**, so no other keyword is needed. Writing `memo pure fun` / `memo function` / `memo fun` is a parse error with a migration hint — `memo` stands on its own.
 
 ```
-memo pure function fib(n) {
+memo fib(n) {
   if (n < 2) return n;
   return fib(n - 1) + fib(n - 2);
 }
 
-memo pure function add(a, b) { return a + b; }
-memo pure async function load(key) { return await db.get(key); }
-export memo pure function normalize(s) { return s.trim().toLowerCase(); }
+memo add(a, b) { return a + b; }
+memo async load(key) { return await db.get(key); }
+export memo normalize(s) { return s.trim().toLowerCase(); }
 ```
 
 Desugars to `const name = __parabunMemo(anonymous_fn, arity);`. The inner function is rendered anonymous so recursive self-references (`fib(n-1)` above) resolve through the outer `const`, which is the memoized wrapper — a named inner function expression would create a local self-binding and bypass the cache.
@@ -234,7 +234,7 @@ File extension registration: `src/options.zig` (loaders, extension orders, all 1
 Lightweight LSP that runs with the Parabun binary. Provides:
 
 - **Diagnostics** — Real parse errors from `Bun.Transpiler` (purity violations, syntax errors)
-- **Completions** — `pure`, `pure function`, `pure async function`, `memo pure function`, `defer`, `defer await`, `..=`, `..!`, `..&`, `|>`
+- **Completions** — `pure`, `pure function`, `pure async function`, `memo`, `memo async`, `defer`, `defer await`, `..=`, `..!`, `..&`, `|>`, `~>`
 - **Hover** — Markdown docs for `pure` keyword and all operators
 - **Semantic tokens** — `pure` keyword tagged as `function` type with `pure` modifier
 
@@ -265,7 +265,7 @@ test/bundler/transpiler/parabun-purity.test.js      — purity enforcement
 test/bundler/transpiler/parabun-throw-expr.test.js           — throw as expression
 test/bundler/transpiler/parabun-pipeline-method.test.js      — pipeline method shorthand
 test/bundler/transpiler/parabun-pipeline-placeholder.test.js — pipeline placeholder (_)
-test/bundler/transpiler/parabun-memo.test.js                 — memo pure function
+test/bundler/transpiler/parabun-memo.test.js                 — memo declarator
 test/bundler/transpiler/parabun-defer.test.js                — defer / defer await
 ```
 

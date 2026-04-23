@@ -57,35 +57,16 @@
       }
     },
     {
-      "match": "\\b(memo)\\s+(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
+      "match": "\\b(memo)\\s+(async)\\s+(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
       "captures": {
         "1": { "name": "keyword.other.memo.parabun" },
-        "2": { "name": "keyword.other.pure.parabun" },
-        "3": { "name": "storage.modifier.async" },
-        "4": { "name": "storage.type.function.parabun" }
+        "2": { "name": "storage.modifier.async" }
       }
     },
     {
-      "match": "\\b(memo)\\s+(pure)\\s+(fun(?:ction)?)\\b",
+      "match": "\\b(memo)\\s+(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
       "captures": {
-        "1": { "name": "keyword.other.memo.parabun" },
-        "2": { "name": "keyword.other.pure.parabun" },
-        "3": { "name": "storage.type.function.parabun" }
-      }
-    },
-    {
-      "match": "\\b(memo)\\s+(async)\\s+(fun(?:ction)?)\\b",
-      "captures": {
-        "1": { "name": "keyword.other.memo.parabun" },
-        "2": { "name": "storage.modifier.async" },
-        "3": { "name": "storage.type.function.parabun" }
-      }
-    },
-    {
-      "match": "\\b(memo)\\s+(fun(?:ction)?)\\b",
-      "captures": {
-        "1": { "name": "keyword.other.memo.parabun" },
-        "2": { "name": "storage.type.function.parabun" }
+        "1": { "name": "keyword.other.memo.parabun" }
       }
     },
     {

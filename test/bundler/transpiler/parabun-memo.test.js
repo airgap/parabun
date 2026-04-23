@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe } from "harness";
 
-// Parabun: `memo pure function name(...) { body }` desugars to
+// Parabun: `memo name(...) { body }` desugars to
 //   const name = __parabunMemo(function(args) { body }, arity);
+// `memo` is a standalone declarator — it implies both purity and
+// function-ness (no `pure` / `function` / `fun` keyword).
 // The function is rendered anonymous so recursive self-references route
 // through the outer memoized const. Arity controls cache layout:
 //   0 args, no rest → 0 (singleton cache)
@@ -17,32 +19,32 @@ describe("Parabun memo", () => {
 
   describe("parse-time desugar", () => {
     it("desugars zero-arg memo to arity 0", () => {
-      const out = transpiler.transformSync(`memo pure function foo() { return 1; }`);
+      const out = transpiler.transformSync(`memo foo() { return 1; }`);
       expect(out).toContain("__parabunMemo");
       expect(out).toContain("const foo =");
       expect(out).toContain(", 0)");
     });
 
     it("desugars single-arg memo to arity 1", () => {
-      const out = transpiler.transformSync(`memo pure function dbl(n) { return n * 2; }`);
+      const out = transpiler.transformSync(`memo dbl(n) { return n * 2; }`);
       expect(out).toContain("const dbl =");
       expect(out).toContain(", 1)");
     });
 
     it("desugars multi-arg memo to arity 2", () => {
-      const out = transpiler.transformSync(`memo pure function add(a, b) { return a + b; }`);
+      const out = transpiler.transformSync(`memo add(a, b) { return a + b; }`);
       expect(out).toContain("const add =");
       expect(out).toContain(", 2)");
     });
 
     it("rest-arg memo lands in arity 2 (nested-map path)", () => {
-      const out = transpiler.transformSync(`memo pure function sum(...xs) { return xs.reduce((a,b)=>a+b,0); }`);
+      const out = transpiler.transformSync(`memo sum(...xs) { return xs.reduce((a,b)=>a+b,0); }`);
       expect(out).toContain("const sum =");
       expect(out).toContain(", 2)");
     });
 
     it("async memo preserves `async` on the inner function", () => {
-      const out = transpiler.transformSync(`memo pure async function load(x) { return x * 2; }`);
+      const out = transpiler.transformSync(`memo async load(x) { return x * 2; }`);
       expect(out).toContain("async function");
       expect(out).toContain(", 1)");
     });
@@ -52,27 +54,32 @@ describe("Parabun memo", () => {
       // not to the inner function's own name binding (which would bypass the
       // cache). We verify this by checking the inner function is printed
       // without a name.
-      const out = transpiler.transformSync(
-        `memo pure function fib(n) { if (n < 2) return n; return fib(n-1) + fib(n-2); }`,
-      );
+      const out = transpiler.transformSync(`memo fib(n) { if (n < 2) return n; return fib(n-1) + fib(n-2); }`);
       // `function(n) {` — no name between `function` and `(`.
       expect(out).toMatch(/function\s*\(n\)/);
       // And the wrapping const binds the name:
       expect(out).toContain("const fib =");
     });
 
-    it("export memo pure function produces an exported const", () => {
-      const out = transpiler.transformSync(`export memo pure function id(x) { return x; }`);
+    it("export memo produces an exported const", () => {
+      const out = transpiler.transformSync(`export memo id(x) { return x; }`);
       expect(out).toContain("export const id =");
       expect(out).toContain("__parabunMemo");
     });
 
-    it("rejects memo without a following pure", () => {
-      expect(() => transpiler.transformSync(`memo function bad() {}`)).toThrow();
+    it("rejects legacy `memo pure function` with a migration hint", () => {
+      expect(() => transpiler.transformSync(`memo pure function bad(n) { return n; }`)).toThrow(/memo.*implies.*pure/i);
     });
 
-    it("rejects memo followed by a non-function", () => {
-      expect(() => transpiler.transformSync(`memo pure const x = 1;`)).toThrow();
+    it("rejects `memo function` / `memo fun` — redundant keyword", () => {
+      expect(() => transpiler.transformSync(`memo function bad() {}`)).toThrow(/drop the.*function/i);
+      expect(() => transpiler.transformSync(`memo fun bad() {}`)).toThrow(/drop the.*function/i);
+    });
+
+    it("rejects anonymous memo", () => {
+      // `memo (` doesn't look like a decl start, so `memo` parses as an
+      // identifier call. The rejection comes from the surrounding parse.
+      expect(() => transpiler.transformSync(`memo () { return 1; }`)).toThrow();
     });
 
     it("leaves `memo` as a plain identifier in other positions", () => {
@@ -105,7 +112,7 @@ describe("Parabun memo", () => {
     it("caches single-arg calls by argument identity", async () => {
       const out = await runScript(`
         let calls = 0;
-        memo pure function dbl(n) { calls++; return n * 2; }
+        memo dbl(n) { calls++; return n * 2; }
         console.log(dbl(5), dbl(5), dbl(7), calls);
       `);
       // dbl(5) cached on second call; dbl(7) fresh. calls = 2.
@@ -115,7 +122,7 @@ describe("Parabun memo", () => {
     it("recursive memoized function memoizes intermediate calls", async () => {
       const out = await runScript(`
         let calls = 0;
-        memo pure function fib(n) {
+        memo fib(n) {
           calls++;
           if (n < 2) return n;
           return fib(n-1) + fib(n-2);
@@ -131,7 +138,7 @@ describe("Parabun memo", () => {
     it("multi-arg memo keys by the full argument tuple", async () => {
       const out = await runScript(`
         let calls = 0;
-        memo pure function add(a, b) { calls++; return a + b; }
+        memo add(a, b) { calls++; return a + b; }
         add(1, 2); add(1, 2); add(1, 3); add(2, 2); add(2, 2);
         console.log(calls);
       `);
@@ -142,7 +149,7 @@ describe("Parabun memo", () => {
     it("zero-arg memo is a singleton cache", async () => {
       const out = await runScript(`
         let calls = 0;
-        memo pure function now() { calls++; return 42; }
+        memo now() { calls++; return 42; }
         console.log(now(), now(), now(), calls);
       `);
       expect(out).toBe("42 42 42 1");
@@ -151,7 +158,7 @@ describe("Parabun memo", () => {
     it("async memo dedupes in-flight calls", async () => {
       const out = await runScript(`
         let attempts = 0;
-        memo pure async function load(k) { attempts++; return k; }
+        memo async load(k) { attempts++; return k; }
         const [a, b] = await Promise.all([load("x"), load("x")]);
         console.log(a, b, attempts);
       `);
@@ -162,7 +169,7 @@ describe("Parabun memo", () => {
       const out = await runScript(`
         let attempts = 0;
         let fail = true;
-        memo pure async function load(k) {
+        memo async load(k) {
           attempts++;
           if (fail) throw new Error("boom");
           return k;
@@ -179,7 +186,7 @@ describe("Parabun memo", () => {
 
     it("async memo caches fulfilled promises (same reference)", async () => {
       const out = await runScript(`
-        memo pure async function load(x) { return { x }; }
+        memo async load(x) { return { x }; }
         const p1 = load("a");
         const p2 = load("a");
         console.log(p1 === p2);
@@ -190,7 +197,7 @@ describe("Parabun memo", () => {
     it("rest-arg memo keys on the full argument sequence", async () => {
       const out = await runScript(`
         let calls = 0;
-        memo pure function joined(...xs) { calls++; return xs.join("-"); }
+        memo joined(...xs) { calls++; return xs.join("-"); }
         joined("a","b","c"); joined("a","b","c"); joined("a","b"); joined("a","b","c");
         console.log(calls);
       `);
@@ -201,7 +208,7 @@ describe("Parabun memo", () => {
     it("memo caches by object identity, not structural equality", async () => {
       const out = await runScript(`
         let calls = 0;
-        memo pure function key(o) { calls++; return o.id; }
+        memo key(o) { calls++; return o.id; }
         const a = { id: 1 };
         const b = { id: 1 };
         key(a); key(a); key(b);

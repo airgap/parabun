@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s+pure\b|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
+  /\bmemo\s+(?:async\s+)?[A-Za-z_$]|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -147,10 +147,20 @@ function stripPure(line: string): string {
   );
 }
 
-// `memo pure function` → `     pure function` — four spaces replace `memo`,
-// preserving columns so hover/go-to-def on `pure`/function name still work.
+// `memo name(` → `function name(` and `memo async name(` → `async function name(`.
+// `memo` is a Parabun-only declarator; TS needs a real `function` keyword to
+// parse the declaration. The replacement shifts every column on the decl line
+// right by 4 chars — hover/go-to-def on the function body (different lines)
+// are unaffected, but hovering the name on the decl line lands 4 cols off.
 function stripMemo(line: string): string {
-  return line.replace(/\bmemo(\s+)(?=pure\b)/g, (_m, space) => "    " + space);
+  // `memo async name(` → `async function name(`
+  line = line.replace(
+    /\bmemo(\s+)async(\s+)(?=[A-Za-z_$][\w$]*\s*(?:<|\())/g,
+    (_m, s1, s2) => `async${s1}function${s2}`,
+  );
+  // `memo name(` → `function name(`
+  line = line.replace(/\bmemo(\s+)(?=[A-Za-z_$][\w$]*\s*(?:<|\())/g, (_m, s) => `function${s}`);
+  return line;
 }
 
 function transformAwaitAssign(line: string): string {
@@ -1191,11 +1201,11 @@ function getParabunHover(content: string, line: number, character: number): stri
 
   if (wordAt === "memo") {
     return [
-      "### `memo` — memoize a pure function",
+      "### `memo` — memoized pure function declarator",
       "",
-      "Caches results by argument. Only valid before `pure` (or `pure async`) —",
-      "memoizing an impure function would silently cache side effects, so",
-      "`memo` without `pure` is a parse error.",
+      "`memo name(params) { body }` declares a memoized pure function. `memo`",
+      "is a first-class declarator: it implies both **pure** (no outer mutation,",
+      "no `this`) and **function**, so no extra keyword is needed.",
       "",
       "Cache shape is picked from arity:",
       "- **0 args** — singleton, first result reused forever.",
@@ -1206,10 +1216,11 @@ function getParabunHover(content: string, line: number, character: number): stri
       "the first call's promise); rejected promises evict.",
       "",
       "```typescript",
-      "memo pure fun fib(n: number): number {",
+      "memo fib(n: number): number {",
       "  return n < 2 ? n : fib(n - 1) + fib(n - 2);",
       "}",
-      "memo pure async fun load(key: string) { return await db.get(key); }",
+      "memo async load(key: string) { return await db.get(key); }",
+      "export memo normalize(s: string) { return s.trim().toLowerCase(); }",
       "```",
     ].join("\n");
   }
@@ -1465,10 +1476,17 @@ const parabunCompletions = [
     insertTextFormat: 2,
   },
   {
-    label: "memo pure fun",
+    label: "memo",
     kind: 15,
     detail: "Parabun: memoized pure function declaration",
-    insertText: "memo pure fun ${1:name}(${2:params}) {\n\t${0}\n}",
+    insertText: "memo ${1:name}(${2:params}) {\n\t${0}\n}",
+    insertTextFormat: 2,
+  },
+  {
+    label: "memo async",
+    kind: 15,
+    detail: "Parabun: memoized pure async function declaration",
+    insertText: "memo async ${1:name}(${2:params}) {\n\t${0}\n}",
     insertTextFormat: 2,
   },
   {

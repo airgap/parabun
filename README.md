@@ -291,19 +291,19 @@ Editors with the Parabun LSP highlight `pure` functions with a distinct style, m
 
 ### Memoized Pure Functions (`memo`)
 
-Prefix a `pure` function declaration with `memo` to cache results by argument. Memoization is only allowed on pure functions — `memo` without `pure` is a parse error, because caching results of an impure function would silently cache side effects.
+`memo` is a first-class declarator for memoized pure functions — it implies both purity (same enforcement as `pure`) and function-ness, so no other keyword is needed. `memo` stands on its own: no `pure`, no `function`, no `fun`.
 
 ```pts
-memo pure function fib(n: number): number {
+memo fib(n: number): number {
   if (n < 2) return n;
   return fib(n - 1) + fib(n - 2);
 }
 
-memo pure function normalize(s: string) {
+memo normalize(s: string) {
   return s.trim().toLowerCase();
 }
 
-memo pure async function fetchProfile(id: string) {
+memo async fetchProfile(id: string) {
   return await db.users.get(id);
 }
 ```
