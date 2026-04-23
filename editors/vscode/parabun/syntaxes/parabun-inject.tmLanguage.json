@@ -70,7 +70,7 @@
       }
     },
     {
-      "match": "\\b(defer|async\\s+defer)\\b(?=\\s+[A-Za-z_$])",
+      "match": "\\b(defer)\\b(?=\\s+[A-Za-z_$])",
       "captures": {
         "1": { "name": "keyword.control.defer.parabun" }
       }

@@ -78,14 +78,9 @@
     "parabun-operators": {
       "patterns": [
         {
-          "comment": "..= await-assign operator",
+          "comment": "..= await-assign / inclusive-range operator",
           "name": "keyword.operator.await-assign.parabun",
           "match": "\\.\\.="
-        },
-        {
-          "comment": "..> await-yield operator",
-          "name": "keyword.operator.await-yield.parabun",
-          "match": "\\.\\.>"
         },
         {
           "comment": "..! error catch operator",
@@ -98,9 +93,19 @@
           "match": "\\.\\.&"
         },
         {
+          "comment": ".. exclusive-range operator (must come after ..= / ..! / ..&)",
+          "name": "keyword.operator.range.parabun",
+          "match": "\\.\\."
+        },
+        {
           "comment": "|> pipeline operator",
           "name": "keyword.operator.pipeline.parabun",
           "match": "\\|>"
+        },
+        {
+          "comment": "~> reactive-binding operator",
+          "name": "keyword.operator.rbind.parabun",
+          "match": "~>"
         }
       ]
     }

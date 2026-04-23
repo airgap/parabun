@@ -83,8 +83,16 @@
           "match": "\\.\\.&"
         },
         {
+          "name": "keyword.operator.range.parabun",
+          "match": "\\.\\."
+        },
+        {
           "name": "keyword.operator.pipeline.parabun",
           "match": "\\|>"
+        },
+        {
+          "name": "keyword.operator.rbind.parabun",
+          "match": "~>"
         }
       ]
     }
