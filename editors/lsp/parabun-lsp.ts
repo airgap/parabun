@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s+(?:async\s+)?[A-Za-z_$]|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -147,19 +147,27 @@ function stripPure(line: string): string {
   );
 }
 
-// `memo name(` → `function name(` and `memo async name(` → `async function name(`.
-// `memo` is a Parabun-only declarator; TS needs a real `function` keyword to
-// parse the declaration. The replacement shifts every column on the decl line
-// right by 4 chars — hover/go-to-def on the function body (different lines)
-// are unaffected, but hovering the name on the decl line lands 4 cols off.
+// Statement form: `memo name(` → `function name(` and `memo async name(` →
+// `async function name(`. TS needs a real `function` keyword to parse the
+// declaration. This shifts the declaration line's columns right by 4 — hover
+// on the body (different lines) is unaffected.
+//
+// Arrow/expression form: `memo (...) =>`, `memo x =>`, `memo async ...`, and
+// `memo <T>(...)` — `memo` is replaced by 4 spaces so TS just sees the bare
+// arrow. Column-preserving, so hover/go-to-def lands on the right span.
 function stripMemo(line: string): string {
-  // `memo async name(` → `async function name(`
   line = line.replace(
     /\bmemo(\s+)async(\s+)(?=[A-Za-z_$][\w$]*\s*(?:<|\())/g,
     (_m, s1, s2) => `async${s1}function${s2}`,
   );
-  // `memo name(` → `function name(`
-  line = line.replace(/\bmemo(\s+)(?=[A-Za-z_$][\w$]*\s*(?:<|\())/g, (_m, s) => `function${s}`);
+  // Negative lookahead on `async` keeps `memo async (k) =>` out of the
+  // stmt-form path (where it would get rewritten as `function async (...)`);
+  // the arrow-form pass below handles it.
+  line = line.replace(/\bmemo(\s+)(?!async\b)(?=[A-Za-z_$][\w$]*\s*(?:<|\())/g, (_m, s) => `function${s}`);
+  line = line.replace(
+    /\bmemo(\s+)(?=\(|[A-Za-z_$][\w$]*\s*=>|async\s+(?:\(|[A-Za-z_$][\w$]*\s*=>)|<[\w\s,=]+>\s*\()/g,
+    (_m, s) => `    ${s}`,
+  );
   return line;
 }
 
