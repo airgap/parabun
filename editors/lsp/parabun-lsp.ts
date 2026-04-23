@@ -626,6 +626,10 @@ function validate(uri: string, content: string) {
   const pureHints = findPureEligibleHints(content);
   diagnostics.push(...pureHints);
 
+  // Memo suggest/warn hints
+  const memoHints = findMemoHints(uri, content);
+  diagnostics.push(...memoHints);
+
   // Purity violation errors for functions already marked pure
   const pureViolations = findPureViolations(uri, content);
   diagnostics.push(...pureViolations);
@@ -634,6 +638,115 @@ function validate(uri: string, content: string) {
 }
 
 const PURE_HINT_CODE = "parabun-pure-eligible";
+const MEMO_SUGGEST_CODE = "parabun-memo-eligible";
+const MEMO_UNNECESSARY_CODE = "parabun-memo-unnecessary";
+
+// Signals that correlate with "memo likely pays off":
+//   - recursion (self-call)
+//   - loop or array-method chain in body
+//   - calls another declared-pure function
+//   - takes exactly one argument (high cache-reuse, cheap key)
+// Threshold of ≥2 keeps straight-line arithmetic one-liners (arcradius,
+// clamp, lerp) out of the hint zone while still flagging obvious wins
+// (fib, tree-walk, hash-by-key lookups).
+const MEMO_SUGGEST_MIN_PRO_SIGNALS = 2;
+
+interface MemoBodyAnalysis {
+  pro: number;
+  arity0: boolean;
+  bodyTrivial: boolean;
+}
+
+function analyzeForMemo(fnName: string, params: string[], rawBody: string, allPureFns: Set<string>): MemoBodyAnalysis {
+  const body = maskCommentsAndStrings(rawBody);
+  const hasRecursion = fnName ? new RegExp(`\\b${fnName}\\s*\\(`).test(body) : false;
+  const hasLoop = /\b(?:for|while)\b|\.(?:map|filter|reduce|forEach|some|every|flatMap|find|findIndex)\s*\(/.test(body);
+
+  let callsAnotherPureFn = false;
+  const callRe = /\b(\w+)\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = callRe.exec(body)) !== null) {
+    const name = m[1];
+    if (name === fnName) continue;
+    if (allPureFns.has(name)) {
+      callsAnotherPureFn = true;
+      break;
+    }
+  }
+
+  const arity1 = params.length === 1;
+  const arity0 = params.length === 0;
+
+  // Body is "trivial" when it does none of the work-suggesting things — no
+  // loop, no self-recursion, and no call to another declared-pure function.
+  // The work is then O(1) arithmetic, so memo overhead tends to exceed it
+  // even for multi-line bodies (e.g. `arcradius` with 4 args and a handful
+  // of Math.sin/cos calls). Line count is an unreliable proxy for work.
+  const bodyTrivial = !hasLoop && !hasRecursion && !callsAnotherPureFn;
+
+  let pro = 0;
+  if (hasRecursion) pro++;
+  if (hasLoop) pro++;
+  if (callsAnotherPureFn) pro++;
+  if (arity1) pro++;
+
+  return { pro, arity0, bodyTrivial };
+}
+
+function findMemoHints(uri: string, content: string): LspDiagnostic[] {
+  const hints: LspDiagnostic[] = [];
+  const lines = content.split("\n");
+  const allPureFns = getAllPureFns(uri, content);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // `pure function name(` / `pure async function name(` / with `fun`.
+    const pureMatch = line.match(/^(\s*(?:export\s+)?)(pure)(\s+(?:async\s+)?fun(?:ction)?\s+)(\w+)/);
+    // `memo name(` / `memo async name(`.
+    const memoMatch = !pureMatch ? line.match(/^(\s*(?:export\s+)?)(memo)(\s+(?:async\s+)?)(\w+)(?=\s*[(<])/) : null;
+
+    if (!pureMatch && !memoMatch) continue;
+
+    const sig = extractFunctionSignatureAndBody(lines, i);
+    if (!sig) continue;
+
+    const match = pureMatch ?? memoMatch!;
+    const name = match[4];
+    const kwStart = match[1].length;
+    const kwEnd = kwStart + match[2].length;
+    const { pro, arity0, bodyTrivial } = analyzeForMemo(name, sig.params, sig.body, allPureFns);
+
+    if (pureMatch && pro >= MEMO_SUGGEST_MIN_PRO_SIGNALS) {
+      hints.push({
+        range: {
+          start: { line: i, character: kwStart },
+          end: { line: i, character: kwEnd },
+        },
+        severity: 4,
+        source: "parabun",
+        message: `Could be \`memo\` — body has ${pro} memo-friendly signals (recursion / loop / pure-fn call / single primitive arg)`,
+        code: MEMO_SUGGEST_CODE,
+      });
+    } else if (memoMatch && pro < MEMO_SUGGEST_MIN_PRO_SIGNALS && (arity0 || bodyTrivial)) {
+      const reason = arity0
+        ? "0-arg memo — a plain `const` captures the value just as well"
+        : "body is trivial — the memo map lookup likely costs more than the work";
+      hints.push({
+        range: {
+          start: { line: i, character: kwStart },
+          end: { line: i, character: kwEnd },
+        },
+        severity: 4,
+        source: "parabun",
+        message: `\`memo\` may not pay off here — ${reason}`,
+        code: MEMO_UNNECESSARY_CODE,
+      });
+    }
+  }
+
+  return hints;
+}
 
 function findPureEligibleHints(content: string): LspDiagnostic[] {
   const hints: LspDiagnostic[] = [];

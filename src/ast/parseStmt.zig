@@ -1215,15 +1215,17 @@ pub fn ParseStmt(
         fn parseMemoFnStmt(p: *P, opts: *ParseStatementOptions, memo_range: logger.Range) anyerror!Stmt {
             // Reject legacy `memo pure function ...` with a helpful migration hint.
             if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
-                try p.log.addRangeError(p.source, memo_range, "`memo` now implies `pure` and drops `function`/`fun` — write `memo name(...)` (or `memo async name(...)`)");
+                try p.log.addRangeError(p.source, p.lexer.range(), "`memo` now implies `pure` and drops `function`/`fun` — write `memo name(...)` (or `memo async name(...)`)");
                 return error.SyntaxError;
             }
             // Reject `memo function ...` / `memo fun ...` — `function`/`fun` is
             // redundant because `memo` itself introduces a function declaration.
+            // Point the diagnostic at the offending keyword (not `memo`) so the
+            // editor underlines the token the user actually needs to delete.
             if (p.lexer.token == .t_function or
                 (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "fun")))
             {
-                try p.log.addRangeError(p.source, memo_range, "`memo` introduces a function declaration — drop the `function`/`fun` keyword (write `memo name(...)`)");
+                try p.log.addRangeError(p.source, p.lexer.range(), "`memo` introduces a function declaration — drop the `function`/`fun` keyword (write `memo name(...)`)");
                 return error.SyntaxError;
             }
 
