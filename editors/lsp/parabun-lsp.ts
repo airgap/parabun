@@ -69,7 +69,7 @@ interface LspPosition {
 // Parabun → TypeScript transform (inlined from ts-plugin/transform.ts)
 // ---------------------------------------------------------------------------
 
-const PARABUN_SYNTAX_RE = /\bpure\s|\bfun\b|\.\.=|\.\.!|\.\.&|\|>/;
+const PARABUN_SYNTAX_RE = /\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -91,10 +91,37 @@ function transformLine(line: string): string {
   if (trimmed.startsWith("//") || trimmed.startsWith("/*")) return line;
   line = expandFun(line);
   line = stripPure(line);
+  line = transformSignal(line);
+  line = transformEffect(line);
+  line = transformArena(line);
   line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
   line = transformPipeline(line);
   return line;
+}
+
+// `signal NAME = RHS` → `let    NAME = RHS`. The `signal` keyword is replaced
+// with `let   ` (3 chars + 3 spaces = 6, matching `signal`'s 6 chars) so every
+// column after the keyword stays at its original position — hover, go-to-def,
+// and diagnostic ranges all still map 1:1. `let` rather than `const` because
+// Parabun rewrites `NAME = x` / `NAME++` to `.set()` calls at parse time, so
+// those mutations must not trip TS's const-reassignment check.
+function transformSignal(line: string): string {
+  return line.replace(/\b(signal)\b(?=\s+[A-Za-z_$][\w$]*\s*[=,;:!])/g, "let   ");
+}
+
+// `effect { body }` → `      { body }` — six spaces replace `effect`, leaving
+// a bare block statement that TypeScript accepts. Column positions inside
+// the body are unchanged. Only triggers when `effect` is immediately before
+// `{` (same line) — other uses of `effect` as an identifier are untouched.
+function transformEffect(line: string): string {
+  return line.replace(/\b(effect)\b(?=\s*\{)/g, "      ");
+}
+
+// `arena { body }` → `     { body }` — five spaces replace `arena`, same
+// column-preserving trick as transformEffect.
+function transformArena(line: string): string {
+  return line.replace(/\b(arena)\b(?=\s*\{)/g, "     ");
 }
 
 function expandFun(line: string): string {
@@ -1140,6 +1167,52 @@ function getParabunHover(content: string, line: number, character: number): stri
     ].join("\n");
   }
 
+  if (wordAt === "signal" && isSignalDeclarationAt(lineText, character)) {
+    return [
+      "### `signal` — reactive binding",
+      "",
+      "`signal NAME = RHS` declares a reactive signal. Bare reads of `NAME`",
+      "rewrite to `NAME.get()`, assignments to `NAME.set(...)`. If `RHS` references",
+      "another in-scope signal, the declaration auto-promotes to",
+      "`derived(() => RHS)` (read-only).",
+      "",
+      "`signal` always implies `const` — there's no `signal let`/`var`. Use",
+      "`// @parabun-strict-signals` to opt out of auto-derive file-wide.",
+      "",
+      "```typescript",
+      "signal count = 0;",
+      "signal doubled = count * 2;   // auto-derived",
+      "effect { console.log(count, doubled); }",
+      "count++;                      // triggers effect",
+      "```",
+      "",
+      "Allow-list: `.get`, `.set`, `.peek`, `.subscribe`, `.update` stay as",
+      "real `Signal` methods. Every other `NAME.foo` rewrites as `NAME.get().foo`.",
+    ].join("\n");
+  }
+
+  if (wordAt === "effect" && isEffectBlockAt(lineText, character)) {
+    return [
+      "### `effect { ... }` — reactive effect block",
+      "",
+      "Runs the body once immediately, tracks every signal `.get()` inside",
+      "as a dependency, and re-runs when any dep changes. Returning a function",
+      "from the body registers it as a cleanup — it fires before the next run",
+      "and on dispose.",
+      "",
+      "`return` / `break` / `continue` are arrow-local (the body lifts into an",
+      "arrow). `await` is rejected — the flush loop is synchronous.",
+      "",
+      "```typescript",
+      "signal count = 0;",
+      "effect {",
+      "  console.log(count);",
+      "  return () => console.log('cleanup', count);",
+      "}",
+      "```",
+    ].join("\n");
+  }
+
   const around = lineText.slice(Math.max(0, character - 3), character + 3);
 
   if (around.includes("..=")) {
@@ -1200,6 +1273,32 @@ function getWordAt(line: string, col: number): string {
   while (start > 0 && /\w/.test(line[start - 1])) start--;
   while (end < line.length && /\w/.test(line[end])) end++;
   return line.slice(start, end);
+}
+
+// True when the cursor is sitting on the `signal` keyword of a `signal NAME =`
+// declaration (as opposed to a plain identifier named `signal` imported from
+// `bun:signals`). Gates the hover so `const x = signal(0)` — which is also
+// valid — doesn't trigger the keyword tooltip.
+function isSignalDeclarationAt(line: string, col: number): boolean {
+  const word = findWordBounds(line, col);
+  if (!word || line.slice(word.start, word.end) !== "signal") return false;
+  return /^\s+[A-Za-z_$][\w$]*\s*[=,;:!]/.test(line.slice(word.end));
+}
+
+function isEffectBlockAt(line: string, col: number): boolean {
+  const word = findWordBounds(line, col);
+  if (!word || line.slice(word.start, word.end) !== "effect") return false;
+  return /^\s*\{/.test(line.slice(word.end));
+}
+
+function findWordBounds(line: string, col: number): { start: number; end: number } | null {
+  if (col > line.length) return null;
+  let start = col;
+  let end = col;
+  while (start > 0 && /\w/.test(line[start - 1])) start--;
+  while (end < line.length && /\w/.test(line[end])) end++;
+  if (start === end) return null;
+  return { start, end };
 }
 
 // ---------------------------------------------------------------------------

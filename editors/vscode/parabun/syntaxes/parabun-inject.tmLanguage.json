@@ -37,6 +37,45 @@
       "captures": {
         "1": { "name": "keyword.other.pure.parabun" }
       }
+    },
+    {
+      "match": "\\b(signal)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=,;:!])",
+      "captures": {
+        "1": { "name": "storage.type.signal.parabun" }
+      }
+    },
+    {
+      "match": "\\b(effect)\\b(?=\\s*\\{)",
+      "captures": {
+        "1": { "name": "keyword.control.effect.parabun" }
+      }
+    },
+    {
+      "match": "\\b(arena)\\b(?=\\s*\\{)",
+      "captures": {
+        "1": { "name": "keyword.control.arena.parabun" }
+      }
+    },
+    {
+      "match": "\\b(memo)\\s+(async)\\s+(fun(?:ction)?)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.memo.parabun" },
+        "2": { "name": "storage.modifier.async" },
+        "3": { "name": "storage.type.function.parabun" }
+      }
+    },
+    {
+      "match": "\\b(memo)\\s+(fun(?:ction)?)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.memo.parabun" },
+        "2": { "name": "storage.type.function.parabun" }
+      }
+    },
+    {
+      "match": "\\b(defer|async\\s+defer)\\b(?=\\s+[A-Za-z_$])",
+      "captures": {
+        "1": { "name": "keyword.control.defer.parabun" }
+      }
     }
   ]
 }
