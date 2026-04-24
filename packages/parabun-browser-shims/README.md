@@ -10,8 +10,9 @@ parse-time desugarings import:
 | `bun:wrap` | Real implementation. Carries the `__parabunMemo` / `__parabunDefer0` / `__parabunRange` runtime, including `.forget()` / `.clear()` / `.bypass()` cache invalidation. |
 | `bun:parallel` | **Web Worker pool** (`navigator.hardwareConcurrency` workers). `pmap` / `preduce` dispatch across workers; transparent sequential fallback under CSP or non-browser hosts. |
 | `bun:simd` | **WebAssembly SIMD kernels** (v128 f32x4). `mulScalar` / `addScalar` / `add` / `mul` / `sum` / `dot` dispatch to WASM; scalar JS fallback when WASM SIMD is unavailable. `alloc(n, "f32")` returns a `Float32Array` backed by the WASM linear memory for zero-copy calls. |
-| `bun:gpu` | **WebGPU compute shaders** for `matVecAsync` (workgroup reduction), `matmulAsync` (16×16 tiled), `dotAsync` (tree reduction). Opt-in via `await gpu.initWebGPU()`; sync surface stays CPU for drop-in compatibility. Quantized kernels (Q4_K / Q6_K) are on the roadmap. |
+| `bun:gpu` | **WebGPU compute shaders** for `matVecAsync` (workgroup reduction), `matmulAsync` (16×16 tiled), `dotAsync` (tree reduction). `holdQ4K` / `holdQ6K` dequantize at hold-time so matVec consumes quantized weights transparently. Opt-in via `await gpu.initWebGPU()`; sync surface stays CPU for drop-in compatibility. |
 | `bun:llm` | Throws on load with a clear message — a WebGPU GGUF / Llama port is substantial future work. |
+| *(sub-module)* `parabun-browser-shims/quant` | Pure-JS dequantizers for **Q4_K**, **Q6_K**, **Q8_0** (the ggml block formats Parabun's native `bun:llm` uses). Consumed by `bun:gpu`'s `holdQ4K` / `holdQ6K`; also exported directly for callers writing their own GGUF loader. |
 
 Language surface that *doesn't* need a shim — all of these desugar to
 plain JS: `pure`, `memo` (statement and arrow forms, including
@@ -133,26 +134,34 @@ skip the pool and run sequentially on the calling thread.
 
 ## Roadmap to in-browser LLM inference
 
-The missing pieces for real `.pts` code doing LLM inference in a
-browser:
+Done:
+
+- ✅ **Q4_K / Q6_K / Q8_0 block dequantizers** — pure JS, matches ggml
+  block layouts byte-for-byte. Exported as
+  `parabun-browser-shims/quant`.
+- ✅ `gpu.holdQ4K(buf)` / `holdQ6K(buf)` dequantize once and feed
+  `matVec` / `matVecAsync` — quantized weights work end-to-end today
+  (slow path: decode → f32 → matVec).
+
+Remaining:
 
 1. **GGUF loader** — `fetch`-backed parser that streams metadata + weights
    from a URL. Tokenizer metadata (BPE merges / vocab) comes free from
    the same file.
-2. **Quantized matVec kernels** — WGSL compute shaders for Q4_K / Q6_K
-   / Q8_0. Each reads packed block-encoded weights, dequantizes on the
-   fly with the block scale + min, multiplies by the input vector,
-   accumulates.
+2. **Dequantize-inside-shader WGSL kernels** — operate directly on the
+   packed block formats so the intermediate f32 copy `holdQ4K`
+   currently produces is avoided. Halves bandwidth + memory for
+   quantized matVec on the GPU.
 3. **Forward pass** — RMSNorm, RoPE, attention, FFN, softmax. All f32
-   WGSL kernels reusing the compute pipeline pattern `matVecAsync` uses.
+   WGSL kernels reusing the compute pipeline pattern `matVecAsync`
+   uses.
 4. **Sampler** — argmax is trivial; top-k and nucleus sampling are
    small CPU-side passes over the final f32 logits vector.
 5. **Chat templates** — Llama-3 / ChatML / Mistral-Instruct parsed out
-   of the GGUF's `tokenizer.chat_template`; mostly string interpolation.
+   of the GGUF's `tokenizer.chat_template`; mostly string
+   interpolation.
 
-None are conceptually blocked. (2) is the critical path and the
-largest single piece — porting the Parabun native Q4_K kernel to WGSL
-is the natural first commit. Ping the repo if you want a specific
+None are conceptually blocked. Ping the repo if you want a specific
 module prioritized.
 
 ## Re-compiling the SIMD WASM

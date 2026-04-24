@@ -25,6 +25,7 @@
 // Nightly, Safari 17.4+.
 
 import simd from "./simd.js";
+import { dequantizeQ4K, dequantizeQ6K, Q4_K_BLOCK_SIZE, Q6_K_BLOCK_SIZE, QK_K } from "./quant.js";
 
 // ── Sync CPU path — always available ────────────────────────────────────
 
@@ -448,15 +449,38 @@ function hold(buf) {
   }
   return { kind: "cpu", buf };
 }
-function holdQ4K(buf) {
-  // Q4_K needs a dedicated dequantizing kernel (Parabun's native path
-  // uses one). The WGSL port is on the roadmap — see README "LLM
-  // inference" section. For now this is a CPU-only passthrough handle
-  // so callers don't crash.
-  return { kind: "q4k", buf };
+// Q4_K / Q6_K holds: dequantize the packed blocks into an f32 tensor
+// once at hold-time, then feed that f32 buffer into the regular
+// matVec / matVecAsync paths. Upload to GPU if WebGPU is live.
+//
+// A future upgrade runs the dequantization inside the compute shader
+// — saves memory (no intermediate f32 copy) and halves bandwidth on
+// GPU. The format-specific WGSL ports are tracked in the README
+// roadmap; this hold/dequant path is what makes quantized weights
+// usable end-to-end today.
+function holdQ4K(buf, totalElements) {
+  const nBlocks = buf.byteLength / Q4_K_BLOCK_SIZE;
+  if (nBlocks !== (nBlocks | 0)) {
+    throw new Error(`holdQ4K: buffer length ${buf.byteLength} not a multiple of ${Q4_K_BLOCK_SIZE}`);
+  }
+  const n = totalElements ?? nBlocks * QK_K;
+  const f32 = new Float32Array(n);
+  dequantizeQ4K(buf, f32, n);
+  const handle = { kind: "q4k", buf: f32 };
+  if (_wgState.available) handle._gpuBuffer = _uploadStorage(f32);
+  return handle;
 }
-function holdQ6K(buf) {
-  return { kind: "q6k", buf };
+function holdQ6K(buf, totalElements) {
+  const nBlocks = buf.byteLength / Q6_K_BLOCK_SIZE;
+  if (nBlocks !== (nBlocks | 0)) {
+    throw new Error(`holdQ6K: buffer length ${buf.byteLength} not a multiple of ${Q6_K_BLOCK_SIZE}`);
+  }
+  const n = totalElements ?? nBlocks * QK_K;
+  const f32 = new Float32Array(n);
+  dequantizeQ6K(buf, f32, n);
+  const handle = { kind: "q6k", buf: f32 };
+  if (_wgState.available) handle._gpuBuffer = _uploadStorage(f32);
+  return handle;
 }
 function release(held) {
   if (held && held._gpuBuffer) held._gpuBuffer.destroy();

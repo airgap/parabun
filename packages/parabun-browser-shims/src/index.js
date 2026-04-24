@@ -9,6 +9,7 @@ export * as parallel from "./parallel.js";
 export * as simd from "./simd.js";
 export * as gpu from "./gpu.js";
 export * as llm from "./llm.js";
+export * as quant from "./quant.js";
 
 // Bundler-agnostic alias map. Bundler configs can `spread` this into
 // their `resolve.alias` / `build.rollupOptions.plugins` to map the
