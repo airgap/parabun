@@ -598,6 +598,17 @@ function getDevOps(): any {
   return typeof fn === "function" ? fn() : null;
 }
 
+// Internal accessor that returns whatever devOps-shape functions the
+// active backend has wired, even if the full forward-pass surface is
+// incomplete. Used by incremental-port tests to exercise individual
+// kernels as they land. bun:llm never calls this — it only calls
+// getDevOps(), which returns null until the full surface is ready.
+function _getPartialDevOps(): any {
+  const b = resolveActive();
+  const fn = (b as any)._getPartialDevOps;
+  return typeof fn === "function" ? fn() : null;
+}
+
 export default {
   dot,
   matVec,
@@ -620,4 +631,5 @@ export default {
   dispose,
   describe,
   getDevOps,
+  _getPartialDevOps,
 };
