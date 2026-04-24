@@ -623,6 +623,45 @@ kernel void softmax_row_f32(
     for (uint i = tid; i < cols; i += bs) row[i] *= invSum;
 }
 
+// Device-resident f32 matVec: y[r] = sum_c M[r*k + c] * x[c]. 128
+// threads per threadgroup (4 warps), one threadgroup per row. float4
+// vectorized loads (k must be a multiple of 4). Cross-warp reduction
+// via a 4-element threadgroup partial array, then a second simd_sum
+// collapses lanes 0..3 of warp 0.
+kernel void matvec_dev_f32x4(
+    device const float4 *mat     [[buffer(0)]],
+    device const float4 *vec     [[buffer(1)]],
+    device       float  *outPtr  [[buffer(2)]],
+    constant     uint   &m       [[buffer(3)]],
+    constant     uint   &k_div4  [[buffer(4)]],
+    uint                 row     [[threadgroup_position_in_grid]],
+    uint                 tid     [[thread_position_in_threadgroup]])
+{
+    threadgroup float warpSum[4];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    if (row >= m) return;
+
+    device const float4 *mrow = mat + (ulong)row * (ulong)k_div4;
+    float acc = 0.0f;
+    for (uint i = tid; i < k_div4; i += 128u) {
+        float4 m4 = mrow[i];
+        float4 v4 = vec[i];
+        acc = fma(m4.x, v4.x, acc);
+        acc = fma(m4.y, v4.y, acc);
+        acc = fma(m4.z, v4.z, acc);
+        acc = fma(m4.w, v4.w, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0u) warpSum[warp] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (warp == 0u) {
+        acc = (tid < 4u) ? warpSum[lane] : 0.0f;
+        acc = simd_sum(acc);
+        if (tid == 0u) outPtr[row] = acc;
+    }
+}
+
 // out[h*headDim + i] = sum_t scores[h][t] * V[t][kvh][i]
 // Dispatch: threadgroups(nHeads, 1, 1), threads(headDim, 1, 1).
 kernel void attn_output_f32(
@@ -772,7 +811,8 @@ const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
   ["attnScores", "attn_scores_f32"],
   ["softmaxRow", "softmax_row_f32"],
   ["attnOutput", "attn_output_f32"],
-  // Future: matVec (matvec_f32x4), embedLookupQ4K, embedLookupQ6K, flashAttn.
+  ["matVec", "matvec_dev_f32x4"],
+  // Future: embedLookupQ4K, embedLookupQ6K, flashAttn.
 ];
 
 // Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
@@ -2043,6 +2083,90 @@ function launchSoftmaxRow(scores: GpuScratch, rows: number, cols: number, stride
   });
 }
 
+// Device-resident matVec (devOps). Dispatches to the f32x4 path when
+// k is a multiple of 4, or to the quantized pipelines when mat has a
+// qFormat tag. Writes result into `y` scratch — no host roundtrip.
+function launchMatVecDev(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number, k: number): void {
+  if (mat.released) throw new Error("bun:gpu metal: matVec called on released handle");
+  if (mat.buffer === 0n) throw new Error("bun:gpu metal: handle has no MTLBuffer");
+  const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
+  const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
+
+  if (mat.qFormat === "q4_K") {
+    if (matVecQ4KPipeline === 0n) throw new Error("bun:gpu metal: matVecQ4K pipeline missing");
+    if ((k & 0xff) !== 0) throw new Error("bun:gpu metal: q4_K matVec requires k % 256 == 0");
+    const kSblocks = k >>> 8;
+    encodeWith(encoder => {
+      msgSend_3_id!(encoder, sel("setComputePipelineState:"), matVecQ4KPipeline);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), mat.buffer, 0n, 0n);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 1n);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), yBuf, yOff, 2n);
+      const pM = new Uint32Array([m]);
+      const pKSb = new Uint32Array([kSblocks]);
+      msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
+      msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKSb), 4n, 4n);
+      const tgCount = new BigUint64Array([BigInt((m + 3) >>> 2), 1n, 1n]);
+      const threadsPerTg = new BigUint64Array([128n, 1n, 1n]);
+      msgSend_4_ptr_ptr!(
+        encoder,
+        sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+        ffiPtr!(tgCount),
+        ffiPtr!(threadsPerTg),
+      );
+    });
+    return;
+  }
+
+  if (mat.qFormat === "q6_K") {
+    if (matVecQ6KPipeline === 0n) throw new Error("bun:gpu metal: matVecQ6K pipeline missing");
+    if ((k & 0xff) !== 0) throw new Error("bun:gpu metal: q6_K matVec requires k % 256 == 0");
+    const kSblocks = k >>> 8;
+    encodeWith(encoder => {
+      msgSend_3_id!(encoder, sel("setComputePipelineState:"), matVecQ6KPipeline);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), mat.buffer, 0n, 0n);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 1n);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), yBuf, yOff, 2n);
+      const pM = new Uint32Array([m]);
+      const pKSb = new Uint32Array([kSblocks]);
+      msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
+      msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKSb), 4n, 4n);
+      const tgCount = new BigUint64Array([BigInt((m + 3) >>> 2), 1n, 1n]);
+      const threadsPerTg = new BigUint64Array([128n, 1n, 1n]);
+      msgSend_4_ptr_ptr!(
+        encoder,
+        sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+        ffiPtr!(tgCount),
+        ffiPtr!(threadsPerTg),
+      );
+    });
+    return;
+  }
+
+  // f32 path. k must be a multiple of 4 for the float4 kernel. The
+  // llama/qwen projection dims we target always satisfy this.
+  if (!devOpsPipes.matVec) throw new Error("bun:gpu metal: matVec kernel missing");
+  if ((k & 3) !== 0) throw new Error("bun:gpu metal: devOps matVec requires k % 4 == 0");
+  const k_div4 = k >>> 2;
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.matVec.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), mat.buffer, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), yBuf, yOff, 2n);
+    const pM = new Uint32Array([m]);
+    const pK = new Uint32Array([k_div4]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pK), 4n, 4n);
+    const tgCount = new BigUint64Array([BigInt(m), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([128n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
 // out[h*headDim + i] = sum_t scores[h][t] * V[t][kvh][i]
 // Dispatch: nHeads tgs, headDim threads.
 function launchAttnOutput(
@@ -2112,6 +2236,7 @@ function getDevOps(): any | null {
     attnScores: launchAttnScores,
     softmaxRow: launchSoftmaxRow,
     attnOutput: launchAttnOutput,
+    matVec: launchMatVecDev,
     // … more to come.
   };
 }
@@ -2142,6 +2267,7 @@ function _getPartialDevOps(): any {
   if (devOpsPipes.attnScores) out.attnScores = launchAttnScores;
   if (devOpsPipes.softmaxRow) out.softmaxRow = launchSoftmaxRow;
   if (devOpsPipes.attnOutput) out.attnOutput = launchAttnOutput;
+  if (devOpsPipes.matVec) out.matVec = launchMatVecDev;
   return out;
 }
 
