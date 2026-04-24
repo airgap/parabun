@@ -44,6 +44,9 @@ if [ "${BUILD_DEBUG:-0}" = "1" ]; then
     echo "=== Building Parabun (debug, no asan) ==="
     bun run build:debug:noasan
 
+    echo "=== Codesigning debug binary with JIT + debugger entitlements ==="
+    codesign --force --timestamp --sign - --entitlements entitlements.debug.plist ./build/debug/bun-debug
+
     echo "=== Smoke-test debug binary ==="
     ./build/debug/bun-debug --version
     ./build/debug/bun-debug -e 'console.log("hello from " + process.platform + "/" + process.arch)'
@@ -58,6 +61,18 @@ rm -rf build/release/cache/zig build/debug/cache/zig
 
 echo "=== Building Parabun (release) ==="
 bun run build:release
+
+# Ad-hoc codesign with the JIT entitlements. Required on Apple Silicon:
+# JavaScriptCore allocates executable pages via MAP_JIT, and an unsigned
+# binary without com.apple.security.cs.allow-jit is SIGKILL'd on first JIT
+# call. The `--sign -` form uses an ad-hoc identity (no Developer ID
+# needed) — Gatekeeper still won't trust it on download without further
+# steps, but users can `xattr -d com.apple.quarantine` to clear that. For
+# full notarization, a Developer ID identity + notarytool submission is
+# needed; we're not there yet.
+echo "=== Codesigning release binary with JIT entitlements ==="
+codesign --force --timestamp --sign - --entitlements entitlements.plist ./build/release/bun
+codesign --verify --deep --strict --verbose=2 ./build/release/bun
 
 echo "=== Smoke-test release binary ==="
 ./build/release/bun --revision
