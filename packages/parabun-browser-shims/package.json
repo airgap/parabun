@@ -1,6 +1,6 @@
 {
   "name": "parabun-browser-shims",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser-compatible shims for the bun:* modules Parabun parse-time desugaring pulls in (bun:arena, bun:signals, bun:wrap, bun:parallel, bun:simd, bun:gpu, bun:llm). Lets .pts / .pjs code compile and run in browsers — at varying fidelity per module.",
   "type": "module",
   "main": "./src/index.js",
@@ -12,6 +12,7 @@
     "./wrap": "./src/wrap.js",
     "./parallel": "./src/parallel.js",
     "./simd": "./src/simd.js",
+    "./simd.wasm": "./src/simd.wasm",
     "./gpu": "./src/gpu.js",
     "./llm": "./src/llm.js"
   },
@@ -19,6 +20,9 @@
     "src/",
     "README.md"
   ],
+  "scripts": {
+    "build:wasm": "bun scripts/build-wasm.ts"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -30,5 +34,8 @@
     "browser",
     "shims",
     "polyfill"
-  ]
+  ],
+  "devDependencies": {
+    "wabt": "1.0.37"
+  }
 }
