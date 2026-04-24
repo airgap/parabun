@@ -299,6 +299,67 @@ kernel void matVecQ6KF32(
     acc = simd_sum(acc);
     if (lane == 0) outPtr[row] = acc;
 }
+
+// ─── Device-resident kernel surface ("devOps") ──────────────────────────
+// Ports of the CUDA devOps kernels in src/js/bun/gpu/cuda.ts, rewritten
+// in MSL. Each is 1 thread per element (or per row) with no shared
+// state — simple to verify, same shape as the CUDA originals.
+//
+// bun:llm's forward pass requires the full devOps surface (~19 kernels);
+// getDevOps() below returns null until every kernel in the list is
+// present, so incremental session-by-session ports don't accidentally
+// flip bun:llm to a half-wired Metal path.
+
+// Embedding table lookup: out[i] = embd[tokenId * dModel + i].
+// Launch: ⌈dModel / 256⌉ TGs × 256 threads.
+kernel void embed_lookup_f32(
+    device const float *embd      [[buffer(0)]],
+    device       float *x         [[buffer(1)]],
+    constant     uint  &tokenId   [[buffer(2)]],
+    constant     uint  &dModel    [[buffer(3)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= dModel) return;
+    x[gid] = embd[(ulong)tokenId * (ulong)dModel + gid];
+}
+
+// x[i] += d[i]. Launch: ⌈n / 256⌉ × 256.
+kernel void accum_f32(
+    device       float *x         [[buffer(0)]],
+    device const float *d         [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    x[gid] += d[gid];
+}
+
+// x[i] += b[i]. Same shape as accum_f32; kept as a distinct kernel so
+// the bun:llm dispatch surface lines up with CUDA's.
+kernel void bias_add_f32(
+    device       float *x         [[buffer(0)]],
+    device const float *b         [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    x[gid] += b[gid];
+}
+
+// Fused SwiGLU: gate[i] = gate[i] * sigmoid(gate[i]) * up[i].
+// precise::exp on Apple GPUs maps to the hardware fast-path — close
+// to CUDAs __expf. fp32 accumulator throughout.
+kernel void silu_mul_f32(
+    device       float *gate      [[buffer(0)]],
+    device const float *up        [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    float g = gate[gid];
+    float sig = 1.0f / (1.0f + precise::exp(-g));
+    gate[gid] = g * sig * up[gid];
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -398,6 +459,33 @@ let matVecQ4KFn: bigint = 0n;
 let matVecQ4KPipeline: bigint = 0n;
 let matVecQ6KFn: bigint = 0n;
 let matVecQ6KPipeline: bigint = 0n;
+
+// ─── devOps state ───────────────────────────────────────────────────────
+// Map of kernel name → { fn, pipe } for each kernel compiled at probe
+// time. `devOpsComplete` flips to true only once every kernel in the
+// canonical list has compiled successfully — guards getDevOps() so
+// bun:llm doesn't flip to a partial Metal path.
+const devOpsPipes: Record<string, { fn: bigint; pipe: bigint }> = {};
+let devOpsComplete = false;
+
+// The canonical devOps kernel list, matching CUDA's surface. Each entry
+// is [ exposed-name, MSL-function-name ]. getDevOps() iterates this in
+// order; any missing entry keeps the full surface disabled.
+const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
+  ["embedLookup", "embed_lookup_f32"],
+  ["accum", "accum_f32"],
+  ["biasAdd", "bias_add_f32"],
+  ["siluMul", "silu_mul_f32"],
+  // Future: rmsnorm, add, ropeNorm, ropeNeox, kvStore, attnScores,
+  // softmaxRow, attnOutput, argmax, matVec (matvec_f32x4),
+  // embedLookupQ4K, embedLookupQ6K, flashAttn.
+];
+
+// Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
+// are present. Listed here so intermediate commits don't claim a
+// partially-wired devOps surface. Flip to true in the commit that lands
+// the final kernel.
+const DEV_OPS_CANONICAL_COMPLETE = false;
 
 function tryLoad(): boolean {
   if (metalLib !== null && objcBase !== null) return true;
@@ -608,6 +696,19 @@ function probe(): boolean {
     matVecQ6KFn = mvQ6.fn;
     matVecQ6KPipeline = mvQ6.pipe;
   }
+
+  // devOps kernels. Each is optional at the probe layer — partial
+  // compilation is fine, getDevOps() enforces the all-or-nothing
+  // rule that bun:llm needs.
+  let devOpsCount = 0;
+  for (const [name, mslName] of DEV_OPS_KERNELS) {
+    const k = compileKernel(lib, mslName);
+    if (k !== null) {
+      devOpsPipes[name] = { fn: k.fn, pipe: k.pipe };
+      devOpsCount++;
+    }
+  }
+  devOpsComplete = devOpsCount === DEV_OPS_KERNELS.length && DEV_OPS_CANONICAL_COMPLETE;
 
   const queue = msgSend_2!(dev, sel("newCommandQueue"));
   if (queue === 0n) {
@@ -1261,6 +1362,233 @@ function launchMatVecQ6K(mat: GpuHandle, vec: Float32Array, m: number, k: number
   return launchMatVecQ(mat, vec, m, k, matVecQ6KPipeline, "q6_K");
 }
 
+// ─── GpuScratch: device-only buffer ─────────────────────────────────────
+// Mirror of the cuda.ts GpuScratch — a pure MTLBuffer with no host view,
+// used by bun:llm as residency for the KV cache, residual stream, and
+// all intermediate activations. Separate from GpuHandle because
+// GpuScratch has no user-supplied typed array backing.
+
+type GpuScratch = {
+  __bunGpuScratch: true;
+  backend: "metal";
+  type: "f32" | "i32";
+  length: number;
+  buffer: bigint;
+  released: boolean;
+  // Slices share the underlying MTLBuffer with an offset. freeScratch
+  // on a slice just marks it released — the parent owns the actual
+  // Metal allocation.
+  isSlice?: boolean;
+  sliceOffsetBytes?: bigint;
+};
+
+function isGpuScratch(x: unknown): x is GpuScratch {
+  return typeof x === "object" && x !== null && (x as any).__bunGpuScratch === true;
+}
+
+function allocScratch(length: number, type: "f32" | "i32" = "f32"): GpuScratch {
+  if (!Number.isInteger(length) || length < 0) {
+    throw new RangeError(`length must be a non-negative integer; got ${length}`);
+  }
+  if (!probe()) throw new Error("bun:gpu metal: backend unavailable");
+  const bytes = BigInt(length * 4);
+  let buffer: bigint = 0n;
+  if (length > 0) {
+    buffer = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (buffer === 0n) throw new Error("bun:gpu metal: newBufferWithLength(scratch) failed");
+  }
+  return {
+    __bunGpuScratch: true,
+    backend: "metal",
+    type,
+    length,
+    buffer,
+    released: false,
+  };
+}
+
+function scratchSlice(s: GpuScratch, elemOffset: number, length: number): GpuScratch {
+  if (s.released) throw new Error("bun:gpu metal: slice on released scratch");
+  if (elemOffset < 0 || length < 0 || elemOffset + length > s.length) {
+    throw new RangeError(`slice out of bounds: offset=${elemOffset}, length=${length}, total=${s.length}`);
+  }
+  const parentOffset = s.sliceOffsetBytes ?? 0n;
+  return {
+    __bunGpuScratch: true,
+    backend: "metal",
+    type: s.type,
+    length,
+    buffer: s.buffer, // shares MTLBuffer with parent
+    released: false,
+    isSlice: true,
+    sliceOffsetBytes: parentOffset + BigInt(elemOffset * 4),
+  };
+}
+
+function freeScratch(s: GpuScratch): void {
+  if (!isGpuScratch(s)) throw new TypeError("freeScratch expected a GpuScratch");
+  if (s.released) return;
+  if (s.isSlice) {
+    s.released = true;
+    return;
+  }
+  if (s.buffer !== 0n) objcRelease(s.buffer);
+  s.buffer = 0n;
+  s.released = true;
+}
+
+function uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOffset = 0): void {
+  if (s.released) throw new Error("bun:gpu metal: uploadScratch on released");
+  if (dstElemOffset + src.length > s.length) {
+    throw new RangeError(`uploadScratch: ${dstElemOffset} + ${src.length} > ${s.length}`);
+  }
+  if (s.buffer === 0n) return;
+  const contents = msgSend_2!(s.buffer, sel("contents"));
+  if (contents === 0n) throw new Error("bun:gpu metal: scratch contents null");
+  const baseOffset = Number(s.sliceOffsetBytes ?? 0n);
+  const dstBytes = baseOffset + dstElemOffset * 4;
+  const view =
+    src instanceof Float32Array
+      ? new Float32Array(ffiToArrayBuffer!(Number(contents) + dstBytes, 0, src.length * 4))
+      : new Int32Array(ffiToArrayBuffer!(Number(contents) + dstBytes, 0, src.length * 4));
+  view.set(src as any);
+}
+
+function downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemOffset = 0): void {
+  if (s.released) throw new Error("bun:gpu metal: downloadScratch on released");
+  if (srcElemOffset + dst.length > s.length) {
+    throw new RangeError(`downloadScratch: ${srcElemOffset} + ${dst.length} > ${s.length}`);
+  }
+  if (s.buffer === 0n) return;
+  const contents = msgSend_2!(s.buffer, sel("contents"));
+  if (contents === 0n) throw new Error("bun:gpu metal: scratch contents null");
+  const baseOffset = Number(s.sliceOffsetBytes ?? 0n);
+  const srcBytes = baseOffset + srcElemOffset * 4;
+  const view =
+    dst instanceof Float32Array
+      ? new Float32Array(ffiToArrayBuffer!(Number(contents) + srcBytes, 0, dst.length * 4))
+      : new Int32Array(ffiToArrayBuffer!(Number(contents) + srcBytes, 0, dst.length * 4));
+  dst.set(view as any);
+}
+
+// ─── devOps kernel launchers ────────────────────────────────────────────
+// Unified encoder/dispatch for the 1-thread-per-element kernels. Each
+// takes 2 GpuScratch args (for kernels of that shape) plus an optional
+// uint constant. Commits + waits synchronously — same shape as
+// launchMatVecQ so bun:llm's call sites block until the kernel finishes.
+function encodeWith(fn: (encoder: bigint, cmdBuf: bigint) => void): void {
+  const cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+  if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+  const encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+  if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+  try {
+    fn(encoder, cmdBuf);
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+  } catch (e) {
+    msgSend_2!(encoder, sel("endEncoding"));
+    throw e;
+  }
+}
+
+function scratchBufferAndOffset(s: GpuScratch): { buf: bigint; offset: bigint } {
+  if (s.released) throw new Error("bun:gpu metal: op on released scratch");
+  return { buf: s.buffer, offset: s.sliceOffsetBytes ?? 0n };
+}
+
+// embed_lookup: x[0..dModel) <- embd[tokenId * dModel + 0..dModel).
+function launchEmbedLookup(embd: GpuScratch, x: GpuScratch, tokenId: number, dModel: number): void {
+  if (!devOpsPipes.embedLookup) throw new Error("bun:gpu metal: embedLookup kernel missing");
+  const { buf: eBuf, offset: eOff } = scratchBufferAndOffset(embd);
+  const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.embedLookup.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), eBuf, eOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 1n);
+    const pTok = new Uint32Array([tokenId]);
+    const pD = new Uint32Array([dModel]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pTok), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pD), 4n, 3n);
+    const threads = new BigUint64Array([BigInt(dModel), 1n, 1n]);
+    const tpt = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+  });
+}
+
+// Shared launch pattern for the elementwise 2-buffer + uint-length
+// kernels (accum, biasAdd, siluMul).
+function launchElementwise2(pipe: bigint, a: GpuScratch, b: GpuScratch, n: number): void {
+  const { buf: aBuf, offset: aOff } = scratchBufferAndOffset(a);
+  const { buf: bBuf, offset: bOff } = scratchBufferAndOffset(b);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), aBuf, aOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), bBuf, bOff, 1n);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 2n);
+    const threads = new BigUint64Array([BigInt(n), 1n, 1n]);
+    const tpt = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+  });
+}
+
+function launchAccum(x: GpuScratch, d: GpuScratch, n: number): void {
+  if (!devOpsPipes.accum) throw new Error("bun:gpu metal: accum kernel missing");
+  launchElementwise2(devOpsPipes.accum.pipe, x, d, n);
+}
+
+function launchBiasAdd(x: GpuScratch, b: GpuScratch, n: number): void {
+  if (!devOpsPipes.biasAdd) throw new Error("bun:gpu metal: biasAdd kernel missing");
+  launchElementwise2(devOpsPipes.biasAdd.pipe, x, b, n);
+}
+
+function launchSiluMul(gate: GpuScratch, up: GpuScratch, n: number): void {
+  if (!devOpsPipes.siluMul) throw new Error("bun:gpu metal: siluMul kernel missing");
+  launchElementwise2(devOpsPipes.siluMul.pipe, gate, up, n);
+}
+
+// Public devOps table. Returns null until every kernel in the canonical
+// list is compiled AND the full port is flagged complete — bun:llm's
+// forward pass is all-or-nothing, so partial tables would mean silent
+// runtime crashes on kernels we haven't ported yet.
+function getDevOps(): any | null {
+  if (!probe()) return null;
+  if (!devOpsComplete) return null;
+  return {
+    allocScratch,
+    freeScratch,
+    uploadScratch,
+    downloadScratch,
+    scratchSlice,
+    embedLookup: launchEmbedLookup,
+    accum: launchAccum,
+    biasAdd: launchBiasAdd,
+    siluMul: launchSiluMul,
+    // … more to come.
+  };
+}
+
+// Partial devOps accessor for tests / incremental validation. Exposes
+// whichever kernel wrappers have been wired, regardless of
+// devOpsComplete. bun:llm does NOT call this; it's only for
+// test/bench harnesses.
+function _getPartialDevOps(): any {
+  if (!probe()) return null;
+  const out: Record<string, unknown> = {
+    allocScratch,
+    freeScratch,
+    uploadScratch,
+    downloadScratch,
+    scratchSlice,
+  };
+  if (devOpsPipes.embedLookup) out.embedLookup = launchEmbedLookup;
+  if (devOpsPipes.accum) out.accum = launchAccum;
+  if (devOpsPipes.biasAdd) out.biasAdd = launchBiasAdd;
+  if (devOpsPipes.siluMul) out.siluMul = launchSiluMul;
+  return out;
+}
+
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
@@ -1633,6 +1961,15 @@ function dispose(): void {
     objcRelease(simdMapFn);
     simdMapFn = 0n;
   }
+  for (const name of Object.keys(devOpsPipes)) {
+    const k = devOpsPipes[name];
+    if (k) {
+      objcRelease(k.pipe);
+      objcRelease(k.fn);
+    }
+    delete devOpsPipes[name];
+  }
+  devOpsComplete = false;
   if (metalLibraryObj !== 0n) {
     objcRelease(metalLibraryObj);
     metalLibraryObj = 0n;
@@ -1668,6 +2005,15 @@ export default {
   holdQ6K,
   releaseHandle,
   releasePinned,
+  allocScratch,
+  freeScratch,
+  uploadScratch,
+  downloadScratch,
+  scratchSlice,
+  getDevOps,
+  // Internal accessor for test / bench harnesses to exercise partial
+  // devOps wiring before the full forward-pass surface is ported.
+  _getPartialDevOps,
   dispose,
   getDeviceName,
   getHasUnifiedMemory,
