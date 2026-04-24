@@ -770,6 +770,77 @@ kernel void matvec_dev_f32x4(
     }
 }
 
+// Fused flash-attention. One TG per head, block = next-warp-multiple ≥
+// headDim. Online softmax (Rabe & Staats) keeps running (max, sum, out);
+// per-step correction rescales runSum/sOut when a new max arrives.
+// headDim ≤ 256 (sQ/sOut sizing). nwarps ≤ 8 → warpRed[8].
+kernel void flash_attn_f32(
+    device const float *q          [[buffer(0)]],
+    device const float *kCache     [[buffer(1)]],
+    device const float *vCache     [[buffer(2)]],
+    device       float *outv       [[buffer(3)]],
+    constant     uint  &headDim    [[buffer(4)]],
+    constant     uint  &kvRowSize  [[buffer(5)]],
+    constant     uint  &groupSize  [[buffer(6)]],
+    constant     uint  &ctxLen     [[buffer(7)]],
+    constant     float &scale      [[buffer(8)]],
+    uint                h          [[threadgroup_position_in_grid]],
+    uint                tid        [[thread_position_in_threadgroup]],
+    uint                bs         [[threads_per_threadgroup]])
+{
+    threadgroup float sQ[256];
+    threadgroup float sOut[256];
+    threadgroup float sScore;
+    threadgroup float warpRed[8];
+
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint nwarps = (bs + 31u) >> 5;
+    uint kvh = h / groupSize;
+
+    if (tid < headDim) {
+        sQ[tid] = q[h * headDim + tid];
+        sOut[tid] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float runMax = -INFINITY;
+    float runSum = 0.0f;
+
+    for (uint t = 0u; t < ctxLen; t++) {
+        float local = 0.0f;
+        if (tid < headDim) {
+            float kv = kCache[(ulong)t * (ulong)kvRowSize + (ulong)(kvh * headDim + tid)];
+            local = sQ[tid] * kv;
+        }
+        local = simd_sum(local);
+        if (lane == 0u) warpRed[warp] = local;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (warp == 0u) {
+            local = (tid < nwarps) ? warpRed[tid] : 0.0f;
+            local = simd_sum(local);
+            if (tid == 0u) sScore = local * scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float score = sScore;
+        float newMax = fmax(runMax, score);
+        float correction = precise::exp(runMax - newMax);
+        float e = precise::exp(score - newMax);
+        runSum = runSum * correction + e;
+        runMax = newMax;
+
+        if (tid < headDim) {
+            float vv = vCache[(ulong)t * (ulong)kvRowSize + (ulong)(kvh * headDim + tid)];
+            sOut[tid] = sOut[tid] * correction + e * vv;
+        }
+    }
+
+    if (tid < headDim) {
+        outv[h * headDim + tid] = sOut[tid] / runSum;
+    }
+}
+
 // out[h*headDim + i] = sum_t scores[h][t] * V[t][kvh][i]
 // Dispatch: threadgroups(nHeads, 1, 1), threads(headDim, 1, 1).
 kernel void attn_output_f32(
@@ -922,14 +993,14 @@ const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
   ["matVec", "matvec_dev_f32x4"],
   ["embedLookupQ4K", "embed_lookup_q4k_f32"],
   ["embedLookupQ6K", "embed_lookup_q6k_f32"],
-  // Future: flashAttn.
+  ["flashAttn", "flash_attn_f32"],
 ];
 
 // Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
 // are present. Listed here so intermediate commits don't claim a
 // partially-wired devOps surface. Flip to true in the commit that lands
 // the final kernel.
-const DEV_OPS_CANONICAL_COMPLETE = false;
+const DEV_OPS_CANONICAL_COMPLETE = true;
 
 function tryLoad(): boolean {
   if (metalLib !== null && objcBase !== null) return true;
@@ -2025,9 +2096,23 @@ function launchAccum(x: GpuScratch, d: GpuScratch, n: number): void {
   launchElementwise2(devOpsPipes.accum.pipe, x, d, n);
 }
 
-function launchBiasAdd(x: GpuScratch, b: GpuScratch, n: number): void {
+// biasAdd accepts the bias as either a GpuScratch or a GpuHandle. In
+// bun:llm's forward pass biases are device-resident weights (handles);
+// tests pass scratches for convenience.
+function launchBiasAdd(x: GpuScratch, b: GpuScratch | GpuHandle, n: number): void {
   if (!devOpsPipes.biasAdd) throw new Error("bun:gpu metal: biasAdd kernel missing");
-  launchElementwise2(devOpsPipes.biasAdd.pipe, x, b, n);
+  const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
+  const { buf: bBuf, offset: bOff } = bufferAndOffsetFor(b);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.biasAdd.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), bBuf, bOff, 1n);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 2n);
+    const threads = new BigUint64Array([BigInt(n), 1n, 1n]);
+    const tpt = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+  });
 }
 
 function launchSiluMul(gate: GpuScratch, up: GpuScratch, n: number): void {
@@ -2076,10 +2161,10 @@ function launchKvStore(src: GpuScratch, cache: GpuScratch, pos: number, kvRowSiz
 // y[i] = x[i] * rsqrt(mean(x^2) + eps) * w[i]. Single threadgroup of
 // 256 threads covers any typical Llama hidden dim strided (n up to
 // ~65k is fine; beyond that bump bs via a future re-issued kernel).
-function launchRmsnorm(x: GpuScratch, w: GpuScratch, y: GpuScratch, n: number, eps: number): void {
+function launchRmsnorm(x: GpuScratch, w: GpuScratch | GpuHandle, y: GpuScratch, n: number, eps: number): void {
   if (!devOpsPipes.rmsnorm) throw new Error("bun:gpu metal: rmsnorm kernel missing");
   const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
-  const { buf: wBuf, offset: wOff } = scratchBufferAndOffset(w);
+  const { buf: wBuf, offset: wOff } = bufferAndOffsetFor(w);
   const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
   encodeWith(encoder => {
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.rmsnorm.pipe);
@@ -2164,6 +2249,19 @@ function launchRopeNorm(x: GpuScratch, invFreq: GpuScratch, nHeads: number, head
 }
 function launchRopeNeox(x: GpuScratch, invFreq: GpuScratch, nHeads: number, headDim: number, pos: number): void {
   launchRope(x, invFreq, nHeads, headDim, pos, "neox");
+}
+
+// Unified rope entry matching bun:llm's devOps signature. mode is
+// "norm" (interleaved) or "neox" (split halves).
+function launchRopeDispatch(
+  x: GpuScratch,
+  invFreq: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  pos: number,
+  mode: "norm" | "neox",
+): void {
+  launchRope(x, invFreq, nHeads, headDim, pos, mode);
 }
 
 // Attention scores: scores[h*scoreStride + t] = scale * dot(Q[h], K[t][kvh]).
@@ -2363,6 +2461,60 @@ function launchAttnOutput(
   });
 }
 
+// Fused flash-attention. One TG per head, bs = max(32, next-warp-multiple
+// ≥ headDim). Writes out[h*headDim + i]; no scores scratch needed.
+function launchFlashAttn(
+  q: GpuScratch,
+  kCache: GpuScratch,
+  vCache: GpuScratch,
+  out: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  kvRowSize: number,
+  groupSize: number,
+  ctxLen: number,
+  scale: number,
+): void {
+  if (!devOpsPipes.flashAttn) throw new Error("bun:gpu metal: flashAttn kernel missing");
+  if (headDim > 256) throw new Error(`bun:gpu metal: flashAttn headDim ${headDim} exceeds 256`);
+  const { buf: qBuf, offset: qOff } = scratchBufferAndOffset(q);
+  const { buf: kBuf, offset: kOff } = scratchBufferAndOffset(kCache);
+  const { buf: vBuf, offset: vOff } = scratchBufferAndOffset(vCache);
+  const { buf: oBuf, offset: oOff } = scratchBufferAndOffset(out);
+  const bs = Math.max(32, ((headDim + 31) >> 5) << 5);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.flashAttn.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), qBuf, qOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), kBuf, kOff, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), vBuf, vOff, 2n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), oBuf, oOff, 3n);
+    const pHd = new Uint32Array([headDim]);
+    const pKv = new Uint32Array([kvRowSize]);
+    const pGs = new Uint32Array([groupSize]);
+    const pCtx = new Uint32Array([ctxLen]);
+    const pScale = new Float32Array([scale]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pHd), 4n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKv), 4n, 5n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pGs), 4n, 6n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pCtx), 4n, 7n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pScale), 4n, 8n);
+    const tgCount = new BigUint64Array([BigInt(nHeads), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([BigInt(bs), 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
+// No-op on Metal: every encodeWith() call ends in waitUntilCompleted,
+// so there's nothing outstanding by the time control returns to JS.
+// Kept as a method for bun:llm surface parity with the CUDA backend,
+// where cuCtxSynchronize() is needed after async launches.
+function syncNoop(): void {}
+
 // Public devOps table. Returns null until every kernel in the canonical
 // list is compiled AND the full port is flagged complete — bun:llm's
 // forward pass is all-or-nothing, so partial tables would mean silent
@@ -2390,7 +2542,9 @@ function getDevOps(): any | null {
     softmaxRow: launchSoftmaxRow,
     attnOutput: launchAttnOutput,
     matVec: launchMatVecDev,
-    // … more to come.
+    flashAttn: launchFlashAttn,
+    rope: launchRopeDispatch,
+    sync: syncNoop,
   };
 }
 
@@ -2421,6 +2575,9 @@ function _getPartialDevOps(): any {
   if (devOpsPipes.softmaxRow) out.softmaxRow = launchSoftmaxRow;
   if (devOpsPipes.attnOutput) out.attnOutput = launchAttnOutput;
   if (devOpsPipes.matVec) out.matVec = launchMatVecDev;
+  if (devOpsPipes.flashAttn) out.flashAttn = launchFlashAttn;
+  if (devOpsPipes.ropeNorm && devOpsPipes.ropeNeox) out.rope = launchRopeDispatch;
+  out.sync = syncNoop;
   return out;
 }
 
