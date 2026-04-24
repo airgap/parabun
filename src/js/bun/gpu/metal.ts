@@ -40,6 +40,12 @@ type GpuHandle = {
   buffer: bigint; // MTLBuffer id (0n once released or on non-Metal hosts)
   view: FArray; // Original typed array — kept alive so the NOCOPY pointer stays valid
   released: boolean;
+  // Populated by holdQ4K / holdQ6K. When set, `buffer` holds the raw
+  // packed super-block bytes (144 B/block for q4_K, 210 B/block for
+  // q6_K) and matVec dispatches to the Q-aware kernel instead of the
+  // f32 one. `view` is a stub Float32Array(0) on these handles —
+  // callers must not read it.
+  qFormat?: "q4_K" | "q6_K";
 };
 
 function isGpuHandle(x: unknown): x is GpuHandle {
@@ -160,6 +166,139 @@ kernel void matmulF32(
 
     if (row < M && col < N) C[(ulong)row * N + col] = acc;
 }
+
+// ── Q4_K direct matVec ─────────────────────────────────────────────────────
+// Port of the CUDA matvec_q4k_f32 kernel (src/js/bun/gpu/cuda.ts).
+// Reads raw 144-byte super-blocks, dequantizes on chip, accumulates in f32.
+// k must be a multiple of 256 (super-block size). Layout per row:
+// (k/256) super-blocks × 144 bytes.
+//
+// Layout: 1 simdgroup (32 threads) per row; 4 simdgroups per threadgroup =
+// 128 threads / TG = 4 rows / TG. Each lane handles 8 elements / sb (one
+// per sub-block sb_idx 0..7, at column = lane). simd_sum reduces within
+// a simdgroup; lane 0 of each simdgroup writes the output.
+//
+// Apple Silicon's simdgroup width is 32 (matches CUDA warps), so the
+// shuffle/reduce pattern transfers directly.
+kernel void matVecQ4KF32(
+    device const uchar *mat       [[buffer(0)]],
+    device const float *vec       [[buffer(1)]],
+    device       float *outPtr    [[buffer(2)]],
+    constant     uint  &m         [[buffer(3)]],
+    constant     uint  &kSblocks  [[buffer(4)]],                  // k / 256
+    uint                tid       [[thread_index_in_threadgroup]],
+    uint                tgid      [[threadgroup_position_in_grid]])
+{
+    uint lane = tid & 31u;
+    uint warpInBlock = tid >> 5;   // 0..3
+    uint row = tgid * 4u + warpInBlock;
+    if (row >= m) return;
+
+    device const uchar *rowBase = mat + (ulong)row * (ulong)kSblocks * 144u;
+
+    float acc = 0.0f;
+    for (uint sb = 0; sb < kSblocks; sb++) {
+        device const uchar *blk = rowBase + (ulong)sb * 144u;
+
+        ushort dh  = (ushort)blk[0] | ((ushort)blk[1] << 8);
+        ushort dmh = (ushort)blk[2] | ((ushort)blk[3] << 8);
+        float d    = float(as_type<half>(dh));
+        float dmin = float(as_type<half>(dmh));
+
+        uint sc0_3 = (uint)blk[4] | ((uint)blk[5] << 8)
+                   | ((uint)blk[6] << 16) | ((uint)blk[7] << 24);
+        uint sc4_7 = (uint)blk[8] | ((uint)blk[9] << 8)
+                   | ((uint)blk[10] << 16) | ((uint)blk[11] << 24);
+        uint sc8_11 = (uint)blk[12] | ((uint)blk[13] << 8)
+                    | ((uint)blk[14] << 16) | ((uint)blk[15] << 24);
+
+        for (uint k_i = 0; k_i < 8u; k_i++) {
+            uint sb_idx   = k_i;
+            uint qi       = sb_idx * 32u + lane;                   // 0..255
+            uint byte_idx = 32u * (sb_idx >> 1) + lane;            // into qs[128]
+            uchar byte    = blk[16u + byte_idx];
+            uint q = (sb_idx & 1u) ? ((uint)byte >> 4) : ((uint)byte & 0xFu);
+
+            uint sc, mn;
+            if (sb_idx < 4u) {
+                uint s_sc = (sc0_3 >> (sb_idx * 8u)) & 0xFFu;
+                uint s_mn = (sc4_7 >> (sb_idx * 8u)) & 0xFFu;
+                sc = s_sc & 63u;
+                mn = s_mn & 63u;
+            } else {
+                // llama.cpp get_scale_min_k4 unpacking
+                uint s_jp4 = (sc8_11 >> ((sb_idx - 4u) * 8u)) & 0xFFu;
+                uint s_jm4 = (sc0_3 >> ((sb_idx - 4u) * 8u)) & 0xFFu;
+                uint s_j   = (sc4_7 >> ((sb_idx - 4u) * 8u)) & 0xFFu;
+                sc = (s_jp4 & 0xFu) | (((s_jm4 >> 6) & 3u) << 4);
+                mn = ((s_jp4 >> 4) & 0xFu) | (((s_j >> 6) & 3u) << 4);
+            }
+
+            float w = d * (float)sc * (float)q - dmin * (float)mn;
+            float v = vec[sb * 256u + qi];
+            acc = fma(w, v, acc);
+        }
+    }
+
+    acc = simd_sum(acc);
+    if (lane == 0) outPtr[row] = acc;
+}
+
+// ── Q6_K direct matVec ─────────────────────────────────────────────────────
+// Port of matvec_q6k_f32. 210-byte super-blocks, 256 elements:
+//   +0..+127    ql[128]   — 4 low bits of each 6-bit quant (packed)
+//   +128..+191  qh[64]    — 2 high bits of each 6-bit quant (packed)
+//   +192..+207  sc[16]    — int8 scales (signed)
+//   +208..+209  fp16 d    — super-block scale
+// Same 1-simdgroup-per-row, 4-per-TG layout as Q4_K.
+kernel void matVecQ6KF32(
+    device const uchar *mat       [[buffer(0)]],
+    device const float *vec       [[buffer(1)]],
+    device       float *outPtr    [[buffer(2)]],
+    constant     uint  &m         [[buffer(3)]],
+    constant     uint  &kSblocks  [[buffer(4)]],                  // k / 256
+    uint                tid       [[thread_index_in_threadgroup]],
+    uint                tgid      [[threadgroup_position_in_grid]])
+{
+    uint lane = tid & 31u;
+    uint warpInBlock = tid >> 5;
+    uint row = tgid * 4u + warpInBlock;
+    if (row >= m) return;
+
+    device const uchar *rowBase = mat + (ulong)row * (ulong)kSblocks * 210u;
+
+    float acc = 0.0f;
+    for (uint sb = 0; sb < kSblocks; sb++) {
+        device const uchar *blk = rowBase + (ulong)sb * 210u;
+        ushort dh = (ushort)blk[208] | ((ushort)blk[209] << 8);
+        float d = float(as_type<half>(dh));
+
+        for (uint k_i = 0; k_i < 8u; k_i++) {
+            uint qi       = lane + k_i * 32u;
+            uint g        = k_i >> 2;
+            uint which    = k_i & 3u;
+            uint ql_idx   = g * 64u + (which & 1u) * 32u + lane;  // 0..127
+            uint qh_idx   = g * 32u + lane;                        // 0..63
+            uint sc_idx   = g * 8u + which * 2u + (lane >> 4);     // 0..15
+
+            uint qlv = blk[ql_idx];
+            uint qhv = blk[128u + qh_idx];
+            // int8 scale — reinterpret as signed.
+            int scv = (int)(char)blk[192u + sc_idx];
+
+            uint nibble = (which < 2u) ? (qlv & 0xFu) : (qlv >> 4);
+            uint high2  = (qhv >> (which * 2u)) & 3u;
+            int q_signed = (int)(nibble | (high2 << 4)) - 32;
+
+            float w = d * (float)scv * (float)q_signed;
+            float v = vec[sb * 256u + qi];
+            acc = fma(w, v, acc);
+        }
+    }
+
+    acc = simd_sum(acc);
+    if (lane == 0) outPtr[row] = acc;
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -255,6 +394,10 @@ let matVecFn: bigint = 0n;
 let matVecPipeline: bigint = 0n;
 let matmulFn: bigint = 0n;
 let matmulPipeline: bigint = 0n;
+let matVecQ4KFn: bigint = 0n;
+let matVecQ4KPipeline: bigint = 0n;
+let matVecQ6KFn: bigint = 0n;
+let matVecQ6KPipeline: bigint = 0n;
 
 function tryLoad(): boolean {
   if (metalLib !== null && objcBase !== null) return true;
@@ -450,8 +593,28 @@ function probe(): boolean {
   matmulFn = mm.fn;
   matmulPipeline = mm.pipe;
 
+  // Quantized matVec kernels. These are optional at the probe layer —
+  // if the device's MSL compiler can't handle the Q-K source (shouldn't
+  // happen on any Apple Silicon / Intel Mac GPU shipped in the last 5
+  // years), we still return a usable backend without the holdQ4K /
+  // holdQ6K path.
+  const mvQ4 = compileKernel(lib, "matVecQ4KF32");
+  if (mvQ4 !== null) {
+    matVecQ4KFn = mvQ4.fn;
+    matVecQ4KPipeline = mvQ4.pipe;
+  }
+  const mvQ6 = compileKernel(lib, "matVecQ6KF32");
+  if (mvQ6 !== null) {
+    matVecQ6KFn = mvQ6.fn;
+    matVecQ6KPipeline = mvQ6.pipe;
+  }
+
   const queue = msgSend_2!(dev, sel("newCommandQueue"));
   if (queue === 0n) {
+    if (matVecQ6KPipeline !== 0n) objcRelease(matVecQ6KPipeline);
+    if (matVecQ6KFn !== 0n) objcRelease(matVecQ6KFn);
+    if (matVecQ4KPipeline !== 0n) objcRelease(matVecQ4KPipeline);
+    if (matVecQ4KFn !== 0n) objcRelease(matVecQ4KFn);
     objcRelease(matmulPipeline);
     objcRelease(matmulFn);
     objcRelease(matVecPipeline);
@@ -459,6 +622,10 @@ function probe(): boolean {
     objcRelease(simdMapPipeline);
     objcRelease(simdMapFn);
     objcRelease(lib);
+    matVecQ6KPipeline = 0n;
+    matVecQ6KFn = 0n;
+    matVecQ4KPipeline = 0n;
+    matVecQ4KFn = 0n;
     matmulPipeline = 0n;
     matmulFn = 0n;
     matVecPipeline = 0n;
@@ -944,6 +1111,156 @@ const MIN_MATVEC_WINS_ELEMS = 1 << 20;
 // Below this the triple-loop fallback beats the MTLBuffer staging cost.
 const MIN_MATMUL_DISPATCH_FLOPS = 1 << 24;
 
+// ─── Q4_K / Q6_K residency + dispatch ─────────────────────────────────────
+// Block sizes match ggml: 144 bytes / 256 elements for q4_K, 210 / 256
+// for q6_K.
+const Q4K_BLOCK_BYTES = 144;
+const Q6K_BLOCK_BYTES = 210;
+
+// Allocate an MTLBuffer holding the raw packed super-block bytes and
+// return a GpuHandle with `qFormat` set. The `view` stub is a zero-
+// length Float32Array so handle-shape code (e.g. gpu.ts's `length`
+// probe) stays happy; callers MUST NOT read it.
+function holdQBytes(blocks: Uint8Array, nElems: number, blockBytes: number, qFormat: "q4_K" | "q6_K"): GpuHandle {
+  if (!(blocks instanceof Uint8Array)) {
+    throw new TypeError(
+      `hold${qFormat === "q4_K" ? "Q4K" : "Q6K"} requires Uint8Array; got ${(blocks as any)?.constructor?.name ?? typeof blocks}`,
+    );
+  }
+  if (!Number.isInteger(nElems) || nElems <= 0 || (nElems & 255) !== 0) {
+    throw new RangeError(
+      `hold${qFormat === "q4_K" ? "Q4K" : "Q6K"}: nElems must be a positive multiple of 256; got ${nElems}`,
+    );
+  }
+  const expectedBytes = (nElems / 256) * blockBytes;
+  if (blocks.byteLength !== expectedBytes) {
+    throw new RangeError(
+      `hold${qFormat === "q4_K" ? "Q4K" : "Q6K"}: expected ${expectedBytes} bytes for ${nElems} elements; got ${blocks.byteLength}`,
+    );
+  }
+  if (!probe()) throw new Error("bun:gpu metal: backend unavailable");
+  const kernelReady = qFormat === "q4_K" ? matVecQ4KPipeline !== 0n : matVecQ6KPipeline !== 0n;
+  if (!kernelReady) {
+    throw new Error(`bun:gpu metal: ${qFormat} kernel failed to compile at probe time`);
+  }
+
+  // Copy the packed bytes into an MTLBuffer. We cannot NOCOPY this as
+  // we do for Float32Array because the source is a Uint8Array and we
+  // can't guarantee page alignment; a one-time memcpy at hold time is
+  // negligible next to the persistent residency win.
+  const bytes = BigInt(blocks.byteLength);
+  const buf = msgSend_5_ptr_u64_u64_ret!(
+    device,
+    sel("newBufferWithBytes:length:options:"),
+    ffiPtr!(blocks),
+    bytes,
+    BigInt(MTL_STORAGE_MODE_SHARED),
+  );
+  if (buf === 0n) throw new Error(`bun:gpu metal: newBufferWithBytes failed for ${qFormat}`);
+
+  return {
+    __bunGpuHandle: true,
+    backend: "metal",
+    type: "f32",
+    length: nElems,
+    buffer: buf,
+    view: new Float32Array(0),
+    released: false,
+    qFormat,
+  };
+}
+
+function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
+  return holdQBytes(blocks, nElems, Q4K_BLOCK_BYTES, "q4_K");
+}
+
+function holdQ6K(blocks: Uint8Array, nElems: number): GpuHandle {
+  return holdQBytes(blocks, nElems, Q6K_BLOCK_BYTES, "q6_K");
+}
+
+// Dispatch a quantized matVec. Shared encoder choreography between q4_K
+// and q6_K — same buffer layout, different pipeline. `k` must be a
+// multiple of 256 (caller asserts this indirectly via hold(), which
+// rejects non-256-aligned tensors). Grid: ⌈m/4⌉ threadgroups × 128
+// threads/TG = 4 rows/TG, each row owned by one simdgroup.
+function launchMatVecQ(
+  mat: GpuHandle,
+  vec: Float32Array,
+  m: number,
+  k: number,
+  pipeline: bigint,
+  qFormat: "q4_K" | "q6_K",
+): Float32Array {
+  if (mat.buffer === 0n) throw new Error(`bun:gpu metal: ${qFormat} handle has no MTLBuffer`);
+  if ((k & 255) !== 0) {
+    throw new RangeError(`bun:gpu metal: ${qFormat} matVec requires k % 256 == 0; got k=${k}`);
+  }
+  const kSblocks = k >>> 8;
+  const vecBytes = BigInt(k * 4);
+  const outBytes = BigInt(m * 4);
+
+  let vecBuf: bigint = 0n;
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    vecBuf = newBufferFromF32(vec, vecBytes);
+    if (vecBuf === 0n) throw new Error("bun:gpu metal: newBuffer (vec) failed");
+
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength (out) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), mat.buffer, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), vecBuf, 0n, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 2n);
+    const pM = new Uint32Array([m]);
+    const pKSb = new Uint32Array([kSblocks]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pM), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKSb), 4n, 4n);
+
+    // ⌈m/4⌉ threadgroups × 128 threads each = 4 rows per TG. Each row
+    // is one simdgroup (32 threads); simd_sum does the cross-lane
+    // reduction inside the kernel.
+    const tgCount = new BigUint64Array([BigInt((m + 3) >>> 2), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([128n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: outBuf contents is null");
+    const out = new Float32Array(m);
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, m * 4));
+    out.set(view);
+    return out;
+  } finally {
+    if (vecBuf !== 0n) objcRelease(vecBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
+  }
+}
+
+function launchMatVecQ4K(mat: GpuHandle, vec: Float32Array, m: number, k: number): Float32Array {
+  return launchMatVecQ(mat, vec, m, k, matVecQ4KPipeline, "q4_K");
+}
+
+function launchMatVecQ6K(mat: GpuHandle, vec: Float32Array, m: number, k: number): Float32Array {
+  return launchMatVecQ(mat, vec, m, k, matVecQ6KPipeline, "q6_K");
+}
+
 function winsForSize(op: string, n: number, elemBytes: number): boolean {
   if (!probed && !probe()) return false;
   if (!probeResult) return false;
@@ -963,6 +1280,28 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
   const matIsHandle = isGpuHandle(matrix);
   if (matIsHandle && matrix.released) {
     throw new Error("bun:gpu: matVec called on released handle");
+  }
+  // Quantized residency: dispatch to the Q-aware kernel without
+  // materializing f32 weights. Threshold checks don't apply — hold()
+  // already committed to device residency, and there's no CPU fallback
+  // for raw super-block bytes.
+  if (matIsHandle && matrix.qFormat === "q4_K") {
+    if (!(vector instanceof Float32Array)) {
+      throw new TypeError("bun:gpu metal: q4_K matVec requires a Float32Array vector");
+    }
+    if (matVecQ4KPipeline === 0n || !probe()) {
+      throw new Error("bun:gpu metal: q4_K kernel unavailable on this device");
+    }
+    return launchMatVecQ4K(matrix, vector, nRows, nCols);
+  }
+  if (matIsHandle && matrix.qFormat === "q6_K") {
+    if (!(vector instanceof Float32Array)) {
+      throw new TypeError("bun:gpu metal: q6_K matVec requires a Float32Array vector");
+    }
+    if (matVecQ6KPipeline === 0n || !probe()) {
+      throw new Error("bun:gpu metal: q6_K kernel unavailable on this device");
+    }
+    return launchMatVecQ6K(matrix, vector, nRows, nCols);
   }
   const matView = matIsHandle ? matrix.view : (matrix as FArray);
   if (
@@ -1270,6 +1609,22 @@ function dispose(): void {
     objcRelease(matVecFn);
     matVecFn = 0n;
   }
+  if (matVecQ4KPipeline !== 0n) {
+    objcRelease(matVecQ4KPipeline);
+    matVecQ4KPipeline = 0n;
+  }
+  if (matVecQ4KFn !== 0n) {
+    objcRelease(matVecQ4KFn);
+    matVecQ4KFn = 0n;
+  }
+  if (matVecQ6KPipeline !== 0n) {
+    objcRelease(matVecQ6KPipeline);
+    matVecQ6KPipeline = 0n;
+  }
+  if (matVecQ6KFn !== 0n) {
+    objcRelease(matVecQ6KFn);
+    matVecQ6KFn = 0n;
+  }
   if (simdMapPipeline !== 0n) {
     objcRelease(simdMapPipeline);
     simdMapPipeline = 0n;
@@ -1309,6 +1664,8 @@ export default {
   alloc,
   isAligned,
   hold,
+  holdQ4K,
+  holdQ6K,
   releaseHandle,
   releasePinned,
   dispose,
