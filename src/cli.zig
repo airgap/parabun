@@ -80,6 +80,7 @@ pub const RunCommand = @import("./cli/run_command.zig").RunCommand;
 pub const ShellCompletions = @import("./cli/shell_completions.zig");
 pub const UpdateCommand = @import("./cli/update_command.zig").UpdateCommand;
 pub const UpgradeCommand = @import("./cli/upgrade_command.zig").UpgradeCommand;
+pub const SelfUpdateCommand = @import("./cli/self_update_command.zig").SelfUpdateCommand;
 pub const BunxCommand = @import("./cli/bunx_command.zig").BunxCommand;
 pub const ExecCommand = @import("./cli/exec_command.zig").ExecCommand;
 pub const PatchCommand = @import("./cli/patch_command.zig").PatchCommand;
@@ -189,7 +190,8 @@ pub const HelpCommand = struct {
         \\
         \\  <b><cyan>init<r>                           Start an empty Parabun project from a built-in template
         \\  <b><cyan>create<r>    <d>{s:<16}<r>     Create a new project from a template <d>(bun c)<r>
-        \\  <b><cyan>upgrade<r>                        Upgrade to latest version of Parabun.
+        \\  <b><cyan>upgrade<r>                        Upgrade Bun runtime to latest upstream.
+        \\  <b><cyan>self-update<r>                    Update Parabun binary + VS Code extension to latest release.
         \\  <b><cyan>feedback<r>  <d>./file1 ./file2<r>      Provide feedback to the Parabun maintainers.
         \\
         \\  <d>\<command\><r> <b><cyan>--help<r>               Print help text for command.
@@ -611,6 +613,7 @@ pub const Command = struct {
             RootCommandMatcher.case("build"), RootCommandMatcher.case("bun") => .BuildCommand,
             RootCommandMatcher.case("discord") => .DiscordCommand,
             RootCommandMatcher.case("upgrade") => .UpgradeCommand,
+            RootCommandMatcher.case("self-update") => .SelfUpdateCommand,
             RootCommandMatcher.case("completions") => .InstallCompletionsCommand,
             RootCommandMatcher.case("getcompletes") => .GetCompletionsCommand,
             RootCommandMatcher.case("link") => .LinkCommand,
@@ -964,6 +967,11 @@ pub const Command = struct {
                 try UpgradeCommand.exec(ctx);
                 return;
             },
+            .SelfUpdateCommand => {
+                const ctx = try Command.init(allocator, log, .SelfUpdateCommand);
+                try SelfUpdateCommand.exec(ctx);
+                return;
+            },
             .AutoCommand => {
                 const ctx = Command.init(allocator, log, .AutoCommand) catch |e| {
                     switch (e) {
@@ -1061,6 +1069,7 @@ pub const Command = struct {
         UnlinkCommand,
         UpdateCommand,
         UpgradeCommand,
+        SelfUpdateCommand,
         ReplCommand,
         ReservedCommand,
         ExecCommand,
@@ -1099,6 +1108,7 @@ pub const Command = struct {
                 .UnlinkCommand => 'U',
                 .UpdateCommand => 'u',
                 .UpgradeCommand => 'p',
+                .SelfUpdateCommand => 'S',
                 .ReplCommand => 'G',
                 .ReservedCommand => 'w',
                 .ExecCommand => 'e',
@@ -1364,6 +1374,23 @@ pub const Command = struct {
                         \\  <b>bun exec "echo \"hey friends\"!"<r>
                         \\
                     , .{});
+                    Output.flush();
+                },
+                Command.Tag.SelfUpdateCommand => {
+                    const intro_text =
+                        \\<b>Usage<r>: <b><green>parabun self-update<r>
+                        \\
+                        \\  Updates the Parabun binary and the VS Code extension to the latest
+                        \\  published release. Runs the canonical install scripts from
+                        \\  github.com/airgap/parabun so behavior matches a fresh curl-install.
+                        \\
+                        \\<b>Notes:<r>
+                        \\  - Requires bash + curl (POSIX). On Windows, use the PowerShell installer.
+                        \\  - Installs the VSIX into every VS Code-compatible editor found
+                        \\    (code / cursor / kiro).
+                        \\
+                    ;
+                    Output.pretty(intro_text, .{});
                     Output.flush();
                 },
                 .OutdatedCommand, .UpdateInteractiveCommand, .PublishCommand, .AuditCommand => {
