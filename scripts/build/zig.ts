@@ -17,7 +17,7 @@
 
 import { existsSync, readFileSync, symlinkSync } from "node:fs";
 import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { availableParallelism } from "node:os";
+import { availableParallelism, totalmem } from "node:os";
 import { resolve } from "node:path";
 import type { Config, OS } from "./config.ts";
 import { downloadWithRetry, extractZip } from "./download.ts";
@@ -67,6 +67,38 @@ export function defaultZigCommit(ci: boolean, hostOs: OS): string {
  */
 function usingParallelCompiler(cfg: Config): boolean {
   return cfg.zigCommit !== ZIG_COMMIT;
+}
+
+/**
+ * Pick the LLVM codegen thread count for `zig build obj`. Each thread compiles
+ * an independent shard of bun-zig.o and can peak ~1.5 GB RSS during JSC-heavy
+ * translation units, so oversubscribing memory here gets the whole `zig`
+ * process SIGKILL'd by the kernel before it prints a meaningful error
+ * (parabun#57 macOS: `terminated unexpectedly` with no diagnostic).
+ *
+ * Cap = min(cores, max(1, floor((totalmem - 4 GB reserve) / 1.5 GB))).
+ * The 4 GB reserve covers the rest of the `zig` process, ninja, the OS, and
+ * the Bun/Node driver itself. The 1.5 GB per-thread figure matches what we
+ * observed on Linux (`MaxRSS: 8 GB` for the whole zig step).
+ *
+ * `PARABUN_LLVM_CODEGEN_THREADS` (positive integer) is a manual override for
+ * agents sharing RAM with other jobs that need a tighter cap.
+ *
+ * Stable compiler path stays at 0 (single-threaded); the parallel compiler is
+ * the only one that supports >0 shards — see usingParallelCompiler().
+ */
+function codegenThreadCount(cfg: Config): number {
+  if (!usingParallelCompiler(cfg)) return 0;
+
+  const override = Number(process.env.PARABUN_LLVM_CODEGEN_THREADS);
+  if (Number.isInteger(override) && override > 0) return override;
+
+  const cores = availableParallelism();
+  const GB = 1024 ** 3;
+  const reserveBytes = 4 * GB;
+  const perThreadBytes = 1.5 * GB;
+  const memoryBudget = Math.max(1, Math.floor(Math.max(0, totalmem() - reserveBytes) / perThreadBytes));
+  return Math.min(cores, memoryBudget);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -404,7 +436,7 @@ function zigBuildArgs(cfg: Config): string[] {
     // Sharded LLVM codegen — one shard per host core on the parallel
     // compiler. Zig has no "auto" value (0 = single-threaded). MUST be 0
     // on the stable compiler — see usingParallelCompiler().
-    `-Dllvm_codegen_threads=${usingParallelCompiler(cfg) ? availableParallelism() : 0}`,
+    `-Dllvm_codegen_threads=${codegenThreadCount(cfg)}`,
 
     // Versioning
     `-Dversion=${cfg.version}`,
