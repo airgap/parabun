@@ -41,11 +41,24 @@ export var __parabunPeek = v => {
 // rejects, the entry is deleted so the next call re-runs. Fulfilled promises
 // stay cached (that's the point — in-flight dedupe + memoized result).
 var __parabunMemoTerminal = Symbol("parabun.memo.terminal");
+
+// The returned function is augmented with three methods so callers can
+// invalidate entries without tearing down the memoized wrapper:
+//
+//   memoFn.forget(...args)  — drop the cached entry for those args; returns
+//                             boolean (was it cached?). For arity-0 memos,
+//                             forget() with no args drops the singleton.
+//   memoFn.clear()          — drop every cached entry.
+//   memoFn.bypass(...args)  — call the underlying fn, skip the cache read,
+//                             do NOT write the result to the cache. Useful
+//                             when the caller wants a guaranteed-fresh
+//                             result without invalidating state other
+//                             callers may still rely on.
 export var __parabunMemo = (fn, arity) => {
   if (arity === 0) {
     var __has = false,
       __cached;
-    return function () {
+    var wrap = function () {
       if (__has) return __cached;
       __cached = fn.apply(this, arguments);
       __has = true;
@@ -57,10 +70,20 @@ export var __parabunMemo = (fn, arity) => {
       }
       return __cached;
     };
+    wrap.forget = wrap.clear = () => {
+      var had = __has;
+      __has = false;
+      __cached = undefined;
+      return had;
+    };
+    wrap.bypass = function () {
+      return fn.apply(this, arguments);
+    };
+    return wrap;
   }
   if (arity === 1) {
     var __cache1 = new Map();
-    return function (a) {
+    var wrap1 = function (a) {
       if (__cache1.has(a)) return __cache1.get(a);
       var v = fn.apply(this, arguments);
       __cache1.set(a, v);
@@ -69,10 +92,16 @@ export var __parabunMemo = (fn, arity) => {
       }
       return v;
     };
+    wrap1.forget = a => __cache1.delete(a);
+    wrap1.clear = () => __cache1.clear();
+    wrap1.bypass = function () {
+      return fn.apply(this, arguments);
+    };
+    return wrap1;
   }
   var __root = new Map();
   var TERMINAL = __parabunMemoTerminal;
-  return function () {
+  var wrapN = function () {
     var args = arguments;
     var m = __root;
     for (var i = 0; i < args.length; i++) {
@@ -92,6 +121,21 @@ export var __parabunMemo = (fn, arity) => {
     }
     return v;
   };
+  wrapN.forget = function () {
+    var args = arguments;
+    var m = __root;
+    for (var i = 0; i < args.length; i++) {
+      var next = m.get(args[i]);
+      if (!(next instanceof Map)) return false;
+      m = next;
+    }
+    return m.delete(TERMINAL);
+  };
+  wrapN.clear = () => __root.clear();
+  wrapN.bypass = function () {
+    return fn.apply(this, arguments);
+  };
+  return wrapN;
 };
 
 // Parabun: defer disposers. `defer expr;` desugars to

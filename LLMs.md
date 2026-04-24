@@ -66,6 +66,23 @@ Cache layout (selected from the declared arity — rest parameters always land i
 
 Async memoization dedupes concurrent in-flight calls (the first call's promise is returned to later callers) and evicts the entry if the promise rejects, so the next call retries fresh. Fulfilled promises stay cached.
 
+**Cache invalidation.** The memoized wrapper carries three methods for manual eviction:
+
+- `fn.forget(...args)` — drop the cache entry for those args. Returns `true` if an entry was present, `false` otherwise. For a 0-arg memo, `forget()` with no args drops the singleton.
+- `fn.clear()` — drop every cached entry.
+- `fn.bypass(...args)` — call the underlying function, skip the cache read, do NOT write the result to the cache. Useful when the caller wants a guaranteed-fresh result without invalidating state other callers still rely on.
+
+```
+memo async fetchProfile(id) { return await db.users.get(id); }
+
+await fetchProfile("u1");           // hits db, caches
+await fetchProfile("u1");           // cached, no db
+fetchProfile.forget("u1");          // drop "u1"
+await fetchProfile("u1");           // hits db again
+await fetchProfile.bypass("u1");    // hits db, cache still holds previous value
+fetchProfile.clear();               // drop all cached profiles
+```
+
 ### `..=` (await-assign)
 
 Desugars `const x ..= expr` to `const x = await expr`. Requires async context.
@@ -610,6 +627,29 @@ large enough (`winsForSize("simdMap", n, 4)`), `bun:pipeline`'s
 `realizeChain` dispatches to `gpu.simdMap` instead of stacking
 `simd.mulScalar`+`simd.addScalar`. Transparent fallback on hosts
 without a real GPU backend — same code path, CPU kernels at the end.
+
+## Browser compilation
+
+Parse-time syntax (`pure`, `memo`, `|>`, `..=`, `..!`, `..&`, range, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `bun:arena`, `signal` / `effect` / `~>` import `bun:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
+
+[`packages/parabun-browser-shims`](packages/parabun-browser-shims) is the browser shim package. Applications targeting the browser alias the `bun:*` specifiers onto it via bundler config:
+
+```
+// vite.config.ts
+import { defineConfig } from "vite";
+import { bunAliases } from "parabun-browser-shims";
+export default defineConfig({ resolve: { alias: bunAliases } });
+```
+
+Module fidelity:
+
+- **`bun:arena`** — no-op (browsers don't expose GC control; inline body is semantically correct).
+- **`bun:signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`.
+- **`bun:wrap`** — full implementation of `__parabunMemo` (with `.forget` / `.clear` / `.bypass`), `__parabunDefer0`, `__parabunAsyncDefer0`, `__parabunRange`, `__parabunRangeInclusive`.
+- **`bun:parallel`** — sequential fallback. `pmap` / `preduce` run on the main thread; Web-Worker-backed implementation is future work.
+- **`bun:simd`** — scalar JS loops. Correct output; ~5–20× slower than v128 on large TypedArrays. WebAssembly SIMD swap-in is future work.
+- **`bun:gpu`** — CPU fallback via `bun:simd`. WebGPU / WebGL2 compute-shader backend is future work.
+- **`bun:llm`** — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
 
 ## Real-world benchmark: SQLite analytical workload
 

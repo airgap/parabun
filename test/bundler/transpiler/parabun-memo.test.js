@@ -263,4 +263,85 @@ describe("Parabun memo", () => {
       expect(out).toBe("2");
     });
   });
+
+  describe("cache invalidation", () => {
+    async function runScript(src) {
+      await using proc = Bun.spawn({
+        cmd: [bunExe(), "-e", src],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      if (exitCode !== 0) throw new Error(`script failed (${exitCode}): ${stderr}\n${stdout}`);
+      return stdout.trim();
+    }
+
+    it("forget(key) drops a single entry and returns true when present", async () => {
+      const out = await runScript(`
+        let calls = 0;
+        memo dbl(n) { calls++; return n * 2; }
+        dbl(5); dbl(5);
+        const had = dbl.forget(5);
+        dbl(5);
+        const missing = dbl.forget(99);
+        console.log(had, missing, calls);
+      `);
+      // forget(5) → true (was cached), forget(99) → false (never cached).
+      // calls: first dbl(5), second cached, third (after forget) fresh → 2.
+      expect(out).toBe("true false 2");
+    });
+
+    it("clear() empties the whole cache", async () => {
+      const out = await runScript(`
+        let calls = 0;
+        memo sum(a, b) { calls++; return a + b; }
+        sum(1, 2); sum(3, 4); sum(5, 6);
+        sum.clear();
+        sum(1, 2); sum(3, 4);
+        console.log(calls);
+      `);
+      // 3 fresh + 2 more after clear = 5.
+      expect(out).toBe("5");
+    });
+
+    it("bypass(...args) runs fresh and does NOT write the cache", async () => {
+      const out = await runScript(`
+        let calls = 0;
+        memo dbl(n) { calls++; return n * 2; }
+        dbl(5);                      // calls=1, cache has 5
+        dbl.bypass(5);               // calls=2, cache unchanged
+        dbl(5);                      // still cached, no call
+        console.log(calls);
+      `);
+      expect(out).toBe("2");
+    });
+
+    it("0-arg forget() and clear() drop the singleton", async () => {
+      const out = await runScript(`
+        let calls = 0;
+        memo now() { calls++; return 42; }
+        now(); now();                // calls=1
+        now.forget();
+        now();                       // calls=2
+        now.clear();
+        now();                       // calls=3
+        console.log(calls);
+      `);
+      expect(out).toBe("3");
+    });
+
+    it("async memo forget re-fetches on next call", async () => {
+      const out = await runScript(`
+        let calls = 0;
+        memo async load(k) { calls++; return k + ":" + calls; }
+        const a = await load("x");
+        const b = await load("x");   // cached, same result
+        load.forget("x");
+        const c = await load("x");   // fresh
+        console.log(a, b, c);
+      `);
+      expect(out).toBe("x:1 x:1 x:2");
+    });
+  });
 });
