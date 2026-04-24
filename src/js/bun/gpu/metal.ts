@@ -360,6 +360,121 @@ kernel void silu_mul_f32(
     float sig = 1.0f / (1.0f + precise::exp(-g));
     gate[gid] = g * sig * up[gid];
 }
+
+// y[i] = a[i] + b[i]. Distinct from accum (in-place) so the dispatch
+// surface matches CUDA's.
+kernel void add_f32(
+    device const float *a         [[buffer(0)]],
+    device const float *b         [[buffer(1)]],
+    device       float *y         [[buffer(2)]],
+    constant     uint  &n         [[buffer(3)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    y[gid] = a[gid] + b[gid];
+}
+
+// cache[pos * kvRowSize + i] = src[i]. One row write into a KV cache
+// at position pos. Launch: ⌈kvRowSize / 256⌉ × 256.
+kernel void kv_store_f32(
+    device const float *src       [[buffer(0)]],
+    device       float *cache     [[buffer(1)]],
+    constant     uint  &pos       [[buffer(2)]],
+    constant     uint  &kvRowSize [[buffer(3)]],
+    uint                gid       [[thread_position_in_grid]])
+{
+    if (gid >= kvRowSize) return;
+    cache[(ulong)pos * (ulong)kvRowSize + gid] = src[gid];
+}
+
+// RMSNorm: y[i] = x[i] * rsqrt(mean(x^2) + eps) * w[i].
+// One threadgroup of bs threads handles the whole vector — strided
+// partial-sum-of-squares, warp reduction via simd_sum, cross-warp
+// reduction via shared memory, then second pass applies the scale.
+// bs must be <= 1024 and a multiple of 32; warpSum is sized for the
+// max case (32 warps = 1024 threads).
+kernel void rmsnorm_f32(
+    device const float *x         [[buffer(0)]],
+    device const float *w         [[buffer(1)]],
+    device       float *y         [[buffer(2)]],
+    constant     uint  &n         [[buffer(3)]],
+    constant     float &eps       [[buffer(4)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]])
+{
+    threadgroup float warpSum[32];
+    threadgroup float sScale[1];
+
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+
+    float local = 0.0f;
+    for (uint i = tid; i < n; i += tpg) {
+        float v = x[i];
+        local += v * v;
+    }
+    local = simd_sum(local);
+    if (lane == 0u) warpSum[warp] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        local = (tid < nwarps) ? warpSum[lane] : 0.0f;
+        local = simd_sum(local);
+        if (tid == 0u) sScale[0] = rsqrt(local / (float)n + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float scale = sScale[0];
+    for (uint i = tid; i < n; i += tpg) {
+        y[i] = x[i] * scale * w[i];
+    }
+}
+
+// argmax over f32 logits, ties broken by lower index. One threadgroup,
+// bs threads (≤ 1024, multiple of 32). simd_shuffle_xor runs the
+// paired (value, index) butterfly reduction inside each simdgroup,
+// then a second pass reduces the per-warp partials.
+kernel void argmax_f32(
+    device const float *logits    [[buffer(0)]],
+    device       int   *outIdx    [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]])
+{
+    threadgroup float warpV[32];
+    threadgroup int   warpI[32];
+
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+
+    float bestV = -INFINITY;
+    int bestI = 0;
+    for (uint i = tid; i < n; i += tpg) {
+        float v = logits[i];
+        if (v > bestV || (v == bestV && (int)i < bestI)) { bestV = v; bestI = (int)i; }
+    }
+
+    for (uint off = 16u; off > 0u; off >>= 1) {
+        float ov = simd_shuffle_xor(bestV, off);
+        int oi = simd_shuffle_xor(bestI, off);
+        if (ov > bestV || (ov == bestV && oi < bestI)) { bestV = ov; bestI = oi; }
+    }
+    if (lane == 0u) { warpV[warp] = bestV; warpI[warp] = bestI; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        bestV = (tid < nwarps) ? warpV[lane] : -INFINITY;
+        bestI = (tid < nwarps) ? warpI[lane] : 0;
+        for (uint off = 16u; off > 0u; off >>= 1) {
+            float ov = simd_shuffle_xor(bestV, off);
+            int oi = simd_shuffle_xor(bestI, off);
+            if (ov > bestV || (ov == bestV && oi < bestI)) { bestV = ov; bestI = oi; }
+        }
+        if (tid == 0u) outIdx[0] = bestI;
+    }
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -476,9 +591,12 @@ const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
   ["accum", "accum_f32"],
   ["biasAdd", "bias_add_f32"],
   ["siluMul", "silu_mul_f32"],
-  // Future: rmsnorm, add, ropeNorm, ropeNeox, kvStore, attnScores,
-  // softmaxRow, attnOutput, argmax, matVec (matvec_f32x4),
-  // embedLookupQ4K, embedLookupQ6K, flashAttn.
+  ["add", "add_f32"],
+  ["kvStore", "kv_store_f32"],
+  ["rmsnorm", "rmsnorm_f32"],
+  ["argmax", "argmax_f32"],
+  // Future: ropeNorm, ropeNeox, attnScores, softmaxRow, attnOutput,
+  // matVec (matvec_f32x4), embedLookupQ4K, embedLookupQ6K, flashAttn.
 ];
 
 // Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
@@ -1548,6 +1666,95 @@ function launchSiluMul(gate: GpuScratch, up: GpuScratch, n: number): void {
   launchElementwise2(devOpsPipes.siluMul.pipe, gate, up, n);
 }
 
+// y[i] = a[i] + b[i]. 3 buffers.
+function launchAdd(a: GpuScratch, b: GpuScratch, y: GpuScratch, n: number): void {
+  if (!devOpsPipes.add) throw new Error("bun:gpu metal: add kernel missing");
+  const { buf: aBuf, offset: aOff } = scratchBufferAndOffset(a);
+  const { buf: bBuf, offset: bOff } = scratchBufferAndOffset(b);
+  const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.add.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), aBuf, aOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), bBuf, bOff, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), yBuf, yOff, 2n);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 3n);
+    const threads = new BigUint64Array([BigInt(n), 1n, 1n]);
+    const tpt = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+  });
+}
+
+// cache[pos * kvRowSize + i] = src[i].
+function launchKvStore(src: GpuScratch, cache: GpuScratch, pos: number, kvRowSize: number): void {
+  if (!devOpsPipes.kvStore) throw new Error("bun:gpu metal: kvStore kernel missing");
+  const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(src);
+  const { buf: cBuf, offset: cOff } = scratchBufferAndOffset(cache);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.kvStore.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), sBuf, sOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), cBuf, cOff, 1n);
+    const pPos = new Uint32Array([pos]);
+    const pKv = new Uint32Array([kvRowSize]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pPos), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKv), 4n, 3n);
+    const threads = new BigUint64Array([BigInt(kvRowSize), 1n, 1n]);
+    const tpt = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+  });
+}
+
+// y[i] = x[i] * rsqrt(mean(x^2) + eps) * w[i]. Single threadgroup of
+// 256 threads covers any typical Llama hidden dim strided (n up to
+// ~65k is fine; beyond that bump bs via a future re-issued kernel).
+function launchRmsnorm(x: GpuScratch, w: GpuScratch, y: GpuScratch, n: number, eps: number): void {
+  if (!devOpsPipes.rmsnorm) throw new Error("bun:gpu metal: rmsnorm kernel missing");
+  const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
+  const { buf: wBuf, offset: wOff } = scratchBufferAndOffset(w);
+  const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.rmsnorm.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), wBuf, wOff, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), yBuf, yOff, 2n);
+    const pN = new Uint32Array([n]);
+    const pEps = new Float32Array([eps]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pEps), 4n, 4n);
+    const tgCount = new BigUint64Array([1n, 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
+// argmax(logits) → outIdx (single int32). 1 threadgroup, 256 threads.
+function launchArgmax(logits: GpuScratch, outIdx: GpuScratch, n: number): void {
+  if (!devOpsPipes.argmax) throw new Error("bun:gpu metal: argmax kernel missing");
+  if (outIdx.type !== "i32") throw new TypeError("argmax outIdx must be an i32 scratch");
+  const { buf: lBuf, offset: lOff } = scratchBufferAndOffset(logits);
+  const { buf: oBuf, offset: oOff } = scratchBufferAndOffset(outIdx);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.argmax.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), lBuf, lOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), oBuf, oOff, 1n);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pN), 4n, 2n);
+    const tgCount = new BigUint64Array([1n, 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([256n, 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
 // Public devOps table. Returns null until every kernel in the canonical
 // list is compiled AND the full port is flagged complete — bun:llm's
 // forward pass is all-or-nothing, so partial tables would mean silent
@@ -1565,6 +1772,10 @@ function getDevOps(): any | null {
     accum: launchAccum,
     biasAdd: launchBiasAdd,
     siluMul: launchSiluMul,
+    add: launchAdd,
+    kvStore: launchKvStore,
+    rmsnorm: launchRmsnorm,
+    argmax: launchArgmax,
     // … more to come.
   };
 }
@@ -1586,6 +1797,10 @@ function _getPartialDevOps(): any {
   if (devOpsPipes.accum) out.accum = launchAccum;
   if (devOpsPipes.biasAdd) out.biasAdd = launchBiasAdd;
   if (devOpsPipes.siluMul) out.siluMul = launchSiluMul;
+  if (devOpsPipes.add) out.add = launchAdd;
+  if (devOpsPipes.kvStore) out.kvStore = launchKvStore;
+  if (devOpsPipes.rmsnorm) out.rmsnorm = launchRmsnorm;
+  if (devOpsPipes.argmax) out.argmax = launchArgmax;
   return out;
 }
 
