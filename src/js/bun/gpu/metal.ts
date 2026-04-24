@@ -623,6 +623,114 @@ kernel void softmax_row_f32(
     for (uint i = tid; i < cols; i += bs) row[i] *= invSum;
 }
 
+// Q4_K embed_lookup: dequantize a single row of Q4_K super-blocks.
+// 128 threads, single threadgroup; loops over dModel/256 super-blocks.
+// dModel must be a multiple of 256.
+kernel void embed_lookup_q4k_f32(
+    device const uchar *embd    [[buffer(0)]],
+    device       float *x       [[buffer(1)]],
+    constant     uint  &tokenId [[buffer(2)]],
+    constant     uint  &dModel  [[buffer(3)]],
+    uint                tid     [[thread_position_in_threadgroup]])
+{
+    threadgroup float sD;
+    threadgroup float sDmin;
+    threadgroup uchar sScales[12];
+    threadgroup uchar sQs[128];
+
+    uint k_sblocks = dModel >> 8;
+    device const uchar *rowBase = embd + (ulong)tokenId * (ulong)k_sblocks * 144u;
+
+    for (uint sb = 0u; sb < k_sblocks; sb++) {
+        device const uchar *blk = rowBase + (ulong)sb * 144u;
+        if (tid == 0u) {
+            ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);
+            sD = float(as_type<half>(dh));
+        } else if (tid == 1u) {
+            ushort dmh = (ushort)blk[2] | ((ushort)blk[3] << 8);
+            sDmin = float(as_type<half>(dmh));
+        } else if (tid < 14u) {
+            sScales[tid - 2u] = blk[2u + tid];
+        }
+        if (tid < 128u) sQs[tid] = blk[16u + tid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint which = 0u; which < 2u; which++) {
+            uint qi = tid + (which == 0u ? 0u : 128u);
+            uint sb_idx = qi >> 5;
+            uint element = qi & 31u;
+            uint byte_idx = 32u * (sb_idx >> 1) + element;
+            uchar byteVal = sQs[byte_idx];
+            uint q = (sb_idx & 1u) ? ((uint)byteVal >> 4) : ((uint)byteVal & 0xFu);
+
+            uint sc, mn;
+            if (sb_idx < 4u) {
+                sc = (uint)sScales[sb_idx] & 63u;
+                mn = (uint)sScales[sb_idx + 4u] & 63u;
+            } else {
+                uint s_jp4 = (uint)sScales[sb_idx + 4u];
+                uint s_jm4 = (uint)sScales[sb_idx - 4u];
+                uint s_j   = (uint)sScales[sb_idx];
+                sc = (s_jp4 & 0xFu) | (((s_jm4 >> 6) & 3u) << 4);
+                mn = ((s_jp4 >> 4) & 0xFu) | (((s_j >> 6) & 3u) << 4);
+            }
+            x[sb * 256u + qi] = sD * (float)sc * (float)q - sDmin * (float)mn;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// Q6_K embed_lookup: dequantize a single row of Q6_K super-blocks.
+// 128 threads, single threadgroup; dModel must be a multiple of 256.
+kernel void embed_lookup_q6k_f32(
+    device const uchar *embd    [[buffer(0)]],
+    device       float *x       [[buffer(1)]],
+    constant     uint  &tokenId [[buffer(2)]],
+    constant     uint  &dModel  [[buffer(3)]],
+    uint                tid     [[thread_position_in_threadgroup]])
+{
+    threadgroup float sD;
+    threadgroup char  sSc[16];
+    threadgroup uchar sQl[128];
+    threadgroup uchar sQh[64];
+
+    uint k_sblocks = dModel >> 8;
+    device const uchar *rowBase = embd + (ulong)tokenId * (ulong)k_sblocks * 210u;
+
+    for (uint sb = 0u; sb < k_sblocks; sb++) {
+        device const uchar *blk = rowBase + (ulong)sb * 210u;
+        sQl[tid] = blk[tid];
+        if (tid < 64u) sQh[tid] = blk[128u + tid];
+        if (tid < 16u) sSc[tid] = (char)blk[192u + tid];
+        if (tid == 0u) {
+            ushort dh = (ushort)blk[208] | ((ushort)blk[209] << 8);
+            sD = float(as_type<half>(dh));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint which_half = 0u; which_half < 2u; which_half++) {
+            uint qi = tid + (which_half == 0u ? 0u : 128u);
+            uint g = qi >> 7;
+            uint i_in_g = qi & 127u;
+            uint which = i_in_g >> 5;
+            uint l = i_in_g & 31u;
+            uint is = l >> 4;
+            uint sc_idx = g * 8u + which * 2u + is;
+            uint ql_idx = g * 64u + (which & 1u) * 32u + l;
+            uint qh_idx = g * 32u + l;
+            uint qh_shift = which * 2u;
+            uint nibble = ((which >> 1) == 0u)
+                ? ((uint)sQl[ql_idx] & 0xFu)
+                : ((uint)sQl[ql_idx] >> 4);
+            uint high2 = ((uint)sQh[qh_idx] >> qh_shift) & 3u;
+            int q_byte = (int)(nibble | (high2 << 4));
+            int q_signed = q_byte - 32;
+            x[sb * 256u + qi] = sD * (float)sSc[sc_idx] * (float)q_signed;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 // Device-resident f32 matVec: y[r] = sum_c M[r*k + c] * x[c]. 128
 // threads per threadgroup (4 warps), one threadgroup per row. float4
 // vectorized loads (k must be a multiple of 4). Cross-warp reduction
@@ -812,7 +920,9 @@ const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
   ["softmaxRow", "softmax_row_f32"],
   ["attnOutput", "attn_output_f32"],
   ["matVec", "matvec_dev_f32x4"],
-  // Future: embedLookupQ4K, embedLookupQ6K, flashAttn.
+  ["embedLookupQ4K", "embed_lookup_q4k_f32"],
+  ["embedLookupQ6K", "embed_lookup_q6k_f32"],
+  // Future: flashAttn.
 ];
 
 // Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
@@ -1831,11 +1941,54 @@ function scratchBufferAndOffset(s: GpuScratch): { buf: bigint; offset: bigint } 
   return { buf: s.buffer, offset: s.sliceOffsetBytes ?? 0n };
 }
 
+// Extract (MTLBuffer, offset) from either a scratch or a user handle. For
+// handles, offset is always 0; scratches may carry a slice offset.
+function bufferAndOffsetFor(h: GpuHandle | GpuScratch): { buf: bigint; offset: bigint } {
+  if ((h as any).__bunGpuHandle === true) {
+    const handle = h as GpuHandle;
+    if (handle.released) throw new Error("bun:gpu metal: op on released handle");
+    if (handle.buffer === 0n) throw new Error("bun:gpu metal: handle has no MTLBuffer");
+    return { buf: handle.buffer, offset: 0n };
+  }
+  return scratchBufferAndOffset(h as GpuScratch);
+}
+
 // embed_lookup: x[0..dModel) <- embd[tokenId * dModel + 0..dModel).
-function launchEmbedLookup(embd: GpuScratch, x: GpuScratch, tokenId: number, dModel: number): void {
-  if (!devOpsPipes.embedLookup) throw new Error("bun:gpu metal: embedLookup kernel missing");
-  const { buf: eBuf, offset: eOff } = scratchBufferAndOffset(embd);
+// Accepts either a GpuScratch (f32 table) or a GpuHandle (f32 or
+// quantized table — the latter dispatches to embed_lookup_q{4,6}k_f32).
+function launchEmbedLookup(embd: GpuScratch | GpuHandle, x: GpuScratch, tokenId: number, dModel: number): void {
   const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
+
+  const isHandle = (embd as any).__bunGpuHandle === true;
+  const qFormat = isHandle ? (embd as GpuHandle).qFormat : undefined;
+
+  if (qFormat === "q4_K" || qFormat === "q6_K") {
+    if ((dModel & 0xff) !== 0) throw new Error("bun:gpu metal: quantized embedLookup requires dModel % 256 == 0");
+    const pipeSlot = qFormat === "q4_K" ? devOpsPipes.embedLookupQ4K : devOpsPipes.embedLookupQ6K;
+    if (!pipeSlot) throw new Error(`bun:gpu metal: ${qFormat} embedLookup kernel missing`);
+    const { buf: eBuf, offset: eOff } = bufferAndOffsetFor(embd);
+    encodeWith(encoder => {
+      msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipeSlot.pipe);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), eBuf, eOff, 0n);
+      msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 1n);
+      const pTok = new Uint32Array([tokenId]);
+      const pD = new Uint32Array([dModel]);
+      msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pTok), 4n, 2n);
+      msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pD), 4n, 3n);
+      const tgCount = new BigUint64Array([1n, 1n, 1n]);
+      const threadsPerTg = new BigUint64Array([128n, 1n, 1n]);
+      msgSend_4_ptr_ptr!(
+        encoder,
+        sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+        ffiPtr!(tgCount),
+        ffiPtr!(threadsPerTg),
+      );
+    });
+    return;
+  }
+
+  if (!devOpsPipes.embedLookup) throw new Error("bun:gpu metal: embedLookup kernel missing");
+  const { buf: eBuf, offset: eOff } = bufferAndOffsetFor(embd);
   encodeWith(encoder => {
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.embedLookup.pipe);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), eBuf, eOff, 0n);
