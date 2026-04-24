@@ -2,80 +2,98 @@ import * as fs from "fs";
 import * as Module from "module";
 import { basename, extname } from "path";
 
-const allFiles = fs.readdirSync(".").filter(f => f.endsWith(".js"));
+// Entry shape: `bun build-fallbacks.ts <outdir> [...sources]`.
+// The outdir is the only meaningful argument; sources are tracked by the
+// ninja edge but we discover them fresh via readdirSync so `bun install`
+// side-effects (e.g. the `punycode` dep writing a new vendored copy)
+// don't leave a stale arg list.
 const outdir = process.argv[2];
-const builtins = Module.builtinModules;
-let commands: Promise<void>[] = [];
-
-let moduleFiles: string[] = [];
-for (const name of allFiles) {
-  const mod = basename(name, extname(name)).replaceAll(".", "/");
-  const file = allFiles.find(f => f.startsWith(mod));
-  moduleFiles.push(file as string);
+if (!outdir) {
+  console.error("build-fallbacks.ts: missing outdir argument");
+  process.exit(1);
 }
 
-for (let fileIndex = 0; fileIndex < allFiles.length; fileIndex++) {
-  const name = allFiles[fileIndex];
-  const mod = basename(name, extname(name)).replaceAll(".", "/");
-  const file = allFiles.find(f => f.startsWith(mod));
-  const externals = [...builtins];
-  const i = externals.indexOf(name);
-  if (i !== -1) {
-    externals.splice(i, 1);
+fs.mkdirSync(outdir, { recursive: true });
+
+const allFiles = fs.readdirSync(".").filter(f => f.endsWith(".js"));
+const builtins = Module.builtinModules;
+
+const moduleNames = allFiles.map(name => basename(name, extname(name)).replaceAll(".", "/"));
+
+async function buildOne(name: string): Promise<void> {
+  // Every sibling fallback is treated as external so we don't bundle them
+  // into each other. Node builtins are external too.
+  const externals = new Set<string>();
+  for (const b of builtins) {
+    externals.add(b);
+    externals.add(`node:${b}`);
+  }
+  for (const m of moduleNames) {
+    if (m !== basename(name, extname(name))) {
+      externals.add(m);
+      externals.add(`node:${m}`);
+    }
   }
 
-  // Build all files at once with specific options
-  const externalModules = builtins
-    .concat(moduleFiles.filter(f => f !== name))
-    .flatMap(b => [`--external:node:${b}`, `--external:${b}`])
-    .join(" ");
+  const isStream = name.includes("stream");
+  const result = await Bun.build({
+    entrypoints: [`./${name}`],
+    outdir,
+    target: "node",
+    format: isStream ? "cjs" : "esm",
+    minify: { syntax: true, whitespace: true, identifiers: false },
+    external: [...externals],
+    define: {
+      "process.env.NODE_DEBUG": "false",
+      "process.env.READABLE_STREAM": "'enable'",
+      "global": "globalThis",
+    },
+  });
 
-  // Create the build command with all the specified options
-  const buildCommand =
-    Bun.$`bun build --define=process.env.NODE_DEBUG:"false" --define=process.env.READABLE_STREAM="'enable'" --define=global:globalThis --outdir=${outdir} ${name} --minify-syntax --minify-whitespace --format=${name.includes("stream") ? "cjs" : "esm"} --target=node ${{ raw: externalModules }}`.text();
+  if (!result.success) {
+    const msg = result.logs.map(l => (typeof l === "string" ? l : `[${l.level}] ${l.message}`)).join("\n");
+    throw new Error(`bun build failed for ${name}:\n${msg}`);
+  }
 
-  commands.push(
-    buildCommand.then(async text => {
-      // This is very brittle. But that should be okay for our usecase
-      let outfile = (await Bun.file(`${outdir}/${name}`).text())
-        .replaceAll("__require(", "require(")
-        .replaceAll("import.meta.url", "''")
-        .replaceAll("createRequire", "")
-        .replaceAll("global.process", "require('process')")
-        .trim();
+  const outPath = `${outdir}/${name}`;
+  // Bun.build resolves {success: true} even if the bundle emitted no
+  // artifacts (eg every import was marked external). Guard against that
+  // so the downstream `Bun.file(outPath).text()` doesn't silently ENOENT.
+  const stat = await Bun.file(outPath).exists();
+  if (!stat) {
+    const outputs = result.outputs.map(o => o.path).join(", ") || "(none)";
+    throw new Error(`bun build for ${name} did not produce ${outPath}. Emitted: ${outputs}`);
+  }
 
-      while (outfile.startsWith("import{")) {
-        outfile = outfile.slice(outfile.indexOf(";") + 1);
-      }
+  let outfile = (await Bun.file(outPath).text())
+    .replaceAll("__require(", "require(")
+    .replaceAll("import.meta.url", "''")
+    .replaceAll("createRequire", "")
+    .replaceAll("global.process", "require('process')")
+    .trim();
 
-      if (outfile.includes('"node:module"')) {
-        console.log(outfile);
-        throw new Error("Unexpected import in " + name);
-      }
+  while (outfile.startsWith("import{")) {
+    outfile = outfile.slice(outfile.indexOf(";") + 1);
+  }
 
-      if (outfile.includes("import.meta")) {
-        throw new Error("Unexpected import.meta in " + name);
-      }
+  if (outfile.includes('"node:module"')) {
+    console.log(outfile);
+    throw new Error("Unexpected import in " + name);
+  }
+  if (outfile.includes("import.meta")) {
+    throw new Error("Unexpected import.meta in " + name);
+  }
+  if (outfile.includes(".$apply")) {
+    throw new Error("$apply is not supported in browsers (while building " + name + ")");
+  }
+  if (outfile.includes(".$call")) {
+    throw new Error("$call is not supported in browsers (while building " + name + ")");
+  }
+  if (outfile.includes("$isObject(") || outfile.includes("$isPromise(") || outfile.includes("$isUndefinedOrNull(")) {
+    throw new Error("Unsupported function in " + name);
+  }
 
-      if (outfile.includes(".$apply")) {
-        throw new Error("$apply is not supported in browsers (while building " + name + ")");
-      }
-
-      if (outfile.includes(".$call")) {
-        throw new Error("$call is not supported in browsers (while building " + name + ")");
-      }
-
-      if (
-        outfile.includes("$isObject(") ||
-        outfile.includes("$isPromise(") ||
-        outfile.includes("$isUndefinedOrNull(")
-      ) {
-        throw new Error("Unsupported function in " + name);
-      }
-
-      await Bun.write(`${outdir}/${name}`, outfile);
-    }),
-  );
+  await Bun.write(outPath, outfile);
 }
 
-await Promise.all(commands);
+await Promise.all(allFiles.map(buildOne));
