@@ -8,16 +8,17 @@
 //     token. Weights are held via gpu.hold (one HtoD at load time, zero
 //     per-token). This is the competitive-with-ollama path.
 //
-//   - HOST path (every other case — CPU backend, Metal, or CUDA without
+//   - HOST path (every other case — CPU backend, or CUDA without
 //     NVRTC): the classical host loop. matVecs still route through
 //     bun:gpu so CUDA hosts with weights held get per-call device matVec,
 //     but every other op runs in JS and the residual stream ping-pongs
 //     across PCIe between ops. Correct but slow; kept for portability.
 //
-// Selection is automatic per-process: if the CUDA backend can compile its
-// NVRTC device-ops module, DEVICE path wins. No flag to flip. The two
-// paths produce numerically equivalent outputs (f32 FMA reordering aside)
-// — the Q4_K end-to-end "Paris" oracle tests both.
+// Selection is automatic per-process: if the active backend exposes a
+// complete devOps table (CUDA via NVRTC, or Metal via its precompiled
+// MSL library), DEVICE path wins. No flag to flip. The two paths produce
+// numerically equivalent outputs (f32 FMA reordering aside) — the Q4_K
+// end-to-end "Paris" oracle tests both.
 //
 // GGUF tensor layout: `dims=[ncols, nrows]`. Element (row, col) lives at
 // `row * ncols + col`. Matmul `y = W @ x` (y shape [nrows], x shape [ncols])

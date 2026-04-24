@@ -530,9 +530,9 @@ function hold(arr: FArray): GpuHandle {
 // Hold a Q4_K-quantized tensor on the active backend. `blocks` is the raw
 // super-block byte stream as stored in GGUF (144 bytes per 256-element
 // super-block, row-major). `nElems` is the logical dequantized element count.
-// Only the CUDA backend currently implements this; other backends throw.
-// The returned handle carries `qFormat: "q4_K"` and matVec will dispatch to
-// the on-chip dequant kernel without ever materializing fp32 weights.
+// Implemented on CUDA and Metal; the CPU backend throws. The returned
+// handle carries `qFormat: "q4_K"` and matVec dispatches to the on-chip
+// dequant kernel without ever materializing fp32 weights.
 function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
   const b = resolveActive() as any;
   if (typeof b.holdQ4K !== "function") {
