@@ -96,4 +96,12 @@ async function buildOne(name: string): Promise<void> {
   await Bun.write(outPath, outfile);
 }
 
-await Promise.all(allFiles.map(buildOne));
+// Serial, not Promise.all. Earlier concurrent version deadlocked on
+// macOS with system bun 1.3.7 — some Bun.build() calls appeared to hang
+// indefinitely when a pool of ~25 bundles ran simultaneously, producing
+// a partial `codegen/node-fallbacks/` directory and never finishing.
+// Sequential execution adds a few hundred ms to `bun run build` on
+// cold cache and avoids the race entirely.
+for (const name of allFiles) {
+  await buildOne(name);
+}
