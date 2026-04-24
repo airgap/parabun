@@ -475,6 +475,50 @@ kernel void argmax_f32(
         if (tid == 0u) outIdx[0] = bestI;
     }
 }
+
+// RoPE NORM (interleaved pairs): for each head, rotate (x[2i], x[2i+1]).
+// Dispatch: threadgroups(nHeads, 1, 1), threadsPerThreadgroup(headDim/2, 1, 1).
+kernel void rope_norm_f32(
+    device       float *x        [[buffer(0)]],
+    device const float *invFreq  [[buffer(1)]],
+    constant     uint  &headDim  [[buffer(2)]],
+    constant     uint  &pos      [[buffer(3)]],
+    uint                h        [[threadgroup_position_in_grid]],
+    uint                i        [[thread_position_in_threadgroup]])
+{
+    uint halfD = headDim >> 1;
+    if (i >= halfD) return;
+    uint base = h * headDim + 2u * i;
+    float theta = (float)pos * invFreq[i];
+    float c = precise::cos(theta);
+    float s = precise::sin(theta);
+    float a = x[base];
+    float b = x[base + 1u];
+    x[base]      = a * c - b * s;
+    x[base + 1u] = a * s + b * c;
+}
+
+// RoPE NEOX (split halves): for each head, rotate (x[i], x[halfD+i]).
+// Dispatch: threadgroups(nHeads, 1, 1), threadsPerThreadgroup(headDim/2, 1, 1).
+kernel void rope_neox_f32(
+    device       float *x        [[buffer(0)]],
+    device const float *invFreq  [[buffer(1)]],
+    constant     uint  &headDim  [[buffer(2)]],
+    constant     uint  &pos      [[buffer(3)]],
+    uint                h        [[threadgroup_position_in_grid]],
+    uint                i        [[thread_position_in_threadgroup]])
+{
+    uint halfD = headDim >> 1;
+    if (i >= halfD) return;
+    uint base = h * headDim;
+    float theta = (float)pos * invFreq[i];
+    float c = precise::cos(theta);
+    float s = precise::sin(theta);
+    float a = x[base + i];
+    float b = x[base + halfD + i];
+    x[base + i]         = a * c - b * s;
+    x[base + halfD + i] = a * s + b * c;
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -595,8 +639,10 @@ const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
   ["kvStore", "kv_store_f32"],
   ["rmsnorm", "rmsnorm_f32"],
   ["argmax", "argmax_f32"],
-  // Future: ropeNorm, ropeNeox, attnScores, softmaxRow, attnOutput,
-  // matVec (matvec_f32x4), embedLookupQ4K, embedLookupQ6K, flashAttn.
+  ["ropeNorm", "rope_norm_f32"],
+  ["ropeNeox", "rope_neox_f32"],
+  // Future: attnScores, softmaxRow, attnOutput, matVec (matvec_f32x4),
+  // embedLookupQ4K, embedLookupQ6K, flashAttn.
 ];
 
 // Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
@@ -1755,6 +1801,48 @@ function launchArgmax(logits: GpuScratch, outIdx: GpuScratch, n: number): void {
   });
 }
 
+// Rotary positional embedding — interleaved-pair (norm) or split-half
+// (neox) variants. In-place rotate of each head slot's (x[a], x[b]) pair
+// by theta = pos * invFreq[i]. Dispatch: 1 threadgroup per head, half
+// headDim threads per threadgroup.
+function launchRope(
+  x: GpuScratch,
+  invFreq: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  pos: number,
+  mode: "norm" | "neox",
+): void {
+  const slot = mode === "neox" ? devOpsPipes.ropeNeox : devOpsPipes.ropeNorm;
+  if (!slot) throw new Error(`bun:gpu metal: rope${mode === "neox" ? "Neox" : "Norm"} kernel missing`);
+  const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
+  const { buf: fBuf, offset: fOff } = scratchBufferAndOffset(invFreq);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), slot.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), xBuf, xOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), fBuf, fOff, 1n);
+    const pHd = new Uint32Array([headDim]);
+    const pPos = new Uint32Array([pos]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pHd), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pPos), 4n, 3n);
+    const tgCount = new BigUint64Array([BigInt(nHeads), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([BigInt(headDim >> 1), 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
+function launchRopeNorm(x: GpuScratch, invFreq: GpuScratch, nHeads: number, headDim: number, pos: number): void {
+  launchRope(x, invFreq, nHeads, headDim, pos, "norm");
+}
+function launchRopeNeox(x: GpuScratch, invFreq: GpuScratch, nHeads: number, headDim: number, pos: number): void {
+  launchRope(x, invFreq, nHeads, headDim, pos, "neox");
+}
+
 // Public devOps table. Returns null until every kernel in the canonical
 // list is compiled AND the full port is flagged complete — bun:llm's
 // forward pass is all-or-nothing, so partial tables would mean silent
@@ -1776,6 +1864,8 @@ function getDevOps(): any | null {
     kvStore: launchKvStore,
     rmsnorm: launchRmsnorm,
     argmax: launchArgmax,
+    ropeNorm: launchRopeNorm,
+    ropeNeox: launchRopeNeox,
     // … more to come.
   };
 }
@@ -1801,6 +1891,8 @@ function _getPartialDevOps(): any {
   if (devOpsPipes.kvStore) out.kvStore = launchKvStore;
   if (devOpsPipes.rmsnorm) out.rmsnorm = launchRmsnorm;
   if (devOpsPipes.argmax) out.argmax = launchArgmax;
+  if (devOpsPipes.ropeNorm) out.ropeNorm = launchRopeNorm;
+  if (devOpsPipes.ropeNeox) out.ropeNeox = launchRopeNeox;
   return out;
 }
 
