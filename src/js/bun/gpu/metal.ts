@@ -519,6 +519,134 @@ kernel void rope_neox_f32(
     x[base + i]         = a * c - b * s;
     x[base + halfD + i] = a * s + b * c;
 }
+
+// Attention scores: one threadgroup per (head, pastPos) pair reduces
+// dot(Q[h], K[t][kvh]) * scale into scores[h * scoreStride + t].
+// Dispatch: threadgroups(nHeads, ctxLen, 1), threads(headDim, 1, 1).
+// headDim must be a multiple of 32 (warp).
+kernel void attn_scores_f32(
+    device const float *q           [[buffer(0)]],
+    device const float *kCache      [[buffer(1)]],
+    device       float *scores      [[buffer(2)]],
+    constant     uint  &headDim     [[buffer(3)]],
+    constant     uint  &kvRowSize   [[buffer(4)]],
+    constant     uint  &groupSize   [[buffer(5)]],
+    constant     uint  &scoreStride [[buffer(6)]],
+    constant     float &scale       [[buffer(7)]],
+    uint3               gid3        [[threadgroup_position_in_grid]],
+    uint3               tid3        [[thread_position_in_threadgroup]])
+{
+    threadgroup float warpV[32];
+
+    uint h = gid3.x;
+    uint t = gid3.y;
+    uint tid = tid3.x;
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint kvh = h / groupSize;
+    uint qBase = h * headDim;
+    ulong kBase = (ulong)t * (ulong)kvRowSize + (ulong)(kvh * headDim);
+
+    float v = (tid < headDim) ? q[qBase + tid] * kCache[kBase + tid] : 0.0f;
+    v = simd_sum(v);
+    if (lane == 0u) warpV[warp] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (warp == 0u) {
+        uint nwarps = (headDim + 31u) >> 5;
+        v = (tid < nwarps) ? warpV[lane] : 0.0f;
+        v = simd_sum(v);
+        if (tid == 0u) scores[h * scoreStride + t] = v * scale;
+    }
+}
+
+// Numerically-stable row softmax (in place). Dispatch: threadgroups(rows, 1, 1),
+// threads(bs, 1, 1). bs must be a multiple of 32, ≤1024.
+kernel void softmax_row_f32(
+    device       float *scores   [[buffer(0)]],
+    constant     uint  &cols     [[buffer(1)]],
+    constant     uint  &stride   [[buffer(2)]],
+    uint                r        [[threadgroup_position_in_grid]],
+    uint                tid      [[thread_position_in_threadgroup]],
+    uint                bs       [[threads_per_threadgroup]])
+{
+    threadgroup float warpMax[32];
+    threadgroup float warpSum[32];
+    threadgroup float sMax[1];
+    threadgroup float sSum[1];
+
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    device float *row = scores + r * stride;
+
+    // Max
+    float lmax = -INFINITY;
+    for (uint i = tid; i < cols; i += bs) {
+        float v = row[i];
+        if (v > lmax) lmax = v;
+    }
+    for (uint off = 16u; off > 0u; off >>= 1) {
+        float o = simd_shuffle_xor(lmax, off);
+        if (o > lmax) lmax = o;
+    }
+    if (lane == 0u) warpMax[warp] = lmax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (warp == 0u) {
+        uint nwarps = (bs + 31u) >> 5;
+        lmax = (tid < nwarps) ? warpMax[lane] : -INFINITY;
+        for (uint off = 16u; off > 0u; off >>= 1) {
+            float o = simd_shuffle_xor(lmax, off);
+            if (o > lmax) lmax = o;
+        }
+        if (tid == 0u) sMax[0] = lmax;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float maxV = sMax[0];
+
+    // Exp + sum
+    float lsum = 0.0f;
+    for (uint i = tid; i < cols; i += bs) {
+        float e = precise::exp(row[i] - maxV);
+        row[i] = e;
+        lsum += e;
+    }
+    lsum = simd_sum(lsum);
+    if (lane == 0u) warpSum[warp] = lsum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (warp == 0u) {
+        uint nwarps = (bs + 31u) >> 5;
+        lsum = (tid < nwarps) ? warpSum[lane] : 0.0f;
+        lsum = simd_sum(lsum);
+        if (tid == 0u) sSum[0] = lsum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float invSum = 1.0f / sSum[0];
+    for (uint i = tid; i < cols; i += bs) row[i] *= invSum;
+}
+
+// out[h*headDim + i] = sum_t scores[h][t] * V[t][kvh][i]
+// Dispatch: threadgroups(nHeads, 1, 1), threads(headDim, 1, 1).
+kernel void attn_output_f32(
+    device const float *scores      [[buffer(0)]],
+    device const float *vCache      [[buffer(1)]],
+    device       float *outv        [[buffer(2)]],
+    constant     uint  &headDim     [[buffer(3)]],
+    constant     uint  &kvRowSize   [[buffer(4)]],
+    constant     uint  &groupSize   [[buffer(5)]],
+    constant     uint  &ctxLen      [[buffer(6)]],
+    constant     uint  &scoreStride [[buffer(7)]],
+    uint                h           [[threadgroup_position_in_grid]],
+    uint                i           [[thread_position_in_threadgroup]])
+{
+    if (i >= headDim) return;
+    uint kvh = h / groupSize;
+    uint vHeadOff = kvh * headDim + i;
+    device const float *srow = scores + h * scoreStride;
+    float acc = 0.0f;
+    for (uint t = 0u; t < ctxLen; t++) {
+        acc += srow[t] * vCache[(ulong)t * (ulong)kvRowSize + vHeadOff];
+    }
+    outv[h * headDim + i] = acc;
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -641,8 +769,10 @@ const DEV_OPS_KERNELS: ReadonlyArray<readonly [string, string]> = [
   ["argmax", "argmax_f32"],
   ["ropeNorm", "rope_norm_f32"],
   ["ropeNeox", "rope_neox_f32"],
-  // Future: attnScores, softmaxRow, attnOutput, matVec (matvec_f32x4),
-  // embedLookupQ4K, embedLookupQ6K, flashAttn.
+  ["attnScores", "attn_scores_f32"],
+  ["softmaxRow", "softmax_row_f32"],
+  ["attnOutput", "attn_output_f32"],
+  // Future: matVec (matvec_f32x4), embedLookupQ4K, embedLookupQ6K, flashAttn.
 ];
 
 // Kernels that need a host-side launch wrapper once all of DEV_OPS_KERNELS
@@ -1843,6 +1973,119 @@ function launchRopeNeox(x: GpuScratch, invFreq: GpuScratch, nHeads: number, head
   launchRope(x, invFreq, nHeads, headDim, pos, "neox");
 }
 
+// Attention scores: scores[h*scoreStride + t] = scale * dot(Q[h], K[t][kvh]).
+// Dispatch: (nHeads, ctxLen) threadgroups, headDim threads per tg.
+function launchAttnScores(
+  q: GpuScratch,
+  kCache: GpuScratch,
+  scores: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  kvRowSize: number,
+  groupSize: number,
+  scoreStride: number,
+  ctxLen: number,
+  scale: number,
+): void {
+  if (!devOpsPipes.attnScores) throw new Error("bun:gpu metal: attnScores kernel missing");
+  const { buf: qBuf, offset: qOff } = scratchBufferAndOffset(q);
+  const { buf: kBuf, offset: kOff } = scratchBufferAndOffset(kCache);
+  const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(scores);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.attnScores.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), qBuf, qOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), kBuf, kOff, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), sBuf, sOff, 2n);
+    const pHd = new Uint32Array([headDim]);
+    const pKv = new Uint32Array([kvRowSize]);
+    const pGs = new Uint32Array([groupSize]);
+    const pSs = new Uint32Array([scoreStride]);
+    const pScale = new Float32Array([scale]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pHd), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKv), 4n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pGs), 4n, 5n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pSs), 4n, 6n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pScale), 4n, 7n);
+    const tgCount = new BigUint64Array([BigInt(nHeads), BigInt(ctxLen), 1n]);
+    const threadsPerTg = new BigUint64Array([BigInt(headDim), 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
+// Row-wise softmax in place. Dispatch: rows tgs, bs threads, where bs is
+// next-pow-2 ≥ cols clamped to [32, 1024].
+function launchSoftmaxRow(scores: GpuScratch, rows: number, cols: number, stride: number): void {
+  if (!devOpsPipes.softmaxRow) throw new Error("bun:gpu metal: softmaxRow kernel missing");
+  const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(scores);
+  // bs: next pow-2 ≥ cols, clamped to [32, 1024].
+  const target = Math.max(32, Math.min(1024, cols));
+  const bs = Math.min(1024, Math.max(32, 1 << Math.ceil(Math.log2(target))));
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.softmaxRow.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), sBuf, sOff, 0n);
+    const pCols = new Uint32Array([cols]);
+    const pStride = new Uint32Array([stride]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pCols), 4n, 1n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pStride), 4n, 2n);
+    const tgCount = new BigUint64Array([BigInt(rows), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([BigInt(bs), 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
+// out[h*headDim + i] = sum_t scores[h][t] * V[t][kvh][i]
+// Dispatch: nHeads tgs, headDim threads.
+function launchAttnOutput(
+  scores: GpuScratch,
+  vCache: GpuScratch,
+  out: GpuScratch,
+  nHeads: number,
+  headDim: number,
+  kvRowSize: number,
+  groupSize: number,
+  ctxLen: number,
+  scoreStride: number,
+): void {
+  if (!devOpsPipes.attnOutput) throw new Error("bun:gpu metal: attnOutput kernel missing");
+  const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(scores);
+  const { buf: vBuf, offset: vOff } = scratchBufferAndOffset(vCache);
+  const { buf: oBuf, offset: oOff } = scratchBufferAndOffset(out);
+  encodeWith(encoder => {
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.attnOutput.pipe);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), sBuf, sOff, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), vBuf, vOff, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), oBuf, oOff, 2n);
+    const pHd = new Uint32Array([headDim]);
+    const pKv = new Uint32Array([kvRowSize]);
+    const pGs = new Uint32Array([groupSize]);
+    const pCtx = new Uint32Array([ctxLen]);
+    const pSs = new Uint32Array([scoreStride]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pHd), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKv), 4n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pGs), 4n, 5n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pCtx), 4n, 6n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pSs), 4n, 7n);
+    const tgCount = new BigUint64Array([BigInt(nHeads), 1n, 1n]);
+    const threadsPerTg = new BigUint64Array([BigInt(headDim), 1n, 1n]);
+    msgSend_4_ptr_ptr!(
+      encoder,
+      sel("dispatchThreadgroups:threadsPerThreadgroup:"),
+      ffiPtr!(tgCount),
+      ffiPtr!(threadsPerTg),
+    );
+  });
+}
+
 // Public devOps table. Returns null until every kernel in the canonical
 // list is compiled AND the full port is flagged complete — bun:llm's
 // forward pass is all-or-nothing, so partial tables would mean silent
@@ -1866,6 +2109,9 @@ function getDevOps(): any | null {
     argmax: launchArgmax,
     ropeNorm: launchRopeNorm,
     ropeNeox: launchRopeNeox,
+    attnScores: launchAttnScores,
+    softmaxRow: launchSoftmaxRow,
+    attnOutput: launchAttnOutput,
     // … more to come.
   };
 }
@@ -1893,6 +2139,9 @@ function _getPartialDevOps(): any {
   if (devOpsPipes.argmax) out.argmax = launchArgmax;
   if (devOpsPipes.ropeNorm) out.ropeNorm = launchRopeNorm;
   if (devOpsPipes.ropeNeox) out.ropeNeox = launchRopeNeox;
+  if (devOpsPipes.attnScores) out.attnScores = launchAttnScores;
+  if (devOpsPipes.softmaxRow) out.softmaxRow = launchSoftmaxRow;
+  if (devOpsPipes.attnOutput) out.attnOutput = launchAttnOutput;
   return out;
 }
 
