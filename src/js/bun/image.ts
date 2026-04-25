@@ -6,19 +6,18 @@
 //
 //   import image from "bun:image";
 //   const img = await image.decode(bytes);
-//   const small = await image.resize(img, { width: 256, fit: "cover" });
-//   const jpeg = await image.encode(small, { format: "jpeg", quality: 85 });
+//   // img: { data: Uint8Array, width, height, channels, format }
 //
-// Codecs: JPEG (libjpeg-turbo), PNG (libpng) ship first; WebP / AVIF
-// follow. Resize takes the bun:gpu 2D-convolution kernel when one is
-// available + the input is large enough to win; otherwise CPU-path
-// (lanczos) via SIMD-accelerated kernels in `bun:simd`.
+// Codecs (v1):
+//   - JPEG: libjpeg-turbo, decoded as 3-channel RGB.
+//   - PNG:  libpng, decoded as 4-channel RGBA.
+// Both libs are statically linked into the Parabun binary; no external
+// install needed. Format is auto-detected from the magic-byte prefix.
 //
-// Tracks LYK-723 (decode/encode/resize) — gated behind the upcoming
-// `bun:gpu` 2D-convolution kernel (LYK-724) for the GPU resize path.
-// Today this module is a placeholder that throws; the dep vendoring is
-// in place so the FFI bindings can land in the next PR without
-// reshuffling the build.
+// Encode + WebP/AVIF + resize (via bun:gpu conv2D) follow in subsequent
+// commits — tracks LYK-723.
+
+const native = $cpp("parabun_image_codecs.cpp", "createParabunImageCodecs");
 
 const NOT_IMPLEMENTED_MSG =
   "bun:image is scaffolded but not yet implemented — see https://linear.app/lyku/issue/LYK-723";
@@ -27,10 +26,24 @@ function todo(): never {
   throw new Error(NOT_IMPLEMENTED_MSG);
 }
 
+type ImageFormat = "jpeg" | "png";
+type DecodedImage = {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  channels: number;
+  format: ImageFormat;
+};
+
+function decode(bytes: Uint8Array): DecodedImage {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("bun:image.decode: expected Uint8Array");
+  }
+  return native.decode(bytes);
+}
+
 export default {
-  decode(_bytes: Uint8Array): Promise<unknown> {
-    return todo();
-  },
+  decode,
   encode(_img: unknown, _opts: unknown): Promise<Uint8Array> {
     return todo();
   },
