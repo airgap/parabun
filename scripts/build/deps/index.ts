@@ -18,6 +18,8 @@ import { hdrhistogram } from "./hdrhistogram.ts";
 import { highway } from "./highway.ts";
 import { libarchive } from "./libarchive.ts";
 import { libdeflate } from "./libdeflate.ts";
+import { libjpegTurbo } from "./libjpeg-turbo.ts";
+import { libpng } from "./libpng.ts";
 import { libuv } from "./libuv.ts";
 import { lolhtml } from "./lolhtml.ts";
 import { lshpack } from "./lshpack.ts";
@@ -47,6 +49,11 @@ export const allDeps: readonly Dependency[] = [
   brotli,
   libdeflate,
   libarchive,
+  // Image codecs for `bun:image`. libpng links against zlib (must come
+  // after); libjpeg-turbo is standalone. Grouped here so `--without=image`
+  // gating can drop both in one move once the build flag lands.
+  libpng,
+  libjpegTurbo,
   cares,
   hdrhistogram,
   highway,
@@ -71,6 +78,8 @@ export {
   highway,
   libarchive,
   libdeflate,
+  libjpegTurbo,
+  libpng,
   libuv,
   lolhtml,
   lshpack,
