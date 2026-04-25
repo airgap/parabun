@@ -204,6 +204,24 @@ See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfo
 | Vector-search layered diagnosis (100k × 384)            | **2.03×** (only the SAB+warm-pool tier wins)| `pmap` + SAB                  |
 | Streaming ETL (10 M Float32, 4-stage affine → fused)    | **50×** vs `.map` chain · **1.24×** vs tight loop | `bun:pipeline` fusion   |
 
+## Roadmap
+
+Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU. The modules already shipping (`bun:parallel`, `bun:simd`, `bun:gpu`, `bun:llm`, `bun:pipeline`, `bun:arena`, `bun:signals`) are the foundation; the next set attack the most common "I have to shell out / use Python / write native code" pain points in JS-land.
+
+Each module ships behind a compile-time feature flag. Production builds slim to only what your app actually imports — heavy codecs (ffmpeg, Apache Arrow) are opt-in, server / Lambda / Workers builds stay minimal.
+
+| Status      | Module                | What it does                                                                                          |
+|-------------|-----------------------|-------------------------------------------------------------------------------------------------------|
+| in flight   | `bun:image`           | JPEG / PNG / WebP / AVIF decode + GPU-accelerated resize / filter. Sharp-class but bundleable.        |
+| next        | `bun:gpu` expansion   | 2D convolution, FFT, sort, scan, histogram kernels. Composes into image / audio / video / data work. |
+| next        | `bun:csv` + `bun:arrow`| Parallel CSV parse + columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB CSV" story.       |
+| next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
+| planned     | `bun:audio`           | FFT, spectrograms, filters, resampling. Currently zero good options in JS.                            |
+| planned     | `bun:video`           | ffmpeg-class transcode / thumbnail / concat as a runtime module. No more `which ffmpeg`.              |
+| planned     | `bun:camera`          | Live video capture (V4L2 / AVFoundation / Media Foundation). Makes Parabun a real embedded runtime.   |
+
+`bun:llm` becomes the proof-of-concept for the stack — "we built llama inference using `bun:gpu` + `bun:simd` + `bun:parallel`; you can build similar things with the same building blocks" — rather than the headline product. Parabun is positioned as a perf runtime, not an AI runtime.
+
 ## Editor Support
 
 ### VS Code / Cursor / Kiro
