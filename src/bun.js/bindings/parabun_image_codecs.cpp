@@ -34,6 +34,7 @@
 extern "C" {
 #include <jpeglib.h>
 #include <png.h>
+#include <webp/decode.h>
 }
 
 namespace Bun {
@@ -156,13 +157,53 @@ bool decodePngBytes(
     return true;
 }
 
-// Detect format from the magic-bytes prefix. JPEG: SOI marker (FF D8 FF).
-// PNG: 8-byte signature (89 50 4E 47 0D 0A 1A 0A — we check the first 4).
+// Detect format from the magic-bytes prefix.
+//   JPEG: SOI marker (FF D8 FF).
+//   PNG : 8-byte signature (89 50 4E 47 0D 0A 1A 0A — we check the first 4).
+//   WebP: RIFF container with "WEBP" subtype tag at byte offset 8.
 const char* detectFormat(const uint8_t* bytes, size_t len)
 {
     if (len >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return "jpeg";
     if (len >= 8 && bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G') return "png";
+    if (len >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+        && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') return "webp";
     return nullptr;
+}
+
+// ─── WebP decode ───────────────────────────────────────────────────────────
+// libwebp's WebPDecodeRGBA handles both lossy (VP8) and lossless (VP8L)
+// internally. Output is always 4-channel RGBA — alpha is always present
+// even for opaque images (set to 255). The library mallocs the output
+// buffer; we copy + free.
+
+bool decodeWebPBytes(
+    const uint8_t* bytes, size_t len,
+    std::vector<uint8_t>& outData,
+    uint32_t& outWidth, uint32_t& outHeight, uint32_t& outChannels,
+    char* outErr, size_t outErrLen)
+{
+    int w = 0, h = 0;
+    if (WebPGetInfo(bytes, len, &w, &h) == 0) {
+        std::strncpy(outErr, "not a valid WebP", outErrLen - 1);
+        return false;
+    }
+    if (w <= 0 || h <= 0) {
+        std::strncpy(outErr, "WebP has invalid dimensions", outErrLen - 1);
+        return false;
+    }
+    outWidth = static_cast<uint32_t>(w);
+    outHeight = static_cast<uint32_t>(h);
+    outChannels = 4;
+
+    uint8_t* decoded = WebPDecodeRGBA(bytes, len, &w, &h);
+    if (!decoded) {
+        std::strncpy(outErr, "WebP decode failed", outErrLen - 1);
+        return false;
+    }
+    const size_t bufSize = static_cast<size_t>(outWidth) * outHeight * 4;
+    outData.assign(decoded, decoded + bufSize);
+    WebPFree(decoded);
+    return true;
 }
 
 // ─── JPEG encode ───────────────────────────────────────────────────────────
@@ -383,8 +424,10 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
     bool ok = false;
     if (std::strcmp(format, "jpeg") == 0) {
         ok = decodeJpegBytes(bytes, len, data, width, height, channels, errMsg, sizeof(errMsg));
-    } else {
+    } else if (std::strcmp(format, "png") == 0) {
         ok = decodePngBytes(bytes, len, data, width, height, channels, errMsg, sizeof(errMsg));
+    } else {
+        ok = decodeWebPBytes(bytes, len, data, width, height, channels, errMsg, sizeof(errMsg));
     }
 
     if (!ok) {

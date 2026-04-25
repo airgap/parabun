@@ -8,6 +8,12 @@ const PNG_4X4_HEX =
   "000000164944415478da63f8cf0004ff212482f51fcac52a03009ea30ff1dd565c" +
   "ee0000000049454e44ae426082";
 
+// 4×4 lossless WebP of the red/blue checkerboard. Generated via Pillow
+// (which uses libwebp). 46 bytes — WebP's lossless container is denser
+// than PNG for small inputs.
+// prettier-ignore
+const WEBP_4X4_HEX = "5249464626000000574542505650384c190000002f03c000000f10f3bffff31f0ed4b46dc0e22be988e87f700e00";
+
 // 4×4 RGB JPEG of the same red/blue checkerboard, quality 95. Generated
 // via Pillow on the host. Single line so there's no chance of a chunk
 // boundary swallowing a byte; ~1344 hex chars / 672 bytes.
@@ -18,6 +24,7 @@ const fixtureSrc = `
   const _hexToBytes = (h) => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
   const PNG = _hexToBytes("${PNG_4X4_HEX}");
   const JPEG = _hexToBytes("${JPEG_4X4_HEX}");
+  const WEBP = _hexToBytes("${WEBP_4X4_HEX}");
 `;
 
 async function runFixture(prefix, source) {
@@ -59,6 +66,38 @@ describe("bun:image — decode", () => {
         // RGBA at row-major offsets.
         console.log("p00", r.data[0], r.data[1], r.data[2], r.data[3]);  // red, opaque
         console.log("p10", r.data[4], r.data[5], r.data[6], r.data[7]);  // blue, opaque
+      `,
+    );
+    expect(stdout).toBe(["p00 255 0 0 255", "p10 0 0 255 255"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("decodes a lossless WebP with the right shape + format", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-webp-shape",
+      `
+        import image from "bun:image";
+        const r = image.decode(WEBP);
+        console.log("format", r.format);
+        console.log("dims", r.width, r.height);
+        console.log("channels", r.channels);
+        console.log("dataLen", r.data.length);
+      `,
+    );
+    // Lossless WebP → RGBA, 4×4×4 = 64 bytes.
+    expect(stdout).toBe(["format webp", "dims 4 4", "channels 4", "dataLen 64"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("WebP pixel(0,0) is red, pixel(1,0) is blue (lossless preserves)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-webp-pixels",
+      `
+        import image from "bun:image";
+        const r = image.decode(WEBP);
+        // Lossless WebP should preserve the exact red/blue pixels.
+        console.log("p00", r.data[0], r.data[1], r.data[2], r.data[3]);
+        console.log("p10", r.data[4], r.data[5], r.data[6], r.data[7]);
       `,
     );
     expect(stdout).toBe(["p00 255 0 0 255", "p10 0 0 255 255"].join("\n"));

@@ -21,6 +21,7 @@ import { libdeflate } from "./libdeflate.ts";
 import { libjpegTurbo } from "./libjpeg-turbo.ts";
 import { libpng } from "./libpng.ts";
 import { libuv } from "./libuv.ts";
+import { libwebp } from "./libwebp.ts";
 import { lolhtml } from "./lolhtml.ts";
 import { lshpack } from "./lshpack.ts";
 import { mimalloc } from "./mimalloc.ts";
@@ -54,6 +55,7 @@ export const allDeps: readonly Dependency[] = [
   // gating can drop both in one move once the build flag lands.
   libpng,
   libjpegTurbo,
+  libwebp,
   cares,
   hdrhistogram,
   highway,
@@ -81,6 +83,7 @@ export {
   libjpegTurbo,
   libpng,
   libuv,
+  libwebp,
   lolhtml,
   lshpack,
   mimalloc,
