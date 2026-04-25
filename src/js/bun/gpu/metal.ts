@@ -167,6 +167,39 @@ kernel void matmulF32(
     if (row < M && col < N) C[(ulong)row * N + col] = acc;
 }
 
+// ── 2D convolution (valid mode) ────────────────────────────────────────────
+// Output[y, x] = sum_{ky, kx} input[y+ky, x+kx] * kernel[ky, kx].
+// Output dims: (iH-kH+1) × (iW-kW+1). One thread per output pixel; 16×16
+// threadgroups give good cache locality on Apple Silicon. fma() promotes
+// the inner accumulator into the GPU's FMA unit. No shared-memory tile
+// for v1 — direct global loads. Worth optimizing later for large kernels
+// (>= 7×7) where input reuse pays for the staging cost.
+kernel void conv2d_f32(
+    device const float *input  [[buffer(0)]],
+    device const float *krn    [[buffer(1)]],
+    device       float *outbuf [[buffer(2)]],
+    constant     uint  &iW     [[buffer(3)]],
+    constant     uint  &iH     [[buffer(4)]],
+    constant     uint  &kW     [[buffer(5)]],
+    constant     uint  &kH     [[buffer(6)]],
+    uint2               gid    [[thread_position_in_grid]])
+{
+    uint x = gid.x;
+    uint y = gid.y;
+    uint oW = iW - kW + 1u;
+    uint oH = iH - kH + 1u;
+    if (x >= oW || y >= oH) return;
+    float acc = 0.0f;
+    for (uint ky = 0u; ky < kH; ky++) {
+        uint inRow = (y + ky) * iW + x;
+        uint kRow = ky * kW;
+        for (uint kx = 0u; kx < kW; kx++) {
+            acc = fma(input[inRow + kx], krn[kRow + kx], acc);
+        }
+    }
+    outbuf[y * oW + x] = acc;
+}
+
 // ── Q4_K direct matVec ─────────────────────────────────────────────────────
 // Port of the CUDA matvec_q4k_f32 kernel (src/js/bun/gpu/cuda.ts).
 // Reads raw 144-byte super-blocks, dequantizes on chip, accumulates in f32.
@@ -960,6 +993,8 @@ let matVecFn: bigint = 0n;
 let matVecPipeline: bigint = 0n;
 let matmulFn: bigint = 0n;
 let matmulPipeline: bigint = 0n;
+let conv2DFn: bigint = 0n;
+let conv2DPipeline: bigint = 0n;
 let matVecQ4KFn: bigint = 0n;
 let matVecQ4KPipeline: bigint = 0n;
 let matVecQ6KFn: bigint = 0n;
@@ -1196,6 +1231,27 @@ function probe(): boolean {
   matmulFn = mm.fn;
   matmulPipeline = mm.pipe;
 
+  const cv = compileKernel(lib, "conv2d_f32");
+  if (cv === null) {
+    objcRelease(matmulPipeline);
+    objcRelease(matmulFn);
+    objcRelease(matVecPipeline);
+    objcRelease(matVecFn);
+    objcRelease(simdMapPipeline);
+    objcRelease(simdMapFn);
+    objcRelease(lib);
+    matmulPipeline = 0n;
+    matmulFn = 0n;
+    matVecPipeline = 0n;
+    matVecFn = 0n;
+    simdMapPipeline = 0n;
+    simdMapFn = 0n;
+    metalLibraryObj = 0n;
+    return false;
+  }
+  conv2DFn = cv.fn;
+  conv2DPipeline = cv.pipe;
+
   // Quantized matVec kernels. These are optional at the probe layer —
   // if the device's MSL compiler can't handle the Q-K source (shouldn't
   // happen on any Apple Silicon / Intel Mac GPU shipped in the last 5
@@ -1231,6 +1287,8 @@ function probe(): boolean {
     if (matVecQ6KFn !== 0n) objcRelease(matVecQ6KFn);
     if (matVecQ4KPipeline !== 0n) objcRelease(matVecQ4KPipeline);
     if (matVecQ4KFn !== 0n) objcRelease(matVecQ4KFn);
+    objcRelease(conv2DPipeline);
+    objcRelease(conv2DFn);
     objcRelease(matmulPipeline);
     objcRelease(matmulFn);
     objcRelease(matVecPipeline);
@@ -1242,6 +1300,8 @@ function probe(): boolean {
     matVecQ6KFn = 0n;
     matVecQ4KPipeline = 0n;
     matVecQ4KFn = 0n;
+    conv2DPipeline = 0n;
+    conv2DFn = 0n;
     matmulPipeline = 0n;
     matmulFn = 0n;
     matVecPipeline = 0n;
@@ -1691,6 +1751,105 @@ function launchMatmulF32(
   } finally {
     if (aBufOwned) objcRelease(aBuf);
     if (bBufOwned) objcRelease(bBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
+  }
+}
+
+// ─── Kernel launch: conv2D ─────────────────────────────────────────────────
+// Valid-mode 2D convolution. Output dims are (iH-kH+1) × (iW-kW+1). Same
+// buffer/encoder choreography as launchMatmulF32; pipeline is conv2d_f32,
+// dispatch is one thread per output pixel in 16×16 threadgroups.
+
+function launchConv2D(
+  input: Float32Array | GpuHandle,
+  kernel: Float32Array | GpuHandle,
+  iW: number,
+  iH: number,
+  kW: number,
+  kH: number,
+): Float32Array {
+  const oW = iW - kW + 1;
+  const oH = iH - kH + 1;
+  const inBytes = BigInt(iW * iH * 4);
+  const kBytes = BigInt(kW * kH * 4);
+  const outBytes = BigInt(oW * oH * 4);
+
+  let inBuf: bigint;
+  let inBufOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error("bun:gpu: conv2D called on released handle");
+    if (input.buffer === 0n) throw new Error("bun:gpu metal: handle has no MTLBuffer (f64?)");
+    inBuf = input.buffer;
+    inBufOwned = false;
+  } else {
+    inBuf = newBufferFromF32(input, inBytes);
+    if (inBuf === 0n) throw new Error("bun:gpu metal: newBuffer (input) failed");
+    inBufOwned = true;
+  }
+
+  let kBuf: bigint;
+  let kBufOwned: boolean;
+  if (isGpuHandle(kernel)) {
+    if (kernel.released) throw new Error("bun:gpu: conv2D called on released handle");
+    if (kernel.buffer === 0n) throw new Error("bun:gpu metal: kernel handle has no MTLBuffer");
+    kBuf = kernel.buffer;
+    kBufOwned = false;
+  } else {
+    kBuf = newBufferFromF32(kernel, kBytes);
+    if (kBuf === 0n) {
+      if (inBufOwned) objcRelease(inBuf);
+      throw new Error("bun:gpu metal: newBuffer (kernel) failed");
+    }
+    kBufOwned = true;
+  }
+
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength (output) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), conv2DPipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), kBuf, 0n, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 2n);
+    const pIW = new Uint32Array([iW]);
+    const pIH = new Uint32Array([iH]);
+    const pKW = new Uint32Array([kW]);
+    const pKH = new Uint32Array([kH]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pIW), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pIH), 4n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKW), 4n, 5n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pKH), 4n, 6n);
+
+    // 16×16 threadgroups → 256 threads/TG. dispatchThreads handles the
+    // partial trailing TG when oW/oH aren't multiples of 16; the in-kernel
+    // boundary check (`if x >= oW || y >= oH return`) is still needed
+    // because dispatchThreads launches whole TGs.
+    const threads = new BigUint64Array([BigInt(oW), BigInt(oH), 1n]);
+    const tpt = new BigUint64Array([16n, 16n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: outBuf contents is null");
+    const out = new Float32Array(oW * oH);
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, oW * oH * 4));
+    out.set(view);
+    return out;
+  } finally {
+    if (inBufOwned) objcRelease(inBuf);
+    if (kBufOwned) objcRelease(kBuf);
     if (outBuf !== 0n) objcRelease(outBuf);
   }
 }
@@ -2888,6 +3047,40 @@ function launchCustomMSLF32(a: Float32Array, kernel: CachedMSLKernel): Float32Ar
   }
 }
 
+function conv2D(
+  input: Float32Array | GpuHandle,
+  kernel: Float32Array | GpuHandle,
+  iW: number,
+  iH: number,
+  kW: number,
+  kH: number,
+): Float32Array {
+  if (!probe() || conv2DPipeline === 0n) {
+    // Probe failed — fall back to the public wrapper's CPU path. The wrapper
+    // calls the backend's conv2D when present; signaling absence by throwing
+    // would force callers to handle it. Returning the CPU result keeps the
+    // backend method total without each caller doing the dance.
+    const inputView = isGpuHandle(input) ? (input.view as Float32Array) : input;
+    const kernelView = isGpuHandle(kernel) ? (kernel.view as Float32Array) : kernel;
+    const oW = iW - kW + 1;
+    const oH = iH - kH + 1;
+    const out = new Float32Array(oW * oH);
+    for (let y = 0; y < oH; y++) {
+      for (let x = 0; x < oW; x++) {
+        let acc = 0;
+        for (let ky = 0; ky < kH; ky++) {
+          const inRow = (y + ky) * iW + x;
+          const kRow = ky * kW;
+          for (let kx = 0; kx < kW; kx++) acc += inputView[inRow + kx] * kernelView[kRow + kx];
+        }
+        out[y * oW + x] = acc;
+      }
+    }
+    return out;
+  }
+  return launchConv2D(input, kernel, iW, iH, kW, kH);
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   if (typeof fn !== "function") throw new TypeError("fn must be a function");
   const view = unwrapHandle(a);
@@ -2920,6 +3113,14 @@ function dispose(): void {
   if (matmulFn !== 0n) {
     objcRelease(matmulFn);
     matmulFn = 0n;
+  }
+  if (conv2DPipeline !== 0n) {
+    objcRelease(conv2DPipeline);
+    conv2DPipeline = 0n;
+  }
+  if (conv2DFn !== 0n) {
+    objcRelease(conv2DFn);
+    conv2DFn = 0n;
   }
   if (matVecPipeline !== 0n) {
     objcRelease(matVecPipeline);
@@ -2989,6 +3190,7 @@ export default {
   dot,
   matVec,
   matmul,
+  conv2D,
   simdMap,
   alloc,
   isAligned,
