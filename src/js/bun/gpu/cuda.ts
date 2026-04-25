@@ -1008,6 +1008,110 @@ function launchMatmulF32(
   }
 }
 
+// ─── Kernel launch: conv2D ────────────────────────────────────────────────
+// Valid-mode 2D convolution. The kernel function is resolved through the
+// NVRTC dev-ops module (probeDevOps), so this launcher is only callable
+// when devOpsFns is non-null. The public wrapper falls back to CPU when
+// it isn't.
+
+function launchConv2DF32(
+  input: Float32Array | GpuHandle,
+  kernel: Float32Array | GpuHandle,
+  iW: number,
+  iH: number,
+  kW: number,
+  kH: number,
+): Float32Array {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const oW = iW - kW + 1;
+  const oH = iH - kH + 1;
+  const inBytes = BigInt(iW * iH * 4);
+  const kBytes = BigInt(kW * kH * 4);
+  const outBytes = BigInt(oW * oH * 4);
+
+  let dIn: bigint;
+  let inOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error("bun:gpu: conv2D called on released handle");
+    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dIn = input.buffer;
+    inOwned = false;
+  } else {
+    const dInBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dInBuf), inBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    dIn = dInBuf[0];
+    inOwned = true;
+  }
+
+  let dK: bigint;
+  let kOwned: boolean;
+  if (isGpuHandle(kernel)) {
+    if (kernel.released) throw new Error("bun:gpu: conv2D called on released handle");
+    if (kernel.buffer === 0n) throw new Error("bun:gpu cuda: kernel handle has no device buffer");
+    dK = kernel.buffer;
+    kOwned = false;
+  } else {
+    const dKBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dKBuf), kBytes) !== 0) {
+      if (inOwned) s.cuMemFree_v2(dIn);
+      throw new Error("bun:gpu cuda: cuMemAlloc(kernel) failed");
+    }
+    dK = dKBuf[0];
+    kOwned = true;
+  }
+
+  let dOut: bigint = 0n;
+  try {
+    const dOutBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(output) failed");
+    dOut = dOutBuf[0];
+
+    if (inOwned) {
+      if (s.cuMemcpyHtoD_v2(dIn, ptr(input as Float32Array), inBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+      }
+    }
+    if (kOwned) {
+      if (s.cuMemcpyHtoD_v2(dK, ptr(kernel as Float32Array), kBytes) !== 0) {
+        throw new Error("bun:gpu cuda: cuMemcpyHtoD(kernel) failed");
+      }
+    }
+
+    const pInBuf = new BigUint64Array([dIn]);
+    const pKBuf = new BigUint64Array([dK]);
+    const pOutBuf = new BigUint64Array([dOut]);
+    const pIW = new Uint32Array([iW]);
+    const pIH = new Uint32Array([iH]);
+    const pKW = new Uint32Array([kW]);
+    const pKH = new Uint32Array([kH]);
+    const paramPtrs = new BigUint64Array([
+      BigInt(ptr(pInBuf)),
+      BigInt(ptr(pKBuf)),
+      BigInt(ptr(pOutBuf)),
+      BigInt(ptr(pIW)),
+      BigInt(ptr(pIH)),
+      BigInt(ptr(pKW)),
+      BigInt(ptr(pKH)),
+    ]);
+
+    // 16×16 blocks; grid covers ceil(oW/16) × ceil(oH/16).
+    const gridX = Math.floor((oW + 15) / 16);
+    const gridY = Math.floor((oH + 15) / 16);
+    const r = s.cuLaunchKernel(devOpsFns!.conv2D, gridX, gridY, 1, 16, 16, 1, 0, 0n, ptr(paramPtrs), null);
+    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(conv2D) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+
+    const out = new Float32Array(oW * oH);
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(output) failed");
+    return out;
+  } finally {
+    if (inOwned && dIn !== 0n) s.cuMemFree_v2(dIn);
+    if (kOwned && dK !== 0n) s.cuMemFree_v2(dK);
+    if (dOut !== 0n) s.cuMemFree_v2(dOut);
+  }
+}
+
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
 //
 // a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
@@ -1682,6 +1786,38 @@ function launchCustomF32(a: Float32Array, kernel: CachedKernel): Float32Array {
     s.cuMemFree_v2(dIn);
     s.cuMemFree_v2(dOut);
   }
+}
+
+function conv2D(
+  input: Float32Array | GpuHandle,
+  kernel: Float32Array | GpuHandle,
+  iW: number,
+  iH: number,
+  kW: number,
+  kH: number,
+): Float32Array {
+  // GPU path requires NVRTC + the dev-ops module. Fall through to a CPU
+  // loop if that's unavailable so callers get correct (just slow) results.
+  if (!probeDevOps()) {
+    const inputView = isGpuHandle(input) ? (input.view as Float32Array) : input;
+    const kernelView = isGpuHandle(kernel) ? (kernel.view as Float32Array) : kernel;
+    const oW = iW - kW + 1;
+    const oH = iH - kH + 1;
+    const out = new Float32Array(oW * oH);
+    for (let y = 0; y < oH; y++) {
+      for (let x = 0; x < oW; x++) {
+        let acc = 0;
+        for (let ky = 0; ky < kH; ky++) {
+          const inRow = (y + ky) * iW + x;
+          const kRow = ky * kW;
+          for (let kx = 0; kx < kW; kx++) acc += inputView[inRow + kx] * kernelView[kRow + kx];
+        }
+        out[y * oW + x] = acc;
+      }
+    }
+    return out;
+  }
+  return launchConv2DF32(input, kernel, iW, iH, kW, kH);
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
@@ -2694,6 +2830,36 @@ extern "C" __global__ void argmax_f32(
         if (tid == 0) outIdx[0] = bestI;
     }
 }
+
+// ─── 2D convolution (valid mode) ───────────────────────────────────────────
+// Output[y, x] = sum_{ky, kx} input[y+ky, x+kx] * kernel[ky, kx].
+// Output dims: (iH-kH+1) × (iW-kW+1). One thread per output pixel; 16×16
+// blocks (256 threads) for cache locality. Direct global loads + fmaf
+// accumulator. Worth tile-optimizing later for kernels >= 7×7.
+extern "C" __global__ void conv2d_f32(
+    const float* __restrict__ input,
+    const float* __restrict__ krn,
+    float* __restrict__ outbuf,
+    unsigned int iW,
+    unsigned int iH,
+    unsigned int kW,
+    unsigned int kH
+) {
+    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int oW = iW - kW + 1u;
+    unsigned int oH = iH - kH + 1u;
+    if (x >= oW || y >= oH) return;
+    float acc = 0.0f;
+    for (unsigned int ky = 0u; ky < kH; ky++) {
+        unsigned int inRow = (y + ky) * iW + x;
+        unsigned int kRow = ky * kW;
+        for (unsigned int kx = 0u; kx < kW; kx++) {
+            acc = fmaf(input[inRow + kx], krn[kRow + kx], acc);
+        }
+    }
+    outbuf[y * oW + x] = acc;
+}
 `;
 
 type DevOpsFns = {
@@ -2716,6 +2882,7 @@ type DevOpsFns = {
   embedLookupQ4K: bigint;
   embedLookupQ6K: bigint;
   flashAttn: bigint;
+  conv2D: bigint;
 };
 
 let devOpsProbed = false;
@@ -2801,6 +2968,7 @@ function probeDevOps(): boolean {
     "embedLookupQ4K",
     "embedLookupQ6K",
     "flashAttn",
+    "conv2D",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -2822,6 +2990,7 @@ function probeDevOps(): boolean {
     embedLookupQ4K: "embed_lookup_q4k_f32",
     embedLookupQ6K: "embed_lookup_q6k_f32",
     flashAttn: "flash_attn_f32",
+    conv2D: "conv2d_f32",
   };
 
   const fns = {} as DevOpsFns;
@@ -3367,6 +3536,7 @@ export default {
   dot,
   matVec,
   matmul,
+  conv2D,
   simdMap,
   alloc,
   isAligned,
