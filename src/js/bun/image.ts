@@ -34,6 +34,11 @@ type DecodedImage = {
   channels: number;
   format: ImageFormat;
 };
+type EncodeOptions = {
+  format: ImageFormat;
+  /** JPEG quality 1-100. Ignored for PNG. Default 85. */
+  quality?: number;
+};
 
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
@@ -42,11 +47,19 @@ function decode(bytes: Uint8Array): DecodedImage {
   return native.decode(bytes);
 }
 
+function encode(img: DecodedImage, opts: EncodeOptions): Uint8Array {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.encode: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null || typeof opts.format !== "string") {
+    throw new TypeError('bun:image.encode: opts must be { format: "jpeg" | "png", quality? }');
+  }
+  return native.encode(img, opts);
+}
+
 export default {
   decode,
-  encode(_img: unknown, _opts: unknown): Promise<Uint8Array> {
-    return todo();
-  },
+  encode,
   resize(_img: unknown, _opts: unknown): Promise<unknown> {
     return todo();
   },

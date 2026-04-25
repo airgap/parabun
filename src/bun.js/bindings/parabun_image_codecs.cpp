@@ -164,6 +164,127 @@ const char* detectFormat(const uint8_t* bytes, size_t len)
     return nullptr;
 }
 
+// ─── JPEG encode ───────────────────────────────────────────────────────────
+// Output is RGB only; encoders that need RGBA input get the alpha channel
+// silently dropped (JPEG has no alpha). Quality clamped to [1, 100].
+
+bool encodeJpegBytes(
+    const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t channels,
+    int quality, std::vector<uint8_t>& outData,
+    char* outErr, size_t outErrLen)
+{
+    if (channels != 3 && channels != 4) {
+        std::snprintf(outErr, outErrLen, "JPEG encode requires 3- or 4-channel input, got %u", channels);
+        return false;
+    }
+    struct jpeg_compress_struct cinfo;
+    JpegError jerr;
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = jpegErrorExit;
+    jerr.pub.output_message = jpegOutputMessage;
+    jerr.message[0] = '\0';
+
+    unsigned char* outBuf = nullptr;
+    unsigned long outBufLen = 0;
+
+    if (setjmp(jerr.jbuf)) {
+        if (outBuf) std::free(outBuf);
+        jpeg_destroy_compress(&cinfo);
+        std::strncpy(outErr, jerr.message[0] ? jerr.message : "JPEG encode failed", outErrLen - 1);
+        outErr[outErrLen - 1] = '\0';
+        return false;
+    }
+
+    jpeg_create_compress(&cinfo);
+    // jpeg_mem_dest mallocs and grows outBuf; we copy out and free below.
+    jpeg_mem_dest(&cinfo, &outBuf, &outBufLen);
+    cinfo.image_width = width;
+    cinfo.image_height = height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    int q = quality;
+    if (q < 1) q = 1;
+    if (q > 100) q = 100;
+    jpeg_set_quality(&cinfo, q, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+
+    if (channels == 3) {
+        // Direct path — pass scanlines into libjpeg as-is.
+        const size_t rowBytes = static_cast<size_t>(width) * 3;
+        while (cinfo.next_scanline < height) {
+            JSAMPROW row[1] = {
+                const_cast<uint8_t*>(pixels) + static_cast<size_t>(cinfo.next_scanline) * rowBytes,
+            };
+            jpeg_write_scanlines(&cinfo, row, 1);
+        }
+    } else {
+        // RGBA → RGB drop the alpha into a per-row scratch buffer.
+        std::vector<uint8_t> rowScratch(static_cast<size_t>(width) * 3);
+        const size_t inRowBytes = static_cast<size_t>(width) * 4;
+        while (cinfo.next_scanline < height) {
+            const uint8_t* src = pixels + static_cast<size_t>(cinfo.next_scanline) * inRowBytes;
+            for (uint32_t x = 0; x < width; x++) {
+                rowScratch[x * 3] = src[x * 4];
+                rowScratch[x * 3 + 1] = src[x * 4 + 1];
+                rowScratch[x * 3 + 2] = src[x * 4 + 2];
+            }
+            JSAMPROW row[1] = { rowScratch.data() };
+            jpeg_write_scanlines(&cinfo, row, 1);
+        }
+    }
+
+    jpeg_finish_compress(&cinfo);
+    outData.assign(outBuf, outBuf + outBufLen);
+    std::free(outBuf);
+    jpeg_destroy_compress(&cinfo);
+    return true;
+}
+
+// ─── PNG encode ────────────────────────────────────────────────────────────
+// libpng's simplified png_image_write_to_memory handles all the chunk +
+// filter machinery. Accepts RGB (3 channels) and RGBA (4 channels)
+// directly; gray + grayscale-alpha possible later.
+
+bool encodePngBytes(
+    const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t channels,
+    std::vector<uint8_t>& outData,
+    char* outErr, size_t outErrLen)
+{
+    if (channels != 3 && channels != 4) {
+        std::snprintf(outErr, outErrLen, "PNG encode requires 3- or 4-channel input, got %u", channels);
+        return false;
+    }
+    png_image image;
+    std::memset(&image, 0, sizeof(image));
+    image.version = PNG_IMAGE_VERSION;
+    image.width = width;
+    image.height = height;
+    image.format = (channels == 4) ? PNG_FORMAT_RGBA : PNG_FORMAT_RGB;
+
+    // Two-pass: first call with output=nullptr to size the buffer, then
+    // allocate and call again with the real destination. The size is an
+    // upper bound (PNG compresses), so we resize the result down afterwards.
+    png_alloc_size_t size = 0;
+    if (png_image_write_get_memory_size(image, size, /* convert_to_8bit */ 0,
+            pixels, /* row_stride */ 0, /* colormap */ nullptr) == 0) {
+        std::strncpy(outErr, image.message[0] ? image.message : "PNG sizing failed", outErrLen - 1);
+        outErr[outErrLen - 1] = '\0';
+        return false;
+    }
+
+    outData.resize(static_cast<size_t>(size));
+    png_alloc_size_t actualSize = size;
+    if (png_image_write_to_memory(&image, outData.data(), &actualSize,
+            /* convert_to_8bit */ 0, pixels, /* row_stride */ 0, /* colormap */ nullptr) == 0) {
+        std::strncpy(outErr, image.message[0] ? image.message : "PNG write failed", outErrLen - 1);
+        outErr[outErrLen - 1] = '\0';
+        return false;
+    }
+    outData.resize(static_cast<size_t>(actualSize));
+    return true;
+}
+
 } // anonymous namespace
 
 JSC_DEFINE_HOST_FUNCTION(functionDecode,
@@ -227,6 +348,95 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
     return JSValue::encode(obj);
 }
 
+JSC_DEFINE_HOST_FUNCTION(functionEncode,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.encode: img must be the object returned from decode()"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+
+    // Pull the format string out of opts.
+    if (!optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.encode: opts must be { format, quality? }"_s);
+        return {};
+    }
+    auto* optsObj = asObject(optsArg);
+    JSValue formatVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!formatVal.isString()) {
+        throwTypeError(globalObject, scope, "bun:image.encode: opts.format must be \"jpeg\" or \"png\""_s);
+        return {};
+    }
+    auto formatStr = formatVal.toWTFString(globalObject).utf8();
+    RETURN_IF_EXCEPTION(scope, {});
+    bool isJpeg = std::strcmp(formatStr.data(), "jpeg") == 0;
+    bool isPng = std::strcmp(formatStr.data(), "png") == 0;
+    if (!isJpeg && !isPng) {
+        throwTypeError(globalObject, scope, makeString("bun:image.encode: unknown format "_s, formatVal.toWTFString(globalObject)));
+        return {};
+    }
+
+    // Pull dims + pixel data out of img.
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!widthVal.isNumber() || !heightVal.isNumber() || !channelsVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.encode: img.width/height/channels must be numbers"_s);
+        return {};
+    }
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.encode: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    uint32_t width = widthVal.toUInt32(globalObject);
+    uint32_t height = heightVal.toUInt32(globalObject);
+    uint32_t channels = channelsVal.toUInt32(globalObject);
+    auto* dataView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* pixelsRaw = dataView->vector();
+    if (!pixelsRaw) {
+        throwTypeError(globalObject, scope, "bun:image.encode: img.data is detached"_s);
+        return {};
+    }
+    const uint8_t* pixels = static_cast<const uint8_t*>(pixelsRaw);
+    if (dataView->length() != static_cast<size_t>(width) * height * channels) {
+        throwTypeError(globalObject, scope, "bun:image.encode: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    int quality = 85;
+    JSValue qualityVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "quality"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (qualityVal.isNumber()) quality = qualityVal.toInt32(globalObject);
+
+    std::vector<uint8_t> outBytes;
+    char errMsg[256] = { 0 };
+    bool ok = isJpeg
+        ? encodeJpegBytes(pixels, width, height, channels, quality, outBytes, errMsg, sizeof(errMsg))
+        : encodePngBytes(pixels, width, height, channels, outBytes, errMsg, sizeof(errMsg));
+
+    if (!ok) {
+        throwTypeError(globalObject, scope, makeString("bun:image.encode: "_s, String::fromUTF8(errMsg)));
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    auto* result = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes.size());
+    RETURN_IF_EXCEPTION(scope, {});
+    if (outBytes.size() > 0) std::memcpy(result->vector(), outBytes.data(), outBytes.size());
+    return JSValue::encode(result);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -234,6 +444,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "decode"_s), 1,
         functionDecode, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "encode"_s), 2,
+        functionEncode, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

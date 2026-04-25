@@ -140,6 +140,105 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("PNG encode → decode roundtrip preserves pixels exactly (lossless)", async () => {
+    // 4×4 RGBA pixels, alternating red/blue. Encode to PNG, decode the
+    // result, verify byte-equal pixel arrays. PNG is lossless so we can
+    // pin every byte.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-png-roundtrip",
+      `
+        import image from "bun:image";
+        const w = 4, h = 4;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          if ((x + y) % 2 === 0) { data[off] = 255; data[off+1] = 0; data[off+2] = 0; data[off+3] = 255; }
+          else                   { data[off] = 0;   data[off+1] = 0; data[off+2] = 255; data[off+3] = 255; }
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const bytes = image.encode(orig, { format: "png" });
+        console.log("encoded.kind", bytes.constructor.name);
+        console.log("encoded.first4", bytes[0], bytes[1], bytes[2], bytes[3]);  // PNG sig
+        const back = image.decode(bytes);
+        console.log("dims", back.width, back.height, "ch", back.channels);
+        console.log("equal", back.data.length === data.length && back.data.every((v, i) => v === data[i]));
+      `,
+    );
+    expect(stdout).toBe(
+      ["encoded.kind Buffer", "encoded.first4 137 80 78 71", "dims 4 4 ch 4", "equal true"].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("JPEG encode → decode roundtrip preserves dims (lossy bytes)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-jpeg-roundtrip",
+      `
+        import image from "bun:image";
+        const w = 16, h = 16;  // 16×16 gives JPEG room to preserve a gradient
+        const data = new Uint8Array(w * h * 3);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 3;
+          data[off] = (x * 16) | 0;
+          data[off + 1] = (y * 16) | 0;
+          data[off + 2] = 128;
+        }
+        const orig = { data, width: w, height: h, channels: 3, format: "jpeg" };
+        const bytes = image.encode(orig, { format: "jpeg", quality: 95 });
+        // SOI marker at start
+        console.log("first2", bytes[0], bytes[1]);
+        const back = image.decode(bytes);
+        console.log("back.dims", back.width, back.height, "ch", back.channels);
+        // Spot check: gradient ordering should survive lossy encode.
+        const left = back.data[0]; // pixel (0,0).R, expected near 0
+        const right = back.data[(w - 1) * 3]; // pixel (w-1, 0).R, expected near 240
+        console.log("gradient.preserved", left < 80 && right > 180);
+      `,
+    );
+    expect(stdout).toBe(["first2 255 216", "back.dims 16 16 ch 3", "gradient.preserved true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("encode accepts RGBA input for JPEG (alpha dropped)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-jpeg-from-rgba",
+      `
+        import image from "bun:image";
+        const w = 16, h = 16;
+        const data = new Uint8Array(w * h * 4);
+        for (let i = 0; i < w * h; i++) {
+          data[i * 4] = 200; data[i * 4 + 1] = 100; data[i * 4 + 2] = 50; data[i * 4 + 3] = 255;
+        }
+        const bytes = image.encode({ data, width: w, height: h, channels: 4, format: "png" }, { format: "jpeg", quality: 90 });
+        const back = image.decode(bytes);
+        console.log("ch", back.channels, "dims", back.width, back.height);
+        // Pixel should be roughly 200, 100, 50 after lossy roundtrip.
+        const r = back.data[0], g = back.data[1], b = back.data[2];
+        console.log("approx", Math.abs(r - 200) < 20, Math.abs(g - 100) < 20, Math.abs(b - 50) < 20);
+      `,
+    );
+    expect(stdout).toBe(["ch 3 dims 16 16", "approx true true true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("encode rejects unknown format", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-encode-bad-format",
+      `
+        import image from "bun:image";
+        const data = new Uint8Array(48);
+        try {
+          image.encode({ data, width: 4, height: 4, channels: 3, format: "jpeg" }, { format: "tiff" });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("unknown format"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",
