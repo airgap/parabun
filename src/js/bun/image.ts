@@ -39,6 +39,10 @@ type EncodeOptions = {
   /** JPEG quality 1-100. Ignored for PNG. Default 85. */
   quality?: number;
 };
+type ResizeOptions = {
+  width: number;
+  height: number;
+};
 
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
@@ -57,10 +61,18 @@ function encode(img: DecodedImage, opts: EncodeOptions): Uint8Array {
   return native.encode(img, opts);
 }
 
+function resize(img: DecodedImage, opts: ResizeOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.resize: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:image.resize: opts must be { width, height }");
+  }
+  return native.resize(img, opts);
+}
+
 export default {
   decode,
   encode,
-  resize(_img: unknown, _opts: unknown): Promise<unknown> {
-    return todo();
-  },
+  resize,
 };

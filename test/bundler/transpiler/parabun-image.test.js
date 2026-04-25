@@ -239,6 +239,129 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("resize identity (same dims) preserves pixels", async () => {
+    // Decoded pixels resized to their own dims should round-trip nearly
+    // exactly under bilinear (each output pixel samples the four nearest
+    // source pixels with weights that collapse to the source pixel
+    // when src == dst dims, modulo float rounding).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-identity",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const same = image.resize(orig, { width: orig.width, height: orig.height });
+        console.log("dims", same.width, same.height, same.channels);
+        const equal = same.data.length === orig.data.length && same.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4 4", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("resize 2× upscale preserves edges", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-up",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);  // 4×4 RGBA red/blue checker
+        const up = image.resize(orig, { width: 8, height: 8 });
+        console.log("dims", up.width, up.height, up.channels);
+        // Top-left pixel of upscaled should still be predominantly red
+        // (its source neighborhood is mostly red).
+        const r = up.data[0], g = up.data[1], b = up.data[2];
+        console.log("topLeftDominant", r > g && r > b);
+      `,
+    );
+    expect(stdout).toBe(["dims 8 8 4", "topLeftDominant true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("resize 2× downscale produces correct dims + valid bytes", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-down",
+      `
+        import image from "bun:image";
+        // Build a 16×16 RGBA image with a horizontal gradient.
+        const w = 16, h = 16;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          data[off] = (x * 16) | 0;       // R: 0 → 240
+          data[off + 1] = 0;
+          data[off + 2] = 0;
+          data[off + 3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const small = image.resize(orig, { width: 8, height: 8 });
+        console.log("dims", small.width, small.height, small.channels);
+        // The gradient still goes left → right after downscale.
+        const leftR = small.data[0];
+        const rightR = small.data[(7) * 4];
+        console.log("gradient", leftR < 80 && rightR > 180);
+      `,
+    );
+    expect(stdout).toBe(["dims 8 8 4", "gradient true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("resize non-square dims (asymmetric scale)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-nonsquare",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const out = image.resize(orig, { width: 12, height: 6 });
+        console.log("dims", out.width, out.height, out.channels);
+        console.log("dataLen", out.data.length);
+        // 12 × 6 × 4 channels = 288.
+      `,
+    );
+    expect(stdout).toBe(["dims 12 6 4", "dataLen 288"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("decode → resize → encode → decode round-trip", async () => {
+    // The end-to-end pipeline this whole module exists for: take a
+    // JPEG, decode + resize + re-encode as PNG, then decode the PNG
+    // back. Verifies all three operations cooperate cleanly.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-pipeline",
+      `
+        import image from "bun:image";
+        const decoded = image.decode(JPEG);
+        const small = image.resize(decoded, { width: 2, height: 2 });
+        const png = image.encode(small, { format: "png" });
+        const back = image.decode(png);
+        console.log("decoded", decoded.format, decoded.width, decoded.height);
+        console.log("small", small.width, small.height, small.channels);
+        // PNG decode forces RGBA, so the round-trip's channels will be
+        // 4 even though we encoded a 3-channel resize result.
+        console.log("back", back.format, back.width, back.height, back.channels);
+      `,
+    );
+    expect(stdout).toBe(["decoded jpeg 4 4", "small 2 2 3", "back png 2 2 4"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("resize rejects zero dims", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-zero",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        try {
+          image.resize(orig, { width: 0, height: 4 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes(">= 1"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

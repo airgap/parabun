@@ -25,6 +25,7 @@
 
 #include "ZigGlobalObject.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <csetjmp>
@@ -241,6 +242,69 @@ bool encodeJpegBytes(
     return true;
 }
 
+// ─── Bilinear resize ───────────────────────────────────────────────────────
+// CPU-side bilinear resampling. Each output pixel samples the four nearest
+// input pixels with bilinear weights derived from the half-pixel-centered
+// source coordinate. Works with 1-, 3-, or 4-channel input.
+//
+// Half-pixel centering (`(ox + 0.5) * w/newW - 0.5`) matches the convention
+// most image libraries use (Pillow, OpenCV, sharp): pixel centers, not
+// edges, are at integer coordinates. Without it, exact 1× resizes drift by
+// half a pixel and a 2× upsample loses edge quality.
+//
+// Future: a `gpu.resize` kernel that does this on GPU directly. The
+// conv2D kernel doesn't fit because the sample center moves per output
+// pixel; resize wants its own dedicated dispatch.
+
+void resizeBilinear(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels,
+    uint8_t* dst, uint32_t dw, uint32_t dh)
+{
+    const float xRatio = static_cast<float>(sw) / static_cast<float>(dw);
+    const float yRatio = static_cast<float>(sh) / static_cast<float>(dh);
+    for (uint32_t oy = 0; oy < dh; oy++) {
+        const float syf = (static_cast<float>(oy) + 0.5f) * yRatio - 0.5f;
+        int sy0 = static_cast<int>(std::floor(syf));
+        int sy1 = sy0 + 1;
+        float ty = syf - static_cast<float>(sy0);
+        if (sy0 < 0) { sy0 = 0; ty = 0.0f; }
+        if (sy1 >= static_cast<int>(sh)) sy1 = static_cast<int>(sh) - 1;
+        if (sy0 >= static_cast<int>(sh)) sy0 = static_cast<int>(sh) - 1;
+
+        for (uint32_t ox = 0; ox < dw; ox++) {
+            const float sxf = (static_cast<float>(ox) + 0.5f) * xRatio - 0.5f;
+            int sx0 = static_cast<int>(std::floor(sxf));
+            int sx1 = sx0 + 1;
+            float tx = sxf - static_cast<float>(sx0);
+            if (sx0 < 0) { sx0 = 0; tx = 0.0f; }
+            if (sx1 >= static_cast<int>(sw)) sx1 = static_cast<int>(sw) - 1;
+            if (sx0 >= static_cast<int>(sw)) sx0 = static_cast<int>(sw) - 1;
+
+            const size_t rowStride = static_cast<size_t>(sw) * channels;
+            const uint8_t* p00 = src + static_cast<size_t>(sy0) * rowStride + static_cast<size_t>(sx0) * channels;
+            const uint8_t* p01 = src + static_cast<size_t>(sy0) * rowStride + static_cast<size_t>(sx1) * channels;
+            const uint8_t* p10 = src + static_cast<size_t>(sy1) * rowStride + static_cast<size_t>(sx0) * channels;
+            const uint8_t* p11 = src + static_cast<size_t>(sy1) * rowStride + static_cast<size_t>(sx1) * channels;
+
+            uint8_t* out = dst + static_cast<size_t>(oy) * dw * channels + static_cast<size_t>(ox) * channels;
+            const float w00 = (1.0f - tx) * (1.0f - ty);
+            const float w01 = tx * (1.0f - ty);
+            const float w10 = (1.0f - tx) * ty;
+            const float w11 = tx * ty;
+            for (uint32_t c = 0; c < channels; c++) {
+                const float v = static_cast<float>(p00[c]) * w00
+                              + static_cast<float>(p01[c]) * w01
+                              + static_cast<float>(p10[c]) * w10
+                              + static_cast<float>(p11[c]) * w11;
+                int rounded = static_cast<int>(v + 0.5f);
+                if (rounded < 0) rounded = 0;
+                if (rounded > 255) rounded = 255;
+                out[c] = static_cast<uint8_t>(rounded);
+            }
+        }
+    }
+}
+
 // ─── PNG encode ────────────────────────────────────────────────────────────
 // libpng's simplified png_image_write_to_memory handles all the chunk +
 // filter machinery. Accepts RGB (3 channels) and RGBA (4 channels)
@@ -437,6 +501,90 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     return JSValue::encode(result);
 }
 
+// resize(img, opts) → DecodedImage
+// opts: { width, height } (both required for v1; aspect-preserving fit
+// modes follow). Algorithm: bilinear resampling on the CPU.
+JSC_DEFINE_HOST_FUNCTION(functionResize,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject() || !optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.resize: expected (img, { width, height })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    auto* optsObj = asObject(optsArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.resize: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.resize: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t sw = widthVal.toUInt32(globalObject);
+    const uint32_t sh = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.resize: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(sw) * sh * channels) {
+        throwTypeError(globalObject, scope, "bun:image.resize: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    JSValue dwVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue dhVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!dwVal.isNumber() || !dhVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.resize: opts.width and opts.height are required"_s);
+        return {};
+    }
+    const int32_t dwSigned = dwVal.toInt32(globalObject);
+    const int32_t dhSigned = dhVal.toInt32(globalObject);
+    if (dwSigned < 1 || dhSigned < 1) {
+        throwTypeError(globalObject, scope, "bun:image.resize: opts.width and opts.height must be >= 1"_s);
+        return {};
+    }
+    const uint32_t dw = static_cast<uint32_t>(dwSigned);
+    const uint32_t dh = static_cast<uint32_t>(dhSigned);
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(dw) * dh * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    resizeBilinear(
+        static_cast<const uint8_t*>(srcRaw), sw, sh, channels,
+        static_cast<uint8_t*>(dstArr->vector()), dw, dh);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(dw));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(dh));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    // Preserve the source's format string; resize is just pixel resampling.
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -447,6 +595,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "encode"_s), 2,
         functionEncode, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "resize"_s), 2,
+        functionResize, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 
