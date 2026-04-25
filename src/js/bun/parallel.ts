@@ -102,7 +102,11 @@ type PoolWorker = {
   reject: ((err: Error) => void) | null;
 };
 
-let pool: PoolWorker[] = [];
+// `pmapPool` is the implicit pool that pmap/preduce ramp up under demand.
+// Renamed from `pool` to free that name for the public `pool()` factory
+// below. The two pools don't share state — pmap workers run the
+// stringify-fn protocol; user pools run the module-path protocol.
+let pmapPool: PoolWorker[] = [];
 let poolUrl: string | null = null;
 
 function ensurePool(size: number): PoolWorker[] {
@@ -110,7 +114,7 @@ function ensurePool(size: number): PoolWorker[] {
     const blob = new Blob([WORKER_SRC], { type: "application/javascript" });
     poolUrl = URL.createObjectURL(blob);
   }
-  while (pool.length < size) {
+  while (pmapPool.length < size) {
     const w = new Worker(poolUrl);
     // Unref so an idle pool doesn't keep the event loop alive — Bun would
     // otherwise wait forever for "live" workers after the user's last pmap()
@@ -142,14 +146,14 @@ function ensurePool(size: number): PoolWorker[] {
       if (typeof entry.w.unref === "function") entry.w.unref();
       reject?.(new Error(ev.message || "pmap worker error"));
     };
-    pool.push(entry);
+    pmapPool.push(entry);
   }
-  return pool;
+  return pmapPool;
 }
 
 function disposeWorkers(): void {
-  for (const p of pool) p.w.terminate();
-  pool = [];
+  for (const p of pmapPool) p.w.terminate();
+  pmapPool = [];
   if (poolUrl !== null) {
     URL.revokeObjectURL(poolUrl);
     poolUrl = null;
@@ -704,6 +708,234 @@ async function dispatchReduceTypedWorkers(
   return acc;
 }
 
+// ─── User-managed worker pool (module-path dispatch) ──────────────────────
+// A persistent pool whose workers preload a TypeScript / JavaScript module
+// at startup. Dispatch is by exported-function name — no source stringi-
+// fication, no eval per call. This is the "real" worker pool that lifts
+// the pmap/preduce ceiling for callers who already have their work
+// organized in modules.
+//
+//   const p = pool({ size: 8, module: import.meta.resolve("./worker-utils.ts") });
+//   const result = await p.run("processItem", item);
+//   p.dispose();
+//
+// Module path MUST be an absolute file URL or absolute path — the worker
+// has no notion of the caller's CWD and Blob-URL workers can't resolve
+// relative imports against the source module.
+
+const POOL_WORKER_SRC = `
+let __ns = null;
+self.onmessage = async ({ data }) => {
+  const { id, type } = data;
+  try {
+    if (type === "init") {
+      __ns = await import(data.modulePath);
+      self.postMessage({ id, ok: true });
+      return;
+    }
+    if (type === "run") {
+      if (__ns === null) throw new Error("pool worker not initialized");
+      const fn = __ns[data.fnName] ?? __ns.default?.[data.fnName];
+      if (typeof fn !== "function") throw new Error("function not exported: " + data.fnName);
+      const result = await fn.apply(undefined, data.args);
+      self.postMessage({ id, ok: true, result });
+      return;
+    }
+    throw new Error("unknown message type: " + type);
+  } catch (err) {
+    self.postMessage({ id, ok: false, err: err && err.message ? String(err.message) : String(err) });
+  }
+};
+`;
+
+interface PoolWorkerEntry {
+  w: Worker;
+  busy: boolean;
+  /**
+   * Stays `true` until the worker reports init success. Tracked separately
+   * from `busy` so dispose() can distinguish "still initializing" from
+   * "running a user call" — only the latter has a user-facing pending
+   * promise to reject. A failed init turns into a rejected `initOk` and
+   * the worker stays unusable; future run() calls won't dispatch to it.
+   */
+  initId: number;
+  initOk: boolean | null; // null = pending, true = ready, false = failed
+}
+
+interface PendingCall {
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+}
+
+interface Pool {
+  /** Run an exported function on an idle worker. Resolves with the function's return value. */
+  run<T = unknown>(fnName: string, ...args: unknown[]): Promise<T>;
+  /** Terminate all workers and reject any pending calls. */
+  dispose(): void;
+  /** Number of workers in the pool. */
+  readonly size: number;
+}
+
+function pool(opts: { size?: number; module: string }): Pool {
+  const moduleArg = opts?.module;
+  if (typeof moduleArg !== "string" || moduleArg.length === 0) {
+    throw new TypeError("bun:parallel pool: `module` must be an absolute path or file: URL string");
+  }
+  // Heuristic: reject obviously-relative paths early so callers don't get a
+  // confusing "module not found" from the worker. Bare specifiers (e.g.
+  // package names) are allowed; they resolve from the worker context.
+  if (moduleArg.startsWith("./") || moduleArg.startsWith("../")) {
+    throw new TypeError(
+      "bun:parallel pool: `module` must be absolute — relative paths can't resolve in a worker. " +
+        'Use `import.meta.resolve("./...")` or `path.resolve(...)`.',
+    );
+  }
+
+  const size = Math.max(1, Math.floor(opts.size ?? defaultConcurrency()));
+
+  // One blob URL per pool — keeps the worker source isolated from the
+  // pmap pool and lets dispose() revoke it cleanly.
+  const blob = new Blob([POOL_WORKER_SRC], { type: "application/javascript" });
+  const blobUrl = URL.createObjectURL(blob);
+
+  let nextId = 1;
+  // `pending` only holds run-call promises. Init responses are matched
+  // against an entry's `initId` field instead, so dispose() can reject
+  // pending run calls without touching init state.
+  const pending = new Map<number, PendingCall>();
+  let disposed = false;
+  let initFailureMessage: string | null = null;
+
+  function makeWorker(): PoolWorkerEntry {
+    const w = new Worker(blobUrl);
+    if (typeof w.unref === "function") w.unref();
+
+    w.onmessage = (ev: MessageEvent) => {
+      const { id, ok, result, err } = ev.data ?? {};
+      const entry = workers.find(e => e.w === w);
+      // Init response — handled per-entry, not via `pending`.
+      if (entry && id === entry.initId) {
+        entry.initOk = ok === true;
+        if (!ok) {
+          // Init failure means the worker can't be used. Leave busy=true
+          // so the dispatcher skips it; surface to any future run() with
+          // a clear error rather than queueing forever.
+          initFailureMessage = err || "pool worker init failed";
+          // Reject any queued calls — they'll never run on this worker
+          // and there's no way to recover. Re-check after every init
+          // failure so a slow-init worker that succeeds later still gets
+          // the queue if that's what ends up happening.
+          if (workers.every(e => e.initOk === false)) {
+            for (const c of queue) c.reject(new Error(initFailureMessage));
+            queue.length = 0;
+          }
+        } else {
+          entry.busy = false;
+          drainQueue();
+        }
+        if (typeof w.unref === "function") w.unref();
+        return;
+      }
+      // Run-call response.
+      const p = pending.get(id);
+      if (!p) return;
+      pending.delete(id);
+      if (entry) entry.busy = false;
+      if (typeof w.unref === "function") w.unref();
+      drainQueue();
+      if (ok) p.resolve(result);
+      else p.reject(new Error(err || "pool worker failed"));
+    };
+    w.onerror = (ev: ErrorEvent) => {
+      // Worker-level error (e.g. JSC startup failure). Reject any pending
+      // run calls bound to this specific worker. Init-time errors come
+      // through onmessage with ok:false so they're handled above; this
+      // path is for runtime-killed workers.
+      const entry = workers.find(e => e.w === w);
+      if (entry) entry.busy = false;
+      // Best-effort: reject all pending if we can't tell which call was
+      // on this worker (we don't currently track that mapping).
+      for (const [id, p] of pending) {
+        pending.delete(id);
+        p.reject(new Error(ev.message || "pool worker error"));
+      }
+    };
+
+    const initId = nextId++;
+    w.postMessage({ id: initId, type: "init", modulePath: moduleArg });
+    if (typeof w.ref === "function") w.ref();
+    return { w, busy: true, initId, initOk: null };
+  }
+
+  const workers: PoolWorkerEntry[] = [];
+  for (let i = 0; i < size; i++) workers.push(makeWorker());
+
+  // FIFO queue of run-requests waiting for an idle worker.
+  type QueuedCall = { fnName: string; args: unknown[]; resolve: (v: unknown) => void; reject: (e: Error) => void };
+  const queue: QueuedCall[] = [];
+
+  function drainQueue(): void {
+    while (queue.length > 0) {
+      const idle = workers.find(e => e.initOk === true && !e.busy);
+      if (!idle) return;
+      const call = queue.shift()!;
+      idle.busy = true;
+      const id = nextId++;
+      pending.set(id, { resolve: call.resolve, reject: call.reject });
+      if (typeof idle.w.ref === "function") idle.w.ref();
+      idle.w.postMessage({ id, type: "run", fnName: call.fnName, args: call.args });
+    }
+  }
+
+  function run<T>(fnName: string, ...args: unknown[]): Promise<T> {
+    if (disposed) return Promise.reject(new Error("bun:parallel pool: disposed"));
+    // If every worker failed init, fail fast — queueing forever is worse.
+    if (workers.length > 0 && workers.every(e => e.initOk === false)) {
+      return Promise.reject(new Error(initFailureMessage ?? "bun:parallel pool: all workers failed to init"));
+    }
+    return new Promise<T>((resolve, reject) => {
+      // A worker is dispatchable only when its init has succeeded
+      // (initOk === true) AND it's not already busy with a run call. Init-
+      // pending workers are skipped — drainQueue picks up the call when
+      // their init message returns.
+      const idle = workers.find(e => e.initOk === true && !e.busy);
+      if (idle) {
+        idle.busy = true;
+        const id = nextId++;
+        pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+        if (typeof idle.w.ref === "function") idle.w.ref();
+        idle.w.postMessage({ id, type: "run", fnName, args });
+      } else {
+        queue.push({ fnName, args, resolve: resolve as (v: unknown) => void, reject });
+      }
+    });
+  }
+
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    for (const e of workers) e.w.terminate();
+    workers.length = 0;
+    // Reject pending RUN calls (init pending entries don't live in
+    // `pending` anymore — their promises are tied to the worker entry
+    // and just become unobservable after terminate()).
+    for (const [, p] of pending) p.reject(new Error("bun:parallel pool: disposed"));
+    pending.clear();
+    // Reject queued run calls so the user's awaiting promises terminate.
+    for (const c of queue) c.reject(new Error("bun:parallel pool: disposed"));
+    queue.length = 0;
+    URL.revokeObjectURL(blobUrl);
+  }
+
+  return {
+    run,
+    dispose,
+    get size() {
+      return workers.length;
+    },
+  };
+}
+
 // ─── Shared-memory primitives ──────────────────────────────────────────────
 // Mutex + Semaphore on top of Atomics.waitAsync/notify. The backing
 // SharedArrayBuffer is exposed via `.sab` so the same primitive can be
@@ -896,4 +1128,4 @@ class Semaphore {
   }
 }
 
-export default { pmap, preduce, disposeWorkers, _heuristicState, _resetHeuristic, Mutex, Semaphore };
+export default { pmap, preduce, disposeWorkers, _heuristicState, _resetHeuristic, Mutex, Semaphore, pool };
