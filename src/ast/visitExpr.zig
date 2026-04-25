@@ -41,6 +41,17 @@ pub fn VisitExpr(
                 // }
                 return expr;
             }
+            pub fn e_import_identifier(p: *P, expr: Expr, _: ExprIn) Expr {
+                // Parabun: PARSE-time emitted runtime calls (e.g. `memo` desugaring
+                // in parseStmt.zig) call `callRuntime`, which records usage into
+                // p.symbol_uses immediately. But `appendPart` clears symbol_uses
+                // before the visit pass populates the part's symbol_uses, so the
+                // parse-time recordUsage is lost. Re-record here so bundler
+                // tree-shaking sees the dependency from this part to the runtime
+                // helper (otherwise the runtime export gets tree-shaken away).
+                p.recordUsage(expr.data.e_import_identifier.ref);
+                return expr;
+            }
             pub fn e_string(_: *P, expr: Expr, _: ExprIn) Expr {
                 // If you're using this, you're probably not using 0-prefixed legacy octal notation
                 // if e.LegacyOctalLoc.Start > 0 {
