@@ -214,6 +214,20 @@ interface Backend {
   dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number;
   matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
   matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray;
+  /**
+   * 2D valid-mode convolution. `input` is iH×iW row-major Float32Array,
+   * `kernel` is kH×kW row-major Float32Array. Output is (iH-kH+1)×(iW-kW+1)
+   * row-major Float32Array. Backends MAY implement this; if a backend
+   * doesn't, the public wrapper falls back to the CPU implementation.
+   */
+  conv2D?(
+    input: Float32Array | GpuHandle,
+    kernel: Float32Array | GpuHandle,
+    iW: number,
+    iH: number,
+    kW: number,
+    kH: number,
+  ): Float32Array;
   simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
   alloc(length: number, type: "f32" | "f64", opts?: { pinned?: boolean }): FArray;
   isAligned(arr: FArray): boolean;
@@ -236,6 +250,37 @@ function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
     return x.view as T;
   }
   return x;
+}
+
+// CPU reference for 2D valid-mode convolution. Naive triple loop with the
+// kernel-element accumulator promoted out of the inner loop. GPU backends
+// substitute their own kernels via Backend.conv2D; this also serves as the
+// fallback when a backend doesn't implement conv2D yet.
+function cpuConv2D(
+  input: Float32Array,
+  kernel: Float32Array,
+  iW: number,
+  iH: number,
+  kW: number,
+  kH: number,
+): Float32Array {
+  const oW = iW - kW + 1;
+  const oH = iH - kH + 1;
+  const out = new Float32Array(oW * oH);
+  for (let y = 0; y < oH; y++) {
+    for (let x = 0; x < oW; x++) {
+      let acc = 0;
+      for (let ky = 0; ky < kH; ky++) {
+        const inRow = (y + ky) * iW + x;
+        const kRow = ky * kW;
+        for (let kx = 0; kx < kW; kx++) {
+          acc += input[inRow + kx] * kernel[kRow + kx];
+        }
+      }
+      out[y * oW + x] = acc;
+    }
+  }
+  return out;
 }
 
 // ─── CPU backend (always available — forwards to bun:simd) ──────────────────
@@ -288,6 +333,16 @@ const cpuBackend: Backend = {
       }
     }
     return dst;
+  },
+  conv2D(input, kernel, iW, iH, kW, kH) {
+    return cpuConv2D(
+      unwrapHandle(input as any) as Float32Array,
+      unwrapHandle(kernel as any) as Float32Array,
+      iW,
+      iH,
+      kW,
+      kH,
+    );
   },
   simdMap(fn, a) {
     return simd.simdMap(fn, unwrapHandle(a) as any);
@@ -485,6 +540,49 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle | G
   return resolveActive().simdMap(fn, unwrapGpuArg(a));
 }
 
+// 2D valid-mode convolution. `input` is iH×iW row-major Float32Array,
+// `kernel` is kH×kW row-major Float32Array. Output is (iH-kH+1)×(iW-kW+1).
+// Used by `bun:image` for resize / blur / sharpen / edge-detect; useful as
+// a general 2D-correlation primitive for any pipeline that needs it.
+//
+// f32 only for v1. f64 follows when there's a use case for it; image and
+// signal processing live in f32.
+//
+// Behavior on each backend:
+//   - cpu:   naive nested loop (correctness reference)
+//   - metal: GPU dispatch when backend.conv2D is wired (LYK-724 follow-up);
+//            falls through to CPU reference until then
+//   - cuda:  same — GPU when wired, CPU until then
+function conv2D(
+  input: Float32Array | GpuHandle | GpuFloat32Array,
+  kernel: Float32Array | GpuHandle | GpuFloat32Array,
+  iW: number,
+  iH: number,
+  kW: number,
+  kH: number,
+): Float32Array {
+  if (!Number.isInteger(iW) || iW < 1) throw new RangeError("iW must be a positive integer");
+  if (!Number.isInteger(iH) || iH < 1) throw new RangeError("iH must be a positive integer");
+  if (!Number.isInteger(kW) || kW < 1) throw new RangeError("kW must be a positive integer");
+  if (!Number.isInteger(kH) || kH < 1) throw new RangeError("kH must be a positive integer");
+  if (kW > iW) throw new RangeError(`kernel width ${kW} > input width ${iW}`);
+  if (kH > iH) throw new RangeError(`kernel height ${kH} > input height ${iH}`);
+  if (input.length !== iW * iH) {
+    throw new RangeError(`input length ${input.length} != iW * iH (${iW} * ${iH} = ${iW * iH})`);
+  }
+  if (kernel.length !== kW * kH) {
+    throw new RangeError(`kernel length ${kernel.length} != kW * kH (${kW} * ${kH} = ${kW * kH})`);
+  }
+  const backend = resolveActive();
+  const a = unwrapGpuArg(input as any);
+  const k = unwrapGpuArg(kernel as any);
+  if (backend.conv2D) return backend.conv2D(a as any, k as any, iW, iH, kW, kH);
+  // Fallback: backend doesn't implement conv2D yet, use CPU reference.
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  const kV = isGpuHandle(k) ? (k.view as Float32Array) : (k as Float32Array);
+  return cpuConv2D(aV, kV, iW, iH, kW, kH);
+}
+
 // Page-aligned typed array suitable for zero-copy staging into the active
 // backend's device memory. On Metal, alloc()'d matrices take the NOCOPY
 // dispatch path in matVec — see bench/parabun-metal-zerocopy/README.md for
@@ -613,6 +711,7 @@ export default {
   dot,
   matVec,
   matmul,
+  conv2D,
   simdMap,
   alloc,
   isAligned,
