@@ -199,7 +199,7 @@ pub const HelpCommand = struct {
     ;
     const cli_helptext_footer =
         \\
-        \\Learn more about Parabun:        <magenta>https://script.dev/parabun<r>
+        \\Learn more about Parabun:        <magenta>https://parabun.script.dev<r>
         \\Upstream Bun docs:               <magenta>https://bun.com/docs<r>
         \\
     ;

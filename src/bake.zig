@@ -988,7 +988,7 @@ pub fn printWarning() void {
         bun.Output.warn(
             \\Be advised that Bun Bake is highly experimental, and its API
             \\will have breaking changes. Report issues you find at:
-            \\<blue>https://script.dev/parabun<r>
+            \\<blue>https://parabun.script.dev<r>
             \\
             \\
         , .{});

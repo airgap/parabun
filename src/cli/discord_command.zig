@@ -1,5 +1,5 @@
 pub const DiscordCommand = struct {
-    const discord_url = "https://script.dev/parabun";
+    const discord_url = "https://parabun.script.dev";
     pub fn exec(_: std.mem.Allocator) !void {
         open.openURL(discord_url);
     }
