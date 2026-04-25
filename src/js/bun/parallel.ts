@@ -704,4 +704,196 @@ async function dispatchReduceTypedWorkers(
   return acc;
 }
 
-export default { pmap, preduce, disposeWorkers, _heuristicState, _resetHeuristic };
+// ─── Shared-memory primitives ──────────────────────────────────────────────
+// Mutex + Semaphore on top of Atomics.waitAsync/notify. The backing
+// SharedArrayBuffer is exposed via `.sab` so the same primitive can be
+// shared with workers (just postMessage the SAB and re-wrap on the other
+// side: `new Mutex(receivedSab)`).
+//
+// These are non-reentrant: a holder calling lock() a second time will
+// deadlock against itself. Match Web's Lock API which has the same
+// semantics. Recursive locking would need a separate class with a
+// holder-id tracker, and that's not what most use cases want.
+
+interface MutexSnapshot {
+  __bunMutex: true;
+  sab: SharedArrayBuffer;
+}
+
+class Mutex {
+  // A 1-int32 view into a SharedArrayBuffer. Value 0 = unlocked, 1 = locked.
+  // We hold both the SAB (so we can hand it to workers) and the typed view
+  // (so Atomics.* calls don't have to re-construct it per call).
+  readonly sab: SharedArrayBuffer;
+  readonly #view: Int32Array;
+
+  /**
+   * Construct a fresh mutex (default), or wrap an existing
+   * SharedArrayBuffer received from another thread.
+   */
+  constructor(sab?: SharedArrayBuffer) {
+    if (sab !== undefined) {
+      if (sab.byteLength < 4) throw new RangeError("bun:parallel: Mutex SAB must be >= 4 bytes");
+      this.sab = sab;
+    } else {
+      this.sab = new SharedArrayBuffer(4);
+    }
+    this.#view = new Int32Array(this.sab, 0, 1);
+  }
+
+  /**
+   * Acquire the lock. Resolves when the lock is held by this caller.
+   * Multiple awaiting callers are woken in unspecified order — the kernel
+   * decides; do not rely on FIFO.
+   */
+  async lock(): Promise<void> {
+    const v = this.#view;
+    for (;;) {
+      // Fast path: try to flip 0 → 1 with a single atomic compareExchange.
+      if (Atomics.compareExchange(v, 0, 0, 1) === 0) return;
+      // Slow path: wait until someone notifies us that the lock changed.
+      // waitAsync returns sync if the value already moved off 1.
+      const r = Atomics.waitAsync(v, 0, 1);
+      if (r.async) {
+        const reason = await r.value;
+        if (reason === "timed-out") continue; // shouldn't happen — we passed no timeout
+      }
+      // Loop and retry the CAS.
+    }
+  }
+
+  /**
+   * Try to acquire the lock without blocking. Returns `true` if acquired,
+   * `false` if it was already held.
+   */
+  tryLock(): boolean {
+    return Atomics.compareExchange(this.#view, 0, 0, 1) === 0;
+  }
+
+  /**
+   * Release the lock and wake up to one waiter. Calling unlock() on a
+   * mutex you don't hold is undefined behavior (we can't cheaply detect
+   * it without tracking holder identity).
+   */
+  unlock(): void {
+    Atomics.store(this.#view, 0, 0);
+    Atomics.notify(this.#view, 0, 1);
+  }
+
+  /**
+   * Run `fn` while holding the lock. Acquires before calling, releases on
+   * either return or throw. Returns whatever `fn` returns.
+   */
+  async with<T>(fn: () => T | Promise<T>): Promise<T> {
+    await this.lock();
+    try {
+      return await fn();
+    } finally {
+      this.unlock();
+    }
+  }
+
+  /** True if the lock is currently held by some caller. */
+  get locked(): boolean {
+    return Atomics.load(this.#view, 0) !== 0;
+  }
+
+  /**
+   * Snapshot for postMessage / structured-clone. Pass the result to the
+   * `Mutex` constructor on the receiving thread to wrap the same lock.
+   */
+  toJSON(): MutexSnapshot {
+    return { __bunMutex: true, sab: this.sab };
+  }
+}
+
+interface SemaphoreSnapshot {
+  __bunSemaphore: true;
+  sab: SharedArrayBuffer;
+}
+
+class Semaphore {
+  // Counter semaphore. Value = number of free permits. acquire() takes
+  // one (wait if zero), release() returns one (wake one waiter).
+  readonly sab: SharedArrayBuffer;
+  readonly #view: Int32Array;
+
+  constructor(initialPermits: number, sab?: SharedArrayBuffer) {
+    if (!Number.isInteger(initialPermits) || initialPermits < 0) {
+      throw new RangeError("bun:parallel: Semaphore initialPermits must be a non-negative integer");
+    }
+    if (sab !== undefined) {
+      if (sab.byteLength < 4) throw new RangeError("bun:parallel: Semaphore SAB must be >= 4 bytes");
+      this.sab = sab;
+    } else {
+      this.sab = new SharedArrayBuffer(4);
+      // Initialize the counter on a fresh SAB. Wrapping an existing SAB
+      // skips this — the constructor in another thread will see whatever
+      // the originating thread already set up.
+      const init = new Int32Array(this.sab, 0, 1);
+      Atomics.store(init, 0, initialPermits);
+    }
+    this.#view = new Int32Array(this.sab, 0, 1);
+  }
+
+  /** Try to take one permit synchronously. Returns true if taken. */
+  tryAcquire(): boolean {
+    const v = this.#view;
+    for (;;) {
+      const cur = Atomics.load(v, 0);
+      if (cur <= 0) return false;
+      if (Atomics.compareExchange(v, 0, cur, cur - 1) === cur) return true;
+      // CAS lost — another thread took or returned a permit. Retry.
+    }
+  }
+
+  /** Take one permit, waiting if none are free. */
+  async acquire(): Promise<void> {
+    const v = this.#view;
+    for (;;) {
+      const cur = Atomics.load(v, 0);
+      if (cur > 0) {
+        if (Atomics.compareExchange(v, 0, cur, cur - 1) === cur) return;
+        // Lost CAS race; retry without sleeping.
+        continue;
+      }
+      // No permits available — wait for someone to release one.
+      const r = Atomics.waitAsync(v, 0, 0);
+      if (r.async) {
+        const reason = await r.value;
+        if (reason === "timed-out") continue;
+      }
+      // Loop and retry the CAS.
+    }
+  }
+
+  /** Return one permit, waking one waiter (if any). */
+  release(): void {
+    Atomics.add(this.#view, 0, 1);
+    Atomics.notify(this.#view, 0, 1);
+  }
+
+  /**
+   * Run `fn` while holding one permit. Acquires before, releases on
+   * return or throw.
+   */
+  async with<T>(fn: () => T | Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  /** Current number of free permits. Snapshot — may change immediately. */
+  get permits(): number {
+    return Atomics.load(this.#view, 0);
+  }
+
+  toJSON(): SemaphoreSnapshot {
+    return { __bunSemaphore: true, sab: this.sab };
+  }
+}
+
+export default { pmap, preduce, disposeWorkers, _heuristicState, _resetHeuristic, Mutex, Semaphore };
