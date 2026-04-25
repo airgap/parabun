@@ -163,6 +163,38 @@ fn main(
   }
 }`;
 
+// 2D valid-mode convolution. Output[y, x] = sum_{ky, kx} input[y+ky, x+kx]
+// * kernel[ky, kx]. Output dims (iH-kH+1) × (iW-kW+1). One thread per
+// output pixel, 16×16 workgroups; nested loops over the kernel. Direct
+// global loads — no shared-memory tile for v1 (worth optimizing later
+// for kernels >= 7×7 where input reuse pays for staging cost).
+const CONV2D_WGSL = /* wgsl */ `
+struct Dims { iW: u32, iH: u32, kW: u32, kH: u32 };
+@group(0) @binding(0) var<storage, read> inp: array<f32>;
+@group(0) @binding(1) var<storage, read> krn: array<f32>;
+@group(0) @binding(2) var<storage, read_write> outp: array<f32>;
+@group(0) @binding(3) var<uniform> d: Dims;
+
+@compute @workgroup_size(16, 16)
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+) {
+  let x = gid.x;
+  let y = gid.y;
+  let oW = d.iW - d.kW + 1u;
+  let oH = d.iH - d.kH + 1u;
+  if (x >= oW || y >= oH) { return; }
+  var acc: f32 = 0.0;
+  for (var ky: u32 = 0u; ky < d.kH; ky = ky + 1u) {
+    let inRow = (y + ky) * d.iW + x;
+    let kRow = ky * d.kW;
+    for (var kx: u32 = 0u; kx < d.kW; kx = kx + 1u) {
+      acc = acc + inp[inRow + kx] * krn[kRow + kx];
+    }
+  }
+  outp[y * oW + x] = acc;
+}`;
+
 // Dot product as a two-pass reduction: first pass computes one partial
 // per workgroup (1024-thread block sums), main thread sums the partials.
 const DOT_WGSL = /* wgsl */ `
@@ -217,6 +249,8 @@ const _wgState = {
   matmulLayout: null,
   dotPipeline: null,
   dotLayout: null,
+  conv2DPipeline: null,
+  conv2DLayout: null,
   error: null,
 };
 
@@ -262,6 +296,9 @@ async function _initWebGPUInternal() {
   _wgState.matmulPipeline = _makePipeline(device, MATMUL_WGSL, matmulLayout);
   _wgState.dotLayout = dotLayout;
   _wgState.dotPipeline = _makePipeline(device, DOT_WGSL, dotLayout);
+  const conv2DLayout = _makeBindLayout(device, threeRW);
+  _wgState.conv2DLayout = conv2DLayout;
+  _wgState.conv2DPipeline = _makePipeline(device, CONV2D_WGSL, conv2DLayout);
   _wgState.available = true;
   return true;
 }
@@ -440,6 +477,70 @@ export async function dotAsync(a, b) {
   return acc;
 }
 
+// ── conv2D / conv2DAsync ────────────────────────────────────────────────
+// Valid-mode 2D convolution. Output dims (iH-kH+1) × (iW-kW+1). The sync
+// path is a naive loop — fine for small kernels and small images. Use
+// conv2DAsync when WebGPU is live for any meaningful workload.
+
+function conv2D(input, kernel, iW, iH, kW, kH) {
+  const oW = iW - kW + 1;
+  const oH = iH - kH + 1;
+  const out = new Float32Array(oW * oH);
+  for (let y = 0; y < oH; y++) {
+    for (let x = 0; x < oW; x++) {
+      let acc = 0;
+      for (let ky = 0; ky < kH; ky++) {
+        const inRow = (y + ky) * iW + x;
+        const kRow = ky * kW;
+        for (let kx = 0; kx < kW; kx++) acc += input[inRow + kx] * kernel[kRow + kx];
+      }
+      out[y * oW + x] = acc;
+    }
+  }
+  return out;
+}
+
+export async function conv2DAsync(input, kernel, iW, iH, kW, kH) {
+  if (!_wgState.available) return conv2D(input, kernel, iW, iH, kW, kH);
+  const { device, queue, conv2DPipeline, conv2DLayout } = _wgState;
+
+  const oW = iW - kW + 1;
+  const oH = iH - kH + 1;
+  const inBuf = _uploadStorage(input);
+  const kBuf = _uploadStorage(kernel);
+  const outBuf = device.createBuffer({
+    size: oW * oH * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+  });
+  const dimsBuf = _uniform([iW, iH, kW, kH]);
+
+  const bg = device.createBindGroup({
+    layout: conv2DLayout,
+    entries: [
+      { binding: 0, resource: { buffer: inBuf } },
+      { binding: 1, resource: { buffer: kBuf } },
+      { binding: 2, resource: { buffer: outBuf } },
+      { binding: 3, resource: { buffer: dimsBuf } },
+    ],
+  });
+
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginComputePass();
+  pass.setPipeline(conv2DPipeline);
+  pass.setBindGroup(0, bg);
+  // 16×16 threads per workgroup; cover oW×oH output pixels.
+  pass.dispatchWorkgroups(Math.ceil(oW / 16), Math.ceil(oH / 16));
+  pass.end();
+  queue.submit([enc.finish()]);
+
+  const out = await _readback(outBuf, oW * oH * 4);
+  inBuf.destroy();
+  kBuf.destroy();
+  outBuf.destroy();
+  dimsBuf.destroy();
+  return out;
+}
+
 // ── hold() / release() ──────────────────────────────────────────────────
 
 function hold(buf) {
@@ -535,20 +636,21 @@ function describe() {
     backend: activeBackend(),
     webgpu: _wgState.available,
     error: _wgState.error,
-    kernels: _wgState.available ? ["matVecAsync", "matmulAsync", "dotAsync"] : [],
+    kernels: _wgState.available ? ["matVecAsync", "matmulAsync", "dotAsync", "conv2DAsync"] : [],
     note: _wgState.available
       ? "WebGPU backend active. Async kernels dispatch to GPU; sync surface stays CPU."
       : "CPU only. Call `await gpu.initWebGPU()` to enable WebGPU async kernels.",
   };
 }
 function getDevOps() {
-  return { matVec, matVecAsync, matmul, matmulAsync, dot, dotAsync };
+  return { matVec, matVecAsync, matmul, matmulAsync, dot, dotAsync, conv2D, conv2DAsync };
 }
 
 export {
   dot,
   matVec,
   matmul,
+  conv2D,
   simdMap,
   alloc,
   isAligned,
@@ -576,6 +678,8 @@ export default {
   matVecAsync,
   matmul,
   matmulAsync,
+  conv2D,
+  conv2DAsync,
   simdMap,
   alloc,
   isAligned,
