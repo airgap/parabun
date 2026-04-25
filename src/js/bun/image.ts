@@ -26,7 +26,7 @@ function todo(): never {
   throw new Error(NOT_IMPLEMENTED_MSG);
 }
 
-type ImageFormat = "jpeg" | "png";
+type ImageFormat = "jpeg" | "png" | "webp";
 type DecodedImage = {
   data: Uint8Array;
   width: number;
@@ -36,8 +36,10 @@ type DecodedImage = {
 };
 type EncodeOptions = {
   format: ImageFormat;
-  /** JPEG quality 1-100. Ignored for PNG. Default 85. */
+  /** JPEG / WebP quality 1-100. Ignored for PNG. Default 85. */
   quality?: number;
+  /** WebP only — opt into lossless mode. PNG is always lossless. Default false. */
+  lossless?: boolean;
 };
 type ResizeOptions = {
   width: number;

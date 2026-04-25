@@ -260,6 +260,63 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("WebP lossless encode → decode roundtrip preserves pixels exactly", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-webp-roundtrip-lossless",
+      `
+        import image from "bun:image";
+        const w = 4, h = 4;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          if ((x + y) % 2 === 0) { data[off] = 255; data[off+1] = 0; data[off+2] = 0; data[off+3] = 255; }
+          else                   { data[off] = 0;   data[off+1] = 0; data[off+2] = 255; data[off+3] = 255; }
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const bytes = image.encode(orig, { format: "webp", lossless: true });
+        // RIFF...WEBP magic
+        console.log("magic", String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]),
+                    String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]));
+        const back = image.decode(bytes);
+        console.log("dims", back.width, back.height, "ch", back.channels);
+        const equal = back.data.length === data.length && back.data.every((v, i) => v === data[i]);
+        console.log("equal", equal);
+      `,
+    );
+    expect(stdout).toBe(["magic RIFF WEBP", "dims 4 4 ch 4", "equal true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("WebP lossy encode produces a valid file that decodes back to right dims", async () => {
+    // Don't assert lossy < lossless on size — for tiny images (16×16) the
+    // VP8 header overhead can flip the inequality. We only assert that
+    // both modes produce decode-able WebP bytes.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-webp-lossy",
+      `
+        import image from "bun:image";
+        const w = 16, h = 16;
+        const data = new Uint8Array(w * h * 3);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 3;
+          data[off] = (x * 16) | 0;       // R gradient L→R
+          data[off + 1] = (y * 16) | 0;   // G gradient T→B
+          data[off + 2] = 128;
+        }
+        const orig = { data, width: w, height: h, channels: 3, format: "png" };
+        const lossy = image.encode(orig, { format: "webp", quality: 75 });
+        const back = image.decode(lossy);
+        console.log("back.dims", back.width, back.height, "ch", back.channels);
+        // Gradient ordering survives — top-left dark, bottom-right bright.
+        const tl = back.data[0];
+        const br = back.data[(15 * 16 + 15) * 4];
+        console.log("gradient", tl < 80 && br > 180);
+      `,
+    );
+    expect(stdout).toBe(["back.dims 16 16 ch 4", "gradient true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
   it("encode rejects unknown format", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-encode-bad-format",

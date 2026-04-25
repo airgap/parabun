@@ -35,6 +35,7 @@ extern "C" {
 #include <jpeglib.h>
 #include <png.h>
 #include <webp/decode.h>
+#include <webp/encode.h>
 }
 
 namespace Bun {
@@ -283,6 +284,44 @@ bool encodeJpegBytes(
     return true;
 }
 
+// ─── WebP encode ───────────────────────────────────────────────────────────
+// libwebp's one-shot encoders take pixel data + dims + quality and malloc
+// an output buffer. Quality applies to lossy mode only; lossless uses a
+// separate API. RGB and RGBA paths are also separate functions in libwebp.
+
+bool encodeWebPBytes(
+    const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t channels,
+    int quality, bool lossless, std::vector<uint8_t>& outData,
+    char* outErr, size_t outErrLen)
+{
+    if (channels != 3 && channels != 4) {
+        std::snprintf(outErr, outErrLen, "WebP encode requires 3- or 4-channel input, got %u", channels);
+        return false;
+    }
+    const int stride = static_cast<int>(width) * static_cast<int>(channels);
+    uint8_t* out = nullptr;
+    size_t outSize = 0;
+    if (lossless) {
+        outSize = (channels == 4)
+            ? WebPEncodeLosslessRGBA(pixels, width, height, stride, &out)
+            : WebPEncodeLosslessRGB(pixels, width, height, stride, &out);
+    } else {
+        const float q = static_cast<float>(quality < 1 ? 1 : quality > 100 ? 100 : quality);
+        outSize = (channels == 4)
+            ? WebPEncodeRGBA(pixels, width, height, stride, q, &out)
+            : WebPEncodeRGB(pixels, width, height, stride, q, &out);
+    }
+    if (outSize == 0 || !out) {
+        std::strncpy(outErr, "WebP encode failed", outErrLen - 1);
+        outErr[outErrLen - 1] = '\0';
+        if (out) WebPFree(out);
+        return false;
+    }
+    outData.assign(out, out + outSize);
+    WebPFree(out);
+    return true;
+}
+
 // ─── Bilinear resize ───────────────────────────────────────────────────────
 // CPU-side bilinear resampling. Each output pixel samples the four nearest
 // input pixels with bilinear weights derived from the half-pixel-centered
@@ -485,7 +524,8 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     RETURN_IF_EXCEPTION(scope, {});
     bool isJpeg = std::strcmp(formatStr.data(), "jpeg") == 0;
     bool isPng = std::strcmp(formatStr.data(), "png") == 0;
-    if (!isJpeg && !isPng) {
+    bool isWebp = std::strcmp(formatStr.data(), "webp") == 0;
+    if (!isJpeg && !isPng && !isWebp) {
         throwTypeError(globalObject, scope, makeString("bun:image.encode: unknown format "_s, formatVal.toWTFString(globalObject)));
         return {};
     }
@@ -525,11 +565,21 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     RETURN_IF_EXCEPTION(scope, {});
     if (qualityVal.isNumber()) quality = qualityVal.toInt32(globalObject);
 
+    bool lossless = false;
+    JSValue losslessVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "lossless"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (losslessVal.isBoolean()) lossless = losslessVal.asBoolean();
+
     std::vector<uint8_t> outBytes;
     char errMsg[256] = { 0 };
-    bool ok = isJpeg
-        ? encodeJpegBytes(pixels, width, height, channels, quality, outBytes, errMsg, sizeof(errMsg))
-        : encodePngBytes(pixels, width, height, channels, outBytes, errMsg, sizeof(errMsg));
+    bool ok;
+    if (isJpeg) {
+        ok = encodeJpegBytes(pixels, width, height, channels, quality, outBytes, errMsg, sizeof(errMsg));
+    } else if (isPng) {
+        ok = encodePngBytes(pixels, width, height, channels, outBytes, errMsg, sizeof(errMsg));
+    } else {
+        ok = encodeWebPBytes(pixels, width, height, channels, quality, lossless, outBytes, errMsg, sizeof(errMsg));
+    }
 
     if (!ok) {
         throwTypeError(globalObject, scope, makeString("bun:image.encode: "_s, String::fromUTF8(errMsg)));

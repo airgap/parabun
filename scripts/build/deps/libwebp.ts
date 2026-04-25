@@ -19,7 +19,11 @@ export const libwebp: Dependency = {
 
   build: () => ({
     kind: "nested-cmake",
-    targets: ["webp", "webpdecoder", "webpdemux"],
+    // libsharpyuv is libwebp's per-pixel sharp-YUV conversion subroutine
+    // — built as its own static lib alongside libwebp. Encode references
+    // it (SharpYuvConvert / SharpYuvGetConversionMatrix). Must come
+    // BEFORE libwebp on the link line so symbols resolve.
+    targets: ["sharpyuv", "webp", "webpdecoder", "webpdemux"],
     args: {
       // Static-only build. We link the .a/.lib into bun-debug; the
       // shared lib variants are pure overhead for our use case.
@@ -45,8 +49,10 @@ export const libwebp: Dependency = {
   //
   // Headers are at src/webp/{decode.h, encode.h, types.h, ...} in the
   // source tree. The cmake build generates no extra headers.
+  // Link order: providers AFTER users. webpdemux / webpdecoder /
+  // webp depend on sharpyuv, so sharpyuv comes last on the link line.
   provides: () => ({
-    libs: ["webpdemux", "webp", "webpdecoder"],
+    libs: ["webpdemux", "webp", "webpdecoder", "sharpyuv"],
     includes: ["src"],
   }),
 };
