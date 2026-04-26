@@ -1354,6 +1354,130 @@ describe("bun:audio — mix", () => {
   });
 });
 
+describe("bun:audio — envelope", () => {
+  it("constant input → constant envelope (peak mode)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-env-constant",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array(4096).fill(0.5);
+        const env = audio.envelope(input, { windowSize: 1024 });
+        // Expect 4 windows of all 0.5.
+        console.log("len", env.length);
+        console.log("allHalf", env.every(v => v === 0.5));
+      `,
+    );
+    expect(stdout).toBe(["len 4", "allHalf true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("RMS envelope of a sine wave equals amplitude / sqrt(2)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-env-rms-sine",
+      `
+        import audio from "bun:audio";
+        const SR = 16000, N = 4096;
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) input[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / SR);
+        const env = audio.envelope(input, { windowSize: 512, mode: "rms" });
+        const expected = 0.5 / Math.sqrt(2);
+        // Average across windows — drift from non-integer cycles per window.
+        let sum = 0;
+        for (const v of env) sum += v;
+        const avg = sum / env.length;
+        console.log("close", Math.abs(avg - expected) / expected < 0.02);
+      `,
+    );
+    expect(stdout).toBe("close true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("envelope traces an attack-release curve", async () => {
+    // Build a buffer that ramps up to 0.9 then decays back to 0.
+    // The envelope should follow that shape — first windows quiet,
+    // middle windows loud, end windows quiet again.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-env-shape",
+      `
+        import audio from "bun:audio";
+        const N = 8192;
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+          const t = i / N;
+          // Triangular envelope peaking at t=0.5 with amp=0.9.
+          const a = 0.9 * (1 - Math.abs(2 * t - 1));
+          input[i] = a * Math.sin(2 * Math.PI * 1000 * i / 16000);
+        }
+        const env = audio.envelope(input, { windowSize: 512 });
+        // First and last quarter of windows should be much quieter than
+        // the middle quarter.
+        const firstQ = env.slice(0, env.length >> 2);
+        const lastQ = env.slice(-(env.length >> 2));
+        const midQ = env.slice(env.length >> 2, 3 * (env.length >> 2));
+        const max = arr => arr.reduce((m, v) => v > m ? v : m, 0);
+        console.log("midLouderThanFirst", max(midQ) > max(firstQ) * 1.5);
+        console.log("midLouderThanLast",  max(midQ) > max(lastQ)  * 1.5);
+      `,
+    );
+    expect(stdout).toBe(["midLouderThanFirst true", "midLouderThanLast true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("hopSize < windowSize gives an oversampled envelope", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-env-hop",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array(4096).fill(0.5);
+        const noOverlap = audio.envelope(input, { windowSize: 1024, hopSize: 1024 });
+        const halfOverlap = audio.envelope(input, { windowSize: 1024, hopSize: 512 });
+        // With windowSize=1024 over 4096 samples:
+        //   non-overlapping: 4 windows
+        //   half-overlapping: floor((4096 - 1024) / 512) + 1 = 7 windows
+        console.log("non", noOverlap.length, "half", halfOverlap.length);
+      `,
+    );
+    expect(stdout).toBe("non 4 half 7");
+    expect(exitCode).toBe(0);
+  });
+
+  it("input shorter than windowSize → empty envelope", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-env-too-short",
+      `
+        import audio from "bun:audio";
+        const env = audio.envelope(new Float32Array(100), { windowSize: 1024 });
+        console.log("len", env.length, "ctor", env.constructor.name);
+      `,
+    );
+    expect(stdout).toBe("len 0 ctor Float32Array");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects bad windowSize / hopSize / mode", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-env-bad-args",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array(2048);
+        let threw = 0;
+        for (const o of [
+          { windowSize: 0 },
+          { windowSize: -1 },
+          { windowSize: 1.5 },
+          { windowSize: 1024, hopSize: 0 },
+          { windowSize: 1024, mode: "linear" },
+        ]) {
+          try { audio.envelope(input, o); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 5");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — peak / rms", () => {
   it("peak returns the largest absolute sample", async () => {
     const { stdout, exitCode } = await runFixture(

@@ -975,6 +975,87 @@ function rms(samples: Float32Array): number {
   return Math.sqrt(sumSq / n);
 }
 
+// ─── Windowed envelope extraction ─────────────────────────────────────────
+// Produces an amplitude envelope by sliding a window across the input and
+// summarizing each window with either its peak (max |x|) or its RMS.
+// Returned as a Float32Array, one sample per window position.
+//
+// Two parameters control the trade-off:
+//   windowSize  — how many input samples each envelope sample averages
+//                 over. Bigger = smoother envelope, less time resolution.
+//   hopSize     — how many samples to advance between windows. hopSize ==
+//                 windowSize is non-overlapping (the cheap default);
+//                 hopSize < windowSize gives an oversampled envelope
+//                 with smoother visual transitions but more output
+//                 samples.
+//
+// Standard uses: drawing a waveform overview (use peak mode + a coarse
+// hop), tagging voice activity (RMS over ~25 ms windows), gating noise,
+// or feeding a downstream level meter without forcing it to look at
+// every sample.
+
+type EnvelopeOptions = {
+  /** Samples per window. Default 1024 (≈ 21 ms at 48 kHz). */
+  windowSize?: number;
+  /** Samples between window starts. Default = windowSize (non-overlapping). */
+  hopSize?: number;
+  /** "peak" (default) tracks transients; "rms" tracks loudness. */
+  mode?: "peak" | "rms";
+};
+
+function envelope(samples: Float32Array, opts: EnvelopeOptions = {}): Float32Array {
+  if (!(samples instanceof Float32Array)) {
+    throw new TypeError("bun:audio.envelope: samples must be a Float32Array");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:audio.envelope: opts must be an object");
+  }
+  const windowSize = opts.windowSize ?? 1024;
+  const hopSize = opts.hopSize ?? windowSize;
+  const mode = opts.mode ?? "peak";
+  if (!Number.isInteger(windowSize) || windowSize < 1) {
+    throw new RangeError(`bun:audio.envelope: windowSize must be a positive integer; got ${windowSize}`);
+  }
+  if (!Number.isInteger(hopSize) || hopSize < 1) {
+    throw new RangeError(`bun:audio.envelope: hopSize must be a positive integer; got ${hopSize}`);
+  }
+  if (mode !== "peak" && mode !== "rms") {
+    throw new TypeError(`bun:audio.envelope: mode must be "peak" or "rms"; got ${JSON.stringify(mode)}`);
+  }
+
+  const N = samples.length;
+  if (N < windowSize) return new Float32Array(0);
+  // Number of full windows that fit. Last window starts at index
+  // (numWindows - 1) * hopSize and extends windowSize samples; that
+  // must not exceed N.
+  const numWindows = Math.floor((N - windowSize) / hopSize) + 1;
+  const out = new Float32Array(numWindows);
+  if (mode === "peak") {
+    for (let w = 0; w < numWindows; w++) {
+      const start = w * hopSize;
+      let m = 0;
+      for (let i = 0; i < windowSize; i++) {
+        const v = samples[start + i];
+        const a = v < 0 ? -v : v;
+        if (a > m) m = a;
+      }
+      out[w] = m;
+    }
+  } else {
+    // RMS — sum of squares / window then sqrt.
+    for (let w = 0; w < numWindows; w++) {
+      const start = w * hopSize;
+      let sumSq = 0;
+      for (let i = 0; i < windowSize; i++) {
+        const v = samples[start + i];
+        sumSq += v * v;
+      }
+      out[w] = Math.sqrt(sumSq / windowSize);
+    }
+  }
+  return out;
+}
+
 // ─── Normalize ─────────────────────────────────────────────────────────────
 // Whole-buffer one-shot leveling. Different intent from `Gain` (streaming
 // AGC): normalize is what you reach for when you have a complete recording
@@ -1221,6 +1302,7 @@ export default {
   normalize,
   peak,
   rms,
+  envelope,
   interleave,
   deinterleave,
   resample,
