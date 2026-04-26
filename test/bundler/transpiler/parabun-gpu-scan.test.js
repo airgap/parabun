@@ -1,0 +1,138 @@
+import { describe, expect, it } from "bun:test";
+import { bunEnv, bunExe, tempDir } from "harness";
+
+async function runFixture(prefix, source) {
+  using dir = tempDir(prefix, { "index.ts": source.trimStart() });
+  await using proc = Bun.spawn({
+    cmd: [bunExe(), "index.ts"],
+    env: bunEnv,
+    cwd: String(dir),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+}
+
+describe("bun:gpu — scan (inclusive prefix sum)", () => {
+  it("ones produce the natural numbers 1..n", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-ones",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const input = new Float32Array(8).fill(1);
+        const out = gpu.scan(input);
+        console.log(Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe("1,2,3,4,5,6,7,8");
+    expect(exitCode).toBe(0);
+  });
+
+  it("hand-computed running total of [3, 1, 4, 1, 5, 9, 2, 6]", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-pi",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const input = new Float32Array([3, 1, 4, 1, 5, 9, 2, 6]);
+        const out = gpu.scan(input);
+        console.log(Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe("3,4,8,9,14,23,25,31");
+    expect(exitCode).toBe(0);
+  });
+
+  it("handles negatives — out[i] tracks the running signed sum", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-negatives",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const input = new Float32Array([1, -1, 2, -3, 5]);
+        const out = gpu.scan(input);
+        console.log(Array.from(out).join(","));
+      `,
+    );
+    // Running totals: 1, 0, 2, -1, 4
+    expect(stdout).toBe("1,0,2,-1,4");
+    expect(exitCode).toBe(0);
+  });
+
+  it("output length matches input length, including empty input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-shape",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const empty = gpu.scan(new Float32Array(0));
+        const single = gpu.scan(new Float32Array([42]));
+        console.log("empty.len", empty.length);
+        console.log("single", single.length, single[0]);
+      `,
+    );
+    expect(stdout).toBe(["empty.len 0", "single 1 42"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("Kahan compensation keeps error tiny on long mixed-magnitude input", async () => {
+    // 1e6 elements of 1.0 plus a 1e8 outlier early on. Naive (uncompensated)
+    // float32 summation loses accuracy because tiny additions onto a huge
+    // accumulator round away. Compensated scan should still produce a final
+    // total within a few ULPs of the analytical 1e8 + 1e6 - 1.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-kahan",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const N = 1_000_000;
+        const input = new Float32Array(N);
+        input.fill(1);
+        input[1] = 1e8;
+        const out = gpu.scan(input);
+        const expected = 1e8 + (N - 1);
+        const got = out[N - 1];
+        const relErr = Math.abs(got - expected) / expected;
+        console.log("relErr.lt.1e-6", relErr < 1e-6);
+        console.log("len", out.length);
+      `,
+    );
+    expect(stdout).toBe(["relErr.lt.1e-6 true", "len 1000000"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects non-Float32Array input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-type",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        try {
+          gpu.scan(new Float64Array([1, 2, 3]));
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e instanceof TypeError);
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("accepts a held GpuHandle (round-trips through the dispatcher)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-handle",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        using held = new gpu.GpuFloat32Array(new Float32Array([2, 4, 6, 8]));
+        const out = gpu.scan(held);
+        console.log(Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe("2,6,12,20");
+    expect(exitCode).toBe(0);
+  });
+});

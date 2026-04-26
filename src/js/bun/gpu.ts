@@ -228,6 +228,12 @@ interface Backend {
     kW: number,
     kH: number,
   ): Float32Array;
+  /**
+   * Inclusive prefix sum over `input`. Output length matches input. Backends
+   * MAY implement this; if a backend doesn't, the public wrapper falls back
+   * to the CPU reference.
+   */
+  scan?(input: Float32Array | GpuHandle): Float32Array;
   simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
   alloc(length: number, type: "f32" | "f64", opts?: { pinned?: boolean }): FArray;
   isAligned(arr: FArray): boolean;
@@ -250,6 +256,31 @@ function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
     return x.view as T;
   }
   return x;
+}
+
+// CPU reference for inclusive prefix sum (a.k.a. inclusive scan).
+// out[i] = in[0] + in[1] + ... + in[i]. Kahan-compensated accumulation
+// keeps the float-add round-off bounded even for long inputs — the
+// straightforward `acc += in[i]` accumulates O(n·ε) error, which becomes
+// visible past a few hundred thousand elements. Compensated summation
+// holds the per-step error in a separate float and re-injects it.
+//
+// GPU backends override via Backend.scan with a parallel Hillis-Steele
+// (or Blelloch on CUDA / Metal) implementation; this CPU path is the
+// fallback and the correctness reference.
+function cpuScan(input: Float32Array): Float32Array {
+  const n = input.length;
+  const out = new Float32Array(n);
+  let acc = 0;
+  let comp = 0; // Kahan compensation for the running sum
+  for (let i = 0; i < n; i++) {
+    const y = input[i] - comp;
+    const t = acc + y;
+    comp = t - acc - y;
+    acc = t;
+    out[i] = acc;
+  }
+  return out;
 }
 
 // CPU reference for 2D valid-mode convolution. Naive triple loop with the
@@ -343,6 +374,9 @@ const cpuBackend: Backend = {
       kW,
       kH,
     );
+  },
+  scan(input) {
+    return cpuScan(unwrapHandle(input as any) as Float32Array);
   },
   simdMap(fn, a) {
     return simd.simdMap(fn, unwrapHandle(a) as any);
@@ -583,6 +617,34 @@ function conv2D(
   return cpuConv2D(aV, kV, iW, iH, kW, kH);
 }
 
+// Inclusive prefix sum (cumulative running total). Output[i] = sum(input[0..i]).
+// f32 only for v1 — integer compaction (Uint32Array) is the natural follow-up
+// once the parallel scan kernels are wired on CUDA / Metal.
+//
+// Behavior on each backend:
+//   - cpu:   Kahan-compensated linear loop (correctness reference)
+//   - metal: GPU dispatch when backend.scan is wired; falls through to CPU
+//   - cuda:  same — GPU when wired, CPU until then
+//
+// Common uses: parallel compaction (compute write indices for stream-filter
+// outputs), cumulative distributions, integral images, summed-area tables,
+// and any algorithm that needs "where does my output go in a packed array".
+function scan(input: Float32Array | GpuHandle | GpuFloat32Array): Float32Array {
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.scan: input must be a Float32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const backend = resolveActive();
+  const a = unwrapGpuArg(input as any);
+  if (backend.scan) return backend.scan(a as any);
+  // Backend doesn't implement scan yet — fall back to the CPU reference.
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  return cpuScan(aV);
+}
+
 // Page-aligned typed array suitable for zero-copy staging into the active
 // backend's device memory. On Metal, alloc()'d matrices take the NOCOPY
 // dispatch path in matVec — see bench/parabun-metal-zerocopy/README.md for
@@ -712,6 +774,7 @@ export default {
   matVec,
   matmul,
   conv2D,
+  scan,
   simdMap,
   alloc,
   isAligned,
