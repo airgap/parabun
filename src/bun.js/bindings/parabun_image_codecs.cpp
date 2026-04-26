@@ -400,8 +400,17 @@ bool encodeJpegBytes(
     jpeg_mem_dest(&cinfo, &outBuf, &outBufLen);
     cinfo.image_width = width;
     cinfo.image_height = height;
-    cinfo.input_components = 3;
-    cinfo.in_color_space = JCS_RGB;
+    // libjpeg-turbo extension: JCS_EXT_RGBA accepts 4-byte RGBA scanlines
+    // directly and does the alpha-strip conversion inside the encoder
+    // with SIMD. Saves the entire scalar RGBA→RGB shuffle pass we used
+    // to do per scanline.
+    if (channels == 4) {
+        cinfo.input_components = 4;
+        cinfo.in_color_space = JCS_EXT_RGBA;
+    } else {
+        cinfo.input_components = 3;
+        cinfo.in_color_space = JCS_RGB;
+    }
     jpeg_set_defaults(&cinfo);
     int q = quality;
     if (q < 1) q = 1;
@@ -409,29 +418,15 @@ bool encodeJpegBytes(
     jpeg_set_quality(&cinfo, q, TRUE);
     jpeg_start_compress(&cinfo, TRUE);
 
-    if (channels == 3) {
-        // Direct path — pass scanlines into libjpeg as-is.
-        const size_t rowBytes = static_cast<size_t>(width) * 3;
-        while (cinfo.next_scanline < height) {
-            JSAMPROW row[1] = {
-                const_cast<uint8_t*>(pixels) + static_cast<size_t>(cinfo.next_scanline) * rowBytes,
-            };
-            jpeg_write_scanlines(&cinfo, row, 1);
-        }
-    } else {
-        // RGBA → RGB drop the alpha into a per-row scratch buffer.
-        std::vector<uint8_t> rowScratch(static_cast<size_t>(width) * 3);
-        const size_t inRowBytes = static_cast<size_t>(width) * 4;
-        while (cinfo.next_scanline < height) {
-            const uint8_t* src = pixels + static_cast<size_t>(cinfo.next_scanline) * inRowBytes;
-            for (uint32_t x = 0; x < width; x++) {
-                rowScratch[x * 3] = src[x * 4];
-                rowScratch[x * 3 + 1] = src[x * 4 + 1];
-                rowScratch[x * 3 + 2] = src[x * 4 + 2];
-            }
-            JSAMPROW row[1] = { rowScratch.data() };
-            jpeg_write_scanlines(&cinfo, row, 1);
-        }
+    // Single path now: libjpeg-turbo's RGBA path handles the alpha
+    // strip internally; for RGB it's pass-through. Either way we just
+    // hand scanlines through without per-row scratch allocation.
+    const size_t rowBytes = static_cast<size_t>(width) * channels;
+    while (cinfo.next_scanline < height) {
+        JSAMPROW row[1] = {
+            const_cast<uint8_t*>(pixels) + static_cast<size_t>(cinfo.next_scanline) * rowBytes,
+        };
+        jpeg_write_scanlines(&cinfo, row, 1);
     }
 
     jpeg_finish_compress(&cinfo);
