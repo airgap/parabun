@@ -18,35 +18,31 @@ noise so JPEG can't trivially compress to flat blocks) at three
 sizes: 512², 2048², and 4096². Both PNG and JPEG variants are
 emitted so the codec-time portion of each op is real.
 
-## Headline numbers (after row-parallel kernels)
+## Headline numbers (after row-parallel + branchless inner loops)
 
-16-core x86 release build, sharp 0.34.5, best-of-7 per cell after 2
-warmup runs:
+16-core x86 release build (`-O3 -march=haswell`, AVX2 enabled), sharp 0.34.5,
+best-of-7 per cell after 2 warmup runs:
 
 ```
 # decode → encode (JPEG q85)
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             3.6                 2.3            1.57× slower
-medium           28.8                26.6            1.08× slower
-large           117.9                70.5            1.67× slower
+medium           28.7                16.5            1.74× slower
+large           119.7                73.2            1.64× slower
 
 # resize to 1/2 (Lanczos, JPEG out)
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             3.9                 3.1            1.27× slower
-medium           26.3                16.9            1.55× slower
-large            96.5                58.0            1.66× slower
+medium           26.6                15.7            1.69× slower
+large            94.1                55.9            1.68× slower
 
 # Gaussian blur (radius 5, JPEG out)
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             5.5                 4.6            1.19× slower
-medium           57.2                28.6            2.00× slower
-large           250.6               113.2            2.21× slower
+medium           53.4                26.6            2.01× slower
+large           186.0               104.8            1.77× slower
 
 # PNG → resize → PNG out
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             9.0                 6.4            1.41× slower
-medium           87.2                22.0            3.97× slower
-large           232.3                51.7            4.49× slower
+medium           75.4                21.2            3.56× slower
+large           229.1                48.6            4.72× slower
 ```
 
 ## Where we used to be vs where we are now
@@ -56,12 +52,13 @@ scalar implementation. For honesty, here's the delta after
 parallelizing the row loops in resize / blur / sharpen / Sobel /
 adjust / invert / threshold / luma:
 
-| op | size | before | after |
-|---|---|---|---|
-| Lanczos resize | large | 4.09× slower | **1.66× slower** |
-| Gaussian blur | large | 7.23× slower | **2.21× slower** |
-| Gaussian blur | medium | 6.81× slower | **2.00× slower** |
-| PNG pipeline | large | 8.38× slower | **4.49× slower** |
+| op | size | scalar serial | row-parallel | + branchless inner |
+|---|---|---|---|---|
+| Lanczos resize | large | 4.09× slower | 1.66× | **1.68×** |
+| Gaussian blur | large | 7.23× slower | 2.21× | **1.77×** |
+| Gaussian blur | medium | 6.81× slower | 2.00× | **2.01×** |
+| PNG pipeline | large | 8.38× slower | 4.49× | **4.72×** |
+| JPEG round-trip | large | 1.36× slower | 1.67× | **1.64×** |
 
 Blur dropped from 7× to 2.2× from threading alone. Resize from
 4× to 1.66×. PNG pipeline is still the worst because libpng's

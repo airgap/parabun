@@ -573,22 +573,61 @@ void gaussianBlur(
 
     std::vector<float> kernel;
     buildGaussianKernel1D(radius, kernel);
+    const float* __restrict__ kPtr = kernel.data();
+    const int kSize = 2 * radius + 1;
 
-    // Pass 1: horizontal blur, src → mid (float). Parallelized by output row.
+    // Pass 1: horizontal blur, src → mid (float). The interior columns
+    // [radius, w - radius) need no bounds-checking — split that region
+    // off so its inner loop is a simple multiply-accumulate the compiler
+    // can auto-vectorize. Edges stay scalar with clamping.
     std::vector<float> mid(static_cast<size_t>(w) * h * channels);
-    const size_t pass1Cost = static_cast<size_t>(w) * h * channels * (2 * radius + 1);
+    const size_t pass1Cost = static_cast<size_t>(w) * h * channels * kSize;
+    const int wi = static_cast<int>(w);
+    const int interiorStart = std::min(radius, wi);
+    const int interiorEnd = std::max(wi - radius, interiorStart);
+
     parallelRows(h, pass1Cost, [&](uint32_t y0, uint32_t y1) {
         for (uint32_t y = y0; y < y1; y++) {
-            const uint8_t* srcRow = src + static_cast<size_t>(y) * w * channels;
-            float* midRow = mid.data() + static_cast<size_t>(y) * w * channels;
-            for (uint32_t x = 0; x < w; x++) {
+            const uint8_t* __restrict__ srcRow = src + static_cast<size_t>(y) * w * channels;
+            float* __restrict__ midRow = mid.data() + static_cast<size_t>(y) * w * channels;
+
+            // Left edge — needs clamping.
+            for (int x = 0; x < interiorStart; x++) {
                 for (uint32_t c = 0; c < channels; c++) {
                     float acc = 0.0f;
                     for (int k = -radius; k <= radius; k++) {
-                        int sx = static_cast<int>(x) + k;
+                        int sx = x + k;
                         if (sx < 0) sx = 0;
-                        if (sx >= static_cast<int>(w)) sx = static_cast<int>(w) - 1;
-                        acc += static_cast<float>(srcRow[sx * channels + c]) * kernel[k + radius];
+                        if (sx >= wi) sx = wi - 1;
+                        acc += static_cast<float>(srcRow[sx * channels + c]) * kPtr[k + radius];
+                    }
+                    midRow[x * channels + c] = acc;
+                }
+            }
+
+            // Interior — no clamping. The compiler vectorizes this on
+            // -march=haswell+ thanks to the stride-known access pattern,
+            // restrict-qualified pointers, and the branch-free inner loop.
+            for (int x = interiorStart; x < interiorEnd; x++) {
+                const uint8_t* base = srcRow + (x - radius) * static_cast<int>(channels);
+                for (uint32_t c = 0; c < channels; c++) {
+                    float acc = 0.0f;
+                    for (int i = 0; i < kSize; i++) {
+                        acc += static_cast<float>(base[i * static_cast<int>(channels) + c]) * kPtr[i];
+                    }
+                    midRow[x * channels + c] = acc;
+                }
+            }
+
+            // Right edge.
+            for (int x = interiorEnd; x < wi; x++) {
+                for (uint32_t c = 0; c < channels; c++) {
+                    float acc = 0.0f;
+                    for (int k = -radius; k <= radius; k++) {
+                        int sx = x + k;
+                        if (sx < 0) sx = 0;
+                        if (sx >= wi) sx = wi - 1;
+                        acc += static_cast<float>(srcRow[sx * channels + c]) * kPtr[k + radius];
                     }
                     midRow[x * channels + c] = acc;
                 }
@@ -596,24 +635,54 @@ void gaussianBlur(
         }
     });
 
-    // Pass 2: vertical blur, mid → dst (uint8 with clamp). Same per-row split.
+    // Pass 2: vertical blur, mid → dst (uint8 with clamp). Same edge /
+    // interior split, this time over y. Interior is a multiply-accumulate
+    // along contiguous-in-y mid rows; per-row stride is `w * channels`.
+    const int hi = static_cast<int>(h);
+    const int yInteriorStart = std::min(radius, hi);
+    const int yInteriorEnd = std::max(hi - radius, yInteriorStart);
+
     parallelRows(h, pass1Cost, [&](uint32_t y0, uint32_t y1) {
-        for (uint32_t y = y0; y < y1; y++) {
-            uint8_t* dstRow = dst + static_cast<size_t>(y) * w * channels;
-            for (uint32_t x = 0; x < w; x++) {
-                for (uint32_t c = 0; c < channels; c++) {
-                    float acc = 0.0f;
-                    for (int k = -radius; k <= radius; k++) {
-                        int sy = static_cast<int>(y) + k;
-                        if (sy < 0) sy = 0;
-                        if (sy >= static_cast<int>(h)) sy = static_cast<int>(h) - 1;
-                        const float* midRow = mid.data() + static_cast<size_t>(sy) * w * channels;
-                        acc += midRow[x * channels + c] * kernel[k + radius];
+        for (uint32_t yu = y0; yu < y1; yu++) {
+            const int y = static_cast<int>(yu);
+            uint8_t* __restrict__ dstRow = dst + static_cast<size_t>(y) * w * channels;
+            const bool clamping = (y < yInteriorStart) || (y >= yInteriorEnd);
+            if (clamping) {
+                for (uint32_t x = 0; x < w; x++) {
+                    for (uint32_t c = 0; c < channels; c++) {
+                        float acc = 0.0f;
+                        for (int k = -radius; k <= radius; k++) {
+                            int sy = y + k;
+                            if (sy < 0) sy = 0;
+                            if (sy >= hi) sy = hi - 1;
+                            const float* midRow = mid.data() + static_cast<size_t>(sy) * w * channels;
+                            acc += midRow[x * channels + c] * kPtr[k + radius];
+                        }
+                        int rounded = static_cast<int>(acc + 0.5f);
+                        if (rounded < 0) rounded = 0;
+                        if (rounded > 255) rounded = 255;
+                        dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
                     }
-                    int rounded = static_cast<int>(acc + 0.5f);
-                    if (rounded < 0) rounded = 0;
-                    if (rounded > 255) rounded = 255;
-                    dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
+                }
+            } else {
+                // Interior — pre-fetch the kSize row pointers once,
+                // then multiply-accumulate without per-pixel bound checks.
+                // radius is bounded to [0, 100] by the host fn so kSize ≤ 201.
+                std::vector<const float*> rows(kSize);
+                for (int i = 0; i < kSize; i++) {
+                    rows[i] = mid.data() + static_cast<size_t>(y - radius + i) * w * channels;
+                }
+                for (uint32_t x = 0; x < w; x++) {
+                    for (uint32_t c = 0; c < channels; c++) {
+                        float acc = 0.0f;
+                        for (int i = 0; i < kSize; i++) {
+                            acc += rows[i][x * channels + c] * kPtr[i];
+                        }
+                        int rounded = static_cast<int>(acc + 0.5f);
+                        if (rounded < 0) rounded = 0;
+                        if (rounded > 255) rounded = 255;
+                        dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
+                    }
                 }
             }
         }
