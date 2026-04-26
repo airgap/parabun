@@ -1112,6 +1112,86 @@ function launchConv2DF32(
   }
 }
 
+// ─── Kernel launch: gaussian_blur_rgba_u8 ─────────────────────────────────
+// Single-launch fused RGBA blur — one thread per output pixel computes
+// all four channels with one set of kernel weight loads. Sidesteps the
+// JS-side per-channel deinterleave that dominates the conv2D-based
+// dispatch.
+//
+// Caller must ensure NVRTC is available (probeDevOps()); the public
+// wrapper on bun:gpu falls back to CPU otherwise.
+function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radius: number): Uint8Array {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const inBytes = BigInt(input.length);
+  const kSize = 2 * radius + 1;
+
+  // Build the 1D Gaussian once on the host. Same coefficients as the C++
+  // path so callers see consistent output across CPU and GPU.
+  const sigma = radius / 3 + 1e-6;
+  const k1d = new Float32Array(kSize);
+  let sum = 0;
+  for (let i = 0; i < kSize; i++) {
+    const x = i - radius;
+    k1d[i] = Math.exp(-(x * x) / (2 * sigma * sigma));
+    sum += k1d[i];
+  }
+  for (let i = 0; i < kSize; i++) k1d[i] /= sum;
+
+  let dIn: bigint = 0n;
+  let dOut: bigint = 0n;
+  let dKern: bigint = 0n;
+  try {
+    const dInBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dInBuf), inBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    dIn = dInBuf[0];
+    const dOutBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dOutBuf), inBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(output) failed");
+    dOut = dOutBuf[0];
+    const dKernBuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dKernBuf), BigInt(kSize * 4)) !== 0)
+      throw new Error("bun:gpu cuda: cuMemAlloc(kern) failed");
+    dKern = dKernBuf[0];
+
+    if (s.cuMemcpyHtoD_v2(dIn, ptr(input), inBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    }
+    if (s.cuMemcpyHtoD_v2(dKern, ptr(k1d), BigInt(kSize * 4)) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(kern) failed");
+    }
+
+    const pIn = new BigUint64Array([dIn]);
+    const pOut = new BigUint64Array([dOut]);
+    const pW = new Uint32Array([w]);
+    const pH = new Uint32Array([h]);
+    const pK = new BigUint64Array([dKern]);
+    const pR = new Int32Array([radius]);
+    const paramPtrs = new BigUint64Array([
+      BigInt(ptr(pIn)),
+      BigInt(ptr(pOut)),
+      BigInt(ptr(pW)),
+      BigInt(ptr(pH)),
+      BigInt(ptr(pK)),
+      BigInt(ptr(pR)),
+    ]);
+
+    // 16×16 blocks; cover ceil(w/16) × ceil(h/16).
+    const gridX = Math.floor((w + 15) / 16);
+    const gridY = Math.floor((h + 15) / 16);
+    const r = s.cuLaunchKernel(devOpsFns!.gaussianBlurRGBAu8, gridX, gridY, 1, 16, 16, 1, 0, 0n, ptr(paramPtrs), null);
+    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(gaussianBlurRGBAu8) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+
+    const out = new Uint8Array(input.length);
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, inBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(output) failed");
+    return out;
+  } finally {
+    if (dIn !== 0n) s.cuMemFree_v2(dIn);
+    if (dOut !== 0n) s.cuMemFree_v2(dOut);
+    if (dKern !== 0n) s.cuMemFree_v2(dKern);
+  }
+}
+
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
 //
 // a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
@@ -1818,6 +1898,26 @@ function conv2D(
     return out;
   }
   return launchConv2DF32(input, kernel, iW, iH, kW, kH);
+}
+
+// Image-specific RGBA-uint8 Gaussian blur. Single-launch fused kernel —
+// caller passes packed RGBA bytes + dims + radius and gets packed RGBA
+// bytes back. Sidesteps the JS-side per-channel deinterleave that
+// dominates the conv2D-based dispatch path.
+function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number): Uint8Array {
+  if (radius < 0 || radius > 100) throw new RangeError("radius must be in [0, 100]");
+  if (radius === 0) {
+    const out = new Uint8Array(input.length);
+    out.set(input);
+    return out;
+  }
+  if (input.length !== w * h * 4) {
+    throw new RangeError(`imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`);
+  }
+  // Requires NVRTC; backends that don't have it return null and the public
+  // gpu.imageBlurRGBA wrapper falls through to a different path.
+  if (!probeDevOps()) return null as any;
+  return launchGaussianBlurRGBAu8(input, w, h, radius);
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
@@ -2860,6 +2960,61 @@ extern "C" __global__ void conv2d_f32(
     }
     outbuf[y * oW + x] = acc;
 }
+
+// Fused RGBA-uint8 Gaussian blur. Single-launch 2D convolution against a
+// separable Gaussian kernel — for radius r the kernel is (2r+1)² weights
+// supplied as the outer product of a 1D Gaussian, but applied as a flat
+// 2D kernel in one launch (one pass, no global sync). Edge clamp on
+// border samples. Each thread computes one output pixel = 4 channels in
+// parallel via float accumulators, then packed back to uint8 with round
+// + clamp. This sidesteps the JS-side deinterleave / reinterleave
+// overhead that dominates a per-channel conv2D dispatch.
+extern "C" __global__ void gaussian_blur_rgba_u8(
+    const unsigned char* __restrict__ src,
+    unsigned char* __restrict__ dst,
+    unsigned int w,
+    unsigned int h,
+    const float* __restrict__ kern1d,
+    int radius
+) {
+    int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= (int)w || y >= (int)h) return;
+
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+    int kSize = 2 * radius + 1;
+    for (int ky = 0; ky < kSize; ky++) {
+        int sy = y + ky - radius;
+        if (sy < 0) sy = 0;
+        if (sy >= (int)h) sy = (int)h - 1;
+        float kyW = kern1d[ky];
+        for (int kx = 0; kx < kSize; kx++) {
+            int sx = x + kx - radius;
+            if (sx < 0) sx = 0;
+            if (sx >= (int)w) sx = (int)w - 1;
+            float kw = kyW * kern1d[kx];
+            int idx = (sy * (int)w + sx) * 4;
+            r = fmaf((float)src[idx + 0], kw, r);
+            g = fmaf((float)src[idx + 1], kw, g);
+            b = fmaf((float)src[idx + 2], kw, b);
+            a = fmaf((float)src[idx + 3], kw, a);
+        }
+    }
+
+    int oIdx = (y * (int)w + x) * 4;
+    int ri = (int)(r + 0.5f);
+    int gi = (int)(g + 0.5f);
+    int bi = (int)(b + 0.5f);
+    int ai = (int)(a + 0.5f);
+    if (ri < 0) ri = 0; else if (ri > 255) ri = 255;
+    if (gi < 0) gi = 0; else if (gi > 255) gi = 255;
+    if (bi < 0) bi = 0; else if (bi > 255) bi = 255;
+    if (ai < 0) ai = 0; else if (ai > 255) ai = 255;
+    dst[oIdx + 0] = (unsigned char)ri;
+    dst[oIdx + 1] = (unsigned char)gi;
+    dst[oIdx + 2] = (unsigned char)bi;
+    dst[oIdx + 3] = (unsigned char)ai;
+}
 `;
 
 type DevOpsFns = {
@@ -2883,6 +3038,7 @@ type DevOpsFns = {
   embedLookupQ6K: bigint;
   flashAttn: bigint;
   conv2D: bigint;
+  gaussianBlurRGBAu8: bigint;
 };
 
 let devOpsProbed = false;
@@ -2969,6 +3125,7 @@ function probeDevOps(): boolean {
     "embedLookupQ6K",
     "flashAttn",
     "conv2D",
+    "gaussianBlurRGBAu8",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -2991,6 +3148,7 @@ function probeDevOps(): boolean {
     embedLookupQ6K: "embed_lookup_q6k_f32",
     flashAttn: "flash_attn_f32",
     conv2D: "conv2d_f32",
+    gaussianBlurRGBAu8: "gaussian_blur_rgba_u8",
   };
 
   const fns = {} as DevOpsFns;
@@ -3537,6 +3695,7 @@ export default {
   matVec,
   matmul,
   conv2D,
+  imageBlurRGBA,
   simdMap,
   alloc,
   isAligned,

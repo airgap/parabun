@@ -241,6 +241,13 @@ interface Backend {
    */
   reduce?(input: Float32Array | GpuHandle, op: "sum" | "min" | "max"): number;
   /**
+   * Single-launch fused Gaussian blur on packed RGBA uint8 — used by
+   * bun:image's GPU dispatch path. Returns null if the backend has no
+   * GPU implementation available (e.g. CUDA without NVRTC), so the
+   * public wrapper can fall through to the CPU path.
+   */
+  imageBlurRGBA?(input: Uint8Array, w: number, h: number, radius: number): Uint8Array | null;
+  /**
    * Bin-counting histogram. Returns a Uint32Array of length `bins`.
    * `min` and `max` are pre-resolved by the public wrapper. Backends
    * MAY implement this for device-side privatized histograms.
@@ -973,6 +980,34 @@ function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
   return cpuReduceF32(aV, op);
 }
 
+// Single-launch fused Gaussian blur on packed RGBA uint8. Used by
+// bun:image's `image.blur(img, { gpu: true })` path so the entire op
+// happens in one CUDA / Metal kernel invocation, sidestepping the
+// JS-side deinterleave / reinterleave that would dominate a per-
+// channel `conv2D` dispatch.
+//
+// Returns null when the active backend has no GPU implementation
+// available (CPU backend, or CUDA without NVRTC). Callers pass radius
+// in [0, 100]; the kernel uses an edge-clamped 2D Gaussian with
+// σ = radius/3 to match the C++ blur.
+function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number): Uint8Array | null {
+  if (!(input instanceof Uint8Array)) {
+    throw new TypeError("bun:gpu.imageBlurRGBA: input must be a Uint8Array");
+  }
+  if (!Number.isInteger(w) || w < 1 || !Number.isInteger(h) || h < 1) {
+    throw new RangeError("bun:gpu.imageBlurRGBA: w and h must be positive integers");
+  }
+  if (!Number.isInteger(radius) || radius < 0 || radius > 100) {
+    throw new RangeError("bun:gpu.imageBlurRGBA: radius must be an integer in [0, 100]");
+  }
+  if (input.length !== w * h * 4) {
+    throw new RangeError(`bun:gpu.imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`);
+  }
+  const backend = resolveActive();
+  if (!backend.imageBlurRGBA) return null;
+  return backend.imageBlurRGBA(input, w, h, radius);
+}
+
 // Bin-counting histogram. Counts how many input values fall into each of
 // `bins` equal-width buckets across `[min, max]`. Returns a Uint32Array of
 // length `bins`. Values outside the range and NaN are dropped silently —
@@ -1270,6 +1305,7 @@ export default {
   quantile,
   variance,
   stddev,
+  imageBlurRGBA,
   simdMap,
   alloc,
   isAligned,
