@@ -1332,6 +1332,121 @@ class Gain {
   }
 }
 
+// ─── I/O: capture + playback (ALSA on Linux, CoreAudio on macOS) ──────────
+// Real-time capture and playback for the embedded edge runtime. These are
+// scaffolded against ALSA on Linux first because the bring-up target is a
+// USB headset on a Pi 5 / Jetson; CoreAudio + WASAPI follow once the Linux
+// path is solid.
+//
+//   const devs = await audio.devices();
+//   //   { input:  [ { id: "hw:1,0", name: "Logitech H390", channels: 1, rates: [8000, 16000, 44100, 48000] } ],
+//   //     output: [ { id: "hw:1,0", name: "Logitech H390", channels: 2, rates: [44100, 48000] } ] }
+//
+//   await using mic = await audio.capture({ device: "hw:1,0", sampleRate: 16000, channels: 1 });
+//   for await (const chunk of mic.frames({ frameMs: 20 })) {
+//     // chunk: Float32Array, length = sampleRate * frameMs / 1000 * channels
+//   }
+//
+//   await using spk = await audio.play({ sampleRate: 48000, channels: 2 });
+//   await spk.write(samples);   // returns when buffer drains
+//
+// Frames are pulled from ALSA's snd_pcm_readi ring buffer. Default period
+// is 20 ms — short enough for VAD / wake-word, long enough that overruns
+// are rare under normal Pi load.
+
+const NOT_IMPLEMENTED_IO_MSG =
+  "bun:audio I/O is scaffolded — ALSA capture/playback land with embedded hardware bring-up";
+
+function todoIO(): never {
+  throw new Error(NOT_IMPLEMENTED_IO_MSG);
+}
+
+type AudioDevice = {
+  /** Platform-specific identifier. ALSA: "hw:CARD,DEV" or "default". */
+  id: string;
+  /** Human-readable name. */
+  name: string;
+  /** Channel count the device exposes. */
+  channels: number;
+  /** Sample rates the device can negotiate (Hz). */
+  rates: number[];
+};
+
+type DeviceList = {
+  input: AudioDevice[];
+  output: AudioDevice[];
+};
+
+type CaptureOptions = {
+  /** Device id from devices().input. Defaults to system default. */
+  device?: string;
+  /** Capture sample rate in Hz. Default 16000 (right for VAD / speech). */
+  sampleRate?: number;
+  /** Channel count. Default 1 (mono — what headset mics produce). */
+  channels?: number;
+  /**
+   * ALSA period in milliseconds — chunk size for the kernel ring buffer.
+   * Smaller = lower latency but more wakeups; larger = more headroom.
+   * Default 20.
+   */
+  periodMs?: number;
+  /** Number of periods kept in the ring buffer. Default 4. */
+  bufferPeriods?: number;
+};
+
+type PlaybackOptions = {
+  device?: string;
+  sampleRate?: number;
+  channels?: number;
+  periodMs?: number;
+  bufferPeriods?: number;
+};
+
+type CaptureFrame = {
+  /** Interleaved Float32 samples in [-1, 1]. */
+  samples: Float32Array;
+  /** Monotonic timestamp from the kernel, in milliseconds. */
+  timestampMs: number;
+  /** True if the kernel reported an overrun before this frame. */
+  overrun: boolean;
+};
+
+interface CaptureStream extends AsyncDisposable {
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly device: string;
+  /** Stream interleaved Float32 frames as an async iterator. */
+  frames(opts?: { frameMs?: number }): AsyncIterableIterator<CaptureFrame>;
+  /** Stop capturing and release the device. Idempotent. */
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+interface PlaybackStream extends AsyncDisposable {
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly device: string;
+  /** Write interleaved Float32 samples; resolves when bytes have drained into ALSA. */
+  write(samples: Float32Array): Promise<void>;
+  /** Block until everything written has been played out. */
+  drain(): Promise<void>;
+  /** Stop playback and release the device. Idempotent. */
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+function listDevices(): Promise<DeviceList> {
+  todoIO();
+}
+
+function capture(_opts?: CaptureOptions): Promise<CaptureStream> {
+  todoIO();
+}
+
+function play(_opts?: PlaybackOptions): Promise<PlaybackStream> {
+  todoIO();
+}
+
 export default {
   fft,
   ifft,
@@ -1358,4 +1473,8 @@ export default {
   OpusDecoder,
   Denoiser,
   Gain,
+  // I/O
+  devices: listDevices,
+  capture,
+  play,
 };
