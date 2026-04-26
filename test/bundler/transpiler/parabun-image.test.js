@@ -622,6 +622,137 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("sharpen with amount 0 returns the input unchanged", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-sharpen-zero",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const out = image.sharpen(orig, { amount: 0, radius: 1 });
+        console.log("dims", out.width, out.height, out.channels);
+        const equal = out.data.length === orig.data.length && out.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4 4", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("sharpen amplifies edge contrast — halos appear around a mid-tone step", async () => {
+    // 16×16 RGBA image with a vertical step edge from 64 to 192 at x=8.
+    // Mid-tone values (not 0/255) leave headroom for unsharp-mask halos
+    // to show up on both sides of the boundary. The total absolute
+    // adjacent-pixel difference along the row should grow because
+    // sharpening adds undershoot/overshoot rings.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-sharpen-edge",
+      `
+        import image from "bun:image";
+        const w = 16, h = 16;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          const v = x < 8 ? 64 : 192;
+          data[off] = v; data[off + 1] = v; data[off + 2] = v; data[off + 3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const sharper = image.sharpen(orig, { amount: 2, radius: 2 });
+        function totalAbsDiffR(img) {
+          let acc = 0;
+          for (let x = 0; x < img.width - 1; x++) {
+            const a = img.data[x * 4];
+            const b = img.data[(x + 1) * 4];
+            acc += Math.abs(b - a);
+          }
+          return acc;
+        }
+        const inDiff = totalAbsDiffR(orig);
+        const outDiff = totalAbsDiffR(sharper);
+        console.log("origStep", inDiff);
+        console.log("sharperGreater", outDiff > inDiff);
+        console.log("dims", sharper.width, sharper.height, sharper.channels);
+      `,
+    );
+    expect(stdout).toBe(["origStep 128", "sharperGreater true", "dims 16 16 4"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("sharpen preserves alpha unchanged on RGBA inputs", async () => {
+    // Vary R/G/B per-pixel, but set alpha to a non-trivial 200 — the
+    // unsharp pass should leave alpha at exactly 200 everywhere.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-sharpen-alpha",
+      `
+        import image from "bun:image";
+        const w = 8, h = 8;
+        const data = new Uint8Array(w * h * 4);
+        for (let i = 0; i < w * h; i++) {
+          data[i * 4 + 0] = (i * 17) & 0xff;
+          data[i * 4 + 1] = (i * 53) & 0xff;
+          data[i * 4 + 2] = (i * 91) & 0xff;
+          data[i * 4 + 3] = 200;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const out = image.sharpen(orig, { amount: 1.5, radius: 1 });
+        let allAlpha200 = true;
+        for (let i = 0; i < w * h; i++) {
+          if (out.data[i * 4 + 3] !== 200) { allAlpha200 = false; break; }
+        }
+        console.log("allAlpha200", allAlpha200);
+      `,
+    );
+    expect(stdout).toBe("allAlpha200 true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("edgeDetect collapses to channels=1 with the source dims", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-edge-shape",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);            // 4×4 RGBA
+        const out = image.edgeDetect(orig);
+        console.log("dims", out.width, out.height, out.channels);
+        console.log("dataLen", out.data.length);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4 1", "dataLen 16"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("edgeDetect picks up a vertical step edge at the boundary", async () => {
+    // 8×8 RGBA: left half black, right half white. Sobel should produce
+    // a strong response (≈ 255) at the boundary column and ~0 in the
+    // flat regions.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-edge-vertical",
+      `
+        import image from "bun:image";
+        const w = 8, h = 8;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          const v = x < 4 ? 0 : 255;
+          data[off] = v; data[off + 1] = v; data[off + 2] = v; data[off + 3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const edges = image.edgeDetect(orig);
+        // Sample the middle row at the boundary column (3 or 4) vs the
+        // flat regions (column 0 and column 7).
+        const midY = 4;
+        const at = (x, y) => edges.data[y * w + x];
+        const boundary = Math.max(at(3, midY), at(4, midY));
+        const flatLeft = at(0, midY);
+        const flatRight = at(7, midY);
+        console.log("boundaryStrong", boundary > 200);
+        console.log("flatLeftSmall", flatLeft < 50);
+        console.log("flatRightSmall", flatRight < 50);
+      `,
+    );
+    expect(stdout).toBe(["boundaryStrong true", "flatLeftSmall true", "flatRightSmall true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

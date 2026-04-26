@@ -545,6 +545,105 @@ void gaussianBlur(
     }
 }
 
+// ─── Unsharp-mask sharpen ──────────────────────────────────────────────────
+// Standard formulation:  sharpened = input + (input − blur(input)) × amount
+// — extract the high-frequency detail by subtracting a low-pass copy, then
+// scale and add it back. amount=1 doubles the high-frequency content;
+// amount=0.5 is subtle; amount=2+ is aggressive. radius controls the
+// Gaussian half-width — small radius (1-3) catches fine detail, larger
+// radius catches broader features.
+
+void unsharpSharpen(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint8_t* dst, int radius, float amount)
+{
+    // Compute a blur into a scratch buffer first.
+    std::vector<uint8_t> blurred(static_cast<size_t>(w) * h * channels);
+    gaussianBlur(src, w, h, channels, blurred.data(), radius);
+
+    // sharpened = src + amount × (src − blurred), clamped to [0, 255].
+    // For RGBA inputs we leave alpha untouched — sharpening alpha is
+    // never what callers want.
+    const size_t total = static_cast<size_t>(w) * h * channels;
+    for (size_t i = 0; i < total; i++) {
+        const uint32_t c = static_cast<uint32_t>(i % channels);
+        if (channels == 4 && c == 3) {
+            dst[i] = src[i]; // pass alpha through unchanged
+            continue;
+        }
+        const float diff = static_cast<float>(src[i]) - static_cast<float>(blurred[i]);
+        const float v = static_cast<float>(src[i]) + amount * diff;
+        int rounded = static_cast<int>(v + 0.5f);
+        if (rounded < 0) rounded = 0;
+        if (rounded > 255) rounded = 255;
+        dst[i] = static_cast<uint8_t>(rounded);
+    }
+}
+
+// ─── Sobel edge detection ──────────────────────────────────────────────────
+// Returns a single-channel grayscale image with the magnitude of the
+// per-pixel gradient. Operates on the luminance of the input — for RGB
+// or RGBA inputs we collapse to luma first via Rec. 601 weights
+// (0.299, 0.587, 0.114) which is the standard tradeoff between speed
+// and visual fidelity for edge detection.
+//
+// 3×3 kernels:
+//   Gx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+//   Gy = [[-1,-2,-1], [ 0, 0, 0], [ 1, 2, 1]]
+//   magnitude = sqrt(Gx² + Gy²), clamped to 255.
+
+void sobelEdgeDetect(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint8_t* dst /* w × h × 1 */)
+{
+    if (w < 2 || h < 2) {
+        std::memset(dst, 0, static_cast<size_t>(w) * h);
+        return;
+    }
+    // Pass 1: collapse to grayscale luma. For 1-channel inputs this is
+    // a memcpy. For multi-channel, weighted-sum the color channels into
+    // a luma buffer.
+    std::vector<uint8_t> luma(static_cast<size_t>(w) * h);
+    if (channels == 1) {
+        std::memcpy(luma.data(), src, luma.size());
+    } else {
+        const size_t pixels = static_cast<size_t>(w) * h;
+        for (size_t i = 0; i < pixels; i++) {
+            const float r = static_cast<float>(src[i * channels + 0]);
+            const float g = static_cast<float>(src[i * channels + 1]);
+            const float b = static_cast<float>(src[i * channels + 2]);
+            const float L = 0.299f * r + 0.587f * g + 0.114f * b;
+            luma[i] = static_cast<uint8_t>(L + 0.5f);
+        }
+    }
+
+    // Pass 2: Sobel on luma.
+    auto at = [&](int x, int y) -> int {
+        if (x < 0) x = 0;
+        if (x >= static_cast<int>(w)) x = static_cast<int>(w) - 1;
+        if (y < 0) y = 0;
+        if (y >= static_cast<int>(h)) y = static_cast<int>(h) - 1;
+        return luma[static_cast<size_t>(y) * w + x];
+    };
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            const int xi = static_cast<int>(x);
+            const int yi = static_cast<int>(y);
+            const int gx =
+                -at(xi - 1, yi - 1) + at(xi + 1, yi - 1)
+                - 2 * at(xi - 1, yi) + 2 * at(xi + 1, yi)
+                - at(xi - 1, yi + 1) + at(xi + 1, yi + 1);
+            const int gy =
+                -at(xi - 1, yi - 1) - 2 * at(xi, yi - 1) - at(xi + 1, yi - 1)
+                + at(xi - 1, yi + 1) + 2 * at(xi, yi + 1) + at(xi + 1, yi + 1);
+            // Magnitudes with clamp.
+            int mag = static_cast<int>(std::sqrt(static_cast<float>(gx * gx + gy * gy)) + 0.5f);
+            if (mag > 255) mag = 255;
+            dst[static_cast<size_t>(y) * w + x] = static_cast<uint8_t>(mag);
+        }
+    }
+}
+
 // ─── Bilinear resize ───────────────────────────────────────────────────────
 // CPU-side bilinear resampling. Each output pixel samples the four nearest
 // input pixels with bilinear weights derived from the half-pixel-centered
@@ -1001,6 +1100,157 @@ JSC_DEFINE_HOST_FUNCTION(functionBlur,
     return JSValue::encode(obj);
 }
 
+// sharpen(img, { amount?, radius? }) → DecodedImage with the same dims /
+// channels / format. Defaults: amount=1.0, radius=1 (fine-detail emphasis).
+// Alpha is passed through untouched on RGBA inputs.
+JSC_DEFINE_HOST_FUNCTION(functionSharpen,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: expected (img, { amount?, radius? })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    JSObject* optsObj = optsArg.isObject() ? asObject(optsArg) : nullptr;
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    int radius = 1;
+    float amount = 1.0f;
+    if (optsObj) {
+        JSValue radiusVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "radius"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (radiusVal.isNumber()) radius = radiusVal.toInt32(globalObject);
+        JSValue amountVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "amount"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (amountVal.isNumber()) amount = static_cast<float>(amountVal.toNumber(globalObject));
+    }
+    if (radius < 0 || radius > 100) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: radius must be in [0, 100]"_s);
+        return {};
+    }
+    if (!std::isfinite(amount) || amount < -10.0f || amount > 10.0f) {
+        throwTypeError(globalObject, scope, "bun:image.sharpen: amount must be a finite number in [-10, 10]"_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    unsharpSharpen(
+        static_cast<const uint8_t*>(srcRaw), w, h, channels,
+        static_cast<uint8_t*>(dstArr->vector()), radius, amount);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
+// edgeDetect(img) → DecodedImage with channels=1 (grayscale magnitude).
+// 3×3 Sobel on Rec. 601 luma; output is the same dimensions as the input
+// regardless of source channel count.
+JSC_DEFINE_HOST_FUNCTION(functionEdgeDetect,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.edgeDetect: expected (img)"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.edgeDetect: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.edgeDetect: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.edgeDetect: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.edgeDetect: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h; // single channel
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    sobelEdgeDetect(
+        static_cast<const uint8_t*>(srcRaw), w, h, channels,
+        static_cast<uint8_t*>(dstArr->vector()));
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(1u));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1017,6 +1267,12 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "blur"_s), 2,
         functionBlur, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "sharpen"_s), 2,
+        functionSharpen, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "edgeDetect"_s), 1,
+        functionEdgeDetect, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

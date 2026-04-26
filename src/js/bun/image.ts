@@ -58,6 +58,16 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
 };
+type SharpenOptions = {
+  /**
+   * Strength of the high-frequency boost. Default 1 (one extra copy of the
+   * detail). 0 = no change, 0.5 = subtle, 2+ = aggressive (visible halos).
+   * Negative values produce a soften effect.
+   */
+  amount?: number;
+  /** Gaussian radius for the unsharp-mask low-pass. Default 1. */
+  radius?: number;
+};
 
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
@@ -96,9 +106,25 @@ function blur(img: DecodedImage, opts: BlurOptions): DecodedImage {
   return native.blur(img, opts);
 }
 
+function sharpen(img: DecodedImage, opts?: SharpenOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.sharpen: img must be the object returned from decode()");
+  }
+  return native.sharpen(img, opts ?? {});
+}
+
+function edgeDetect(img: DecodedImage): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.edgeDetect: img must be the object returned from decode()");
+  }
+  return native.edgeDetect(img);
+}
+
 export default {
   decode,
   encode,
   resize,
   blur,
+  sharpen,
+  edgeDetect,
 };
