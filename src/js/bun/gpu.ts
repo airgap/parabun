@@ -234,6 +234,12 @@ interface Backend {
    * to the CPU reference.
    */
   scan?(input: Float32Array | GpuHandle): Float32Array;
+  /**
+   * Reduction. `op` is "sum" | "min" | "max"; result is a single number.
+   * Backends MAY implement this; if they don't, the public wrapper falls
+   * back to the CPU reference.
+   */
+  reduce?(input: Float32Array | GpuHandle, op: "sum" | "min" | "max"): number;
   simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
   alloc(length: number, type: "f32" | "f64", opts?: { pinned?: boolean }): FArray;
   isAligned(arr: FArray): boolean;
@@ -281,6 +287,63 @@ function cpuScan(input: Float32Array): Float32Array {
     out[i] = acc;
   }
   return out;
+}
+
+// CPU reductions. Same Kahan trick for sum so long inputs stay accurate;
+// straight loops for min/max. Empty-input semantics match the well-known
+// JS `Math.min` / `Math.max` / `[].reduce(... 0)` conventions:
+//   sum([]) = 0,  min([]) = +Infinity,  max([]) = -Infinity.
+function cpuReduceF32(input: Float32Array, op: "sum" | "min" | "max"): number {
+  const n = input.length;
+  if (op === "sum") {
+    let acc = 0;
+    let comp = 0;
+    for (let i = 0; i < n; i++) {
+      const y = input[i] - comp;
+      const t = acc + y;
+      comp = t - acc - y;
+      acc = t;
+    }
+    return acc;
+  }
+  if (op === "min") {
+    let m = Infinity;
+    for (let i = 0; i < n; i++) {
+      const v = input[i];
+      // NaN propagates: any NaN in the input → NaN result, matching Math.min.
+      if (Number.isNaN(v)) return NaN;
+      if (v < m) m = v;
+    }
+    return m;
+  }
+  // op === "max"
+  let m = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const v = input[i];
+    if (Number.isNaN(v)) return NaN;
+    if (v > m) m = v;
+  }
+  return m;
+}
+
+function cpuReduceU32(input: Uint32Array, op: "sum" | "min" | "max"): number {
+  const n = input.length;
+  if (op === "sum") {
+    let acc = 0;
+    for (let i = 0; i < n; i++) acc = (acc + input[i]) >>> 0;
+    return acc;
+  }
+  if (op === "min") {
+    if (n === 0) return Infinity;
+    let m = input[0];
+    for (let i = 1; i < n; i++) if (input[i] < m) m = input[i];
+    return m;
+  }
+  // op === "max"
+  if (n === 0) return -Infinity;
+  let m = input[0];
+  for (let i = 1; i < n; i++) if (input[i] > m) m = input[i];
+  return m;
 }
 
 // Integer prefix sum. No Kahan compensation needed — `>>> 0` makes the
@@ -393,6 +456,9 @@ const cpuBackend: Backend = {
   },
   scan(input) {
     return cpuScan(unwrapHandle(input as any) as Float32Array);
+  },
+  reduce(input, op) {
+    return cpuReduceF32(unwrapHandle(input as any) as Float32Array, op);
   },
   simdMap(fn, a) {
     return simd.simdMap(fn, unwrapHandle(a) as any);
@@ -671,6 +737,37 @@ function scan(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): 
   return cpuScan(aV);
 }
 
+// Reduction. Returns a single number — the sum, min, or max of the input.
+// Float32Array uses Kahan-compensated summation for `sum`; min/max are plain
+// loops with NaN-propagation matching JS Math.min/Math.max. Uint32Array uses
+// u32-wrapping add for `sum` and direct comparisons for min/max.
+//
+// Empty inputs follow the well-known JS conventions:
+//   sum([]) = 0,  min([]) = +Infinity,  max([]) = -Infinity.
+//
+// Backends MAY override the f32 path via Backend.reduce; the u32 path stays
+// on CPU until someone needs a device-side integer reduction.
+function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, op: "sum" | "min" | "max"): number {
+  if (op !== "sum" && op !== "min" && op !== "max") {
+    throw new TypeError(`bun:gpu.reduce: op must be "sum", "min", or "max"; got ${JSON.stringify(op)}`);
+  }
+  if (input instanceof Uint32Array) {
+    return cpuReduceU32(input, op);
+  }
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.reduce: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const backend = resolveActive();
+  const a = unwrapGpuArg(input as any);
+  if (backend.reduce) return backend.reduce(a as any, op);
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  return cpuReduceF32(aV, op);
+}
+
 // Page-aligned typed array suitable for zero-copy staging into the active
 // backend's device memory. On Metal, alloc()'d matrices take the NOCOPY
 // dispatch path in matVec — see bench/parabun-metal-zerocopy/README.md for
@@ -801,6 +898,7 @@ export default {
   matmul,
   conv2D,
   scan,
+  reduce,
   simdMap,
   alloc,
   isAligned,
