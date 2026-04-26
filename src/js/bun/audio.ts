@@ -753,6 +753,110 @@ class Denoiser {
   }
 }
 
+// ─── Mix ───────────────────────────────────────────────────────────────────
+// Combine N parallel audio streams into one. Each output sample is the
+// (optionally weighted) sum of the input samples at that position.
+// Standard use cases: conference-call mixing (each participant is a
+// track), music + voice ducking, sample triggering.
+//
+// All tracks must be the same length — there's no implicit zero-padding;
+// callers who need different-length tracks should resample / pad first.
+//
+// Clipping behavior:
+//   "hard" (default) — clamp to [-1, 1]. Fast, but bright distortion if
+//                      the mix is hot.
+//   "soft"           — tanh saturation. y = tanh(x). Smoother distortion,
+//                      preferred for music; tanh(2)≈0.96 so the output
+//                      asymptotes to ±1 without ever quite reaching it.
+//   "none"           — pass through unclamped. Caller takes responsibility
+//                      for keeping the levels in range (or post-processing
+//                      with audio.Gain).
+
+type MixOptions = {
+  /**
+   * Per-track linear gain. Length must match `tracks`. Default: 1.0 for
+   * every track (raw sum). Negative values invert phase — useful for
+   * out-of-phase cancellation but uncommon in normal mixing.
+   */
+  gains?: number[];
+  /** Clipping mode for the output. Default "hard". */
+  clip?: "hard" | "soft" | "none";
+};
+
+function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
+  if (!Array.isArray(tracks)) {
+    throw new TypeError("bun:audio.mix: tracks must be an array of Float32Arrays");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:audio.mix: opts must be an object");
+  }
+  if (tracks.length === 0) return new Float32Array(0);
+
+  const N = tracks[0].length;
+  for (let i = 0; i < tracks.length; i++) {
+    if (!(tracks[i] instanceof Float32Array)) {
+      throw new TypeError(`bun:audio.mix: tracks[${i}] must be a Float32Array`);
+    }
+    if (tracks[i].length !== N) {
+      throw new RangeError(
+        `bun:audio.mix: all tracks must have the same length; tracks[0] is ${N}, tracks[${i}] is ${tracks[i].length}`,
+      );
+    }
+  }
+
+  const gains = opts.gains;
+  if (gains !== undefined) {
+    if (!Array.isArray(gains)) {
+      throw new TypeError("bun:audio.mix: opts.gains must be an array of numbers");
+    }
+    if (gains.length !== tracks.length) {
+      throw new RangeError(
+        `bun:audio.mix: opts.gains length ${gains.length} must match tracks length ${tracks.length}`,
+      );
+    }
+    for (let t = 0; t < gains.length; t++) {
+      if (typeof gains[t] !== "number" || !Number.isFinite(gains[t])) {
+        throw new TypeError(`bun:audio.mix: opts.gains[${t}] must be a finite number`);
+      }
+    }
+  }
+
+  const clip = opts.clip ?? "hard";
+  if (clip !== "hard" && clip !== "soft" && clip !== "none") {
+    throw new TypeError(`bun:audio.mix: opts.clip must be "hard", "soft", or "none"; got ${JSON.stringify(clip)}`);
+  }
+
+  const out = new Float32Array(N);
+  // Two paths so the inner loop stays as tight as possible. The unweighted
+  // path also lets us skip the multiply per track.
+  if (gains === undefined) {
+    for (let i = 0; i < N; i++) {
+      let s = 0;
+      for (let t = 0; t < tracks.length; t++) s += tracks[t][i];
+      out[i] = s;
+    }
+  } else {
+    for (let i = 0; i < N; i++) {
+      let s = 0;
+      for (let t = 0; t < tracks.length; t++) s += tracks[t][i] * gains[t];
+      out[i] = s;
+    }
+  }
+
+  if (clip === "hard") {
+    for (let i = 0; i < N; i++) {
+      const v = out[i];
+      if (v > 1) out[i] = 1;
+      else if (v < -1) out[i] = -1;
+    }
+  } else if (clip === "soft") {
+    // tanh saturation — smooth knee, asymptotes to ±1.
+    for (let i = 0; i < N; i++) out[i] = Math.tanh(out[i]);
+  }
+  // "none" — leave samples as-is.
+  return out;
+}
+
 // ─── Auto Gain Control ─────────────────────────────────────────────────────
 // Voice-call mics deliver wildly varying levels — distance from the mic,
 // room loudness, headset vs laptop builtin, you name it. AGC tracks the
@@ -929,6 +1033,7 @@ export default {
   highpass,
   bandpass,
   notch,
+  mix,
   resample,
   spectrogram,
   detectVoice,

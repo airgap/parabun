@@ -1034,6 +1034,175 @@ describe("bun:audio — spectrogram", () => {
   });
 });
 
+describe("bun:audio — mix", () => {
+  it("two tracks sum sample-wise", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-basic",
+      `
+        import audio from "bun:audio";
+        const a = new Float32Array([0.1, 0.2, 0.3, 0.4]);
+        const b = new Float32Array([0.5, 0.4, 0.3, 0.2]);
+        const out = audio.mix([a, b]);
+        // a + b clipped: 0.6, 0.6, 0.6, 0.6 — none exceed 1 so no clipping.
+        console.log(Array.from(out).map(x => x.toFixed(4)).join(","));
+      `,
+    );
+    expect(stdout).toBe("0.6000,0.6000,0.6000,0.6000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("hard-clips samples that exceed ±1", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-hard",
+      `
+        import audio from "bun:audio";
+        const a = new Float32Array([0.8, -0.9, 0.0, 1.5]);
+        const b = new Float32Array([0.6, -0.5,  0.3, 0.5]);
+        // Sums: 1.4 (clip→1), -1.4 (clip→-1), 0.3 (passthrough), 2.0 (clip→1)
+        const out = audio.mix([a, b]);
+        console.log(Array.from(out).map(x => x.toFixed(4)).join(","));
+      `,
+    );
+    expect(stdout).toBe("1.0000,-1.0000,0.3000,1.0000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("soft clip uses tanh saturation (smooth knee, never quite ±1)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-soft",
+      `
+        import audio from "bun:audio";
+        // Mix two tracks each at 0.6 — sum is 1.2, well past hard-clip.
+        const a = new Float32Array([0.6, 0.6, 0.6, 0.6]);
+        const b = new Float32Array([0.6, 0.6, 0.6, 0.6]);
+        const out = audio.mix([a, b], { clip: "soft" });
+        // tanh(1.2) ≈ 0.8337
+        const expected = Math.tanh(1.2);
+        // tanh asymptotes to 1 but never reaches it — verify smoothness.
+        const allBelowOne = out.every(v => v < 1);
+        const matches = out.every(v => Math.abs(v - expected) < 1e-5);
+        console.log("matches.tanh", matches);
+        console.log("allBelowOne", allBelowOne);
+      `,
+    );
+    expect(stdout).toBe(["matches.tanh true", "allBelowOne true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it('clip: "none" leaves the unclamped sum intact', async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-none",
+      `
+        import audio from "bun:audio";
+        const a = new Float32Array([0.7, -0.7]);
+        const b = new Float32Array([0.7, -0.7]);
+        const out = audio.mix([a, b], { clip: "none" });
+        // Should produce 1.4 / -1.4, unclamped.
+        console.log(Array.from(out).map(x => x.toFixed(4)).join(","));
+      `,
+    );
+    expect(stdout).toBe("1.4000,-1.4000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("per-track gains scale each input independently", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-gains",
+      `
+        import audio from "bun:audio";
+        const a = new Float32Array([0.1, 0.2, 0.3]);
+        const b = new Float32Array([0.5, 0.5, 0.5]);
+        // a contributes ×2 = [0.2, 0.4, 0.6]; b contributes ×0.5 = [0.25, 0.25, 0.25].
+        // Sum: 0.45, 0.65, 0.85.
+        const out = audio.mix([a, b], { gains: [2, 0.5], clip: "none" });
+        console.log(Array.from(out).map(x => x.toFixed(4)).join(","));
+      `,
+    );
+    expect(stdout).toBe("0.4500,0.6500,0.8500");
+    expect(exitCode).toBe(0);
+  });
+
+  it("a single track is just gain-scaled (or passthrough when gain=1)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-single",
+      `
+        import audio from "bun:audio";
+        const a = new Float32Array([0.1, 0.2, 0.3]);
+        const passthrough = audio.mix([a], { clip: "none" });
+        const halved = audio.mix([a], { gains: [0.5], clip: "none" });
+        console.log("pt", Array.from(passthrough).map(x => x.toFixed(4)).join(","));
+        console.log("h",  Array.from(halved     ).map(x => x.toFixed(4)).join(","));
+      `,
+    );
+    expect(stdout).toBe(["pt 0.1000,0.2000,0.3000", "h 0.0500,0.1000,0.1500"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("empty track list returns an empty Float32Array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-empty",
+      `
+        import audio from "bun:audio";
+        const out = audio.mix([]);
+        console.log("len", out.length, "ctor", out.constructor.name);
+      `,
+    );
+    expect(stdout).toBe("len 0 ctor Float32Array");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects mismatched track lengths", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-len-mismatch",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.mix([new Float32Array(4), new Float32Array(8)]);
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e instanceof RangeError, e.message.includes("same length"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects gains length mismatch", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-gains-mismatch",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.mix([new Float32Array(4), new Float32Array(4)], { gains: [1, 1, 1] });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e instanceof RangeError);
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects unknown clip mode", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mix-bad-clip",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.mix([new Float32Array(4), new Float32Array(4)], { clip: "tape" });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e instanceof TypeError);
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — Gain (AGC)", () => {
   it("brings a quiet sine wave up toward the target level", async () => {
     // Quiet 440 Hz sine at amplitude 0.01 → AGC should boost it toward
