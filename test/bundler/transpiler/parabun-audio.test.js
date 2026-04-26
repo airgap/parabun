@@ -228,6 +228,152 @@ describe("bun:audio — lowpass", () => {
   });
 });
 
+describe("bun:audio — highpass", () => {
+  it("kills a low tone, passes a high one", async () => {
+    // 200 Hz + 4 kHz mix at 16 kHz, highpass at 1 kHz: 200 should be
+    // crushed, 4 kHz should survive.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-highpass",
+      `
+        import audio from "bun:audio";
+        const sr = 16000, N = 4096;
+        const sig = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+          sig[i] = 0.5 * Math.sin(2 * Math.PI * 200 * i / sr)
+                 + 0.5 * Math.sin(2 * Math.PI * 4000 * i / sr);
+        }
+        const hp = audio.highpass(sig, { cutoff: 1000, sampleRate: sr });
+        function magAt(samples, freq) {
+          const f = audio.fft(samples);
+          const bin = Math.round(freq * samples.length / sr);
+          return Math.hypot(f[bin*2], f[bin*2+1]);
+        }
+        const mLow_in  = magAt(sig, 200);
+        const mLow_out = magAt(hp, 200);
+        const mHi_in   = magAt(sig, 4000);
+        const mHi_out  = magAt(hp, 4000);
+        console.log("lowKilled",     mLow_out / mLow_in < 0.1);
+        console.log("highPreserved", mHi_out / mHi_in > 0.7);
+      `,
+    );
+    expect(stdout).toBe(["lowKilled true", "highPreserved true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("removes DC offset", async () => {
+    // Constant DC offset = 0 Hz content. A highpass should reduce it
+    // toward zero. (Steady-state DC gain of a properly normalized HP
+    // biquad is exactly 0.)
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-highpass-dc",
+      `
+        import audio from "bun:audio";
+        const sr = 16000, N = 4096;
+        const sig = new Float32Array(N);
+        for (let i = 0; i < N; i++) sig[i] = 0.5;          // pure DC
+        const hp = audio.highpass(sig, { cutoff: 80, sampleRate: sr });
+        // Average of the steady-state tail should be near zero (the
+        // initial transient takes some samples to die out).
+        let sum = 0;
+        for (let i = N / 2; i < N; i++) sum += hp[i];
+        const mean = sum / (N / 2);
+        console.log("dcGone", Math.abs(mean) < 0.01);
+      `,
+    );
+    expect(stdout).toBe("dcGone true");
+    expect(exitCode).toBe(0);
+  });
+});
+
+describe("bun:audio — bandpass", () => {
+  it("isolates the center band — kills tones above and below", async () => {
+    // 100 Hz + 1000 Hz + 8 kHz triple-tone mix at 32 kHz. Bandpass
+    // centered at 1 kHz with Q=2 should keep the middle, kill both ends.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-bandpass",
+      `
+        import audio from "bun:audio";
+        const sr = 32000, N = 4096;
+        const sig = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+          sig[i] = (1/3) * (
+            Math.sin(2 * Math.PI * 100  * i / sr) +
+            Math.sin(2 * Math.PI * 1000 * i / sr) +
+            Math.sin(2 * Math.PI * 8000 * i / sr)
+          );
+        }
+        const bp = audio.bandpass(sig, { center: 1000, Q: 2, sampleRate: sr });
+        function magAt(samples, freq) {
+          const f = audio.fft(samples);
+          const bin = Math.round(freq * samples.length / sr);
+          return Math.hypot(f[bin*2], f[bin*2+1]);
+        }
+        const mLow  = magAt(bp, 100);
+        const mMid  = magAt(bp, 1000);
+        const mHi   = magAt(bp, 8000);
+        // Center bin should dominate by at least 3×; flanking bands suppressed.
+        console.log("midDominates", mMid > mLow * 3 && mMid > mHi * 3);
+      `,
+    );
+    expect(stdout).toBe("midDominates true");
+    expect(exitCode).toBe(0);
+  });
+});
+
+describe("bun:audio — notch", () => {
+  it("kills a single offending frequency, leaves others intact", async () => {
+    // FFT bins don't fall exactly on 60 Hz at sr=16k/N=4096, so use the
+    // time domain instead: feed a pure 60 Hz tone, measure RMS in the
+    // settled tail. A notch at 60 Hz should reduce its RMS to near zero.
+    // Then verify a 1 kHz tone survives the same filter unscathed.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-notch",
+      `
+        import audio from "bun:audio";
+        const sr = 16000, N = 4096;
+        function pureTone(freq) {
+          const a = new Float32Array(N);
+          for (let i = 0; i < N; i++) a[i] = 0.5 * Math.sin(2 * Math.PI * freq * i / sr);
+          return a;
+        }
+        function tailRms(buf) {
+          // Skip the initial transient; measure the steady state.
+          let sum = 0;
+          for (let i = N / 2; i < N; i++) sum += buf[i] * buf[i];
+          return Math.sqrt(sum / (N / 2));
+        }
+        const hum  = pureTone(60);
+        const tone = pureTone(1000);
+        // Q=10 is wide enough that the IIR transient settles inside 4096
+        // samples; Q=30 is a tighter notch but takes ~0.5s to fully settle.
+        const humOut  = audio.notch(hum,  { center: 60, Q: 10, sampleRate: sr });
+        const toneOut = audio.notch(tone, { center: 60, Q: 10, sampleRate: sr });
+        console.log("humKilled",      tailRms(humOut)  / tailRms(hum)  < 0.1);
+        console.log("speechSurvives", tailRms(toneOut) / tailRms(tone) > 0.95);
+      `,
+    );
+    expect(stdout).toBe(["humKilled true", "speechSurvives true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects bad Q", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-notch-bad-q",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.notch(new Float32Array(64), { center: 60, Q: 0, sampleRate: 16000 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("Q"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — resample", () => {
   it("identity (from === to) returns a copy of the input", async () => {
     const { stdout, exitCode } = await runFixture(

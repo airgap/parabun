@@ -274,32 +274,24 @@ type FilterOptions = {
   sampleRate: number;
 };
 
-function lowpass(samples: Float32Array, opts: FilterOptions): Float32Array {
-  const { cutoff, sampleRate } = opts;
-  if (!(cutoff > 0)) throw new RangeError("bun:audio lowpass: cutoff must be > 0");
-  if (!(cutoff < sampleRate / 2)) {
-    throw new RangeError(`bun:audio lowpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
-  }
-
-  const Q = Math.SQRT1_2; // Butterworth
-  const w0 = (TWO_PI * cutoff) / sampleRate;
-  const cosW = Math.cos(w0);
-  const sinW = Math.sin(w0);
-  const alpha = sinW / (2 * Q);
-
-  const b0 = (1 - cosW) / 2;
-  const b1 = 1 - cosW;
-  const b2 = b0;
-  const a0 = 1 + alpha;
-  const a1 = -2 * cosW;
-  const a2 = 1 - alpha;
-
+// Direct-form-I biquad runner. Coefficients are normalized by a0 once up
+// front so the inner loop is just five multiplies and four adds. State is
+// fresh per call — for streaming use cases we'd hold (x1, x2, y1, y2)
+// between calls; today every filter does whole-buffer.
+function runBiquad(
+  samples: Float32Array,
+  b0: number,
+  b1: number,
+  b2: number,
+  a0: number,
+  a1: number,
+  a2: number,
+): Float32Array {
   const nB0 = b0 / a0,
     nB1 = b1 / a0,
     nB2 = b2 / a0;
   const nA1 = a1 / a0,
     nA2 = a2 / a0;
-
   const out = new Float32Array(samples.length);
   let x1 = 0,
     x2 = 0,
@@ -315,6 +307,118 @@ function lowpass(samples: Float32Array, opts: FilterOptions): Float32Array {
     y1 = y0;
   }
   return out;
+}
+
+function lowpass(samples: Float32Array, opts: FilterOptions): Float32Array {
+  const { cutoff, sampleRate } = opts;
+  if (!(cutoff > 0)) throw new RangeError("bun:audio lowpass: cutoff must be > 0");
+  if (!(cutoff < sampleRate / 2)) {
+    throw new RangeError(`bun:audio lowpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
+  }
+
+  const Q = Math.SQRT1_2; // Butterworth
+  const w0 = (TWO_PI * cutoff) / sampleRate;
+  const cosW = Math.cos(w0);
+  const sinW = Math.sin(w0);
+  const alpha = sinW / (2 * Q);
+
+  // RBJ Audio EQ Cookbook — lowpass.
+  const b0 = (1 - cosW) / 2;
+  const b1 = 1 - cosW;
+  const b2 = b0;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosW;
+  const a2 = 1 - alpha;
+  return runBiquad(samples, b0, b1, b2, a0, a1, a2);
+}
+
+// Highpass — strips DC and low-frequency rumble. For voice work this is
+// usually applied at ~80 Hz to remove HVAC hum, mic-stand thumps, and
+// microphone proximity-effect bass.
+function highpass(samples: Float32Array, opts: FilterOptions): Float32Array {
+  const { cutoff, sampleRate } = opts;
+  if (!(cutoff > 0)) throw new RangeError("bun:audio highpass: cutoff must be > 0");
+  if (!(cutoff < sampleRate / 2)) {
+    throw new RangeError(`bun:audio highpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
+  }
+  const Q = Math.SQRT1_2;
+  const w0 = (TWO_PI * cutoff) / sampleRate;
+  const cosW = Math.cos(w0);
+  const sinW = Math.sin(w0);
+  const alpha = sinW / (2 * Q);
+  // RBJ — highpass.
+  const b0 = (1 + cosW) / 2;
+  const b1 = -(1 + cosW);
+  const b2 = b0;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosW;
+  const a2 = 1 - alpha;
+  return runBiquad(samples, b0, b1, b2, a0, a1, a2);
+}
+
+type BandFilterOptions = {
+  /** Center frequency in Hz. Must be < sampleRate / 2. */
+  center: number;
+  /**
+   * Resonance — narrower band as Q grows. Default 1 (moderate). Q=0.707
+   * gives an octave-wide band; Q=10 is a tight resonant peak.
+   */
+  Q?: number;
+  /** Sample rate of the input in Hz. */
+  sampleRate: number;
+};
+
+// Bandpass — keeps a band of frequencies around `center`, attenuates
+// everything else. Constant-0-dB-peak-gain variant (RBJ): the response
+// hits 1.0 at the center frequency regardless of Q, so callers can
+// reason about loudness independently of bandwidth.
+function bandpass(samples: Float32Array, opts: BandFilterOptions): Float32Array {
+  const { center, sampleRate } = opts;
+  const Q = opts.Q ?? 1;
+  if (!(center > 0)) throw new RangeError("bun:audio bandpass: center must be > 0");
+  if (!(center < sampleRate / 2)) {
+    throw new RangeError(`bun:audio bandpass: center (${center}) must be < sampleRate / 2 (${sampleRate / 2})`);
+  }
+  if (!(Q > 0)) throw new RangeError("bun:audio bandpass: Q must be > 0");
+  const w0 = (TWO_PI * center) / sampleRate;
+  const cosW = Math.cos(w0);
+  const sinW = Math.sin(w0);
+  const alpha = sinW / (2 * Q);
+  // RBJ — bandpass (constant 0 dB peak gain).
+  const b0 = alpha;
+  const b1 = 0;
+  const b2 = -alpha;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosW;
+  const a2 = 1 - alpha;
+  return runBiquad(samples, b0, b1, b2, a0, a1, a2);
+}
+
+// Notch — kills a single frequency and a narrow band around it; passes
+// everything else. Use for mains hum (50 Hz / 60 Hz), specific resonant
+// rings, or any single-frequency contamination. Q controls how narrow
+// the kill band is — Q=30+ for surgical hum removal, Q=1 for a wide
+// midrange dip.
+function notch(samples: Float32Array, opts: BandFilterOptions): Float32Array {
+  const { center, sampleRate } = opts;
+  const Q = opts.Q ?? 30;
+  if (!(center > 0)) throw new RangeError("bun:audio notch: center must be > 0");
+  if (!(center < sampleRate / 2)) {
+    throw new RangeError(`bun:audio notch: center (${center}) must be < sampleRate / 2 (${sampleRate / 2})`);
+  }
+  if (!(Q > 0)) throw new RangeError("bun:audio notch: Q must be > 0");
+  const w0 = (TWO_PI * center) / sampleRate;
+  const cosW = Math.cos(w0);
+  const sinW = Math.sin(w0);
+  const alpha = sinW / (2 * Q);
+  // RBJ — notch.
+  const b0 = 1;
+  const b1 = -2 * cosW;
+  const b2 = 1;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosW;
+  const a2 = 1 - alpha;
+  return runBiquad(samples, b0, b1, b2, a0, a1, a2);
 }
 
 // ─── Resampling ────────────────────────────────────────────────────────────
@@ -822,6 +926,9 @@ export default {
   readWav,
   writeWav,
   lowpass,
+  highpass,
+  bandpass,
+  notch,
   resample,
   spectrogram,
   detectVoice,
