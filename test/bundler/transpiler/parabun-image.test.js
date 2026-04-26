@@ -1381,6 +1381,158 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("composite RGBA-over-RGB at (0,0) with full alpha replaces the corner", async () => {
+    // 4×4 base RGB (all white) + 2×2 overlay RGBA (red, full alpha=255).
+    // Expected: top-left 2×2 turns red, bottom-right 2×2 stays white.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-composite-opaque",
+      `
+        import image from "bun:image";
+        const baseData = new Uint8Array(4 * 4 * 3).fill(255);  // 4×4 RGB white
+        const overData = new Uint8Array(2 * 2 * 4);            // 2×2 RGBA red
+        for (let i = 0; i < 4; i++) {
+          overData[i * 4 + 0] = 255; overData[i * 4 + 1] = 0; overData[i * 4 + 2] = 0; overData[i * 4 + 3] = 255;
+        }
+        const base = { data: baseData, width: 4, height: 4, channels: 3, format: "png" };
+        const overlay = { data: overData, width: 2, height: 2, channels: 4, format: "png" };
+        const out = image.composite(base, overlay, { x: 0, y: 0 });
+        console.log("dims", out.width, out.height, out.channels);
+        // Pixel (0,0) should be red; pixel (3,3) should still be white.
+        const at = (x, y) => [out.data[(y*4+x)*3], out.data[(y*4+x)*3+1], out.data[(y*4+x)*3+2]].join(",");
+        console.log("p00", at(0, 0));
+        console.log("p10", at(1, 0));
+        console.log("p33", at(3, 3));
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4 3", "p00 255,0,0", "p10 255,0,0", "p33 255,255,255"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("composite at 50% alpha blends pixel values toward base", async () => {
+    // Base RGBA (white, opaque), overlay RGBA (red at alpha=128).
+    // Expected blend at the overlay pixel:
+    //   srcA = 128/255 ≈ 0.502, dstA = 1
+    //   outA = 0.502 + 1 * 0.498 = 1
+    //   outR = (255 * 0.502 + 255 * 1 * 0.498) / 1 = 255   (red in src + base both contribute)
+    //   wait: src = (255, 0, 0), dst = (255, 255, 255).
+    //   outR = 255 * 0.502 + 255 * 0.498 = 255       → 255
+    //   outG = 0 * 0.502   + 255 * 0.498 = 126.99    → 127
+    //   outB = same as G  = 127
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-composite-blend",
+      `
+        import image from "bun:image";
+        const baseData = new Uint8Array(2 * 2 * 4);
+        for (let i = 0; i < 4; i++) {
+          baseData[i*4+0] = 255; baseData[i*4+1] = 255; baseData[i*4+2] = 255; baseData[i*4+3] = 255;
+        }
+        const overData = new Uint8Array([255, 0, 0, 128]); // 1×1 RGBA red @ alpha=128
+        const base = { data: baseData, width: 2, height: 2, channels: 4, format: "png" };
+        const overlay = { data: overData, width: 1, height: 1, channels: 4, format: "png" };
+        const out = image.composite(base, overlay, { x: 0, y: 0 });
+        // Pixel (0,0) is the blended one; (1,0), (0,1), (1,1) should still be white.
+        const at = (x, y) => Array.from(out.data.subarray((y*2+x)*4, (y*2+x)*4 + 4)).join(",");
+        console.log("p00", at(0, 0));
+        console.log("p10", at(1, 0));
+      `,
+    );
+    expect(stdout).toBe(["p00 255,127,127,255", "p10 255,255,255,255"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("composite preserves base alpha at non-overlay pixels (RGBA over RGBA)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-composite-alpha-preserve",
+      `
+        import image from "bun:image";
+        const baseData = new Uint8Array(2 * 2 * 4);
+        for (let i = 0; i < 4; i++) {
+          baseData[i*4+0] = 200; baseData[i*4+1] = 200; baseData[i*4+2] = 200; baseData[i*4+3] = 100;
+        }
+        const overData = new Uint8Array([0, 0, 0, 255]); // 1×1 black
+        const base = { data: baseData, width: 2, height: 2, channels: 4, format: "png" };
+        const overlay = { data: overData, width: 1, height: 1, channels: 4, format: "png" };
+        const out = image.composite(base, overlay, { x: 1, y: 1 });
+        // Pixel (0,0) wasn't touched: alpha should still be 100.
+        // Pixel (1,1) was overwritten by full-alpha overlay: alpha now 255.
+        console.log("p00.alpha", out.data[3]);
+        console.log("p11.alpha", out.data[3 * 4 + 3]);
+      `,
+    );
+    expect(stdout).toBe(["p00.alpha 100", "p11.alpha 255"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("composite clips overlay regions that extend past base bounds", async () => {
+    // 2×2 base; place a 2×2 overlay at (1, 1) — only the bottom-right
+    // 1×1 of the overlay actually touches the base. (0,0), (1,0), (0,1)
+    // should be unchanged base; (1,1) should be the overlay's (0,0).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-composite-clip",
+      `
+        import image from "bun:image";
+        const baseData = new Uint8Array(2 * 2 * 3).fill(50);  // gray
+        const overData = new Uint8Array([
+          200, 0, 0,    0, 200, 0,
+            0, 0, 200, 100, 100, 100,
+        ]);
+        const base = { data: baseData, width: 2, height: 2, channels: 3, format: "png" };
+        const overlay = { data: overData, width: 2, height: 2, channels: 3, format: "png" };
+        const out = image.composite(base, overlay, { x: 1, y: 1 });
+        const at = (x, y) => Array.from(out.data.subarray((y*2+x)*3, (y*2+x)*3 + 3)).join(",");
+        // (1,1) of base gets overlay's (0,0) = 200,0,0.
+        console.log("p00", at(0, 0));
+        console.log("p11", at(1, 1));
+      `,
+    );
+    expect(stdout).toBe(["p00 50,50,50", "p11 200,0,0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("composite with negative offset clips the overlay's left/top edges", async () => {
+    // Place a 2×2 overlay at (-1, -1) — only its bottom-right pixel
+    // lands on the base at (0, 0).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-composite-neg",
+      `
+        import image from "bun:image";
+        const baseData = new Uint8Array(2 * 2 * 3).fill(50);
+        const overData = new Uint8Array([
+          255,   0,   0,    0, 255,   0,
+            0,   0, 255,  100, 100, 100,
+        ]);
+        const base = { data: baseData, width: 2, height: 2, channels: 3, format: "png" };
+        const overlay = { data: overData, width: 2, height: 2, channels: 3, format: "png" };
+        const out = image.composite(base, overlay, { x: -1, y: -1 });
+        const at = (x, y) => Array.from(out.data.subarray((y*2+x)*3, (y*2+x)*3 + 3)).join(",");
+        // (0,0) of base receives overlay's (1,1) = 100,100,100.
+        console.log("p00", at(0, 0));
+        console.log("p11", at(1, 1));
+      `,
+    );
+    expect(stdout).toBe(["p00 100,100,100", "p11 50,50,50"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("composite rejects 1-channel inputs (3 or 4 only for v1)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-composite-bad-channels",
+      `
+        import image from "bun:image";
+        const base = { data: new Uint8Array(16), width: 4, height: 4, channels: 1, format: "png" };
+        const overlay = { data: new Uint8Array(4), width: 2, height: 2, channels: 1, format: "png" };
+        try {
+          image.composite(base, overlay);
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("channels"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

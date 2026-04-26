@@ -25,6 +25,7 @@
 
 #include "ZigGlobalObject.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -577,6 +578,82 @@ void unsharpSharpen(
         if (rounded < 0) rounded = 0;
         if (rounded > 255) rounded = 255;
         dst[i] = static_cast<uint8_t>(rounded);
+    }
+}
+
+// ─── Composite (alpha blending) ───────────────────────────────────────────
+// Porter-Duff "source over" alpha compositing: paste an overlay onto a
+// base at a given (x, y), respecting alpha. Base + overlay can each be
+// 3- or 4-channel. The output matches base's channel count.
+//
+// Channel-mix matrix:
+//   base RGBA + overlay RGBA → full alpha blend, output RGBA
+//   base RGBA + overlay RGB  → overlay treated as opaque (alpha = 255)
+//   base RGB  + overlay RGBA → blend, drop alpha at output
+//   base RGB  + overlay RGB  → overlay replaces base in the region
+//
+// Assumes UNassociated alpha (RGB stored as the un-multiplied color, alpha
+// kept separate) — matches PNG and what every common image library uses.
+//
+// Out-of-bounds regions are silently clipped (an overlay placed at
+// x = base.width - 2 with overlay.width = 10 just composites the leftmost
+// 2 columns; the rest is dropped).
+
+void compositeOver(
+    const uint8_t* baseSrc, uint32_t bw, uint32_t bh, uint32_t bChannels,
+    const uint8_t* overlay, uint32_t ow, uint32_t oh, uint32_t oChannels,
+    uint8_t* dst /* bw × bh × bChannels */,
+    int32_t px, int32_t py)
+{
+    // First copy base → dst untouched. Overlay then writes only into the
+    // intersected region.
+    std::memcpy(dst, baseSrc, static_cast<size_t>(bw) * bh * bChannels);
+
+    // Compute the intersection of the overlay rectangle with the base.
+    const int32_t startX = std::max(px, 0);
+    const int32_t startY = std::max(py, 0);
+    const int32_t endX = std::min(px + static_cast<int32_t>(ow), static_cast<int32_t>(bw));
+    const int32_t endY = std::min(py + static_cast<int32_t>(oh), static_cast<int32_t>(bh));
+    if (startX >= endX || startY >= endY) return;
+
+    const bool overlayHasAlpha = (oChannels == 4);
+    const bool baseHasAlpha = (bChannels == 4);
+
+    for (int32_t y = startY; y < endY; y++) {
+        const int32_t oy = y - py;
+        for (int32_t x = startX; x < endX; x++) {
+            const int32_t ox = x - px;
+            const size_t srcIdx = (static_cast<size_t>(oy) * ow + ox) * oChannels;
+            const size_t dstIdx = (static_cast<size_t>(y) * bw + x) * bChannels;
+
+            const float srcA = overlayHasAlpha ? (overlay[srcIdx + 3] / 255.0f) : 1.0f;
+            const float dstA = baseHasAlpha ? (dst[dstIdx + 3] / 255.0f) : 1.0f;
+            const float invSrcA = 1.0f - srcA;
+            // out_a = src_a + dst_a * (1 - src_a)
+            const float outA = srcA + dstA * invSrcA;
+
+            // Fully transparent overlay pixel = no change. Skip rather
+            // than dividing by a tiny outA.
+            if (outA == 0.0f) continue;
+
+            for (uint32_t c = 0; c < 3; c++) {
+                const float src = overlay[srcIdx + c];
+                const float dstC = dst[dstIdx + c];
+                // Unassociated-alpha source-over:
+                // out = (src * srcA + dst * dstA * (1 - srcA)) / outA
+                const float v = (src * srcA + dstC * dstA * invSrcA) / outA;
+                int rounded = static_cast<int>(v + 0.5f);
+                if (rounded < 0) rounded = 0;
+                if (rounded > 255) rounded = 255;
+                dst[dstIdx + c] = static_cast<uint8_t>(rounded);
+            }
+            if (baseHasAlpha) {
+                int rounded = static_cast<int>(outA * 255.0f + 0.5f);
+                if (rounded < 0) rounded = 0;
+                if (rounded > 255) rounded = 255;
+                dst[dstIdx + 3] = static_cast<uint8_t>(rounded);
+            }
+        }
     }
 }
 
@@ -1955,6 +2032,98 @@ JSC_DEFINE_HOST_FUNCTION(functionHistogram,
     return JSValue::encode(arr);
 }
 
+// composite(base, overlay, { x?, y? }) → DecodedImage. Output dims and
+// channels match `base`. Out-of-bounds overlay regions are clipped.
+JSC_DEFINE_HOST_FUNCTION(functionComposite,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue baseArg = callFrame->argument(0);
+    JSValue overlayArg = callFrame->argument(1);
+    JSValue optsArg = callFrame->argument(2);
+    if (!baseArg.isObject() || !overlayArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.composite: expected (base, overlay, { x?, y? })"_s);
+        return {};
+    }
+    auto* baseObj = asObject(baseArg);
+    auto* overlayObj = asObject(overlayArg);
+    JSObject* optsObj = optsArg.isObject() ? asObject(optsArg) : nullptr;
+
+    auto extract = [&](JSObject* obj, const ASCIILiteral& errPrefix,
+                       const uint8_t*& outPtr, uint32_t& outW, uint32_t& outH, uint32_t& outChannels) -> bool {
+        JSValue widthVal = obj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+        JSValue heightVal = obj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+        JSValue channelsVal = obj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+        JSValue dataVal = obj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+        if (scope.exception()) return false;
+        if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+            throwTypeError(globalObject, scope, makeString(errPrefix, ".data must be a Uint8Array"_s));
+            return false;
+        }
+        auto* view = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+        void* raw = view->vector();
+        if (!raw) {
+            throwTypeError(globalObject, scope, makeString(errPrefix, ".data is detached"_s));
+            return false;
+        }
+        outW = widthVal.toUInt32(globalObject);
+        outH = heightVal.toUInt32(globalObject);
+        outChannels = channelsVal.toUInt32(globalObject);
+        if (outChannels != 3 && outChannels != 4) {
+            throwTypeError(globalObject, scope, makeString(errPrefix, ".channels must be 3 or 4 for compositing"_s));
+            return false;
+        }
+        if (view->length() != static_cast<size_t>(outW) * outH * outChannels) {
+            throwTypeError(globalObject, scope, makeString(errPrefix, ".data length doesn't match width*height*channels"_s));
+            return false;
+        }
+        outPtr = static_cast<const uint8_t*>(raw);
+        return true;
+    };
+
+    const uint8_t* basePtr = nullptr;
+    uint32_t bw = 0, bh = 0, bChannels = 0;
+    if (!extract(baseObj, "bun:image.composite: base"_s, basePtr, bw, bh, bChannels)) return {};
+    const uint8_t* overlayPtr = nullptr;
+    uint32_t ow = 0, oh = 0, oChannels = 0;
+    if (!extract(overlayObj, "bun:image.composite: overlay"_s, overlayPtr, ow, oh, oChannels)) return {};
+
+    int32_t px = 0, py = 0;
+    if (optsObj) {
+        JSValue xVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "x"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (xVal.isNumber()) px = xVal.toInt32(globalObject);
+        JSValue yVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "y"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (yVal.isNumber()) py = yVal.toInt32(globalObject);
+    }
+
+    JSValue formatVal = baseObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(bw) * bh * bChannels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    compositeOver(
+        basePtr, bw, bh, bChannels,
+        overlayPtr, ow, oh, oChannels,
+        static_cast<uint8_t*>(dstArr->vector()), px, py);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(bw));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(bh));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(bChannels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1995,6 +2164,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "histogram"_s), 1,
         functionHistogram, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "composite"_s), 3,
+        functionComposite, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

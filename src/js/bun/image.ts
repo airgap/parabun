@@ -58,6 +58,12 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
 };
+type CompositeOptions = {
+  /** X-offset of the overlay's top-left corner in base coordinates. Default 0. Negative values are allowed (overlay clipped on the left). */
+  x?: number;
+  /** Y-offset of the overlay's top-left corner in base coordinates. Default 0. Negative values are allowed (overlay clipped on the top). */
+  y?: number;
+};
 type AdjustOptions = {
   /** Additive lightness shift, -1 = full black, 0 = unchanged, +1 = full white. */
   brightness?: number;
@@ -197,6 +203,16 @@ function histogram(img: DecodedImage): Uint32Array[] {
   return native.histogram(img);
 }
 
+function composite(base: DecodedImage, overlay: DecodedImage, opts?: CompositeOptions): DecodedImage {
+  if (typeof base !== "object" || base === null) {
+    throw new TypeError("bun:image.composite: base must be the object returned from decode()");
+  }
+  if (typeof overlay !== "object" || overlay === null) {
+    throw new TypeError("bun:image.composite: overlay must be the object returned from decode()");
+  }
+  return native.composite(base, overlay, opts ?? {});
+}
+
 export default {
   decode,
   encode,
@@ -210,4 +226,5 @@ export default {
   toGrayscale,
   adjust,
   histogram,
+  composite,
 };
