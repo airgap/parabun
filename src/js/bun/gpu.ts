@@ -366,6 +366,46 @@ function cpuHistogramF32(input: Float32Array, bins: number, min: number, max: nu
   return out;
 }
 
+// CPU quantile (and median = quantile(0.5)). Sorts a fresh copy of the
+// input, then linearly interpolates between adjacent order statistics —
+// matches numpy's default "linear" interpolation:
+//   pos = q * (n - 1)
+//   value = sorted[floor(pos)] * (1 - frac) + sorted[ceil(pos)] * frac
+//
+// Empty input returns NaN (also matching numpy).
+//
+// Sort is O(n log n) — fine for arbitrary q. For median specifically a
+// proper Quickselect would be O(n); the cost difference only matters for
+// huge arrays, so the simple path is the right v1.
+function cpuQuantileF32(input: Float32Array, q: number): number {
+  const n = input.length;
+  if (n === 0) return NaN;
+  const sorted = new Float32Array(input);
+  sorted.sort();
+  const pos = q * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  const frac = pos - lo;
+  return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+}
+
+function cpuQuantileU32(input: Uint32Array, q: number): number {
+  const n = input.length;
+  if (n === 0) return NaN;
+  // Float32 sort is enough — Uint32 max is 2^32 - 1, beyond f32's exactly-
+  // representable range, so use a Float64Array for the sorted copy to keep
+  // the interpolation exact.
+  const sorted = new Float64Array(input);
+  sorted.sort();
+  const pos = q * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  const frac = pos - lo;
+  return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+}
+
 // CPU argmin/argmax. Returns the *index* of the smallest/largest element.
 // Tie-break: first occurrence (i.e. the earliest index that holds the
 // extremum), matching numpy's argmin/argmax convention. NaN propagates by
@@ -936,6 +976,40 @@ function histogram(
   return cpuHistogramF32(aV, bins, min, max);
 }
 
+// Quantile (linear-interpolated between adjacent order statistics).
+// `q` in [0, 1]: 0 → min, 0.5 → median, 1 → max. Float32Array input
+// returns a Float32 (well, a Number — JS doesn't distinguish in storage);
+// Uint32Array input returns a Number that may be fractional for
+// even-length inputs at q=0.5.
+//
+// Empty input → NaN (numpy convention).
+//
+// Sort-based, so O(n log n). For very large arrays where you only need
+// the median, a future quickselect path could drop this to O(n); for
+// now this matches numpy's default precision and keeps the code small.
+function quantile(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, q: number): number {
+  if (typeof q !== "number" || !(q >= 0 && q <= 1)) {
+    throw new RangeError(`bun:gpu.quantile: q must be a number in [0, 1]; got ${q}`);
+  }
+  if (input instanceof Uint32Array) return cpuQuantileU32(input, q);
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.quantile: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const a = unwrapGpuArg(input as any);
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  return cpuQuantileF32(aV, q);
+}
+
+// Median is just quantile(0.5) — exposed as its own export so the
+// common case doesn't have to spell out the magic number.
+function median(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): number {
+  return quantile(input, 0.5);
+}
+
 // Index of the smallest element. Tie-break: first occurrence. NaN in the
 // input returns the index of the first NaN (consistent with reduce's NaN
 // propagation). Empty input throws RangeError.
@@ -1104,6 +1178,8 @@ export default {
   argMin,
   argMax,
   histogram,
+  median,
+  quantile,
   simdMap,
   alloc,
   isAligned,
