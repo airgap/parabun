@@ -934,6 +934,49 @@ function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
   return out;
 }
 
+// ─── PCM type conversion (i16 ⇄ f32) ──────────────────────────────────────
+// OS audio APIs (ALSA, CoreAudio, WASAPI) and most file containers
+// (PCM-16 WAV, telephony formats) deliver Int16Array PCM in [-32768,
+// 32767]. The DSP code in this module — and most modern audio APIs
+// (Web Audio, Opus, our codec stack) — wants Float32Array in [-1, 1].
+//
+// Conventions match readWav / writeWav exactly so callers can use the
+// helpers at OS boundaries and the file paths at file boundaries
+// without subtle drift between the two:
+//   i16 → f32: divide by 32768 (symmetric negative; +1 lands at 0.99997)
+//   f32 → i16: asymmetric — multiply by 32768 on negatives, 32767 on
+//              positives, clamp out-of-range. -1.0 → -32768, +1.0 →
+//              +32767, both at the i16 representable limits.
+
+function i16ToF32(input: Int16Array): Float32Array {
+  if (!(input instanceof Int16Array)) {
+    throw new TypeError("bun:audio.i16ToF32: input must be an Int16Array");
+  }
+  const out = new Float32Array(input.length);
+  for (let i = 0; i < input.length; i++) out[i] = input[i] / 32768;
+  return out;
+}
+
+function f32ToI16(input: Float32Array): Int16Array {
+  if (!(input instanceof Float32Array)) {
+    throw new TypeError("bun:audio.f32ToI16: input must be a Float32Array");
+  }
+  const out = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = input[i];
+    let q: number;
+    if (s < 0) {
+      q = Math.round(s * 32768);
+      if (q < -32768) q = -32768;
+    } else {
+      q = Math.round(s * 32767);
+      if (q > 32767) q = 32767;
+    }
+    out[i] = q;
+  }
+  return out;
+}
+
 // ─── Level measurement (peak / RMS) ───────────────────────────────────────
 // Two scalar summaries of a buffer's loudness:
 //   peak — max(|x|), the largest instantaneous excursion. Single-sample
@@ -1303,6 +1346,8 @@ export default {
   peak,
   rms,
   envelope,
+  i16ToF32,
+  f32ToI16,
   interleave,
   deinterleave,
   resample,

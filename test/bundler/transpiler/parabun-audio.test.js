@@ -1354,6 +1354,107 @@ describe("bun:audio — mix", () => {
   });
 });
 
+describe("bun:audio — i16 ⇄ f32 PCM", () => {
+  it("i16ToF32 maps the i16 limits to ±1 (mostly)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-i16-to-f32",
+      `
+        import audio from "bun:audio";
+        const input = new Int16Array([0, -32768, 32767, 16384, -16384]);
+        const out = audio.i16ToF32(input);
+        // -32768/32768 = -1 exactly; 32767/32768 ≈ 0.99997.
+        console.log("ctor", out.constructor.name);
+        console.log("zero", out[0]);
+        console.log("min", out[1]);
+        console.log("nearMax", Math.abs(out[2] - 0.99997) < 1e-4);
+        console.log("half", out[3].toFixed(4));    // 16384/32768 = 0.5
+        console.log("nhalf", out[4].toFixed(4));   // -16384/32768 = -0.5
+      `,
+    );
+    expect(stdout).toBe(
+      ["ctor Float32Array", "zero 0", "min -1", "nearMax true", "half 0.5000", "nhalf -0.5000"].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("f32ToI16 hits the i16 limits at ±1", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-f32-to-i16",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array([0, 1, -1, 0.5, -0.5]);
+        const out = audio.f32ToI16(input);
+        console.log("ctor", out.constructor.name);
+        console.log(Array.from(out).join(","));
+      `,
+    );
+    // 0 → 0. 1 * 32767 = 32767. -1 * 32768 = -32768.
+    // 0.5 * 32767 = 16383.5 → round → 16384.
+    // -0.5 * 32768 = -16384.
+    expect(stdout).toBe(["ctor Int16Array", "0,32767,-32768,16384,-16384"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("f32ToI16 clamps out-of-range inputs to the i16 limits", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-f32-to-i16-clip",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array([2.0, -2.0, 1.5, -1.5]);
+        const out = audio.f32ToI16(input);
+        console.log(Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe("32767,-32768,32767,-32768");
+    expect(exitCode).toBe(0);
+  });
+
+  it("round-trip f32 → i16 → f32 stays within 1/32768 (one-LSB) of input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-pcm-roundtrip",
+      `
+        import audio from "bun:audio";
+        // 1024 random-ish samples in [-1, 1] via a simple LCG.
+        const N = 1024;
+        const orig = new Float32Array(N);
+        let s = 1;
+        for (let i = 0; i < N; i++) {
+          s = (Math.imul(s, 1103515245) + 12345) >>> 0;
+          orig[i] = ((s >>> 0) / 0x100000000) * 2 - 1;  // [-1, 1)
+        }
+        const back = audio.i16ToF32(audio.f32ToI16(orig));
+        let maxErr = 0;
+        for (let i = 0; i < N; i++) {
+          const e = Math.abs(back[i] - orig[i]);
+          if (e > maxErr) maxErr = e;
+        }
+        // 1 LSB = 1/32768 ≈ 3.05e-5. Allow a touch more for the
+        // asymmetric quantizer to round trip cleanly.
+        console.log("withinLsb", maxErr < 1.5 / 32768);
+      `,
+    );
+    expect(stdout).toBe("withinLsb true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects mismatched typed-array kinds", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-pcm-bad",
+      `
+        import audio from "bun:audio";
+        let threw = 0;
+        try { audio.i16ToF32(new Float32Array(4)); } catch { threw++; }
+        try { audio.i16ToF32([1, 2, 3]); } catch { threw++; }
+        try { audio.f32ToI16(new Int16Array(4)); } catch { threw++; }
+        try { audio.f32ToI16([0.1, 0.2]); } catch { threw++; }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 4");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — envelope", () => {
   it("constant input → constant envelope (peak mode)", async () => {
     const { stdout, exitCode } = await runFixture(
