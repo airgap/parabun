@@ -24,6 +24,7 @@ import { libpng } from "./libpng.ts";
 import { libuv } from "./libuv.ts";
 import { libwebp } from "./libwebp.ts";
 import { minimp3 } from "./minimp3.ts";
+import { rnnoise } from "./rnnoise.ts";
 import { lolhtml } from "./lolhtml.ts";
 import { lshpack } from "./lshpack.ts";
 import { mimalloc } from "./mimalloc.ts";
@@ -60,6 +61,7 @@ export const allDeps: readonly Dependency[] = [
   libwebp,
   libopus,
   minimp3,
+  rnnoise,
   cares,
   hdrhistogram,
   highway,
@@ -90,6 +92,7 @@ export {
   libuv,
   libwebp,
   minimp3,
+  rnnoise,
   lolhtml,
   lshpack,
   mimalloc,

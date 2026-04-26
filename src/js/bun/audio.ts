@@ -36,6 +36,9 @@ const opusEncoderRegistry = new FinalizationRegistry<bigint>(handle => {
 const opusDecoderRegistry = new FinalizationRegistry<bigint>(handle => {
   if (handle !== 0n) native.destroyOpusDecoder(handle);
 });
+const denoiserRegistry = new FinalizationRegistry<bigint>(handle => {
+  if (handle !== 0n) native.destroyDenoiser(handle);
+});
 
 // ─── FFT (Cooley-Tukey radix-2, in-place) ──────────────────────────────────
 // Operates on an interleaved-complex Float32Array: [re0, im0, re1, im1, …].
@@ -603,6 +606,49 @@ class OpusDecoder {
   }
 }
 
+// ─── Denoiser (rnnoise) ────────────────────────────────────────────────────
+// RNN-based noise suppression. Operates on 480-sample mono frames at
+// 48 kHz, in-place. Resample first if the source rate is different.
+//
+//   const den = new audio.Denoiser();
+//   for each 10ms frame at 48 kHz mono:
+//     const voiceProb = den.process(frame);  // mutates `frame` in place
+//   den.close();
+//
+// `voiceProb` is rnnoise's per-frame voice-likelihood estimate (0..1).
+// Useful as a complement to detectVoice() for higher-quality VAD.
+
+class Denoiser {
+  #handle: bigint;
+  /** Required frame size: 480 samples (10 ms at 48 kHz). */
+  static readonly FRAME_SIZE = 480;
+  /** Required sample rate: 48 kHz. */
+  static readonly SAMPLE_RATE = 48000;
+
+  constructor() {
+    this.#handle = native.createDenoiser();
+    denoiserRegistry.register(this, this.#handle, this);
+  }
+
+  /**
+   * Denoise a frame in place. Frame must be exactly 480 mono samples in
+   * [-1, 1] at 48 kHz. Returns the per-frame voice-likelihood estimate
+   * from the RNN (0 = noise/silence, 1 = clear voice).
+   */
+  process(frame: Float32Array): number {
+    if (this.#handle === 0n) throw new Error("bun:audio Denoiser: closed");
+    return native.denoise(this.#handle, frame);
+  }
+
+  close(): void {
+    if (this.#handle !== 0n) {
+      native.destroyDenoiser(this.#handle);
+      denoiserRegistry.unregister(this);
+      this.#handle = 0n;
+    }
+  }
+}
+
 export default {
   fft,
   ifft,
@@ -615,4 +661,5 @@ export default {
   decodeMp3,
   OpusEncoder,
   OpusDecoder,
+  Denoiser,
 };

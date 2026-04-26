@@ -355,6 +355,101 @@ describe("bun:audio — resample", () => {
   });
 });
 
+describe("bun:audio — Denoiser (rnnoise)", () => {
+  it("processes a 480-sample frame and returns a probability in [0, 1]", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-denoise-basic",
+      `
+        import audio from "bun:audio";
+        const den = new audio.Denoiser();
+        const frame = new Float32Array(audio.Denoiser.FRAME_SIZE);
+        // White-ish noise — should produce a low voice probability
+        for (let i = 0; i < frame.length; i++) frame[i] = (Math.random() - 0.5) * 0.1;
+        const prob = den.process(frame);
+        den.close();
+        console.log("FRAME_SIZE", audio.Denoiser.FRAME_SIZE);
+        console.log("SAMPLE_RATE", audio.Denoiser.SAMPLE_RATE);
+        console.log("inRange", prob >= 0 && prob <= 1);
+      `,
+    );
+    expect(stdout).toBe(["FRAME_SIZE 480", "SAMPLE_RATE 48000", "inRange true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("attenuates noise — output RMS smaller than input RMS for a noise-only frame", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-denoise-attenuate",
+      `
+        import audio from "bun:audio";
+        const den = new audio.Denoiser();
+
+        // White noise at moderate amplitude. The RNN warm-up takes a few
+        // frames to stabilize, so feed several silent-noise frames first
+        // and only measure the last one.
+        const frameSize = audio.Denoiser.FRAME_SIZE;
+        let inEnergy = 0, outEnergy = 0;
+        for (let f = 0; f < 20; f++) {
+          const frame = new Float32Array(frameSize);
+          for (let i = 0; i < frameSize; i++) frame[i] = (Math.random() - 0.5) * 0.1;
+          const inSqr = frame.reduce((s, x) => s + x * x, 0);
+          den.process(frame);
+          const outSqr = frame.reduce((s, x) => s + x * x, 0);
+          if (f >= 15) {  // post-warmup
+            inEnergy += inSqr;
+            outEnergy += outSqr;
+          }
+        }
+        den.close();
+        // RNN should reduce noise energy by at least 30%
+        const ratio = outEnergy / inEnergy;
+        console.log("attenuated", ratio < 0.7);
+      `,
+    );
+    expect(stdout).toBe("attenuated true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects wrong frame size with a clear error", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-denoise-bad-frame",
+      `
+        import audio from "bun:audio";
+        const den = new audio.Denoiser();
+        try {
+          den.process(new Float32Array(320));  // 10 ms at 16 kHz, not 480
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("must be exactly 480"));
+        }
+        den.close();
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("close() is idempotent and process throws after close", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-denoise-close",
+      `
+        import audio from "bun:audio";
+        const den = new audio.Denoiser();
+        den.close();
+        try {
+          den.process(new Float32Array(480));
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("closed"));
+        }
+        den.close();  // idempotent
+        console.log("idempotent ok");
+      `,
+    );
+    expect(stdout).toBe(["THREW true", "idempotent ok"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — VAD (voice activity detection)", () => {
   it("classifies pure silence as non-speech", async () => {
     const { stdout, exitCode } = await runFixture(

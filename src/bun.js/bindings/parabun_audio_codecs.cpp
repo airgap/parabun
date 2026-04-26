@@ -45,6 +45,10 @@ extern "C" {
 #define MINIMP3_FLOAT_OUTPUT
 #include <minimp3.h>
 #include <minimp3_ex.h>
+
+// rnnoise: RNN-based noise suppression. Operates on 480-sample mono
+// frames at 48 kHz, in-place. State is per-stream (DenoiseState*).
+#include <rnnoise.h>
 }
 
 namespace Bun {
@@ -81,6 +85,17 @@ OpusDecoder* asOpusDecoder(JSValue v)
     auto* big = jsCast<JSBigInt*>(v.asCell());
     return reinterpret_cast<OpusDecoder*>(JSBigInt::toBigInt64(big));
 }
+
+DenoiseState* asDenoiseState(JSValue v)
+{
+    if (!v.isBigInt() || !v.isCell()) return nullptr;
+    auto* big = jsCast<JSBigInt*>(v.asCell());
+    return reinterpret_cast<DenoiseState*>(JSBigInt::toBigInt64(big));
+}
+
+// rnnoise operates on 480-sample mono frames at 48 kHz. Anything else
+// is the caller's problem (resample first).
+constexpr int RNNOISE_FRAME_SIZE = 480;
 
 } // anonymous namespace
 
@@ -344,6 +359,70 @@ JSC_DEFINE_HOST_FUNCTION(functionOpusDecode,
     return JSValue::encode(result);
 }
 
+// ─── rnnoise: RNN noise suppression ────────────────────────────────────────
+
+JSC_DEFINE_HOST_FUNCTION(functionCreateDenoiser,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    DenoiseState* st = rnnoise_create(nullptr);
+    if (!st) {
+        throwTypeError(globalObject, scope, "createDenoiser: rnnoise_create returned null"_s);
+        return {};
+    }
+    return JSValue::encode(JSC::JSBigInt::createFrom(globalObject, reinterpret_cast<int64_t>(st)));
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionDestroyDenoiser,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    DenoiseState* st = asDenoiseState(callFrame->argument(0));
+    if (st) rnnoise_destroy(st);
+    return JSValue::encode(jsUndefined());
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionDenoise,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    DenoiseState* st = asDenoiseState(callFrame->argument(0));
+    if (!st) {
+        throwTypeError(globalObject, scope, "denoise: state handle is invalid (closed?)"_s);
+        return {};
+    }
+
+    JSValue framesArg = callFrame->argument(1);
+    if (!framesArg.isCell() || framesArg.asCell()->type() != JSC::Float32ArrayType) {
+        throwTypeError(globalObject, scope, "denoise: samples must be a Float32Array"_s);
+        return {};
+    }
+    auto* view = jsCast<JSC::JSArrayBufferView*>(framesArg.asCell());
+    float* samples = static_cast<float*>(view->vector());
+    if (!samples) {
+        throwTypeError(globalObject, scope, "denoise: samples buffer is detached"_s);
+        return {};
+    }
+    if (view->length() != RNNOISE_FRAME_SIZE) {
+        throwTypeError(globalObject, scope,
+            makeString("denoise: frame must be exactly "_s, String::number(RNNOISE_FRAME_SIZE),
+                " samples (mono 48 kHz, 10 ms); got "_s, String::number(view->length())));
+        return {};
+    }
+
+    // rnnoise operates on int16-scaled floats (range ±32768). Many callers
+    // arrive with normalized [-1, 1] f32, so we scale up before processing
+    // and scale back after — same buffer, in-place.
+    for (uint32_t i = 0; i < RNNOISE_FRAME_SIZE; i++) samples[i] *= 32768.0f;
+    const float voiceProb = rnnoise_process_frame(st, samples, samples);
+    for (uint32_t i = 0; i < RNNOISE_FRAME_SIZE; i++) samples[i] *= (1.0f / 32768.0f);
+
+    return JSValue::encode(jsNumber(voiceProb));
+}
+
 JSC::JSObject* createParabunAudioCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -369,6 +448,15 @@ JSC::JSObject* createParabunAudioCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "decodeMp3"_s), 1,
         functionDecodeMp3, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "createDenoiser"_s), 0,
+        functionCreateDenoiser, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "destroyDenoiser"_s), 1,
+        functionDestroyDenoiser, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "denoise"_s), 2,
+        functionDenoise, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 
