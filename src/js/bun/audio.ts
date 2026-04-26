@@ -302,6 +302,68 @@ function lowpass(samples: Float32Array, opts: FilterOptions): Float32Array {
   return out;
 }
 
+// ─── Resampling ────────────────────────────────────────────────────────────
+// Sample-rate conversion for the common case of feeding voice / audio
+// pipelines: 48 kHz mic → 16 kHz Opus encoder, 44.1 kHz CD → 16 kHz Whisper
+// preprocessing, etc. Implementation:
+//   - Downsample (target < source): lowpass at target Nyquist (anti-alias
+//     to prevent fold-back), then linear-interpolate at output rate.
+//   - Upsample (target > source): linear-interpolate at output rate. No
+//     pre-filter needed since there's no above-Nyquist content to alias.
+// Linear is the practical sweet spot — sinc / polyphase deliver less than
+// 0.5 dB extra quality for typical voice work and add ~10× the code.
+
+type ResampleOptions = {
+  /** Source sample rate in Hz. */
+  from: number;
+  /** Target sample rate in Hz. */
+  to: number;
+};
+
+function linearResample(samples: Float32Array, ratio: number): Float32Array {
+  // ratio = sourceRate / targetRate. Output length = round(input / ratio).
+  const outLen = Math.round(samples.length / ratio);
+  const out = new Float32Array(outLen);
+  if (outLen === 0 || samples.length === 0) return out;
+  const lastIdx = samples.length - 1;
+  for (let i = 0; i < outLen; i++) {
+    const t = i * ratio;
+    const i0 = Math.floor(t);
+    const frac = t - i0;
+    if (i0 >= lastIdx) {
+      out[i] = samples[lastIdx];
+    } else {
+      out[i] = samples[i0] + (samples[i0 + 1] - samples[i0]) * frac;
+    }
+  }
+  return out;
+}
+
+function resample(samples: Float32Array, opts: ResampleOptions): Float32Array {
+  const { from, to } = opts;
+  if (!(from > 0)) throw new RangeError("bun:audio resample: from must be > 0");
+  if (!(to > 0)) throw new RangeError("bun:audio resample: to must be > 0");
+  if (from === to) return new Float32Array(samples);
+
+  const ratio = from / to;
+  if (to < from) {
+    // Downsampling — anti-alias filter at the new Nyquist (slightly under,
+    // since the filter has finite rolloff). A single biquad gives only
+    // -12 dB/octave rolloff which isn't sharp enough for typical 2-3×
+    // downsampling targets. Cascading four biquad sections gives roughly
+    // -48 dB/octave — sufficient to push above-Nyquist content below the
+    // noise floor before decimation.
+    const cutoff = (to / 2) * 0.95;
+    let filtered = samples;
+    for (let i = 0; i < 4; i++) {
+      filtered = lowpass(filtered, { cutoff, sampleRate: from });
+    }
+    return linearResample(filtered, ratio);
+  }
+  // Upsampling — no pre-filter needed.
+  return linearResample(samples, ratio);
+}
+
 // ─── Spectrogram (STFT) ────────────────────────────────────────────────────
 // Short-Time Fourier Transform. Each frame is `window` samples wide,
 // stepped by `hop` samples. Returns an array of magnitude arrays — one per
@@ -352,5 +414,6 @@ export default {
   readWav,
   writeWav,
   lowpass,
+  resample,
   spectrogram,
 };

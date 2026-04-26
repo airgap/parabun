@@ -228,6 +228,133 @@ describe("bun:audio — lowpass", () => {
   });
 });
 
+describe("bun:audio — resample", () => {
+  it("identity (from === to) returns a copy of the input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-resample-identity",
+      `
+        import audio from "bun:audio";
+        const samples = new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5]);
+        const out = audio.resample(samples, { from: 48000, to: 48000 });
+        console.log("len", out.length);
+        console.log("equal", samples.every((v, i) => v === out[i]));
+        // Must be a copy, not the same buffer (caller might mutate).
+        console.log("sameBuffer", samples.buffer === out.buffer);
+      `,
+    );
+    expect(stdout).toBe(["len 5", "equal true", "sameBuffer false"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("upsample 2× produces 2× the samples", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-resample-up",
+      `
+        import audio from "bun:audio";
+        const samples = new Float32Array(1000);
+        for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(i * 0.1);
+        const out = audio.resample(samples, { from: 8000, to: 16000 });
+        console.log("len", out.length);
+      `,
+    );
+    expect(stdout).toBe("len 2000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("downsample 48 kHz → 16 kHz produces 1/3 the samples", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-resample-down",
+      `
+        import audio from "bun:audio";
+        const samples = new Float32Array(48000);  // 1 second at 48 kHz
+        for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(2 * Math.PI * 200 * i / 48000);
+        const out = audio.resample(samples, { from: 48000, to: 16000 });
+        console.log("len", out.length);
+      `,
+    );
+    expect(stdout).toBe("len 16000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("downsample preserves a sub-Nyquist tone (within passband)", async () => {
+    // 200 Hz is well under both sample rates' Nyquist; should survive
+    // 48 kHz → 16 kHz with most of its energy intact.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-resample-preserves-tone",
+      `
+        import audio from "bun:audio";
+        const sr1 = 48000, sr2 = 16000, N = 48000;
+        const samples = new Float32Array(N);
+        for (let i = 0; i < N; i++) samples[i] = Math.sin(2 * Math.PI * 200 * i / sr1);
+        const down = audio.resample(samples, { from: sr1, to: sr2 });
+
+        function magAt(samples, freq, sr) {
+          // Snap N to a power of 2 the FFT can handle.
+          const fftN = 1 << (31 - Math.clz32(samples.length));
+          const buf = samples.subarray(0, fftN);
+          const f = audio.fft(buf);
+          const bin = Math.round(freq * fftN / sr);
+          return Math.hypot(f[bin*2], f[bin*2+1]);
+        }
+        const mIn = magAt(samples, 200, sr1);
+        const mOut = magAt(down, 200, sr2);
+        // Ratio should account for length difference (3× shorter output)
+        const ratio = mOut / (mIn / 3);
+        // Linear interpolation has some passband ripple; allow 30%.
+        console.log("preserved", ratio > 0.7);
+      `,
+    );
+    expect(stdout).toBe("preserved true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("downsample anti-aliases content above the new Nyquist", async () => {
+    // A 6 kHz tone in a 48 kHz signal should be heavily attenuated when
+    // we downsample to 16 kHz (Nyquist 8 kHz — the tone is in-band, but
+    // a 12 kHz tone at 48 kHz wouldn't survive a 16 kHz target). Test
+    // the latter case to verify the anti-alias filter actually runs.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-resample-antialias",
+      `
+        import audio from "bun:audio";
+        const sr1 = 48000, sr2 = 16000, N = 48000;
+        const samples = new Float32Array(N);
+        // 12 kHz tone — above the 16 kHz target's 8 kHz Nyquist.
+        for (let i = 0; i < N; i++) samples[i] = Math.sin(2 * Math.PI * 12000 * i / sr1);
+        const down = audio.resample(samples, { from: sr1, to: sr2 });
+
+        // The energy of "down" should be dramatically smaller than the
+        // input — the 12 kHz tone gets killed by the anti-alias filter.
+        let inEnergy = 0, outEnergy = 0;
+        for (let i = 0; i < samples.length; i++) inEnergy += samples[i] ** 2;
+        for (let i = 0; i < down.length; i++) outEnergy += down[i] ** 2;
+        // Account for length difference (3× shorter output is naturally smaller).
+        const ratio = outEnergy / (inEnergy / 3);
+        console.log("attenuated", ratio < 0.05);
+      `,
+    );
+    expect(stdout).toBe("attenuated true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects non-positive sample rates", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-resample-bad-rate",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.resample(new Float32Array(64), { from: 0, to: 16000 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("from must be > 0"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — spectrogram", () => {
   it("produces frame count consistent with hop / window settings", async () => {
     const { stdout, exitCode } = await runFixture(
