@@ -1,6 +1,6 @@
-# bun:csv — parallel vs serial parse
+# bun:csv — parallel vs serial parse (size sweep)
 
-Times `bun:csv` parsing of a 50 MB fixture in two modes:
+Times `bun:csv` parsing across multiple input sizes in two modes:
 
 - **Serial** — single-threaded state machine, `parseCsv(input)`.
 - **Parallel** — `parseCsv(input, { parallel: true })`. Materializes the
@@ -10,52 +10,68 @@ Times `bun:csv` parsing of a 50 MB fixture in two modes:
 ## Run
 
 ```sh
-bun run bench/parabun-csv-parallel/seed.ts            # ~50 MB, 1.25M rows
-bun run build:release bench/parabun-csv-parallel/run.ts
+bun run build:release bench/parabun-csv-parallel/run.ts            # default sweep: 5, 50, 200 MB
+bun run build:release bench/parabun-csv-parallel/run.ts --sizes=10,100,500
 ```
 
-`seed.ts` is deterministic (LCG with a fixed seed) so the fixture is
-identical across machines. The fixture is intentionally quote-free so the
-parallel-mode safety check passes and the fast chunk-and-fork path engages.
+`seed.ts` is deterministic (LCG with a fixed seed) so fixtures are
+identical across machines. Fixtures are quote-free so the parallel-mode
+safety check passes and the fast chunk-and-fork path engages.
 
 ## What we see
 
 On a recent Linux x86 box (16-core, release build):
 
 ```
-variant      rows         min / med / max          throughput (median)
-serial       1,250,297    1427 / 1429 / 1501 ms    35.0 MB/s
-parallel     1,250,297    1295 / 1426 / 1636 ms    35.1 MB/s
-
-speedup (median): 1.00×
+size      rows         serial  (min/med/max ms)    parallel (min/med/max ms)    speedup
+5 MB      128,028       148 /  152 /  159           113 /  129 /  163           1.18×
+50 MB     1,250,297    1438 / 1446 / 1507          1440 / 1528 / 1737           0.95×
+200 MB    4,923,201    5873 / 5892 / 6203          6101 / 6363 / 6765           0.93×
 ```
 
-Roughly tied. The takeaway is that at 50 MB the serial state machine is
-already memory-bandwidth bound — the worker pool can carve the input
-into chunks but each worker is still doing the same per-byte work, and
-the materialization-plus-fork overhead matches whatever savings the
-parallelism delivers. Row counts agree exactly, which confirms the
-chunk-boundary heuristic is splitting at line breaks correctly.
+Parallel mode helps a little at 5 MB (~18%), breaks even at 50 MB, and
+gets *worse* from there. The naive intuition "more cores → faster
+parse" doesn't hold for byte-scanning workloads at this scale.
 
-This matches the pattern the [Parabun reality-check
-memory](../../README.md) documents: pmap + SIMD show clean speedups on
-pure-math / typed-array kernels (Monte Carlo, dot product, image
-filters), but I/O-shaped workloads where each lane is doing the same
-byte-scanning work hit memory-bandwidth walls long before they hit the
-core limit.
+### Why doesn't parallel scale up?
+
+A few interacting effects:
+
+1. **The serial path is already fast.** It's a tight state machine
+   reading one byte at a time with no branch surprises — memory
+   bandwidth, not CPU, is the binding resource. Adding workers can't
+   unlock bandwidth that doesn't exist.
+2. **Materialization tax.** Parallel mode pulls the whole input into one
+   string first so it can split it at line boundaries. At 200 MB that
+   allocation alone is non-trivial.
+3. **Worker IPC cost.** Each chunk is sent to a worker, parsed there,
+   and the resulting `string[][]` is sent back. The bigger the input,
+   the more work this round-trip does — and it scales linearly with
+   input size, not workers.
+4. **Final concatenation.** All the per-worker row arrays have to be
+   yielded back to the caller in order. That's another O(N) pass over
+   the parsed data.
+
+The 5 MB win likely comes from the materialization + IPC costs being
+small enough that the chunk-parallel parse still wins. Past that, the
+overheads dominate.
 
 ## When `parallel: true` is still worth it
 
-Two real scenarios:
+The case for parallel mode is **off-the-main-thread parsing**, not
+raw throughput:
 
-1. **Multiple files in flight at once.** Even if a single 50 MB parse
-   isn't faster, parsing four of them concurrently *is* — the parallel
-   path doesn't block the main thread on byte-by-byte work, so other
-   tasks (HTTP handlers, other parses, GC) keep running.
-2. **Larger files, faster CPUs.** At 200 MB+ on a faster L3 we expect
-   the chunk parse to pull ahead, since the per-chunk fixed cost
-   amortizes. Re-run with a bigger fixture to check on your hardware.
+- A 1.4-second serial parse blocks the event loop for 1.4 seconds.
+  The parallel path keeps the main thread responsive — HTTP handlers,
+  GC, other I/O all keep running while workers grind.
+- Parsing N files concurrently scales linearly across cores even if
+  any single one doesn't get faster.
 
-The right policy is "default to serial, opt into parallel when the
-profiler says serial is the bottleneck and the file is big enough" —
-exactly the reverse of the "always-on" framing the API might suggest.
+Don't reach for `parallel: true` expecting a per-file speedup. Reach
+for it when the parse is currently making your event loop unresponsive.
+
+## Memory
+
+This empirical result is recorded in
+`memory/project_parabun_csv_parallel_perf.md` so future sessions don't
+accidentally reintroduce the wrong claim.

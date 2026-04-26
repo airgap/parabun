@@ -1,30 +1,37 @@
-// Time bun:csv serial vs parallel mode on a real 50 MB fixture. Reports
-// min/med/max per variant across N runs, plus the speedup ratio. Requires
-// the fixture to have been generated first via seed.ts.
+// Sweep bun:csv parse times across a few input sizes, comparing serial
+// against parallel mode. Reports min/med/max ms and the median speedup
+// per size, so the per-size break-even point (if any) is visible.
 //
-//   bun run bench/parabun-csv-parallel/seed.ts
 //   bun run build:release bench/parabun-csv-parallel/run.ts
+//
+// Override sizes via CLI:  --sizes=5,50,200
 
 import csv from "bun:csv";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
+import { generate, fixturePath } from "./seed.ts";
 
 const RUNS = 5;
-const HERE = new URL(".", import.meta.url).pathname;
-const FIXTURE = `${HERE}fixture.csv`;
+const DEFAULT_SIZES_MB = [5, 50, 200];
 
-if (!existsSync(FIXTURE)) {
-  console.error(`fixture not found at ${FIXTURE}`);
-  console.error(`run \`bun run ${HERE}seed.ts\` first.`);
-  process.exit(1);
+function parseSizes(): number[] {
+  const arg = process.argv.find(a => a.startsWith("--sizes="));
+  if (!arg) return DEFAULT_SIZES_MB;
+  const parsed = arg
+    .slice("--sizes=".length)
+    .split(",")
+    .map(s => parseInt(s, 10))
+    .filter(n => Number.isFinite(n) && n > 0);
+  if (parsed.length === 0) {
+    console.error(`bad --sizes value; expected comma-separated MB numbers`);
+    process.exit(1);
+  }
+  return parsed;
 }
 
-const fileBytes = statSync(FIXTURE).size;
-const fixtureText = readFileSync(FIXTURE, "utf8");
-
-async function timeOne(parallel: boolean): Promise<{ ms: number; rows: number }> {
+async function timeOne(text: string, parallel: boolean): Promise<{ ms: number; rows: number }> {
   const t0 = performance.now();
   let rows = 0;
-  for await (const _ of csv.parseCsv(fixtureText, { parallel })) rows++;
+  for await (const _ of csv.parseCsv(text, { parallel })) rows++;
   return { ms: performance.now() - t0, rows };
 }
 
@@ -37,32 +44,53 @@ function stats(xs: number[]) {
   };
 }
 
-async function bench(name: string, parallel: boolean) {
+async function bench(text: string, parallel: boolean) {
   const times: number[] = [];
   let rows = 0;
   for (let i = 0; i < RUNS; i++) {
-    const r = await timeOne(parallel);
+    const r = await timeOne(text, parallel);
     times.push(r.ms);
     rows = r.rows;
   }
-  const s = stats(times);
-  return { name, rows, ...s };
+  return { rows, ...stats(times) };
 }
 
-console.log(`bun:csv parse — ${(fileBytes / (1024 * 1024)).toFixed(1)} MB fixture, best-of-${RUNS} per variant\n`);
-const serial = await bench("serial   ", /* parallel */ false);
-const par = await bench("parallel ", /* parallel */ true);
+const sizes = parseSizes();
 
-const fmt = (s: { min: number; med: number; max: number }) =>
-  `${s.min.toFixed(0).padStart(5)} / ${s.med.toFixed(0).padStart(5)} / ${s.max.toFixed(0).padStart(5)} ms`;
-const mbPerSec = (ms: number) => `${(fileBytes / (1024 * 1024) / (ms / 1000)).toFixed(1)} MB/s`;
+console.log(`bun:csv parse — sweep across ${sizes.join(", ")} MB, best-of-${RUNS} per cell\n`);
+console.log(
+  [
+    "size".padEnd(7),
+    "rows".padEnd(11),
+    "serial (min/med/max ms)".padEnd(28),
+    "parallel (min/med/max ms)".padEnd(30),
+    "speedup",
+  ].join("\t"),
+);
 
-console.log(`${"variant".padEnd(12)}\trows\t${"min / med / max".padEnd(24)}\tthroughput (median)`);
-console.log(`${serial.name}\t${serial.rows.toLocaleString()}\t${fmt(serial)}\t${mbPerSec(serial.med)}`);
-console.log(`${par.name}\t${par.rows.toLocaleString()}\t${fmt(par)}\t${mbPerSec(par.med)}`);
-
-const speedup = serial.med / par.med;
-console.log(`\nspeedup (median): ${speedup.toFixed(2)}×`);
-if (par.rows !== serial.rows) {
-  console.log(`  !! row count mismatch: serial=${serial.rows} parallel=${par.rows}`);
+for (const sizeMB of sizes) {
+  const path = fixturePath(sizeMB);
+  if (!existsSync(path)) {
+    process.stderr.write(`generating ${path}…\n`);
+    generate(sizeMB);
+  }
+  const text = readFileSync(path, "utf8");
+  const fileBytes = statSync(path).size;
+  const serial = await bench(text, false);
+  const par = await bench(text, true);
+  const speedup = serial.med / par.med;
+  const fmt = (s: { min: number; med: number; max: number }) =>
+    `${s.min.toFixed(0).padStart(5)} / ${s.med.toFixed(0).padStart(5)} / ${s.max.toFixed(0).padStart(5)}`;
+  console.log(
+    [
+      `${(fileBytes / (1024 * 1024)).toFixed(0)} MB`.padEnd(7),
+      serial.rows.toLocaleString().padEnd(11),
+      fmt(serial).padEnd(28),
+      fmt(par).padEnd(30),
+      `${speedup.toFixed(2)}×`,
+    ].join("\t"),
+  );
+  if (par.rows !== serial.rows) {
+    console.log(`  !! row count mismatch at ${sizeMB} MB: serial=${serial.rows} parallel=${par.rows}`);
+  }
 }

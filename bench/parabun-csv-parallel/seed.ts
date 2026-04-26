@@ -1,15 +1,16 @@
-// Generate a deterministic ~50 MB CSV fixture with NO quoted cells so the
-// parallel parser's pre-scan engages its fast chunk-and-fork path. Layout:
+// Generate a deterministic CSV fixture with NO quoted cells so the parallel
+// parser's pre-scan engages its fast chunk-and-fork path. Layout:
 //   id,first,last,age,city,zip,score
-// 7 columns, ~80 bytes per row → ~650k rows for ~50 MB.
+// 7 columns, ~80 bytes per row.
 //
-//   bun run bench/parabun-csv-parallel/seed.ts
+// Usable two ways:
+//   Importable — `import { generate } from "./seed.ts"; generate(50);`
+//   CLI       — `bun run bench/parabun-csv-parallel/seed.ts [sizeMB]`
+// CLI default is 50 MB.
 
 import { writeFileSync } from "node:fs";
 
-const TARGET_BYTES = 50 * 1024 * 1024;
 const HERE = new URL(".", import.meta.url).pathname;
-const OUT = `${HERE}fixture.csv`;
 
 const firstNames = [
   "Avery",
@@ -91,30 +92,43 @@ function lcg(seed: number) {
   };
 }
 
-const rng = lcg(0xdeadbeef);
-function pick<T>(xs: T[]): T {
-  return xs[rng() % xs.length];
+export function fixturePath(sizeMB: number): string {
+  return `${HERE}fixture-${sizeMB}MB.csv`;
 }
 
-const header = "id,first,last,age,city,zip,score\n";
-const chunks: string[] = [header];
-let total = header.length;
-let id = 0;
-while (total < TARGET_BYTES) {
-  const first = pick(firstNames);
-  const last = pick(lastNames);
-  const age = 18 + (rng() % 70);
-  const city = pick(cities);
-  const zip = 10000 + (rng() % 89999);
-  const score = ((rng() % 100000) / 1000).toFixed(3);
-  const row = `${id},${first},${last},${age},${city},${zip},${score}\n`;
-  chunks.push(row);
-  total += row.length;
-  id++;
+export function generate(sizeMB: number): { path: string; bytes: number; rows: number } {
+  const targetBytes = sizeMB * 1024 * 1024;
+  const rng = lcg(0xdeadbeef);
+  const pick = <T>(xs: T[]): T => xs[rng() % xs.length];
+
+  const header = "id,first,last,age,city,zip,score\n";
+  const chunks: string[] = [header];
+  let total = header.length;
+  let id = 0;
+  while (total < targetBytes) {
+    const first = pick(firstNames);
+    const last = pick(lastNames);
+    const age = 18 + (rng() % 70);
+    const city = pick(cities);
+    const zip = 10000 + (rng() % 89999);
+    const score = ((rng() % 100000) / 1000).toFixed(3);
+    const row = `${id},${first},${last},${age},${city},${zip},${score}\n`;
+    chunks.push(row);
+    total += row.length;
+    id++;
+  }
+
+  const out = chunks.join("");
+  const path = fixturePath(sizeMB);
+  writeFileSync(path, out);
+  return { path, bytes: out.length, rows: id };
 }
 
-const out = chunks.join("");
-writeFileSync(OUT, out);
-console.log(`wrote ${OUT}`);
-console.log(`bytes: ${out.length.toLocaleString()}`);
-console.log(`rows : ${id.toLocaleString()}`);
+// CLI entry — only run when the module is invoked directly (not imported).
+if (import.meta.main) {
+  const sizeMB = parseInt(process.argv[2] ?? "50", 10);
+  const r = generate(sizeMB);
+  console.log(`wrote ${r.path}`);
+  console.log(`bytes: ${r.bytes.toLocaleString()}`);
+  console.log(`rows : ${r.rows.toLocaleString()}`);
+}
