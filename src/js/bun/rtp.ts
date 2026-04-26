@@ -209,7 +209,129 @@ function parse(bytes: Uint8Array): ParsedPacket {
   };
 }
 
+// ─── Jitter buffer ─────────────────────────────────────────────────────────
+// Receiver-side primitive: absorbs network jitter, reorders packets that
+// arrive out of sequence, and emits a "lost" signal for packets that
+// never show up before the buffer's lag threshold runs out.
+//
+//   const jb = new rtp.JitterBuffer({ maxLag: 5 });
+//   network.onmessage = bytes => jb.push(rtp.parse(bytes));
+//   setInterval(() => {
+//     const next = jb.pop();
+//     if (next) decode(next.payload);          // payload arrived in order
+//     else handleConcealment();                // gap — lost or not-yet-arrived
+//   }, frameDurationMs);
+//
+// 16-bit sequence wrap-around: RFC 3550 sequence numbers are u16 and wrap
+// every 65535 packets. Comparison is "modulo signed" — the diff is sign-
+// extended into 16 bits so adjacent sequences compare correctly across
+// the wrap boundary.
+
+// Wrap-aware comparison: (a - b) treated as 16-bit signed. Positive →
+// `a` is after `b` in the stream. Used for sequence ordering.
+function seqDiff(a: number, b: number): number {
+  return ((a - b) << 16) >> 16;
+}
+
+type JitterBufferOptions = {
+  /**
+   * Max number of packets the buffer can hold ahead of the expected one
+   * before declaring the missing slot lost and advancing. Default 5,
+   * which translates to 100 ms at 20 ms voice frames — typical for
+   * voice calls. Bigger = better loss tolerance, more added latency.
+   */
+  maxLag?: number;
+};
+
+class JitterBuffer {
+  readonly maxLag: number;
+  #buf = new Map<number, ParsedPacket>();
+  #expected: number | null = null;
+  #lossCount = 0;
+
+  constructor(opts: JitterBufferOptions = {}) {
+    this.maxLag = opts.maxLag ?? 5;
+    if (this.maxLag < 1) {
+      throw new RangeError("bun:rtp JitterBuffer: maxLag must be >= 1");
+    }
+  }
+
+  /**
+   * Insert a parsed packet. Late arrivals (sequence < expected) are
+   * dropped silently — the consumer has already concealed past them.
+   */
+  push(packet: ParsedPacket): void {
+    if (this.#expected === null) {
+      this.#expected = packet.sequence;
+    } else if (seqDiff(packet.sequence, this.#expected) < 0) {
+      // Late: arrived after the consumer has already moved past this slot.
+      return;
+    }
+    this.#buf.set(packet.sequence, packet);
+  }
+
+  /**
+   * Return the next in-order packet, or `null` if the next-expected
+   * sequence isn't here yet AND the buffer hasn't gone past its lag
+   * threshold (in which case we declare loss and advance).
+   */
+  pop(): ParsedPacket | null {
+    if (this.#expected === null) return null;
+    const expected = this.#expected;
+
+    const direct = this.#buf.get(expected);
+    if (direct !== undefined) {
+      this.#buf.delete(expected);
+      this.#expected = (expected + 1) & 0xffff;
+      return direct;
+    }
+
+    // Expected slot is missing. Count buffered packets that sit ahead
+    // of `expected` in sequence order. If we're more than `maxLag`
+    // packets ahead, declare the missing slot lost and skip to the
+    // smallest buffered sequence past it.
+    let smallestAhead = -1;
+    let smallestDiff = Infinity;
+    for (const seq of this.#buf.keys()) {
+      const d = seqDiff(seq, expected);
+      if (d > 0 && d < smallestDiff) {
+        smallestDiff = d;
+        smallestAhead = seq;
+      }
+    }
+    if (smallestAhead < 0) return null; // empty or only-late packets
+
+    // Use buffer fill (count of buffered packets) as the lag proxy.
+    if (this.#buf.size > this.maxLag) {
+      this.#lossCount++;
+      // Skip the missing slot — advance expected to the smallest one we
+      // have. Re-enter pop so subsequent contiguous-buffered packets
+      // drain in one batch.
+      this.#expected = smallestAhead;
+      return this.pop();
+    }
+
+    return null;
+  }
+
+  /** Number of packets currently buffered. */
+  get pending(): number {
+    return this.#buf.size;
+  }
+
+  /** Sequence the buffer is waiting on. `null` until the first push. */
+  get nextSequence(): number | null {
+    return this.#expected;
+  }
+
+  /** Cumulative count of packets declared lost since construction. */
+  get lossCount(): number {
+    return this.#lossCount;
+  }
+}
+
 export default {
   pack,
   parse,
+  JitterBuffer,
 };

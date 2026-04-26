@@ -234,6 +234,160 @@ describe("bun:rtp", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("JitterBuffer: in-order push → in-order pop", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-rtp-jb-inorder",
+      `
+        import rtp from "bun:rtp";
+        const jb = new rtp.JitterBuffer();
+        const mkPkt = (seq) => rtp.parse(rtp.pack({
+          payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
+          payload: new Uint8Array([seq]),
+        }));
+        jb.push(mkPkt(1));
+        jb.push(mkPkt(2));
+        jb.push(mkPkt(3));
+        const popped = [];
+        for (let i = 0; i < 4; i++) {
+          const p = jb.pop();
+          popped.push(p ? p.sequence : "null");
+        }
+        console.log(popped.join(","));
+      `,
+    );
+    expect(stdout).toBe("1,2,3,null");
+    expect(exitCode).toBe(0);
+  });
+
+  it("JitterBuffer: out-of-order push reorders on pop", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-rtp-jb-reorder",
+      `
+        import rtp from "bun:rtp";
+        const jb = new rtp.JitterBuffer();
+        const mkPkt = (seq) => rtp.parse(rtp.pack({
+          payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
+          payload: new Uint8Array(0),
+        }));
+        // Arrive in 1, 3, 2 order. Pop should return 1, then null (waiting
+        // for 2 which hasn't arrived yet — only one packet ahead, well
+        // under maxLag), then after 2 arrives pop returns 2 and 3.
+        jb.push(mkPkt(1));
+        jb.push(mkPkt(3));
+        const a = jb.pop()?.sequence;          // 1
+        const b = jb.pop();                    // null — waiting for 2
+        jb.push(mkPkt(2));
+        const c = jb.pop()?.sequence;          // 2
+        const d = jb.pop()?.sequence;          // 3
+        console.log(\`\${a},\${b === null ? "null" : b.sequence},\${c},\${d}\`);
+      `,
+    );
+    expect(stdout).toBe("1,null,2,3");
+    expect(exitCode).toBe(0);
+  });
+
+  it("JitterBuffer: lost packet declared after maxLag overflow", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-rtp-jb-loss",
+      `
+        import rtp from "bun:rtp";
+        const jb = new rtp.JitterBuffer({ maxLag: 2 });
+        const mkPkt = (seq) => rtp.parse(rtp.pack({
+          payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
+          payload: new Uint8Array(0),
+        }));
+        // Push sequences 1, 3, 4, 5, 6 — sequence 2 never arrives.
+        // maxLag = 2 so once we've buffered 3 packets ahead of the
+        // expected (2), the missing one gets declared lost.
+        jb.push(mkPkt(1));
+        const a = jb.pop()?.sequence;          // 1, expected=2
+        jb.push(mkPkt(3));
+        const b = jb.pop();                    // null (size=1, ≤ maxLag=2)
+        jb.push(mkPkt(4));
+        const c = jb.pop();                    // null (size=2, ≤ maxLag=2)
+        jb.push(mkPkt(5));
+        const d = jb.pop()?.sequence;          // 3 (size=3 > 2 → loss declared)
+        console.log(
+          a,
+          b === null ? "null" : b.sequence,
+          c === null ? "null" : c.sequence,
+          d,
+          "loss=" + jb.lossCount,
+        );
+      `,
+    );
+    expect(stdout).toBe("1 null null 3 loss=1");
+    expect(exitCode).toBe(0);
+  });
+
+  it("JitterBuffer: late arrivals (after consumer moved past) are dropped", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-rtp-jb-late",
+      `
+        import rtp from "bun:rtp";
+        const jb = new rtp.JitterBuffer();
+        const mkPkt = (seq) => rtp.parse(rtp.pack({
+          payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
+          payload: new Uint8Array(0),
+        }));
+        jb.push(mkPkt(5));
+        jb.pop();  // consumes 5; expected becomes 6.
+        // Now push 3 (late arrival) and 6 (in order).
+        jb.push(mkPkt(3));
+        jb.push(mkPkt(6));
+        const next = jb.pop();
+        console.log("next.seq", next?.sequence ?? "null");
+        console.log("pending", jb.pending);  // late 3 was dropped, so 0
+      `,
+    );
+    expect(stdout).toBe(["next.seq 6", "pending 0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("JitterBuffer: handles 16-bit sequence wrap-around", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-rtp-jb-wrap",
+      `
+        import rtp from "bun:rtp";
+        const jb = new rtp.JitterBuffer();
+        const mkPkt = (seq) => rtp.parse(rtp.pack({
+          payloadType: 96, sequence: seq, timestamp: 0, ssrc: 1,
+          payload: new Uint8Array(0),
+        }));
+        // Cross 65535 → 0 → 1 in order.
+        jb.push(mkPkt(65534));
+        jb.push(mkPkt(65535));
+        jb.push(mkPkt(0));
+        jb.push(mkPkt(1));
+        const seqs = [];
+        for (let i = 0; i < 4; i++) {
+          const p = jb.pop();
+          if (p) seqs.push(p.sequence);
+        }
+        console.log(seqs.join(","));
+      `,
+    );
+    expect(stdout).toBe("65534,65535,0,1");
+    expect(exitCode).toBe(0);
+  });
+
+  it("JitterBuffer: rejects invalid maxLag", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-rtp-jb-bad-maxlag",
+      `
+        import rtp from "bun:rtp";
+        try {
+          new rtp.JitterBuffer({ maxLag: 0 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("maxLag must be >= 1"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("voice-pipeline integration: Opus packet → RTP wire → parse → payload matches", async () => {
     // The use case bun:rtp exists for: take an Opus-encoded frame, wrap
     // it in RTP for transport, parse on the receiving end, recover the
