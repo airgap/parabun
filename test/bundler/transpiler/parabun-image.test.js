@@ -1533,6 +1533,107 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("invert flips color channels and preserves alpha", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-invert-rgba",
+      `
+        import image from "bun:image";
+        // 1×2 RGBA: [10, 20, 30, 100], [255, 0, 128, 200]
+        const data = Uint8Array.from([10, 20, 30, 100, 255, 0, 128, 200]);
+        const orig = { data, width: 1, height: 2, channels: 4, format: "png" };
+        const out = image.invert(orig);
+        // Color channels: 245, 235, 225 / 0, 255, 127. Alpha unchanged.
+        console.log(Array.from(out.data).join(","));
+      `,
+    );
+    expect(stdout).toBe("245,235,225,100,0,255,127,200");
+    expect(exitCode).toBe(0);
+  });
+
+  it("invert is its own inverse — applying twice returns the input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-invert-roundtrip",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const back = image.invert(image.invert(orig));
+        const equal = back.data.length === orig.data.length && back.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe("byteEqual true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("threshold returns single-channel binary image", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-threshold-shape",
+      `
+        import image from "bun:image";
+        // 1-channel ramp 0..255 in 4 steps.
+        const data = Uint8Array.from([100, 130, 200, 0]);
+        const orig = { data, width: 4, height: 1, channels: 1, format: "png" };
+        const out = image.threshold(orig, { value: 128 });
+        console.log("dims", out.width, out.height, out.channels);
+        // 100 < 128 → 0; 130 > 128 → 255; 200 > 128 → 255; 0 < 128 → 0.
+        console.log("vals", Array.from(out.data).join(","));
+      `,
+    );
+    expect(stdout).toBe(["dims 4 1 1", "vals 0,255,255,0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("threshold collapses RGB to luma before comparing", async () => {
+    // Pure red (255, 0, 0) has Rec. 601 luma 0.299*255 ≈ 76. With threshold
+    // 50, that's "above" → 255. With threshold 100, "below" → 0.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-threshold-rgb",
+      `
+        import image from "bun:image";
+        const data = Uint8Array.from([255, 0, 0]); // pure red
+        const orig = { data, width: 1, height: 1, channels: 3, format: "png" };
+        const lo = image.threshold(orig, { value: 50 });
+        const hi = image.threshold(orig, { value: 100 });
+        console.log("lo", lo.data[0], "hi", hi.data[0]);
+      `,
+    );
+    expect(stdout).toBe("lo 255 hi 0");
+    expect(exitCode).toBe(0);
+  });
+
+  it("threshold default value is 128", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-threshold-default",
+      `
+        import image from "bun:image";
+        const data = Uint8Array.from([127, 128, 129]);
+        const orig = { data, width: 3, height: 1, channels: 1, format: "png" };
+        const out = image.threshold(orig);
+        // 127 ≤ 128 → 0; 128 not > 128 → 0; 129 > 128 → 255.
+        console.log(Array.from(out.data).join(","));
+      `,
+    );
+    expect(stdout).toBe("0,0,255");
+    expect(exitCode).toBe(0);
+  });
+
+  it("threshold rejects out-of-range value", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-threshold-range",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        let threw = 0;
+        for (const v of [-1, 256, 1000]) {
+          try { image.threshold(orig, { value: v }); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 3");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

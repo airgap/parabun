@@ -58,6 +58,10 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
 };
+type ThresholdOptions = {
+  /** Cutoff in [0, 255]. Pixels with luma > value become 255, else 0. Default 128. */
+  value?: number;
+};
 type CompositeOptions = {
   /** X-offset of the overlay's top-left corner in base coordinates. Default 0. Negative values are allowed (overlay clipped on the left). */
   x?: number;
@@ -213,6 +217,20 @@ function composite(base: DecodedImage, overlay: DecodedImage, opts?: CompositeOp
   return native.composite(base, overlay, opts ?? {});
 }
 
+function invert(img: DecodedImage): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.invert: img must be the object returned from decode()");
+  }
+  return native.invert(img);
+}
+
+function threshold(img: DecodedImage, opts?: ThresholdOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.threshold: img must be the object returned from decode()");
+  }
+  return native.threshold(img, opts ?? {});
+}
+
 export default {
   decode,
   encode,
@@ -227,4 +245,6 @@ export default {
   adjust,
   histogram,
   composite,
+  invert,
+  threshold,
 };
