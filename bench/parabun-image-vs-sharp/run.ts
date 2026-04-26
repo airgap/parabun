@@ -34,26 +34,28 @@ type Op = {
   sharp: (bytes: Buffer) => Promise<Buffer>;
 };
 
+// All parabun paths use the chained image.pipeline() API so decode →
+// transforms → encode happens in one C++ call with shared scratch
+// buffers — matches Sharp's lazy libvips graph instead of paying the
+// full codec round-trip between every operation.
 const ops: Op[] = [
   {
     name: "decode → encode (JPEG q85)",
-    parabun: async bytes => {
-      const img = image.decode(bytes);
-      return image.encode(img, { format: "jpeg", quality: 85 });
-    },
-    sharp: async bytes => {
-      return sharp(bytes).jpeg({ quality: 85, mozjpeg: false }).toBuffer();
-    },
+    parabun: async bytes => image.pipeline(bytes).toBytes({ format: "jpeg", quality: 85 }),
+    sharp: async bytes => sharp(bytes).jpeg({ quality: 85, mozjpeg: false }).toBuffer(),
   },
   {
     name: "resize to 1/2 (Lanczos, JPEG out)",
     parabun: async bytes => {
-      const img = image.decode(bytes);
-      const small = image.resize(img, { width: img.width >> 1, height: img.height >> 1, kernel: "lanczos" });
-      return image.encode(small, { format: "jpeg", quality: 85 });
+      const meta = await sharp(bytes).metadata();
+      const w = (meta.width ?? 0) >> 1;
+      const h = (meta.height ?? 0) >> 1;
+      return image
+        .pipeline(bytes)
+        .resize({ width: w, height: h, kernel: "lanczos" })
+        .toBytes({ format: "jpeg", quality: 85 });
     },
     sharp: async bytes => {
-      // Sharp's default resize kernel is Lanczos3 — match it explicitly anyway.
       const meta = await sharp(bytes).metadata();
       const w = (meta.width ?? 0) >> 1;
       const h = (meta.height ?? 0) >> 1;
@@ -65,27 +67,20 @@ const ops: Op[] = [
   },
   {
     name: "Gaussian blur (radius 5, JPEG out)",
-    parabun: async bytes => {
-      const img = image.decode(bytes);
-      const blurred = image.blur(img, { radius: 5 });
-      return image.encode(blurred, { format: "jpeg", quality: 85 });
-    },
-    sharp: async bytes => {
-      // Sharp's blur sigma roughly == our radius / 3 (we set σ = radius/3
-      // inside the kernel build), so passing 5/3 gives an apples-to-apples
-      // visual blur strength.
-      return sharp(bytes)
+    parabun: async bytes => image.pipeline(bytes).blur({ radius: 5 }).toBytes({ format: "jpeg", quality: 85 }),
+    sharp: async bytes =>
+      sharp(bytes)
         .blur(5 / 3)
         .jpeg({ quality: 85, mozjpeg: false })
-        .toBuffer();
-    },
+        .toBuffer(),
   },
   {
     name: "PNG → resize → PNG out",
     parabun: async bytes => {
-      const img = image.decode(bytes);
-      const small = image.resize(img, { width: img.width >> 1, height: img.height >> 1, kernel: "lanczos" });
-      return image.encode(small, { format: "png" });
+      const meta = await sharp(bytes).metadata();
+      const w = (meta.width ?? 0) >> 1;
+      const h = (meta.height ?? 0) >> 1;
+      return image.pipeline(bytes).resize({ width: w, height: h, kernel: "lanczos" }).toBytes({ format: "png" });
     },
     sharp: async bytes => {
       const meta = await sharp(bytes).metadata();

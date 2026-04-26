@@ -2948,6 +2948,359 @@ JSC_DEFINE_HOST_FUNCTION(functionBoxBlur,
     return JSValue::encode(obj);
 }
 
+// ─── Pipeline runner ──────────────────────────────────────────────────────
+// Single C++ entry point that takes (input bytes, op-list, output opts)
+// and runs the entire decode → transforms → encode flow in one call.
+// Operations work on shared scratch buffers — no JS round-trips per op,
+// no redundant pixel-buffer materialization between transforms. This
+// closes the end-to-end gap with Sharp / libvips's lazy pipeline by
+// matching its buffer-sharing strategy from the C++ side.
+//
+// Each op in the JS array is `{ kind: "resize" | "blur" | ..., ...params }`.
+// We dispatch by kind and apply to the current pixel buffer in place
+// when sizes match, or into a swapped-in second buffer when sizes change.
+
+namespace {
+
+// Ping-pong pixel-buffer state passed through the op runners.
+struct PipelineState {
+    std::vector<uint8_t> a;
+    std::vector<uint8_t> b;
+    bool useA;          // true → `a` is the active buffer, `b` is scratch
+    uint32_t w;
+    uint32_t h;
+    uint32_t channels;
+
+    uint8_t* current() { return useA ? a.data() : b.data(); }
+    uint8_t* scratch(size_t needBytes) {
+        auto& dst = useA ? b : a;
+        if (dst.size() < needBytes) dst.resize(needBytes);
+        return dst.data();
+    }
+    void swap() { useA = !useA; }
+    size_t currentSize() const { return static_cast<size_t>(w) * h * channels; }
+};
+
+// Pull a numeric option off a JS object. Returns `defaultValue` if missing.
+double getNumOpt(JSC::JSGlobalObject* globalObject, JSC::JSObject* obj, const String& key, double defaultValue)
+{
+    auto& vm = JSC::getVM(globalObject);
+    JSC::JSValue v = obj->get(globalObject, JSC::Identifier::fromString(vm, key));
+    if (v.isNumber()) return v.toNumber(globalObject);
+    return defaultValue;
+}
+
+String getStrOpt(JSC::JSGlobalObject* globalObject, JSC::JSObject* obj, const String& key, const String& defaultValue)
+{
+    auto& vm = JSC::getVM(globalObject);
+    JSC::JSValue v = obj->get(globalObject, JSC::Identifier::fromString(vm, key));
+    if (v.isString()) return v.toWTFString(globalObject);
+    return defaultValue;
+}
+
+// Apply one op. Returns false on error (and writes to outErr).
+bool applyPipelineOp(
+    JSC::JSGlobalObject* globalObject, JSC::ThrowScope& scope,
+    PipelineState& s, JSC::JSObject* op, char* outErr, size_t outErrLen)
+{
+    auto& vm = JSC::getVM(globalObject);
+    JSC::JSValue kindVal = op->get(globalObject, JSC::Identifier::fromString(vm, "kind"_s));
+    if (scope.exception() || !kindVal.isString()) {
+        std::strncpy(outErr, "pipeline op missing 'kind'", outErrLen - 1);
+        return false;
+    }
+    auto kindStr = kindVal.toWTFString(globalObject).utf8();
+    const char* kind = kindStr.data();
+
+    if (std::strcmp(kind, "resize") == 0) {
+        const int32_t dw = static_cast<int32_t>(getNumOpt(globalObject, op, "width"_s, 0));
+        const int32_t dh = static_cast<int32_t>(getNumOpt(globalObject, op, "height"_s, 0));
+        if (dw < 1 || dh < 1) {
+            std::strncpy(outErr, "pipeline.resize: width and height required and >= 1", outErrLen - 1);
+            return false;
+        }
+        const String kernelStr = getStrOpt(globalObject, op, "kernel"_s, "bilinear"_s);
+        const bool useLanczos = kernelStr == "lanczos"_s;
+        // Resize changes dims — output goes to the OPPOSITE buffer regardless of size match.
+        const size_t outBytes = static_cast<size_t>(dw) * dh * s.channels;
+        uint8_t* dst = s.scratch(outBytes);
+        if (useLanczos) {
+            resizeLanczos(s.current(), s.w, s.h, s.channels, dst, dw, dh);
+        } else {
+            resizeBilinear(s.current(), s.w, s.h, s.channels, dst, dw, dh);
+        }
+        s.swap();
+        s.w = dw;
+        s.h = dh;
+        return true;
+    }
+
+    if (std::strcmp(kind, "blur") == 0) {
+        const int radius = static_cast<int>(getNumOpt(globalObject, op, "radius"_s, 0));
+        if (radius < 0 || radius > 100) {
+            std::strncpy(outErr, "pipeline.blur: radius must be in [0, 100]", outErrLen - 1);
+            return false;
+        }
+        if (radius == 0) return true;
+        uint8_t* dst = s.scratch(s.currentSize());
+        gaussianBlur(s.current(), s.w, s.h, s.channels, dst, radius);
+        s.swap();
+        return true;
+    }
+
+    if (std::strcmp(kind, "boxBlur") == 0) {
+        if (s.channels != 4) {
+            std::strncpy(outErr, "pipeline.boxBlur: requires 4-channel RGBA", outErrLen - 1);
+            return false;
+        }
+        const int radius = static_cast<int>(getNumOpt(globalObject, op, "radius"_s, 0));
+        if (radius < 0 || radius > 1000) {
+            std::strncpy(outErr, "pipeline.boxBlur: radius must be in [0, 1000]", outErrLen - 1);
+            return false;
+        }
+        if (radius == 0) return true;
+        uint8_t* dst = s.scratch(s.currentSize());
+        boxBlurRGBA(s.current(), s.w, s.h, dst, radius);
+        s.swap();
+        return true;
+    }
+
+    if (std::strcmp(kind, "sharpen") == 0) {
+        const int radius = static_cast<int>(getNumOpt(globalObject, op, "radius"_s, 1));
+        const float amount = static_cast<float>(getNumOpt(globalObject, op, "amount"_s, 1.0));
+        if (radius < 0 || radius > 100) {
+            std::strncpy(outErr, "pipeline.sharpen: radius must be in [0, 100]", outErrLen - 1);
+            return false;
+        }
+        uint8_t* dst = s.scratch(s.currentSize());
+        unsharpSharpen(s.current(), s.w, s.h, s.channels, dst, radius, amount);
+        s.swap();
+        return true;
+    }
+
+    if (std::strcmp(kind, "rotate") == 0) {
+        const int32_t deg = static_cast<int32_t>(getNumOpt(globalObject, op, "degrees"_s, 0));
+        if (deg != 90 && deg != 180 && deg != 270) {
+            std::strncpy(outErr, "pipeline.rotate: degrees must be 90, 180, or 270", outErrLen - 1);
+            return false;
+        }
+        const uint32_t newW = (deg == 180) ? s.w : s.h;
+        const uint32_t newH = (deg == 180) ? s.h : s.w;
+        uint8_t* dst = s.scratch(static_cast<size_t>(newW) * newH * s.channels);
+        if (deg == 90) rotate90Clockwise(s.current(), s.w, s.h, s.channels, dst);
+        else if (deg == 180) rotate180(s.current(), s.w, s.h, s.channels, dst);
+        else rotate270Clockwise(s.current(), s.w, s.h, s.channels, dst);
+        s.swap();
+        s.w = newW;
+        s.h = newH;
+        return true;
+    }
+
+    if (std::strcmp(kind, "flip") == 0) {
+        const String axis = getStrOpt(globalObject, op, "axis"_s, ""_s);
+        const bool horiz = axis == "horizontal"_s;
+        const bool vert = axis == "vertical"_s;
+        if (!horiz && !vert) {
+            std::strncpy(outErr, "pipeline.flip: axis must be \"horizontal\" or \"vertical\"", outErrLen - 1);
+            return false;
+        }
+        uint8_t* dst = s.scratch(s.currentSize());
+        if (horiz) flipHorizontal(s.current(), s.w, s.h, s.channels, dst);
+        else flipVertical(s.current(), s.w, s.h, s.channels, dst);
+        s.swap();
+        return true;
+    }
+
+    if (std::strcmp(kind, "crop") == 0) {
+        const int32_t cx = static_cast<int32_t>(getNumOpt(globalObject, op, "x"_s, 0));
+        const int32_t cy = static_cast<int32_t>(getNumOpt(globalObject, op, "y"_s, 0));
+        const int32_t cw = static_cast<int32_t>(getNumOpt(globalObject, op, "width"_s, 0));
+        const int32_t ch = static_cast<int32_t>(getNumOpt(globalObject, op, "height"_s, 0));
+        if (cx < 0 || cy < 0 || cw < 1 || ch < 1
+            || static_cast<uint32_t>(cx + cw) > s.w
+            || static_cast<uint32_t>(cy + ch) > s.h) {
+            std::strncpy(outErr, "pipeline.crop: rectangle out of bounds", outErrLen - 1);
+            return false;
+        }
+        const size_t outBytes = static_cast<size_t>(cw) * ch * s.channels;
+        uint8_t* dst = s.scratch(outBytes);
+        cropRect(s.current(), s.w, s.h, s.channels, dst, cx, cy, cw, ch);
+        s.swap();
+        s.w = cw;
+        s.h = ch;
+        return true;
+    }
+
+    if (std::strcmp(kind, "adjust") == 0) {
+        const float br = static_cast<float>(getNumOpt(globalObject, op, "brightness"_s, 0.0));
+        const float ct = static_cast<float>(getNumOpt(globalObject, op, "contrast"_s, 0.0));
+        const float sat = static_cast<float>(getNumOpt(globalObject, op, "saturation"_s, 0.0));
+        uint8_t* dst = s.scratch(s.currentSize());
+        adjustToneCpu(s.current(), s.w, s.h, s.channels, dst, br, ct, sat);
+        s.swap();
+        return true;
+    }
+
+    if (std::strcmp(kind, "invert") == 0) {
+        uint8_t* dst = s.scratch(s.currentSize());
+        invertImage(s.current(), s.w, s.h, s.channels, dst);
+        s.swap();
+        return true;
+    }
+
+    if (std::strcmp(kind, "threshold") == 0) {
+        const int32_t value = static_cast<int32_t>(getNumOpt(globalObject, op, "value"_s, 128));
+        if (value < 0 || value > 255) {
+            std::strncpy(outErr, "pipeline.threshold: value must be in [0, 255]", outErrLen - 1);
+            return false;
+        }
+        // threshold collapses to 1 channel.
+        const size_t outBytes = static_cast<size_t>(s.w) * s.h;
+        uint8_t* dst = s.scratch(outBytes);
+        thresholdImage(s.current(), s.w, s.h, s.channels, dst, static_cast<uint8_t>(value));
+        s.swap();
+        s.channels = 1;
+        return true;
+    }
+
+    if (std::strcmp(kind, "toGrayscale") == 0) {
+        const size_t outBytes = static_cast<size_t>(s.w) * s.h;
+        uint8_t* dst = s.scratch(outBytes);
+        rgbToLuma(s.current(), s.w, s.h, s.channels, dst);
+        s.swap();
+        s.channels = 1;
+        return true;
+    }
+
+    std::snprintf(outErr, outErrLen, "pipeline: unknown op kind \"%s\"", kind);
+    return false;
+}
+
+} // anonymous namespace
+
+// runPipeline(inputBytes, opsArray, outOpts) → Uint8Array
+//   inputBytes : Uint8Array containing the encoded source image
+//   opsArray   : array of { kind, ...params } op descriptors
+//   outOpts    : { format: "jpeg" | "png" | "webp", quality?, lossless? }
+JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue inArg = callFrame->argument(0);
+    JSValue opsArg = callFrame->argument(1);
+    JSValue outArg = callFrame->argument(2);
+
+    if (!inArg.isCell() || inArg.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: input must be a Uint8Array"_s);
+        return {};
+    }
+    if (!opsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: ops must be an array"_s);
+        return {};
+    }
+    if (!outArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: out opts must be an object"_s);
+        return {};
+    }
+    auto* inView = jsCast<JSC::JSArrayBufferView*>(inArg.asCell());
+    void* inRaw = inView->vector();
+    if (!inRaw) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: input is detached"_s);
+        return {};
+    }
+    const uint8_t* inBytes = static_cast<const uint8_t*>(inRaw);
+    const size_t inLen = inView->length();
+
+    // Decode once.
+    const char* fmtIn = detectFormat(inBytes, inLen);
+    if (!fmtIn) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: input format not recognized"_s);
+        return {};
+    }
+    PipelineState state;
+    state.useA = true;
+    char errMsg[256] = { 0 };
+    bool ok = false;
+    if (std::strcmp(fmtIn, "jpeg") == 0) {
+        ok = decodeJpegBytes(inBytes, inLen, state.a, state.w, state.h, state.channels, errMsg, sizeof(errMsg));
+    } else if (std::strcmp(fmtIn, "png") == 0) {
+        ok = decodePngBytes(inBytes, inLen, state.a, state.w, state.h, state.channels, errMsg, sizeof(errMsg));
+    } else {
+        ok = decodeWebPBytes(inBytes, inLen, state.a, state.w, state.h, state.channels, errMsg, sizeof(errMsg));
+    }
+    if (!ok) {
+        throwTypeError(globalObject, scope, makeString("bun:image.pipeline: decode: "_s, String::fromUTF8(errMsg)));
+        return {};
+    }
+
+    // Run ops in order.
+    auto* opsObj = asObject(opsArg);
+    JSValue lengthVal = opsObj->get(globalObject, vm.propertyNames->length);
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!lengthVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: ops must have .length"_s);
+        return {};
+    }
+    const uint32_t numOps = lengthVal.toUInt32(globalObject);
+    for (uint32_t i = 0; i < numOps; i++) {
+        JSValue opVal = opsObj->get(globalObject, i);
+        RETURN_IF_EXCEPTION(scope, {});
+        if (!opVal.isObject()) {
+            throwTypeError(globalObject, scope, makeString("bun:image.pipeline: ops["_s, String::number(i), "] must be an object"_s));
+            return {};
+        }
+        if (!applyPipelineOp(globalObject, scope, state, asObject(opVal), errMsg, sizeof(errMsg))) {
+            throwTypeError(globalObject, scope, makeString("bun:image.pipeline: "_s, String::fromUTF8(errMsg)));
+            return {};
+        }
+    }
+
+    // Encode once.
+    auto* outOpts = asObject(outArg);
+    JSValue formatVal = outOpts->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!formatVal.isString()) {
+        throwTypeError(globalObject, scope, "bun:image.pipeline: out.format is required"_s);
+        return {};
+    }
+    auto outFormatStr = formatVal.toWTFString(globalObject).utf8();
+    const char* outFormat = outFormatStr.data();
+    int quality = 85;
+    JSValue qVal = outOpts->get(globalObject, JSC::Identifier::fromString(vm, "quality"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (qVal.isNumber()) quality = qVal.toInt32(globalObject);
+    bool lossless = false;
+    JSValue lossVal = outOpts->get(globalObject, JSC::Identifier::fromString(vm, "lossless"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (lossVal.isBoolean()) lossless = lossVal.asBoolean();
+
+    std::vector<uint8_t> outBytes;
+    bool encOk = false;
+    if (std::strcmp(outFormat, "jpeg") == 0) {
+        encOk = encodeJpegBytes(state.current(), state.w, state.h, state.channels, quality, outBytes, errMsg, sizeof(errMsg));
+    } else if (std::strcmp(outFormat, "png") == 0) {
+        encOk = encodePngBytes(state.current(), state.w, state.h, state.channels, outBytes, errMsg, sizeof(errMsg));
+    } else if (std::strcmp(outFormat, "webp") == 0) {
+        encOk = encodeWebPBytes(state.current(), state.w, state.h, state.channels, quality, lossless, outBytes, errMsg, sizeof(errMsg));
+    } else {
+        throwTypeError(globalObject, scope, makeString("bun:image.pipeline: unknown out.format "_s, formatVal.toWTFString(globalObject)));
+        return {};
+    }
+    if (!encOk) {
+        throwTypeError(globalObject, scope, makeString("bun:image.pipeline: encode: "_s, String::fromUTF8(errMsg)));
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    auto* result = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes.size());
+    RETURN_IF_EXCEPTION(scope, {});
+    if (outBytes.size() > 0) std::memcpy(result->vector(), outBytes.data(), outBytes.size());
+    return JSValue::encode(result);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -3000,6 +3353,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "boxBlur"_s), 2,
         functionBoxBlur, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "runPipeline"_s), 3,
+        functionRunPipeline, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

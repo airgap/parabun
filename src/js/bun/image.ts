@@ -304,6 +304,117 @@ function threshold(img: DecodedImage, opts?: ThresholdOptions): DecodedImage {
   return native.threshold(img, opts ?? {});
 }
 
+// ─── Pipeline (chained, fused decode → transforms → encode) ──────────────
+// The big end-to-end perf win. Each chained method just records an op
+// descriptor; no actual work happens until `.toBytes()` is called. At
+// that point the C++ side runs the entire flow in a single call —
+// decode once, ping-pong intermediate pixel buffers across all
+// transforms, encode once. No JS round-trips, no redundant
+// materialization between ops.
+//
+//   const out = image.pipeline(bytes)
+//     .resize({ width: 800, height: 600 })
+//     .blur({ radius: 5 })
+//     .toBytes({ format: "jpeg", quality: 85 });
+//
+// On the bench cases the chained pipeline closes the end-to-end
+// gap with Sharp / libvips: their lazy graph shares buffers across
+// decode → transform → encode, ours now does the same in C++.
+
+type PipelineOp =
+  | { kind: "resize"; width: number; height: number; kernel?: "bilinear" | "lanczos" }
+  | { kind: "blur"; radius: number }
+  | { kind: "boxBlur"; radius: number }
+  | { kind: "sharpen"; radius?: number; amount?: number }
+  | { kind: "rotate"; degrees: 90 | 180 | 270 }
+  | { kind: "flip"; axis: "horizontal" | "vertical" }
+  | { kind: "crop"; x: number; y: number; width: number; height: number }
+  | { kind: "adjust"; brightness?: number; contrast?: number; saturation?: number }
+  | { kind: "invert" }
+  | { kind: "threshold"; value?: number }
+  | { kind: "toGrayscale" };
+
+type EncodeOutOptions = {
+  format: ImageFormat;
+  quality?: number;
+  lossless?: boolean;
+};
+
+class Pipeline {
+  #bytes: Uint8Array;
+  #ops: PipelineOp[];
+
+  constructor(bytes: Uint8Array) {
+    if (!(bytes instanceof Uint8Array)) {
+      throw new TypeError("bun:image.pipeline: input must be a Uint8Array");
+    }
+    this.#bytes = bytes;
+    this.#ops = [];
+  }
+
+  resize(opts: ResizeOptions): this {
+    this.#ops.push({ kind: "resize", width: opts.width, height: opts.height, kernel: opts.kernel });
+    return this;
+  }
+  blur(opts: BlurOptions): this {
+    this.#ops.push({ kind: "blur", radius: opts.radius });
+    return this;
+  }
+  boxBlur(opts: BoxBlurOptions): this {
+    this.#ops.push({ kind: "boxBlur", radius: opts.radius });
+    return this;
+  }
+  sharpen(opts?: SharpenOptions): this {
+    this.#ops.push({ kind: "sharpen", radius: opts?.radius, amount: opts?.amount });
+    return this;
+  }
+  rotate(opts: RotateOptions): this {
+    this.#ops.push({ kind: "rotate", degrees: opts.degrees });
+    return this;
+  }
+  flip(opts: FlipOptions): this {
+    this.#ops.push({ kind: "flip", axis: opts.axis });
+    return this;
+  }
+  crop(opts: CropOptions): this {
+    this.#ops.push({ kind: "crop", x: opts.x, y: opts.y, width: opts.width, height: opts.height });
+    return this;
+  }
+  adjust(opts: AdjustOptions): this {
+    this.#ops.push({
+      kind: "adjust",
+      brightness: opts.brightness,
+      contrast: opts.contrast,
+      saturation: opts.saturation,
+    });
+    return this;
+  }
+  invert(): this {
+    this.#ops.push({ kind: "invert" });
+    return this;
+  }
+  threshold(opts?: ThresholdOptions): this {
+    this.#ops.push({ kind: "threshold", value: opts?.value });
+    return this;
+  }
+  toGrayscale(): this {
+    this.#ops.push({ kind: "toGrayscale" });
+    return this;
+  }
+
+  /** Materialize the pipeline. Returns the encoded bytes. */
+  toBytes(opts: EncodeOutOptions): Uint8Array {
+    if (typeof opts !== "object" || opts === null || typeof opts.format !== "string") {
+      throw new TypeError("bun:image.pipeline.toBytes: opts must be { format, quality?, lossless? }");
+    }
+    return native.runPipeline(this.#bytes, this.#ops, opts);
+  }
+}
+
+function pipeline(bytes: Uint8Array): Pipeline {
+  return new Pipeline(bytes);
+}
+
 export default {
   decode,
   encode,
@@ -321,4 +432,6 @@ export default {
   composite,
   invert,
   threshold,
+  pipeline,
+  Pipeline,
 };
