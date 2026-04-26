@@ -803,6 +803,71 @@ void gaussianBlur(
     });
 }
 
+// ─── Box blur via summed-area tables ─────────────────────────────────────
+// Builds a per-channel summed-area table (integral image) once, then
+// answers the (2r+1)² box-sum at each output pixel in O(1) via four
+// SAT lookups. The whole op is O(W·H) regardless of radius — Sharp /
+// libvips's separable Gaussian scales as O(W·H·radius), so this wins
+// dominantly once the kernel grows. At radius=20 we expect ~10-20×
+// over Sharp; at radius=5 it's still 2-4×. Visual result is a uniform-
+// weighted box average (not a true Gaussian), which is fine for soft
+// blur effects but not for blur-then-subtract operations like
+// unsharp-mask. Callers who need a Gaussian use image.blur instead.
+//
+// SAT element type: u32 here. Risk is overflow at extreme image sizes —
+// max value across the full SAT is 255·W·H, which exceeds 2^32 only
+// for white images >= 16384² pixels. For realistic photo content
+// (mean luma ≈ 128) the headroom is 2× larger.
+
+void boxBlurRGBA(
+    const uint8_t* src, uint32_t w, uint32_t h, uint8_t* dst, int radius)
+{
+    const uint32_t sw = w + 1;
+    const uint32_t sh = h + 1;
+    const size_t satElems = static_cast<size_t>(sw) * sh;
+    // One scratch SAT, reused across the four channels.
+    std::vector<uint32_t> sat(satElems);
+
+    for (uint32_t c = 0; c < 4; c++) {
+        // Build SAT — row prefix-sum then column prefix-sum, single
+        // pass each (row j depends on row j-1's column-prefix output).
+        std::memset(sat.data(), 0, satElems * sizeof(uint32_t));
+        for (uint32_t y = 0; y < h; y++) {
+            uint32_t rowSum = 0;
+            const uint8_t* srcRow = src + static_cast<size_t>(y) * w * 4 + c;
+            uint32_t* satRow = sat.data() + static_cast<size_t>(y + 1) * sw + 1;
+            const uint32_t* satRowAbove = sat.data() + static_cast<size_t>(y) * sw + 1;
+            for (uint32_t x = 0; x < w; x++) {
+                rowSum += srcRow[x * 4];
+                satRow[x] = satRowAbove[x] + rowSum;
+            }
+        }
+
+        // Apply the box average. Output rows are independent → parallel.
+        const size_t cost = static_cast<size_t>(w) * h * 4;
+        parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+            for (uint32_t y = y0; y < y1; y++) {
+                const int32_t yi = static_cast<int32_t>(y);
+                const int32_t y1c = std::max(0, yi - radius);
+                const int32_t y2c = std::min(static_cast<int32_t>(h) - 1, yi + radius);
+                const uint32_t* satY2 = sat.data() + static_cast<size_t>(y2c + 1) * sw;
+                const uint32_t* satY1 = sat.data() + static_cast<size_t>(y1c) * sw;
+                const int32_t yCount = y2c - y1c + 1;
+                uint8_t* dstRow = dst + static_cast<size_t>(y) * w * 4 + c;
+                for (uint32_t x = 0; x < w; x++) {
+                    const int32_t xi = static_cast<int32_t>(x);
+                    const int32_t x1c = std::max(0, xi - radius);
+                    const int32_t x2c = std::min(static_cast<int32_t>(w) - 1, xi + radius);
+                    const uint32_t sum = satY2[x2c + 1] - satY1[x2c + 1] - satY2[x1c] + satY1[x1c];
+                    const int32_t count = yCount * (x2c - x1c + 1);
+                    // Round-to-nearest for the integer divide.
+                    dstRow[x * 4] = static_cast<uint8_t>((sum + count / 2) / count);
+                }
+            }
+        });
+    }
+}
+
 // ─── Unsharp-mask sharpen ──────────────────────────────────────────────────
 // Standard formulation:  sharpened = input + (input − blur(input)) × amount
 // — extract the high-frequency detail by subtracting a low-pass copy, then
@@ -2642,6 +2707,89 @@ JSC_DEFINE_HOST_FUNCTION(functionThreshold,
     return JSValue::encode(obj);
 }
 
+// boxBlur(img, { radius }) → DecodedImage. RGBA only (channels=4).
+// O(1) per output pixel via summed-area tables; speed independent of
+// radius, dominant over Gaussian for r ≥ 5.
+JSC_DEFINE_HOST_FUNCTION(functionBoxBlur,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject() || !optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: expected (img, { radius })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    auto* optsObj = asObject(optsArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: only 4-channel RGBA inputs supported in v1"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    JSValue radiusVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "radius"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!radiusVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: opts.radius is required (number)"_s);
+        return {};
+    }
+    const int radius = radiusVal.toInt32(globalObject);
+    if (radius < 0 || radius > 1000) {
+        throwTypeError(globalObject, scope, "bun:image.boxBlur: radius must be in [0, 1000]"_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (radius == 0) {
+        std::memcpy(dstArr->vector(), srcRaw, outBytes);
+    } else {
+        boxBlurRGBA(static_cast<const uint8_t*>(srcRaw), w, h,
+            static_cast<uint8_t*>(dstArr->vector()), radius);
+    }
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -2691,6 +2839,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "threshold"_s), 2,
         functionThreshold, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "boxBlur"_s), 2,
+        functionBoxBlur, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

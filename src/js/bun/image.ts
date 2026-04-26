@@ -141,6 +141,32 @@ function resize(img: DecodedImage, opts: ResizeOptions): DecodedImage {
   return native.resize(img, opts);
 }
 
+type BoxBlurOptions = {
+  /** Box-blur radius in pixels. 0 = passthrough. */
+  radius: number;
+};
+
+// Box blur via summed-area tables. Speed is independent of radius —
+// the kernel is O(W·H) regardless of how big the radius is, while
+// Sharp's `.blur(sigma)` and our own `image.blur` scale linearly with
+// radius. For radius ≥ 5 this beats Sharp dominantly; the trade-off
+// is uniform-weighted box averaging, not a true Gaussian (visually
+// similar for soft-blur effects, not appropriate for unsharp-mask
+// or feature-preserving work).
+//
+// RGBA only in v1. The native kernel uses u32 SATs which can overflow
+// on uniform-luminance images larger than ~16384²; realistic photo
+// content has 2× more headroom.
+function boxBlur(img: DecodedImage, opts: BoxBlurOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.boxBlur: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:image.boxBlur: opts must be { radius }");
+  }
+  return native.boxBlur(img, opts);
+}
+
 function blur(img: DecodedImage, opts: BlurOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
     throw new TypeError("bun:image.blur: img must be the object returned from decode()");
@@ -283,6 +309,7 @@ export default {
   encode,
   resize,
   blur,
+  boxBlur,
   sharpen,
   edgeDetect,
   rotate,

@@ -556,6 +556,129 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("boxBlur radius 0 returns the input unchanged", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-boxblur-zero",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const out = image.boxBlur(orig, { radius: 0 });
+        const equal = out.data.length === orig.data.length && out.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal, "dims", out.width, out.height, out.channels);
+      `,
+    );
+    expect(stdout).toBe("byteEqual true dims 4 4 4");
+    expect(exitCode).toBe(0);
+  });
+
+  it("boxBlur on a uniform image is identity", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-boxblur-uniform",
+      `
+        import image from "bun:image";
+        // 32×32 RGBA, all pixels (100, 150, 200, 255).
+        const w = 32, h = 32;
+        const data = new Uint8Array(w * h * 4);
+        for (let i = 0; i < w * h; i++) {
+          data[i*4+0] = 100; data[i*4+1] = 150; data[i*4+2] = 200; data[i*4+3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const out = image.boxBlur(orig, { radius: 5 });
+        // A box blur of a uniform image must produce the same uniform image.
+        let allMatch = true;
+        for (let i = 0; i < w * h; i++) {
+          if (out.data[i*4+0] !== 100 || out.data[i*4+1] !== 150 ||
+              out.data[i*4+2] !== 200 || out.data[i*4+3] !== 255) { allMatch = false; break; }
+        }
+        console.log("uniform.preserved", allMatch);
+      `,
+    );
+    expect(stdout).toBe("uniform.preserved true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("boxBlur smooths a high-contrast edge — variance drops", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-boxblur-smooths",
+      `
+        import image from "bun:image";
+        // 32×32 alternating columns 0/255 — same fixture as the gaussian
+        // blur smooth test, so we know the variance characteristic.
+        const w = 32, h = 32;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          const v = (x % 2 === 0) ? 0 : 255;
+          data[off] = v; data[off+1] = v; data[off+2] = v; data[off+3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        function rVariance(img) {
+          const N = img.width * img.height;
+          let sum = 0;
+          for (let i = 0; i < N; i++) sum += img.data[i * 4];
+          const mean = sum / N;
+          let var_ = 0;
+          for (let i = 0; i < N; i++) { const d = img.data[i * 4] - mean; var_ += d * d; }
+          return var_ / N;
+        }
+        const inVar = rVariance(orig);
+        const blurred = image.boxBlur(orig, { radius: 5 });
+        const outVar = rVariance(blurred);
+        console.log("inVar.gt.10000", inVar > 10000);
+        console.log("outVar.lt.1000", outVar < 1000);
+        console.log("dims", blurred.width, blurred.height, blurred.channels);
+      `,
+    );
+    expect(stdout).toBe(["inVar.gt.10000 true", "outVar.lt.1000 true", "dims 32 32 4"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("boxBlur output dims and alpha channel are preserved", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-boxblur-shape",
+      `
+        import image from "bun:image";
+        const w = 64, h = 64;
+        const data = new Uint8Array(w * h * 4);
+        for (let i = 0; i < w * h; i++) {
+          data[i*4+0] = (i * 17) & 0xff;
+          data[i*4+1] = (i * 53) & 0xff;
+          data[i*4+2] = (i * 91) & 0xff;
+          data[i*4+3] = 200;  // fixed non-trivial alpha
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const out = image.boxBlur(orig, { radius: 3 });
+        // Box-averaging a constant alpha = same constant.
+        let alphaOk = true;
+        for (let i = 0; i < w * h; i++) {
+          if (out.data[i*4+3] !== 200) { alphaOk = false; break; }
+        }
+        console.log("dims", out.width, out.height, out.channels);
+        console.log("alphaPreserved", alphaOk);
+      `,
+    );
+    expect(stdout).toBe(["dims 64 64 4", "alphaPreserved true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("boxBlur rejects non-RGBA inputs in v1", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-boxblur-channels",
+      `
+        import image from "bun:image";
+        const orig = { data: new Uint8Array(64 * 64), width: 64, height: 64, channels: 1, format: "png" };
+        try {
+          image.boxBlur(orig, { radius: 5 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("4-channel"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("blur with radius 0 returns the input unchanged", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-zero",
