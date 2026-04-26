@@ -934,6 +934,88 @@ function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
   return out;
 }
 
+// ─── Normalize ─────────────────────────────────────────────────────────────
+// Whole-buffer one-shot leveling. Different intent from `Gain` (streaming
+// AGC): normalize is what you reach for when you have a complete recording
+// and want to bring its peak (or RMS) to a target level with a single
+// uniform scaling factor — music files, voice memos, sample triggers,
+// anywhere "level the whole thing now" beats "track the envelope".
+//
+// Modes:
+//   "peak" (default) — gain = target / max(|x|). Output's peak is
+//                      exactly `target`; quiet sections stay
+//                      proportionally quiet. Distortion-free unless
+//                      the caller picks target > 1 (which gets clipped).
+//   "rms"            — gain = target / rms(x). Output's RMS is `target`,
+//                      but peaks may exceed 1.0 — those get hard-clipped.
+//                      Trade peak distortion for matched perceived
+//                      loudness across files.
+
+type NormalizeOptions = {
+  /**
+   * Target peak (or RMS) level in linear, in (0, 1]. Default 0.95 —
+   * leaves a small headroom under unity so a downstream encoder doesn't
+   * have to deal with samples right at the edge.
+   */
+  target?: number;
+  /** "peak" (default) leaves dynamics intact; "rms" matches loudness. */
+  mode?: "peak" | "rms";
+};
+
+function normalize(samples: Float32Array, opts: NormalizeOptions = {}): Float32Array {
+  if (!(samples instanceof Float32Array)) {
+    throw new TypeError("bun:audio.normalize: samples must be a Float32Array");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:audio.normalize: opts must be an object");
+  }
+  const target = opts.target ?? 0.95;
+  const mode = opts.mode ?? "peak";
+  if (!(target > 0 && target <= 1) || !Number.isFinite(target)) {
+    throw new RangeError(`bun:audio.normalize: target must be in (0, 1]; got ${target}`);
+  }
+  if (mode !== "peak" && mode !== "rms") {
+    throw new TypeError(`bun:audio.normalize: mode must be "peak" or "rms"; got ${JSON.stringify(mode)}`);
+  }
+  const N = samples.length;
+  const out = new Float32Array(N);
+  if (N === 0) return out;
+
+  let metric: number;
+  if (mode === "peak") {
+    let maxAbs = 0;
+    for (let i = 0; i < N; i++) {
+      const v = samples[i];
+      const a = v < 0 ? -v : v;
+      if (a > maxAbs) maxAbs = a;
+    }
+    metric = maxAbs;
+  } else {
+    let sumSq = 0;
+    for (let i = 0; i < N; i++) {
+      const v = samples[i];
+      sumSq += v * v;
+    }
+    metric = Math.sqrt(sumSq / N);
+  }
+
+  if (metric === 0) {
+    // All-silent input — nothing to normalize. Return a fresh-buffer copy
+    // so caller mutations don't leak back into the input.
+    out.set(samples);
+    return out;
+  }
+
+  const gain = target / metric;
+  for (let i = 0; i < N; i++) {
+    let y = samples[i] * gain;
+    if (y > 1) y = 1;
+    else if (y < -1) y = -1;
+    out[i] = y;
+  }
+  return out;
+}
+
 // ─── Auto Gain Control ─────────────────────────────────────────────────────
 // Voice-call mics deliver wildly varying levels — distance from the mic,
 // room loudness, headset vs laptop builtin, you name it. AGC tracks the
@@ -1111,6 +1193,7 @@ export default {
   bandpass,
   notch,
   mix,
+  normalize,
   interleave,
   deinterleave,
   resample,

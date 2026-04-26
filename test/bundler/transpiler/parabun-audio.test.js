@@ -1354,6 +1354,123 @@ describe("bun:audio — mix", () => {
   });
 });
 
+describe("bun:audio — normalize", () => {
+  it("peak mode brings max(|x|) exactly to the target", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-norm-peak",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array([0.1, -0.2, 0.4, -0.05, 0.3]);
+        const out = audio.normalize(input, { target: 0.9, mode: "peak" });
+        let maxAbs = 0;
+        for (const v of out) if (Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+        // Within float-rounding of 0.9.
+        console.log("peakClose", Math.abs(maxAbs - 0.9) < 1e-5);
+        // Quiet sections still proportionally quiet — original 0.05 was
+        // 1/8 of the peak, output should be 1/8 of 0.9 = 0.1125.
+        const ratio = Math.abs(out[3]) / maxAbs;
+        console.log("ratioPreserved", Math.abs(ratio - 0.05 / 0.4) < 1e-5);
+      `,
+    );
+    expect(stdout).toBe(["peakClose true", "ratioPreserved true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rms mode brings rms(x) exactly to the target", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-norm-rms",
+      `
+        import audio from "bun:audio";
+        // 1 kHz sine at amplitude 0.05 — RMS = amp / sqrt(2) ≈ 0.0354.
+        const SR = 16000, N = 4096;
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) input[i] = 0.05 * Math.sin(2 * Math.PI * 1000 * i / SR);
+        const out = audio.normalize(input, { target: 0.5, mode: "rms" });
+        let sumSq = 0;
+        for (const v of out) sumSq += v * v;
+        const rms = Math.sqrt(sumSq / N);
+        // Within 0.5% of target — peaks may have clipped if target * gain > 1,
+        // but for 0.05 → 0.5 the peak gain is 10× → output peak ≈ 0.5, no clip.
+        console.log("rmsClose", Math.abs(rms - 0.5) / 0.5 < 0.005);
+      `,
+    );
+    expect(stdout).toBe("rmsClose true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("output is hard-clipped to [-1, 1] regardless of mode", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-norm-clip",
+      `
+        import audio from "bun:audio";
+        // Mostly quiet with one big spike — RMS-normalize aggressively, the
+        // spike will clip. Verify the hard-clip envelope is honored.
+        const input = new Float32Array(1000).fill(0.01);
+        input[500] = 0.95; // big spike
+        const out = audio.normalize(input, { target: 0.9, mode: "rms" });
+        let inRange = true;
+        for (const v of out) if (v > 1 || v < -1 || Number.isNaN(v)) { inRange = false; break; }
+        console.log("inRange", inRange);
+      `,
+    );
+    expect(stdout).toBe("inRange true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("all-silent input passes through unchanged (no divide-by-zero)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-norm-silent",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array(64); // all zeros
+        const out = audio.normalize(input, { target: 0.9 });
+        const allZero = out.every(v => v === 0);
+        const sameLen = out.length === input.length;
+        const sameRef = out === input;
+        console.log("allZero", allZero, "sameLen", sameLen, "sameRef", sameRef);
+      `,
+    );
+    expect(stdout).toBe("allZero true sameLen true sameRef false");
+    expect(exitCode).toBe(0);
+  });
+
+  it("empty input returns an empty Float32Array", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-norm-empty",
+      `
+        import audio from "bun:audio";
+        const out = audio.normalize(new Float32Array(0));
+        console.log("len", out.length, "ctor", out.constructor.name);
+      `,
+    );
+    expect(stdout).toBe("len 0 ctor Float32Array");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects out-of-range target and unknown mode", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-norm-bad-args",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array([0.1, 0.2, 0.3]);
+        let threw = 0;
+        for (const o of [
+          { target: 0 },
+          { target: 1.5 },
+          { target: -0.5 },
+          { target: NaN },
+          { mode: "lufs" },
+        ]) {
+          try { audio.normalize(input, o); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 5");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — Gain (AGC)", () => {
   it("brings a quiet sine wave up toward the target level", async () => {
     // Quiet 440 Hz sine at amplitude 0.01 → AGC should boost it toward
