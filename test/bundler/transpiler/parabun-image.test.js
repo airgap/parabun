@@ -513,6 +513,49 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("blur { gpu: true } produces the same shape as the CPU path", async () => {
+    // Numerical equivalence between the native C++ blur and the gpu-routed
+    // blur is approximate — the float / kernel-build paths differ slightly
+    // and the conv2D-based path uses a 2D kernel vs the native separable
+    // 1D pair, with edge-clamp padding instead of in-loop clamp. Verify
+    // dims + channels + reasonable agreement on the interior pixels
+    // (where edge handling doesn't dominate).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-blur-gpu-shape",
+      `
+        import image from "bun:image";
+        const w = 16, h = 16;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          data[off] = (x * 17) & 0xff;
+          data[off + 1] = (y * 23) & 0xff;
+          data[off + 2] = ((x + y) * 41) & 0xff;
+          data[off + 3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const cpu = image.blur(orig, { radius: 2 });
+        const gpu = image.blur(orig, { radius: 2, gpu: true });
+        console.log("dims", gpu.width, gpu.height, gpu.channels);
+        // Compare interior pixels (skip the first / last 2 rows / cols).
+        let maxDiff = 0;
+        for (let y = 2; y < h - 2; y++) {
+          for (let x = 2; x < w - 2; x++) {
+            for (let c = 0; c < 3; c++) {
+              const d = Math.abs(cpu.data[(y * w + x) * 4 + c] - gpu.data[(y * w + x) * 4 + c]);
+              if (d > maxDiff) maxDiff = d;
+            }
+          }
+        }
+        // Allow up to 2 LSB difference — both paths float-clamp to uint8.
+        console.log("interiorClose", maxDiff <= 2);
+        console.log("alphaPreserved", gpu.data.every((v, i) => i % 4 !== 3 || v === 255));
+      `,
+    );
+    expect(stdout).toBe(["dims 16 16 4", "interiorClose true", "alphaPreserved true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
   it("blur with radius 0 returns the input unchanged", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-zero",
