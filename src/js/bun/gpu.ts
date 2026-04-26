@@ -326,6 +326,77 @@ function cpuReduceF32(input: Float32Array, op: "sum" | "min" | "max"): number {
   return m;
 }
 
+// CPU argmin/argmax. Returns the *index* of the smallest/largest element.
+// Tie-break: first occurrence (i.e. the earliest index that holds the
+// extremum), matching numpy's argmin/argmax convention. NaN propagates by
+// returning the index of the first NaN — consistent with reduce's
+// "NaN-in → NaN-out" semantics: callers can chain `input[argMin] === NaN`
+// to detect contamination without re-scanning.
+//
+// Empty input throws — there is no meaningful "argmin of nothing" and
+// returning -1 would silently break compositional code.
+function cpuArgMinF32(input: Float32Array): number {
+  const n = input.length;
+  if (n === 0) throw new RangeError("bun:gpu.argMin: empty input has no extremum");
+  if (Number.isNaN(input[0])) return 0;
+  let mi = 0;
+  let m = input[0];
+  for (let i = 1; i < n; i++) {
+    const v = input[i];
+    if (Number.isNaN(v)) return i;
+    if (v < m) {
+      m = v;
+      mi = i;
+    }
+  }
+  return mi;
+}
+
+function cpuArgMaxF32(input: Float32Array): number {
+  const n = input.length;
+  if (n === 0) throw new RangeError("bun:gpu.argMax: empty input has no extremum");
+  if (Number.isNaN(input[0])) return 0;
+  let mi = 0;
+  let m = input[0];
+  for (let i = 1; i < n; i++) {
+    const v = input[i];
+    if (Number.isNaN(v)) return i;
+    if (v > m) {
+      m = v;
+      mi = i;
+    }
+  }
+  return mi;
+}
+
+function cpuArgMinU32(input: Uint32Array): number {
+  const n = input.length;
+  if (n === 0) throw new RangeError("bun:gpu.argMin: empty input has no extremum");
+  let mi = 0;
+  let m = input[0];
+  for (let i = 1; i < n; i++) {
+    if (input[i] < m) {
+      m = input[i];
+      mi = i;
+    }
+  }
+  return mi;
+}
+
+function cpuArgMaxU32(input: Uint32Array): number {
+  const n = input.length;
+  if (n === 0) throw new RangeError("bun:gpu.argMax: empty input has no extremum");
+  let mi = 0;
+  let m = input[0];
+  for (let i = 1; i < n; i++) {
+    if (input[i] > m) {
+      m = input[i];
+      mi = i;
+    }
+  }
+  return mi;
+}
+
 function cpuReduceU32(input: Uint32Array, op: "sum" | "min" | "max"): number {
   const n = input.length;
   if (op === "sum") {
@@ -768,6 +839,40 @@ function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
   return cpuReduceF32(aV, op);
 }
 
+// Index of the smallest element. Tie-break: first occurrence. NaN in the
+// input returns the index of the first NaN (consistent with reduce's NaN
+// propagation). Empty input throws RangeError.
+//
+// Useful for top-1 selection, peak-finding, and any "which index won" query.
+function argMin(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): number {
+  if (input instanceof Uint32Array) return cpuArgMinU32(input);
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.argMin: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const a = unwrapGpuArg(input as any);
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  return cpuArgMinF32(aV);
+}
+
+// Index of the largest element. Same tie-break / NaN / empty rules as argMin.
+function argMax(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): number {
+  if (input instanceof Uint32Array) return cpuArgMaxU32(input);
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.argMax: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const a = unwrapGpuArg(input as any);
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  return cpuArgMaxF32(aV);
+}
+
 // Page-aligned typed array suitable for zero-copy staging into the active
 // backend's device memory. On Metal, alloc()'d matrices take the NOCOPY
 // dispatch path in matVec — see bench/parabun-metal-zerocopy/README.md for
@@ -899,6 +1004,8 @@ export default {
   conv2D,
   scan,
   reduce,
+  argMin,
+  argMax,
   simdMap,
   alloc,
   isAligned,
