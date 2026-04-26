@@ -44,6 +44,15 @@ type EncodeOptions = {
 type ResizeOptions = {
   width: number;
   height: number;
+  /**
+   * Resampling algorithm.
+   *   "bilinear" — fast, smooth (default). Good for upscaling, fine for
+   *               small-ratio downscaling.
+   *   "lanczos"  — sharper, ~3-4× slower. Strongly preferred for
+   *               significant downscaling (≥ 2×) or when edge sharpness
+   *               matters. Standard Lanczos-3.
+   */
+  kernel?: "bilinear" | "lanczos";
 };
 
 function decode(bytes: Uint8Array): DecodedImage {

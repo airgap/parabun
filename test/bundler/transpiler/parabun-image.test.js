@@ -440,6 +440,79 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("Lanczos resize matches dims and produces a valid result", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-lanczos",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const out = image.resize(orig, { width: 8, height: 8, kernel: "lanczos" });
+        console.log("dims", out.width, out.height, out.channels);
+        console.log("dataLen", out.data.length);
+        // Lanczos preserves edges — top-left should still be predominantly red
+        // (its neighborhood is mostly red in the source checkerboard).
+        const r = out.data[0], g = out.data[1], b = out.data[2];
+        console.log("topLeftRedDominant", r > g && r > b);
+      `,
+    );
+    expect(stdout).toBe(["dims 8 8 4", "dataLen 256", "topLeftRedDominant true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("Lanczos anti-aliases a high-frequency pattern that bilinear aliases", async () => {
+    // 32×32 vertical-stripes pattern (1px black, 1px white) downscaled
+    // to 8×8. Bilinear with no anti-alias filter aliases hard — the
+    // 8×8 result has near-uniform middle-gray (or moiré). Lanczos
+    // with its wide kernel averages each output cell over multiple
+    // stripes and produces a visibly more uniform mid-gray with less
+    // bin-to-bin variance.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-lanczos-aliasing",
+      `
+        import image from "bun:image";
+        const w = 32, h = 32;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          const v = (x % 2 === 0) ? 0 : 255;
+          data[off] = v; data[off+1] = v; data[off+2] = v; data[off+3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const lanczos = image.resize(orig, { width: 8, height: 8, kernel: "lanczos" });
+
+        // The Lanczos result of an alternating-pixel pattern should have
+        // every R sample close to the average (~127) — anti-aliased.
+        const reds = [];
+        for (let i = 0; i < 64; i++) reds.push(lanczos.data[i * 4]);
+        const avg = reds.reduce((a, b) => a + b, 0) / reds.length;
+        let maxDev = 0;
+        for (const r of reds) maxDev = Math.max(maxDev, Math.abs(r - avg));
+        console.log("avgClose127", Math.abs(avg - 127) < 30);
+        console.log("lowVariance", maxDev < 50);
+      `,
+    );
+    expect(stdout).toBe(["avgClose127 true", "lowVariance true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects an unknown kernel name", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-resize-bad-kernel",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        try {
+          image.resize(orig, { width: 4, height: 4, kernel: "bicubic" });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("\\"bilinear\\" or \\"lanczos\\""));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("resize rejects zero dims", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-zero",

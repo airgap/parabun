@@ -322,6 +322,143 @@ bool encodeWebPBytes(
     return true;
 }
 
+// ─── Lanczos resize ────────────────────────────────────────────────────────
+// Windowed-sinc resampling — the de-facto standard for high-quality
+// image scaling (Pillow, ImageMagick, GIMP all default to it for
+// downsampling). Sharper than bilinear at edges, especially when
+// shrinking; preserves more detail at the cost of running ~3-4× the
+// per-pixel ops. Separable: a horizontal 1D Lanczos pass followed by
+// a vertical one, both with the same kernel.
+
+namespace {
+
+float sinc(float x)
+{
+    if (std::abs(x) < 1e-7f) return 1.0f;
+    const float pix = static_cast<float>(M_PI) * x;
+    return std::sin(pix) / pix;
+}
+
+// Lanczos kernel: L(x) = sinc(x) * sinc(x/a) for |x| < a, else 0.
+// `a` (radius) = 3 gives the widely-used Lanczos-3.
+float lanczosWeight(float x, int a)
+{
+    if (x < 0) x = -x;
+    if (x >= static_cast<float>(a)) return 0.0f;
+    return sinc(x) * sinc(x / static_cast<float>(a));
+}
+
+// Pre-computed per-output-column weights. For a fixed scale ratio, every
+// output column samples the same set of input columns relative to its
+// center. Pre-computing avoids re-evaluating sinc per pixel.
+struct LanczosTaps {
+    int a;
+    int outW;
+    std::vector<int> firstSource; // outW entries — first source col for each output col
+    std::vector<int> tapCount;    // outW entries — how many sources contribute
+    std::vector<float> weights;   // flattened, sum(tapCount) entries
+};
+
+LanczosTaps buildLanczosTaps(uint32_t inLen, uint32_t outLen, int radius)
+{
+    LanczosTaps t;
+    t.a = radius;
+    t.outW = static_cast<int>(outLen);
+    t.firstSource.resize(outLen);
+    t.tapCount.resize(outLen);
+    const float ratio = static_cast<float>(inLen) / static_cast<float>(outLen);
+    // Down-scaling case: stretch the kernel by `ratio` so it averages over
+    // the larger input footprint. Up-scaling uses ratio = 1 (kernel
+    // operates on integer-spaced input pixels directly).
+    const float filterScale = (outLen < inLen) ? ratio : 1.0f;
+    const float invFilterScale = 1.0f / filterScale;
+    const float support = static_cast<float>(radius) * filterScale;
+
+    for (uint32_t o = 0; o < outLen; o++) {
+        const float center = (static_cast<float>(o) + 0.5f) * ratio - 0.5f;
+        int first = static_cast<int>(std::ceil(center - support));
+        int last = static_cast<int>(std::floor(center + support));
+        if (first < 0) first = 0;
+        if (last >= static_cast<int>(inLen)) last = static_cast<int>(inLen) - 1;
+        const int n = std::max(0, last - first + 1);
+
+        float sum = 0;
+        std::vector<float> ws(n);
+        for (int i = 0; i < n; i++) {
+            const float x = (static_cast<float>(first + i) - center) * invFilterScale;
+            ws[i] = lanczosWeight(x, radius);
+            sum += ws[i];
+        }
+        // Normalize so the kernel has unit DC gain — keeps brightness stable.
+        if (sum != 0) {
+            for (int i = 0; i < n; i++) ws[i] /= sum;
+        }
+
+        t.firstSource[o] = first;
+        t.tapCount[o] = n;
+        for (int i = 0; i < n; i++) t.weights.push_back(ws[i]);
+    }
+    return t;
+}
+
+} // anonymous namespace
+
+void resizeLanczos(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels,
+    uint8_t* dst, uint32_t dw, uint32_t dh, int radius = 3)
+{
+    // Pass 1: horizontal — produces a sw_collapsed × sh × channels float buffer.
+    // We use float for the intermediate so summing many low-weight taps
+    // doesn't lose precision through repeated 0..255 clamps.
+    LanczosTaps hT = buildLanczosTaps(sw, dw, radius);
+    std::vector<float> mid(static_cast<size_t>(dw) * sh * channels);
+    {
+        size_t taps = 0;
+        for (uint32_t oy = 0; oy < sh; oy++) {
+            const uint8_t* srcRow = src + static_cast<size_t>(oy) * sw * channels;
+            float* midRow = mid.data() + static_cast<size_t>(oy) * dw * channels;
+            taps = 0;
+            for (uint32_t ox = 0; ox < dw; ox++) {
+                const int first = hT.firstSource[ox];
+                const int n = hT.tapCount[ox];
+                for (uint32_t c = 0; c < channels; c++) {
+                    float acc = 0;
+                    for (int i = 0; i < n; i++) {
+                        acc += static_cast<float>(srcRow[(first + i) * channels + c]) * hT.weights[taps + i];
+                    }
+                    midRow[ox * channels + c] = acc;
+                }
+                taps += n;
+            }
+        }
+    }
+
+    // Pass 2: vertical — turns dw × sh into dw × dh.
+    LanczosTaps vT = buildLanczosTaps(sh, dh, radius);
+    {
+        size_t taps = 0;
+        for (uint32_t oy = 0; oy < dh; oy++) {
+            const int first = vT.firstSource[oy];
+            const int n = vT.tapCount[oy];
+            uint8_t* dstRow = dst + static_cast<size_t>(oy) * dw * channels;
+            for (uint32_t ox = 0; ox < dw; ox++) {
+                for (uint32_t c = 0; c < channels; c++) {
+                    float acc = 0;
+                    for (int i = 0; i < n; i++) {
+                        const float* midRow = mid.data() + static_cast<size_t>(first + i) * dw * channels;
+                        acc += midRow[ox * channels + c] * vT.weights[taps + i];
+                    }
+                    int rounded = static_cast<int>(acc + 0.5f);
+                    if (rounded < 0) rounded = 0;
+                    if (rounded > 255) rounded = 255;
+                    dstRow[ox * channels + c] = static_cast<uint8_t>(rounded);
+                }
+            }
+            taps += n;
+        }
+    }
+}
+
 // ─── Bilinear resize ───────────────────────────────────────────────────────
 // CPU-side bilinear resampling. Each output pixel samples the four nearest
 // input pixels with bilinear weights derived from the half-pixel-centered
@@ -657,14 +794,36 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
     const uint32_t dw = static_cast<uint32_t>(dwSigned);
     const uint32_t dh = static_cast<uint32_t>(dhSigned);
 
+    // Pick resampling kernel: "bilinear" (default, fast) or "lanczos"
+    // (sharper, ~3-4× slower but better for downscaling especially).
+    JSValue kernelVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "kernel"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    bool useLanczos = false;
+    if (kernelVal.isString()) {
+        auto kStr = kernelVal.toWTFString(globalObject).utf8();
+        RETURN_IF_EXCEPTION(scope, {});
+        if (std::strcmp(kStr.data(), "lanczos") == 0) {
+            useLanczos = true;
+        } else if (std::strcmp(kStr.data(), "bilinear") != 0) {
+            throwTypeError(globalObject, scope, "bun:image.resize: opts.kernel must be \"bilinear\" or \"lanczos\""_s);
+            return {};
+        }
+    }
+
     auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(dw) * dh * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
     RETURN_IF_EXCEPTION(scope, {});
-    resizeBilinear(
-        static_cast<const uint8_t*>(srcRaw), sw, sh, channels,
-        static_cast<uint8_t*>(dstArr->vector()), dw, dh);
+    if (useLanczos) {
+        resizeLanczos(
+            static_cast<const uint8_t*>(srcRaw), sw, sh, channels,
+            static_cast<uint8_t*>(dstArr->vector()), dw, dh);
+    } else {
+        resizeBilinear(
+            static_cast<const uint8_t*>(srcRaw), sw, sh, channels,
+            static_cast<uint8_t*>(dstArr->vector()), dw, dh);
+    }
 
     auto* obj = JSC::constructEmptyObject(globalObject);
     obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
