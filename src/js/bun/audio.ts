@@ -26,6 +26,7 @@
 const TWO_PI = 2 * Math.PI;
 
 const native = $cpp("parabun_audio_codecs.cpp", "createParabunAudioCodecs");
+const io = $cpp("parabun_audio_io.cpp", "createParabunAudioIO");
 
 // FinalizationRegistry to back-stop forgotten close() calls. Holders that
 // drop without calling .close() leak their libopus state until GC; the
@@ -1354,13 +1355,6 @@ class Gain {
 // is 20 ms — short enough for VAD / wake-word, long enough that overruns
 // are rare under normal Pi load.
 
-const NOT_IMPLEMENTED_IO_MSG =
-  "bun:audio I/O is scaffolded — ALSA capture/playback land with embedded hardware bring-up";
-
-function todoIO(): never {
-  throw new Error(NOT_IMPLEMENTED_IO_MSG);
-}
-
 type AudioDevice = {
   /** Platform-specific identifier. ALSA: "hw:CARD,DEV" or "default". */
   id: string;
@@ -1435,16 +1429,121 @@ interface PlaybackStream extends AsyncDisposable {
   [Symbol.asyncDispose](): Promise<void>;
 }
 
-function listDevices(): Promise<DeviceList> {
-  todoIO();
+// FinalizationRegistry backstop: if a stream drops without close(), the
+// kernel PCM handle is freed at GC time rather than leaking.
+const pcmRegistry = new FinalizationRegistry<bigint>(handle => {
+  if (handle !== 0n) io.closePcm(handle);
+});
+
+function periodFromMs(periodMs: number, sampleRate: number): number {
+  // ALSA likes powers of two for periods on most hardware; round to the
+  // nearest power of two of the frame target. 20ms @ 48kHz = 960 → 1024.
+  const target = Math.max(64, Math.round((sampleRate * periodMs) / 1000));
+  let p = 1;
+  while (p < target) p <<= 1;
+  return p;
 }
 
-function capture(_opts?: CaptureOptions): Promise<CaptureStream> {
-  todoIO();
+async function listDevices(): Promise<DeviceList> {
+  return io.listDevices();
 }
 
-function play(_opts?: PlaybackOptions): Promise<PlaybackStream> {
-  todoIO();
+class CaptureStreamImpl implements CaptureStream {
+  #handle: bigint;
+  sampleRate: number;
+  channels: number;
+  device: string;
+  #periodFrames: number;
+
+  constructor(handle: bigint, device: string, sampleRate: number, channels: number, periodFrames: number) {
+    this.#handle = handle;
+    this.device = device;
+    this.sampleRate = sampleRate;
+    this.channels = channels;
+    this.#periodFrames = periodFrames;
+    pcmRegistry.register(this, handle, this);
+  }
+
+  async *frames(opts?: { frameMs?: number }): AsyncIterableIterator<CaptureFrame> {
+    const frames =
+      opts?.frameMs != null ? Math.max(64, Math.round((this.sampleRate * opts.frameMs) / 1000)) : this.#periodFrames;
+    while (this.#handle !== 0n) {
+      const r = io.captureRead(this.#handle, frames);
+      yield { samples: r.samples, timestampMs: r.timestampMs, overrun: r.overrun };
+    }
+  }
+
+  async close(): Promise<void> {
+    const h = this.#handle;
+    this.#handle = 0n;
+    if (h !== 0n) {
+      pcmRegistry.unregister(this);
+      io.closePcm(h);
+    }
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+}
+
+class PlaybackStreamImpl implements PlaybackStream {
+  #handle: bigint;
+  sampleRate: number;
+  channels: number;
+  device: string;
+
+  constructor(handle: bigint, device: string, sampleRate: number, channels: number) {
+    this.#handle = handle;
+    this.device = device;
+    this.sampleRate = sampleRate;
+    this.channels = channels;
+    pcmRegistry.register(this, handle, this);
+  }
+
+  async write(samples: Float32Array): Promise<void> {
+    if (this.#handle === 0n) throw new Error("playback stream is closed");
+    io.playbackWrite(this.#handle, samples);
+  }
+
+  async drain(): Promise<void> {
+    if (this.#handle !== 0n) io.playbackDrain(this.#handle);
+  }
+
+  async close(): Promise<void> {
+    const h = this.#handle;
+    this.#handle = 0n;
+    if (h !== 0n) {
+      pcmRegistry.unregister(this);
+      io.closePcm(h);
+    }
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+}
+
+async function capture(opts: CaptureOptions = {}): Promise<CaptureStream> {
+  const device = opts.device ?? "default";
+  const sampleRate = opts.sampleRate ?? 16000;
+  const channels = opts.channels ?? 1;
+  const periodMs = opts.periodMs ?? 20;
+  const bufferPeriods = opts.bufferPeriods ?? 4;
+  const periodFrames = periodFromMs(periodMs, sampleRate);
+  const handle: bigint = io.openCapture(device, sampleRate, channels, periodFrames, bufferPeriods);
+  return new CaptureStreamImpl(handle, device, sampleRate, channels, periodFrames);
+}
+
+async function play(opts: PlaybackOptions = {}): Promise<PlaybackStream> {
+  const device = opts.device ?? "default";
+  const sampleRate = opts.sampleRate ?? 48000;
+  const channels = opts.channels ?? 2;
+  const periodMs = opts.periodMs ?? 20;
+  const bufferPeriods = opts.bufferPeriods ?? 4;
+  const periodFrames = periodFromMs(periodMs, sampleRate);
+  const handle: bigint = io.openPlayback(device, sampleRate, channels, periodFrames, bufferPeriods);
+  return new PlaybackStreamImpl(handle, device, sampleRate, channels);
 }
 
 export default {

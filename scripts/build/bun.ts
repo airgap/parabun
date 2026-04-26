@@ -56,6 +56,10 @@ function systemLibs(cfg: Config): string[] {
 
   if (cfg.linux) {
     libs.push("-lc", "-lpthread", "-ldl");
+    // libasound: ALSA host audio I/O for bun:audio's capture/playback path.
+    // Universally available on desktop Linux, Pi OS, and JetPack — link
+    // dynamically (we don't vendor ALSA; the host's version is always right).
+    libs.push("-lasound");
     // libatomic: static by default (CI distros ship it), dynamic on Arch-like.
     // The static path needs to be the actual file path for lld to find it;
     // dynamic uses -l syntax. We emit what CMake does: bare libatomic.a gets
