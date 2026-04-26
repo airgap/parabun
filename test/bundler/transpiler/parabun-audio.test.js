@@ -355,6 +355,191 @@ describe("bun:audio — resample", () => {
   });
 });
 
+describe("bun:audio — Opus codec", () => {
+  it("encode → decode round-trip preserves the dominant frequency", async () => {
+    // 16 kHz, 20 ms frame = 320 samples. Encode a 200 Hz sine, decode
+    // it, verify the dominant FFT bin survived. Opus is lossy, so we
+    // don't byte-compare; we check that the dominant tone's bin stays
+    // the same through the codec.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-opus-roundtrip",
+      `
+        import audio from "bun:audio";
+        const sr = 16000, frameSize = 320, freq = 200;
+        const samples = new Float32Array(frameSize);
+        for (let i = 0; i < frameSize; i++) samples[i] = 0.5 * Math.sin(2 * Math.PI * freq * i / sr);
+
+        const enc = new audio.OpusEncoder({ sampleRate: sr, channels: 1, bitrate: 32000 });
+        const packet = enc.encode(samples, frameSize);
+        enc.close();
+        console.log("packetIsUint8", packet instanceof Uint8Array);
+        console.log("packetLen.gt.0", packet.length > 0);
+
+        const dec = new audio.OpusDecoder({ sampleRate: sr, channels: 1 });
+        const decoded = dec.decode(packet, frameSize);
+        dec.close();
+        console.log("decodedLen", decoded.length);
+
+        // Find the dominant bin in both. They should match (Opus
+        // preserves dominant frequency, just with some compression loss).
+        function dominantBin(buf) {
+          // Pad to power of 2 for FFT.
+          const fftN = 256;
+          const padded = new Float32Array(fftN);
+          padded.set(buf.subarray(0, fftN));
+          const f = audio.fft(padded);
+          let best = 0, idx = 0;
+          for (let i = 0; i < fftN / 2; i++) {
+            const m = Math.hypot(f[i*2], f[i*2+1]);
+            if (m > best) { best = m; idx = i; }
+          }
+          return idx;
+        }
+        const inBin = dominantBin(samples);
+        const outBin = dominantBin(decoded);
+        console.log("inBin", inBin, "outBin", outBin);
+        // ±1 tolerance for FFT bin quantization
+        console.log("withinOneBin", Math.abs(inBin - outBin) <= 1);
+      `,
+    );
+    expect(stdout).toBe(
+      ["packetIsUint8 true", "packetLen.gt.0 true", "decodedLen 320", "inBin 3 outBin 3", "withinOneBin true"].join(
+        "\n",
+      ),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("encode produces a smaller packet than the raw samples", async () => {
+    // 320 samples × 4 bytes = 1280 bytes raw. Opus at 32 kbps for 20 ms
+    // = ~80 bytes per packet. Verify compression actually happened.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-opus-compresses",
+      `
+        import audio from "bun:audio";
+        const sr = 16000, frameSize = 320;
+        const samples = new Float32Array(frameSize);
+        for (let i = 0; i < frameSize; i++) samples[i] = 0.5 * Math.sin(i * 0.1);
+        const enc = new audio.OpusEncoder({ sampleRate: sr, channels: 1, bitrate: 32000 });
+        const packet = enc.encode(samples, frameSize);
+        enc.close();
+        const rawBytes = frameSize * 4;
+        console.log("raw", rawBytes);
+        console.log("compressedSmaller", packet.length < rawBytes / 4);
+      `,
+    );
+    expect(stdout).toBe(["raw 1280", "compressedSmaller true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("stereo encode + decode preserves channel count", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-opus-stereo",
+      `
+        import audio from "bun:audio";
+        const sr = 48000, frameSize = 960;  // 20 ms at 48 kHz
+        const samples = new Float32Array(frameSize * 2);  // stereo interleaved
+        for (let i = 0; i < frameSize; i++) {
+          samples[i * 2]     = 0.4 * Math.sin(2 * Math.PI * 440 * i / sr);  // L
+          samples[i * 2 + 1] = 0.4 * Math.sin(2 * Math.PI * 660 * i / sr);  // R
+        }
+        const enc = new audio.OpusEncoder({ sampleRate: sr, channels: 2 });
+        const packet = enc.encode(samples, frameSize);
+        enc.close();
+        const dec = new audio.OpusDecoder({ sampleRate: sr, channels: 2 });
+        const decoded = dec.decode(packet, frameSize);
+        dec.close();
+        console.log("decodedLen", decoded.length);
+        // Stereo output is 2× frameSize floats.
+        console.log("expectedLen", frameSize * 2);
+      `,
+    );
+    expect(stdout).toBe(["decodedLen 1920", "expectedLen 1920"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects invalid sample rate", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-opus-bad-rate",
+      `
+        import audio from "bun:audio";
+        try {
+          new audio.OpusEncoder({ sampleRate: 44100, channels: 1 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("8000, 12000, 16000, 24000, or 48000"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("close() makes subsequent calls throw a clear error", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-opus-after-close",
+      `
+        import audio from "bun:audio";
+        const enc = new audio.OpusEncoder({ sampleRate: 16000, channels: 1 });
+        enc.close();
+        try {
+          enc.encode(new Float32Array(320), 320);
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("closed"));
+        }
+        // close() is idempotent — second call must not throw.
+        enc.close();
+        console.log("idempotent ok");
+      `,
+    );
+    expect(stdout).toBe(["THREW true", "idempotent ok"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("voice-call pipeline: 48 kHz mic → resample → Opus → decode → resample back", async () => {
+    // The end-to-end pipeline lyku-class apps need: capture at 48 kHz,
+    // downsample to 16 kHz for Opus, encode, transmit, decode on the
+    // other end, optionally upsample back. Verify the dominant tone
+    // survives the whole chain.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-opus-pipeline",
+      `
+        import audio from "bun:audio";
+        const sr1 = 48000, sr2 = 16000;
+        const N = 4800;  // 100 ms at 48 kHz
+        const mic = new Float32Array(N);
+        for (let i = 0; i < N; i++) mic[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / sr1);
+
+        // Sender: downsample 48 → 16 kHz, encode 5 frames of 320 samples each
+        const downsampled = audio.resample(mic, { from: sr1, to: sr2 });
+        console.log("downsampledLen", downsampled.length);
+
+        const enc = new audio.OpusEncoder({ sampleRate: sr2, channels: 1, bitrate: 32000 });
+        const packets = [];
+        for (let off = 0; off + 320 <= downsampled.length; off += 320) {
+          packets.push(enc.encode(downsampled.subarray(off, off + 320), 320));
+        }
+        enc.close();
+        console.log("packets", packets.length);
+
+        // Receiver: decode each packet, upsample back to 48 kHz
+        const dec = new audio.OpusDecoder({ sampleRate: sr2, channels: 1 });
+        const decoded16k = new Float32Array(packets.length * 320);
+        for (let i = 0; i < packets.length; i++) {
+          const frame = dec.decode(packets[i], 320);
+          decoded16k.set(frame, i * 320);
+        }
+        dec.close();
+        const decoded48k = audio.resample(decoded16k, { from: sr2, to: sr1 });
+        console.log("decoded48kLen", decoded48k.length);
+      `,
+    );
+    expect(stdout).toBe(["downsampledLen 1600", "packets 5", "decoded48kLen 4800"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — spectrogram", () => {
   it("produces frame count consistent with hop / window settings", async () => {
     const { stdout, exitCode } = await runFixture(

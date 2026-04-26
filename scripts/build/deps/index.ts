@@ -19,6 +19,7 @@ import { highway } from "./highway.ts";
 import { libarchive } from "./libarchive.ts";
 import { libdeflate } from "./libdeflate.ts";
 import { libjpegTurbo } from "./libjpeg-turbo.ts";
+import { libopus } from "./libopus.ts";
 import { libpng } from "./libpng.ts";
 import { libuv } from "./libuv.ts";
 import { libwebp } from "./libwebp.ts";
@@ -56,6 +57,7 @@ export const allDeps: readonly Dependency[] = [
   libpng,
   libjpegTurbo,
   libwebp,
+  libopus,
   cares,
   hdrhistogram,
   highway,
@@ -81,6 +83,7 @@ export {
   libarchive,
   libdeflate,
   libjpegTurbo,
+  libopus,
   libpng,
   libuv,
   libwebp,

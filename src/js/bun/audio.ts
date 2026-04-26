@@ -25,6 +25,18 @@
 
 const TWO_PI = 2 * Math.PI;
 
+const native = $cpp("parabun_audio_codecs.cpp", "createParabunAudioCodecs");
+
+// FinalizationRegistry to back-stop forgotten close() calls. Holders that
+// drop without calling .close() leak their libopus state until GC; the
+// registry runs at GC time and frees anything still alive.
+const opusEncoderRegistry = new FinalizationRegistry<bigint>(handle => {
+  if (handle !== 0n) native.destroyOpusEncoder(handle);
+});
+const opusDecoderRegistry = new FinalizationRegistry<bigint>(handle => {
+  if (handle !== 0n) native.destroyOpusDecoder(handle);
+});
+
 // ─── FFT (Cooley-Tukey radix-2, in-place) ──────────────────────────────────
 // Operates on an interleaved-complex Float32Array: [re0, im0, re1, im1, …].
 // Length must be a power of 2. `forward` controls sign of the twiddle factor;
@@ -408,6 +420,95 @@ function spectrogram(samples: Float32Array, opts: SpectrogramOptions): Float32Ar
   return frames;
 }
 
+// ─── Opus codec ────────────────────────────────────────────────────────────
+// libopus encoder + decoder, what every WebRTC client uses for voice. Class
+// wrappers hide the bigint-handle plumbing and back-stop forgotten close()
+// calls via FinalizationRegistry.
+//
+// Frame sizes (samples per encode/decode call) must match Opus's allowed
+// values FOR THE SAMPLE RATE. At 16 kHz: 40 / 80 / 160 / 320 / 640 / 960
+// (= 2.5 / 5 / 10 / 20 / 40 / 60 ms). At 48 kHz: 120 / 240 / 480 / 960 /
+// 1920 / 2880. 20 ms is the standard voice setting (320 @ 16 kHz, 960 @
+// 48 kHz). Voice / video calls typically pin frame size at the sender +
+// receiver and exchange Opus packets across the wire.
+
+type OpusEncoderOptions = {
+  /** 8000, 12000, 16000, 24000, or 48000 Hz. */
+  sampleRate: number;
+  /** 1 (mono) or 2 (stereo). */
+  channels: number;
+  /** Target bitrate in bits per second. Default ≈ 64000 (libopus picks). */
+  bitrate?: number;
+};
+
+class OpusEncoder {
+  #handle: bigint;
+  readonly sampleRate: number;
+  readonly channels: number;
+
+  constructor(opts: OpusEncoderOptions) {
+    this.sampleRate = opts.sampleRate;
+    this.channels = opts.channels;
+    this.#handle = native.createOpusEncoder(opts);
+    opusEncoderRegistry.register(this, this.#handle, this);
+  }
+
+  /**
+   * Encode one frame of samples into one Opus packet. `samples` must be
+   * `frameSize * channels` floats long; for stereo input, samples are
+   * interleaved (L, R, L, R, ...). Returns the encoded packet bytes.
+   */
+  encode(samples: Float32Array, frameSize: number): Uint8Array {
+    if (this.#handle === 0n) throw new Error("bun:audio OpusEncoder: closed");
+    return native.opusEncode(this.#handle, samples, frameSize);
+  }
+
+  /** Free the libopus state. Safe to call multiple times. */
+  close(): void {
+    if (this.#handle !== 0n) {
+      native.destroyOpusEncoder(this.#handle);
+      opusEncoderRegistry.unregister(this);
+      this.#handle = 0n;
+    }
+  }
+}
+
+type OpusDecoderOptions = {
+  sampleRate: number;
+  channels: number;
+};
+
+class OpusDecoder {
+  #handle: bigint;
+  readonly sampleRate: number;
+  readonly channels: number;
+
+  constructor(opts: OpusDecoderOptions) {
+    this.sampleRate = opts.sampleRate;
+    this.channels = opts.channels;
+    this.#handle = native.createOpusDecoder(opts);
+    opusDecoderRegistry.register(this, this.#handle, this);
+  }
+
+  /**
+   * Decode one Opus packet into one frame of samples. `frameSize` must
+   * match what the encoder used (Opus is frame-aligned). Returns
+   * `frameSize * channels` floats; stereo is interleaved.
+   */
+  decode(packet: Uint8Array, frameSize: number): Float32Array {
+    if (this.#handle === 0n) throw new Error("bun:audio OpusDecoder: closed");
+    return native.opusDecode(this.#handle, packet, frameSize, this.channels);
+  }
+
+  close(): void {
+    if (this.#handle !== 0n) {
+      native.destroyOpusDecoder(this.#handle);
+      opusDecoderRegistry.unregister(this);
+      this.#handle = 0n;
+    }
+  }
+}
+
 export default {
   fft,
   ifft,
@@ -416,4 +517,6 @@ export default {
   lowpass,
   resample,
   spectrogram,
+  OpusEncoder,
+  OpusDecoder,
 };
