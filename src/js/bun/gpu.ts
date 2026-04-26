@@ -240,6 +240,12 @@ interface Backend {
    * back to the CPU reference.
    */
   reduce?(input: Float32Array | GpuHandle, op: "sum" | "min" | "max"): number;
+  /**
+   * Bin-counting histogram. Returns a Uint32Array of length `bins`.
+   * `min` and `max` are pre-resolved by the public wrapper. Backends
+   * MAY implement this for device-side privatized histograms.
+   */
+  histogram?(input: Float32Array | GpuHandle, bins: number, min: number, max: number): Uint32Array;
   simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray;
   alloc(length: number, type: "f32" | "f64", opts?: { pinned?: boolean }): FArray;
   isAligned(arr: FArray): boolean;
@@ -324,6 +330,40 @@ function cpuReduceF32(input: Float32Array, op: "sum" | "min" | "max"): number {
     if (v > m) m = v;
   }
   return m;
+}
+
+// CPU histogram. Counts how many input values fall into each of `bins`
+// equal-width buckets across [min, max]. Values outside the range are
+// dropped (silent — callers can pass [reduce min, reduce max] to count
+// everything). NaN is also dropped.
+//
+// The top edge is inclusive: a value exactly equal to `max` lands in
+// the last bin instead of falling off the end. Without this, a uniform
+// 0..1 input with max=1 would always undercount the last bin by one.
+function cpuHistogramF32(input: Float32Array, bins: number, min: number, max: number): Uint32Array {
+  const out = new Uint32Array(bins);
+  if (min === max) {
+    // Degenerate range — every (in-range, non-NaN) value goes in bin 0.
+    let n = 0;
+    for (let i = 0; i < input.length; i++) {
+      const v = input[i];
+      if (Number.isNaN(v) || v !== min) continue;
+      n++;
+    }
+    out[0] = n;
+    return out;
+  }
+  const scale = bins / (max - min);
+  const last = bins - 1;
+  for (let i = 0; i < input.length; i++) {
+    const v = input[i];
+    if (Number.isNaN(v) || v < min || v > max) continue;
+    let bin = (v - min) * scale;
+    bin = bin | 0; // truncate toward 0 (input is ≥ 0 after the subtraction)
+    if (bin > last) bin = last; // top-edge inclusivity
+    out[bin]++;
+  }
+  return out;
 }
 
 // CPU argmin/argmax. Returns the *index* of the smallest/largest element.
@@ -530,6 +570,9 @@ const cpuBackend: Backend = {
   },
   reduce(input, op) {
     return cpuReduceF32(unwrapHandle(input as any) as Float32Array, op);
+  },
+  histogram(input, bins, min, max) {
+    return cpuHistogramF32(unwrapHandle(input as any) as Float32Array, bins, min, max);
   },
   simdMap(fn, a) {
     return simd.simdMap(fn, unwrapHandle(a) as any);
@@ -839,6 +882,60 @@ function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
   return cpuReduceF32(aV, op);
 }
 
+// Bin-counting histogram. Counts how many input values fall into each of
+// `bins` equal-width buckets across `[min, max]`. Returns a Uint32Array of
+// length `bins`. Values outside the range and NaN are dropped silently —
+// pass [reduce(input, "min"), reduce(input, "max")] (the default) to count
+// every finite value.
+//
+// The top edge is inclusive: a value exactly equal to `max` lands in the
+// last bin instead of being dropped. This matches numpy.histogram's
+// "right edge of last bin is closed" behavior.
+//
+// Common uses: image-pixel intensity distributions, telemetry latency
+// buckets, ML quantization step sizing, anomaly detection.
+function histogram(
+  input: Float32Array | GpuHandle | GpuFloat32Array,
+  bins: number,
+  opts?: { min?: number; max?: number },
+): Uint32Array {
+  if (!Number.isInteger(bins) || bins < 1) {
+    throw new RangeError(`bun:gpu.histogram: bins must be a positive integer; got ${bins}`);
+  }
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.histogram: input must be a Float32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const a = unwrapGpuArg(input as any);
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+
+  // Resolve range. If the caller didn't pin both edges we compute them via
+  // the existing reduce path — same Kahan-irrelevant min/max kernel that
+  // backends will eventually accelerate. NaN-only / empty inputs collapse
+  // to an all-zero histogram (no values to count).
+  const minOpt = opts?.min;
+  const maxOpt = opts?.max;
+  let min = minOpt !== undefined ? minOpt : cpuReduceF32(aV, "min");
+  let max = maxOpt !== undefined ? maxOpt : cpuReduceF32(aV, "max");
+  if (typeof min !== "number" || typeof max !== "number") {
+    throw new TypeError("bun:gpu.histogram: opts.min and opts.max must be numbers");
+  }
+  if (Number.isNaN(min) || Number.isNaN(max) || !Number.isFinite(min) || !Number.isFinite(max)) {
+    // NaN or ±Infinity range — nothing meaningful to bucket against.
+    return new Uint32Array(bins);
+  }
+  if (min > max) {
+    throw new RangeError(`bun:gpu.histogram: min ${min} must be <= max ${max}`);
+  }
+
+  const backend = resolveActive();
+  if (backend.histogram) return backend.histogram(a as any, bins, min, max);
+  return cpuHistogramF32(aV, bins, min, max);
+}
+
 // Index of the smallest element. Tie-break: first occurrence. NaN in the
 // input returns the index of the first NaN (consistent with reduce's NaN
 // propagation). Empty input throws RangeError.
@@ -1006,6 +1103,7 @@ export default {
   reduce,
   argMin,
   argMax,
+  histogram,
   simdMap,
   alloc,
   isAligned,
