@@ -420,6 +420,18 @@ function spectrogram(samples: Float32Array, opts: SpectrogramOptions): Float32Ar
   return frames;
 }
 
+// ─── MP3 decode (minimp3) ──────────────────────────────────────────────────
+// One-shot in-memory decode. Returns the same shape as readWav. MP3 is
+// decode-only — encode would pull in LAME with patent + license complexity
+// that's not v1.
+
+function decodeMp3(bytes: Uint8Array): WavData {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("bun:audio decodeMp3: expected Uint8Array");
+  }
+  return native.decodeMp3(bytes);
+}
+
 // ─── Opus codec ────────────────────────────────────────────────────────────
 // libopus encoder + decoder, what every WebRTC client uses for voice. Class
 // wrappers hide the bigint-handle plumbing and back-stop forgotten close()
@@ -517,6 +529,7 @@ export default {
   lowpass,
   resample,
   spectrogram,
+  decodeMp3,
   OpusEncoder,
   OpusDecoder,
 };

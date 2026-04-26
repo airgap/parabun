@@ -23,6 +23,7 @@ import { libopus } from "./libopus.ts";
 import { libpng } from "./libpng.ts";
 import { libuv } from "./libuv.ts";
 import { libwebp } from "./libwebp.ts";
+import { minimp3 } from "./minimp3.ts";
 import { lolhtml } from "./lolhtml.ts";
 import { lshpack } from "./lshpack.ts";
 import { mimalloc } from "./mimalloc.ts";
@@ -58,6 +59,7 @@ export const allDeps: readonly Dependency[] = [
   libjpegTurbo,
   libwebp,
   libopus,
+  minimp3,
   cares,
   hdrhistogram,
   highway,
@@ -87,6 +89,7 @@ export {
   libpng,
   libuv,
   libwebp,
+  minimp3,
   lolhtml,
   lshpack,
   mimalloc,

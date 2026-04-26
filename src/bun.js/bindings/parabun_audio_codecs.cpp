@@ -36,6 +36,15 @@
 
 extern "C" {
 #include <opus.h>
+
+// minimp3 is a header-only library. The implementation lives in whichever
+// translation unit defines MINIMP3_IMPLEMENTATION before including the
+// header — that's this file. minimp3_ex layers a streaming decoder on top
+// of the core; we use mp3dec_load_buf for one-shot in-memory decode.
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_FLOAT_OUTPUT
+#include <minimp3.h>
+#include <minimp3_ex.h>
 }
 
 namespace Bun {
@@ -74,6 +83,61 @@ OpusDecoder* asOpusDecoder(JSValue v)
 }
 
 } // anonymous namespace
+
+// ─── MP3 decode (minimp3) ──────────────────────────────────────────────────
+// One-shot in-memory MP3 decode. Returns { samples, sampleRate, channels }
+// shaped the same as readWav so callers can compose with the rest of the
+// audio module without case-splitting on format.
+JSC_DEFINE_HOST_FUNCTION(functionDecodeMp3,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue arg = callFrame->argument(0);
+    if (!arg.isCell() || arg.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "decodeMp3: expected Uint8Array"_s);
+        return {};
+    }
+    auto* view = jsCast<JSC::JSArrayBufferView*>(arg.asCell());
+    void* dataPtr = view->vector();
+    if (!dataPtr) {
+        throwTypeError(globalObject, scope, "decodeMp3: bytes is detached"_s);
+        return {};
+    }
+    const uint8_t* bytes = static_cast<const uint8_t*>(dataPtr);
+    const size_t len = view->length();
+
+    mp3dec_t mp3d;
+    mp3dec_file_info_t info;
+    std::memset(&info, 0, sizeof(info));
+    int err = mp3dec_load_buf(&mp3d, bytes, len, &info, nullptr, nullptr);
+    if (err != 0) {
+        if (info.buffer) std::free(info.buffer);
+        throwTypeError(globalObject, scope, "decodeMp3: not a valid MP3 stream"_s);
+        return {};
+    }
+    if (info.samples == 0 || !info.buffer) {
+        if (info.buffer) std::free(info.buffer);
+        throwTypeError(globalObject, scope, "decodeMp3: zero samples decoded (truncated stream?)"_s);
+        return {};
+    }
+
+    Structure* structure = globalObject->typedArrayStructure(JSC::TypeFloat32, false);
+    auto* samples = JSC::JSFloat32Array::createUninitialized(globalObject, structure, info.samples);
+    if (scope.exception()) {
+        std::free(info.buffer);
+        return {};
+    }
+    std::memcpy(samples->vector(), info.buffer, info.samples * sizeof(float));
+    std::free(info.buffer);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "samples"_s), samples);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "sampleRate"_s), jsNumber(info.hz));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(info.channels));
+    return JSValue::encode(obj);
+}
 
 JSC_DEFINE_HOST_FUNCTION(functionCreateOpusEncoder,
     (JSGlobalObject * globalObject, CallFrame* callFrame))
@@ -302,6 +366,9 @@ JSC::JSObject* createParabunAudioCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "opusDecode"_s), 4,
         functionOpusDecode, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "decodeMp3"_s), 1,
+        functionDecodeMp3, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

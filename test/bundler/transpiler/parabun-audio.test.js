@@ -355,6 +355,101 @@ describe("bun:audio — resample", () => {
   });
 });
 
+describe("bun:audio — MP3 decode (minimp3)", () => {
+  // Tiny 0.05s MP3 of a 440 Hz sine at 22050 Hz / 32 kbps mono. Generated
+  // via `ffmpeg -f lavfi -i sine=frequency=440:duration=0.05:sample_rate=22050
+  // -ac 1 -ab 32k`. ID3 + LAME encoder header overhead means even short
+  // clips weigh ~600 B.
+  // prettier-ignore
+  const MP3_HEX =
+    "49443304000000000023545353450000000f0000034c61766636302e31362e3130300000000000000000000000fff370c0000000000000000000496e666f0000000f0000000400000258007a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7aa6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3ffffffffffffffffffffffffffffffffffffffffffffffffff000000004c61766336302e333100000000000000000000000024027100000000000002583864b62a00000000000000000000000000fff340c400133062843f4f18000bd6dbb60879a6699a669a1ee6c08610710b01dc02300ec15638ceb6778f1e3c78f01004c1f07c1fe7383fe1894f7f29e7f94f3fca7bfa38200f83ef07c1c04030a0c03e0fcb81010e0fbf47bd200920830c0000bcc0203693f726fff342c40e17f1727cd59c6800e2631181829f6d60ca02e280a18aa6c69d06182c18256a540649083920e90574159fc4982f4176fc768c28c293bfc6186189a3d47affe645e248c4ba5d4bfff2f178c4ba5d48bc5e3bfe54240d094240d0955c0002c14028180c0502fff340c40a16e9ae95bf9aa00000001f046daa18a145dd68201d94e6546838b992be19321f1f0b0b07688476c0d20c06f280513ed8a544a66dfe2772385c045bff16422380b241ffff2e917513e709c32ffffcd268b371397fff902082694a16e000449952271728fff342c40916b8aa6417d83001bc4c9960400734252b96040813104b42b55b117080204c1903b4e5394ff4bbb54e24492e68280402939a448cb82417c2828d0a0ae833fc1415e0a2bedfe1415e14779bfe0a0be0a6f0eff0a0af0a7f4dff8b4c414d45332e31303055";
+
+  const mp3Setup = `const MP3 = Uint8Array.from("${MP3_HEX}".match(/../g).map(h => parseInt(h, 16)));`;
+
+  it("decodes an MP3 to Float32Array samples + matching metadata", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mp3-shape",
+      `
+        import audio from "bun:audio";
+        ${mp3Setup}
+        const { samples, sampleRate, channels } = audio.decodeMp3(MP3);
+        console.log("isFloat32", samples instanceof Float32Array);
+        console.log("rate", sampleRate);
+        console.log("channels", channels);
+        // 0.05s × 22050 Hz = 1102 samples (rounded). MP3 frame boundaries
+        // can over-deliver slightly; assert >= expected.
+        console.log("samples.gte", samples.length >= 1024);
+      `,
+    );
+    expect(stdout).toBe(["isFloat32 true", "rate 22050", "channels 1", "samples.gte true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("decoded samples preserve the dominant 440 Hz tone", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mp3-tone",
+      `
+        import audio from "bun:audio";
+        ${mp3Setup}
+        const { samples, sampleRate } = audio.decodeMp3(MP3);
+
+        // Take a power-of-2 window and find the dominant FFT bin. The
+        // 440 Hz tone should land in bin round(440 * 1024 / 22050) ≈ 20.
+        const fftN = 1024;
+        const buf = samples.subarray(0, fftN);
+        const f = audio.fft(buf);
+        let best = 0, idx = 0;
+        for (let i = 0; i < fftN / 2; i++) {
+          const m = Math.hypot(f[i*2], f[i*2+1]);
+          if (m > best) { best = m; idx = i; }
+        }
+        const expectedBin = Math.round(440 * fftN / sampleRate);
+        // ±2 bin tolerance for FFT quantization + MP3 lossy compression
+        console.log("withinTwoBins", Math.abs(idx - expectedBin) <= 2);
+      `,
+    );
+    expect(stdout).toBe("withinTwoBins true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects non-MP3 input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mp3-bad",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.decodeMp3(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log(
+            "THREW",
+            e.message.includes("not a valid MP3") || e.message.includes("zero samples"),
+          );
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects non-Uint8Array input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-mp3-bad-type",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.decodeMp3("not bytes");
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("expected Uint8Array"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — Opus codec", () => {
   it("encode → decode round-trip preserves the dominant frequency", async () => {
     // 16 kHz, 20 ms frame = 320 samples. Encode a 200 Hz sine, decode
