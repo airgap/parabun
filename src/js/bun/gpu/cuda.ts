@@ -1118,15 +1118,19 @@ function launchConv2DF32(
 // JS-side per-channel deinterleave that dominates the conv2D-based
 // dispatch.
 //
-// Persistent device buffers: cuMemAlloc / cuMemFree of 64 MB on every
-// call costs ~50 ms by itself, which dominates the 1 ms transfer + 0.1 ms
-// kernel time. Cache the input/output buffers at module scope keyed by
-// byte size; the common case (repeated calls at the same image size)
-// pays the alloc cost exactly once. Buffers free on backend dispose().
+// Persistent device buffers + pinned host buffers: cuMemAlloc / cuMemFree
+// of 64 MB on every call costs ~50 ms by itself, and cuMemcpy of pageable
+// host memory takes a slow driver-staged path (sub-1 GB/s). The fix is
+// (a) keep the device buffers around across calls, and (b) stage host
+// data through cuMemAllocHost-pinned memory so the H2D / D2H DMA can run
+// at PCIe line rate. Cache both at module scope keyed by byte size;
+// repeated same-size dispatches reuse them. Free on backend dispose().
 //
 // Caller must ensure NVRTC is available (probeDevOps()); the public
 // wrapper on bun:gpu falls back to CPU otherwise.
 const cachedDeviceBuffers: Map<bigint, bigint> = new Map();
+const cachedPinnedBuffers: Map<bigint, bigint> = new Map();
+
 function getCachedDevBuf(bytes: bigint): bigint {
   const hit = cachedDeviceBuffers.get(bytes);
   if (hit !== undefined) return hit;
@@ -1139,19 +1143,37 @@ function getCachedDevBuf(bytes: bigint): bigint {
   cachedDeviceBuffers.set(bytes, buf[0]);
   return buf[0];
 }
+
+function getCachedPinnedBuf(bytes: bigint): bigint {
+  const hit = cachedPinnedBuffers.get(bytes);
+  if (hit !== undefined) return hit;
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const buf = new BigUint64Array(1);
+  if (s.cuMemAllocHost_v2(ptr(buf), bytes) !== 0) {
+    throw new Error(`bun:gpu cuda: cuMemAllocHost(${bytes}) failed`);
+  }
+  cachedPinnedBuffers.set(bytes, buf[0]);
+  return buf[0];
+}
+
 function freeCachedDevBufs(): void {
   const s = cudaLib?.symbols;
   if (!s) {
     cachedDeviceBuffers.clear();
+    cachedPinnedBuffers.clear();
     return;
   }
   for (const ptr of cachedDeviceBuffers.values()) s.cuMemFree_v2(ptr);
   cachedDeviceBuffers.clear();
+  for (const ptr of cachedPinnedBuffers.values()) s.cuMemFreeHost(ptr);
+  cachedPinnedBuffers.clear();
 }
 
 function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radius: number): Uint8Array {
   const s = cudaLib!.symbols;
   const ptr = ffiPtr!;
+  const tab = ffiToArrayBuffer!;
   const inBytes = BigInt(input.length);
   const kSize = 2 * radius + 1;
   const kBytes = BigInt(kSize * 4);
@@ -1172,13 +1194,23 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
   // on subsequent calls. Use distinct cache keys for input vs output so a
   // single-size repeated call always hits the same buffer pair.
   const dIn = getCachedDevBuf(inBytes);
-  // Tag output with a +1 byte count so it lives in a separate cache slot
-  // from any future same-size input — saves an extra alloc when callers
-  // pipeline same-size inputs.
   const dOut = getCachedDevBuf(inBytes + 1n);
   const dKern = getCachedDevBuf(kBytes);
 
-  if (s.cuMemcpyHtoD_v2(dIn, ptr(input), inBytes) !== 0) {
+  // Pinned host buffers for the input + output staging. Copying through
+  // these lets cuMemcpyHtoD / cuMemcpyDtoH DMA at full PCIe line rate
+  // instead of the slow driver-staged path used for pageable Uint8Array
+  // pointers. The CPU-side memcpy into the pinned buffer is fast (inline
+  // typed-array .set()).
+  const pinnedInPtr = getCachedPinnedBuf(inBytes);
+  const pinnedOutPtr = getCachedPinnedBuf(inBytes + 1n);
+  // Convert the pinned bigint pointer to a Uint8Array view we can write
+  // into. 48-bit user-space pointers fit in a JS Number exactly.
+  const pinnedInView = new Uint8Array(tab(Number(pinnedInPtr), 0, input.length));
+  const pinnedOutView = new Uint8Array(tab(Number(pinnedOutPtr), 0, input.length));
+  pinnedInView.set(input);
+
+  if (s.cuMemcpyHtoD_v2(dIn, Number(pinnedInPtr), inBytes) !== 0) {
     throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
   }
   if (s.cuMemcpyHtoD_v2(dKern, ptr(k1d), kBytes) !== 0) {
@@ -1215,9 +1247,10 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
   if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
 
   const out = new Uint8Array(input.length);
-  if (s.cuMemcpyDtoH_v2(ptr(out), dOut, inBytes) !== 0) {
+  if (s.cuMemcpyDtoH_v2(Number(pinnedOutPtr), dOut, inBytes) !== 0) {
     throw new Error("bun:gpu cuda: cuMemcpyDtoH(output) failed");
   }
+  out.set(pinnedOutView);
   return out;
 }
 
