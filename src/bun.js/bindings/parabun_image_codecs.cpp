@@ -33,6 +33,18 @@
 #include <thread>
 #include <vector>
 
+// ─── SIMD intrinsics for the per-pixel hot path ───────────────────────────
+// We rely on -march=haswell or better on x86 (AVX2 + FMA). On ARM64 NEON
+// is part of the base ISA. The fallback path is the scalar code, which
+// also still runs on hosts where neither is set.
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define PB_HAVE_X86_SIMD 1
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define PB_HAVE_NEON 1
+#endif
+
 extern "C" {
 #include <jpeglib.h>
 #include <png.h>
@@ -605,17 +617,67 @@ void gaussianBlur(
                 }
             }
 
-            // Interior — no clamping. The compiler vectorizes this on
-            // -march=haswell+ thanks to the stride-known access pattern,
-            // restrict-qualified pointers, and the branch-free inner loop.
-            for (int x = interiorStart; x < interiorEnd; x++) {
-                const uint8_t* base = srcRow + (x - radius) * static_cast<int>(channels);
-                for (uint32_t c = 0; c < channels; c++) {
-                    float acc = 0.0f;
+            // Interior — no clamping.
+            //
+            // For channels == 4 we hand-roll a 4-lane SIMD inner loop:
+            // load one RGBA pixel (4 bytes) per tap as a single i32,
+            // expand to 4 floats, broadcast the kernel weight, FMA
+            // into a 4-lane accumulator. This collapses what was 4
+            // scalar accumulator chains in the C++ into a single
+            // SIMD FMA per tap. SSE2 + FMA on x86 (Haswell+ via AVX2),
+            // NEON on ARM64.
+            if (channels == 4) {
+#if defined(PB_HAVE_X86_SIMD)
+                for (int x = interiorStart; x < interiorEnd; x++) {
+                    const uint8_t* base = srcRow + (x - radius) * 4;
+                    __m128 acc = _mm_setzero_ps();
                     for (int i = 0; i < kSize; i++) {
-                        acc += static_cast<float>(base[i * static_cast<int>(channels) + c]) * kPtr[i];
+                        // Load 4 bytes (1 RGBA pixel) → expand to 4 i32 → 4 f32
+                        __m128i b = _mm_cvtsi32_si128(*reinterpret_cast<const int32_t*>(base + i * 4));
+                        __m128i ext = _mm_cvtepu8_epi32(b);
+                        __m128 pf = _mm_cvtepi32_ps(ext);
+                        __m128 wf = _mm_set1_ps(kPtr[i]);
+                        acc = _mm_fmadd_ps(pf, wf, acc);
                     }
-                    midRow[x * channels + c] = acc;
+                    _mm_storeu_ps(midRow + x * 4, acc);
+                }
+#elif defined(PB_HAVE_NEON)
+                for (int x = interiorStart; x < interiorEnd; x++) {
+                    const uint8_t* base = srcRow + (x - radius) * 4;
+                    float32x4_t acc = vdupq_n_f32(0.0f);
+                    for (int i = 0; i < kSize; i++) {
+                        // Load 4 bytes, widen u8→u16→u32, convert to f32.
+                        uint8x8_t b8 = vld1_u8(base + i * 4); // loads 8, we use the low 4
+                        uint16x8_t b16 = vmovl_u8(b8);
+                        uint32x4_t b32 = vmovl_u16(vget_low_u16(b16));
+                        float32x4_t pf = vcvtq_f32_u32(b32);
+                        float32x4_t wf = vdupq_n_f32(kPtr[i]);
+                        acc = vfmaq_f32(acc, pf, wf);
+                    }
+                    vst1q_f32(midRow + x * 4, acc);
+                }
+#else
+                // Pure-scalar fallback (no SIMD intrinsics available).
+                for (int x = interiorStart; x < interiorEnd; x++) {
+                    const uint8_t* base = srcRow + (x - radius) * 4;
+                    for (uint32_t c = 0; c < 4u; c++) {
+                        float acc = 0.0f;
+                        for (int i = 0; i < kSize; i++) acc += static_cast<float>(base[i * 4 + c]) * kPtr[i];
+                        midRow[x * 4 + c] = acc;
+                    }
+                }
+#endif
+            } else {
+                // Generic fallback for channels != 4 (1 or 3).
+                for (int x = interiorStart; x < interiorEnd; x++) {
+                    const uint8_t* base = srcRow + (x - radius) * static_cast<int>(channels);
+                    for (uint32_t c = 0; c < channels; c++) {
+                        float acc = 0.0f;
+                        for (int i = 0; i < kSize; i++) {
+                            acc += static_cast<float>(base[i * static_cast<int>(channels) + c]) * kPtr[i];
+                        }
+                        midRow[x * channels + c] = acc;
+                    }
                 }
             }
 
@@ -672,16 +734,68 @@ void gaussianBlur(
                 for (int i = 0; i < kSize; i++) {
                     rows[i] = mid.data() + static_cast<size_t>(y - radius + i) * w * channels;
                 }
-                for (uint32_t x = 0; x < w; x++) {
-                    for (uint32_t c = 0; c < channels; c++) {
-                        float acc = 0.0f;
+
+                if (channels == 4) {
+#if defined(PB_HAVE_X86_SIMD)
+                    for (uint32_t x = 0; x < w; x++) {
+                        const size_t off = static_cast<size_t>(x) * 4;
+                        __m128 acc = _mm_setzero_ps();
                         for (int i = 0; i < kSize; i++) {
-                            acc += rows[i][x * channels + c] * kPtr[i];
+                            __m128 pf = _mm_loadu_ps(rows[i] + off);
+                            __m128 wf = _mm_set1_ps(kPtr[i]);
+                            acc = _mm_fmadd_ps(pf, wf, acc);
                         }
-                        int rounded = static_cast<int>(acc + 0.5f);
-                        if (rounded < 0) rounded = 0;
-                        if (rounded > 255) rounded = 255;
-                        dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
+                        // Round, clamp [0, 255], pack to 4 bytes.
+                        __m128 half = _mm_set1_ps(0.5f);
+                        __m128i ri = _mm_cvttps_epi32(_mm_add_ps(acc, half));
+                        __m128i lo = _mm_max_epi32(_mm_setzero_si128(), ri);
+                        __m128i clamped = _mm_min_epi32(_mm_set1_epi32(255), lo);
+                        __m128i packed16 = _mm_packus_epi32(clamped, clamped);
+                        __m128i packed8 = _mm_packus_epi16(packed16, packed16);
+                        *reinterpret_cast<int32_t*>(dstRow + off) = _mm_cvtsi128_si32(packed8);
+                    }
+#elif defined(PB_HAVE_NEON)
+                    for (uint32_t x = 0; x < w; x++) {
+                        const size_t off = static_cast<size_t>(x) * 4;
+                        float32x4_t acc = vdupq_n_f32(0.0f);
+                        for (int i = 0; i < kSize; i++) {
+                            float32x4_t pf = vld1q_f32(rows[i] + off);
+                            float32x4_t wf = vdupq_n_f32(kPtr[i]);
+                            acc = vfmaq_f32(acc, pf, wf);
+                        }
+                        // Round-to-nearest, clamp, pack to u8x4.
+                        uint32x4_t u32 = vcvtnq_u32_f32(acc);
+                        uint16x4_t u16 = vqmovn_u32(u32);
+                        uint8x8_t u8 = vqmovn_u16(vcombine_u16(u16, u16));
+                        // Store the low 4 bytes.
+                        vst1_lane_u32(reinterpret_cast<uint32_t*>(dstRow + off),
+                                      vreinterpret_u32_u8(u8), 0);
+                    }
+#else
+                    for (uint32_t x = 0; x < w; x++) {
+                        for (uint32_t c = 0; c < 4u; c++) {
+                            float acc = 0.0f;
+                            for (int i = 0; i < kSize; i++) acc += rows[i][x * 4 + c] * kPtr[i];
+                            int rounded = static_cast<int>(acc + 0.5f);
+                            if (rounded < 0) rounded = 0;
+                            if (rounded > 255) rounded = 255;
+                            dstRow[x * 4 + c] = static_cast<uint8_t>(rounded);
+                        }
+                    }
+#endif
+                } else {
+                    // Generic fallback for channels != 4 (1 or 3).
+                    for (uint32_t x = 0; x < w; x++) {
+                        for (uint32_t c = 0; c < channels; c++) {
+                            float acc = 0.0f;
+                            for (int i = 0; i < kSize; i++) {
+                                acc += rows[i][x * channels + c] * kPtr[i];
+                            }
+                            int rounded = static_cast<int>(acc + 0.5f);
+                            if (rounded < 0) rounded = 0;
+                            if (rounded > 255) rounded = 255;
+                            dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
+                        }
                     }
                 }
             }
