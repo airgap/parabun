@@ -580,6 +580,76 @@ void unsharpSharpen(
     }
 }
 
+// ─── Tone adjustment (brightness / contrast / saturation) ─────────────────
+// Single-pass per-pixel transform applied in this order:
+//   1. contrast   — pivot around 128, scale by (1 + contrast)
+//   2. brightness — additive offset of brightness * 255
+//   3. saturation — lerp between Rec. 601 luma and the RGB value:
+//                   saturation = -1 → grayscale, 0 → unchanged, +1 → 2× saturated
+// Final values are clamped to [0, 255]. Alpha (channel 3 on RGBA) passes
+// through unchanged — adjusting alpha here would conflate "make this image
+// brighter" with "make this image more transparent", which is rarely what
+// callers want.
+//
+// All three parameters have a sane no-op default of 0, so adjust() with any
+// subset of them works without forcing callers to spell out the others.
+
+void adjustToneCpu(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint8_t* dst, float brightness, float contrast, float saturation)
+{
+    const float contrastMul = 1.0f + contrast; // -1 → flat 128, +1 → 2× contrast
+    const float brightnessAdd = brightness * 255.0f;
+    const float satMul = 1.0f + saturation; // -1 → fully grayscale, +1 → 2× saturated
+    const size_t pixels = static_cast<size_t>(w) * h;
+
+    for (size_t i = 0; i < pixels; i++) {
+        const size_t base = i * channels;
+        // 1- and 3-channel inputs share most of the code; the 4-channel
+        // case adds an alpha passthrough at the end.
+        if (channels == 1) {
+            float v = static_cast<float>(src[base]);
+            v = (v - 128.0f) * contrastMul + 128.0f;
+            v += brightnessAdd;
+            // Saturation has no meaning on a single channel — skip the lerp.
+            if (v < 0) v = 0;
+            else if (v > 255) v = 255;
+            dst[base] = static_cast<uint8_t>(v + 0.5f);
+            continue;
+        }
+
+        float r = static_cast<float>(src[base + 0]);
+        float g = static_cast<float>(src[base + 1]);
+        float b = static_cast<float>(src[base + 2]);
+        // Step 1+2: contrast around 128, then brightness offset.
+        r = (r - 128.0f) * contrastMul + 128.0f + brightnessAdd;
+        g = (g - 128.0f) * contrastMul + 128.0f + brightnessAdd;
+        b = (b - 128.0f) * contrastMul + 128.0f + brightnessAdd;
+        // Step 3: saturation as a lerp between luma and the RGB triple.
+        // Done AFTER brightness/contrast so the post-tone-mapped color
+        // space is what gets desaturated; doing it before would cause
+        // negative-brightness regions to bleed odd hues.
+        if (satMul != 1.0f) {
+            const float L = 0.299f * r + 0.587f * g + 0.114f * b;
+            r = L + (r - L) * satMul;
+            g = L + (g - L) * satMul;
+            b = L + (b - L) * satMul;
+        }
+        if (r < 0) r = 0;
+        else if (r > 255) r = 255;
+        if (g < 0) g = 0;
+        else if (g > 255) g = 255;
+        if (b < 0) b = 0;
+        else if (b > 255) b = 255;
+        dst[base + 0] = static_cast<uint8_t>(r + 0.5f);
+        dst[base + 1] = static_cast<uint8_t>(g + 0.5f);
+        dst[base + 2] = static_cast<uint8_t>(b + 0.5f);
+        if (channels == 4) {
+            dst[base + 3] = src[base + 3]; // alpha passthrough
+        }
+    }
+}
+
 // ─── Luma collapse (Rec. 601) ──────────────────────────────────────────────
 // RGB → single-channel luminance using the standard Rec. 601 / ITU-R BT.601
 // weights (0.299 R + 0.587 G + 0.114 B). Alpha is dropped for RGBA inputs;
@@ -1710,6 +1780,91 @@ JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
     return JSValue::encode(obj);
 }
 
+// adjust(img, { brightness?, contrast?, saturation? }) → DecodedImage with
+// the same dims / channels / format. All three parameters default to 0
+// (identity); each is a number in [-1, 1].
+JSC_DEFINE_HOST_FUNCTION(functionAdjust,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.adjust: expected (img, { brightness?, contrast?, saturation? })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    JSObject* optsObj = optsArg.isObject() ? asObject(optsArg) : nullptr;
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.adjust: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.adjust: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.adjust: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.adjust: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    float brightness = 0.0f, contrast = 0.0f, saturation = 0.0f;
+    if (optsObj) {
+        JSValue bVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "brightness"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (bVal.isNumber()) brightness = static_cast<float>(bVal.toNumber(globalObject));
+        JSValue cVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "contrast"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (cVal.isNumber()) contrast = static_cast<float>(cVal.toNumber(globalObject));
+        JSValue sVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "saturation"_s));
+        RETURN_IF_EXCEPTION(scope, {});
+        if (sVal.isNumber()) saturation = static_cast<float>(sVal.toNumber(globalObject));
+    }
+    auto inRange = [](float v) { return std::isfinite(v) && v >= -1.0f && v <= 1.0f; };
+    if (!inRange(brightness) || !inRange(contrast) || !inRange(saturation)) {
+        throwTypeError(globalObject, scope, "bun:image.adjust: brightness / contrast / saturation must each be a finite number in [-1, 1]"_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    adjustToneCpu(
+        static_cast<const uint8_t*>(srcRaw), w, h, channels,
+        static_cast<uint8_t*>(dstArr->vector()), brightness, contrast, saturation);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1744,6 +1899,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "toGrayscale"_s), 1,
         functionToGrayscale, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "adjust"_s), 2,
+        functionAdjust, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

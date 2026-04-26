@@ -1139,6 +1139,136 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("adjust with all-zero opts is the identity", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-adjust-identity",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const out = image.adjust(orig, { brightness: 0, contrast: 0, saturation: 0 });
+        const equal = out.data.length === orig.data.length && out.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe("byteEqual true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("brightness=1 saturates to white; brightness=-1 drives to black", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-adjust-brightness",
+      `
+        import image from "bun:image";
+        // Mid-tone image — every byte 128.
+        const data = new Uint8Array(16).fill(128);
+        const orig = { data, width: 2, height: 2, channels: 4, format: "png" };
+        const bright = image.adjust(orig, { brightness: 1 });
+        const dark = image.adjust(orig, { brightness: -1 });
+        // Alpha (channels 3, 7, 11, 15) passes through untouched at 128.
+        const isWhite = bright.data.every((v, i) => i % 4 === 3 ? v === 128 : v === 255);
+        const isBlack = dark.data.every  ((v, i) => i % 4 === 3 ? v === 128 : v === 0);
+        console.log("white", isWhite);
+        console.log("black", isBlack);
+      `,
+    );
+    expect(stdout).toBe(["white true", "black true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("contrast=-1 collapses everything to mid-gray (128)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-adjust-contrast-flat",
+      `
+        import image from "bun:image";
+        // Mixed values — bright and dark.
+        const data = Uint8Array.from([
+          0,   0,   0, 255,
+          255, 255, 255, 255,
+          50,  150, 200, 255,
+          200, 100,  50, 255,
+        ]);
+        const orig = { data, width: 4, height: 1, channels: 4, format: "png" };
+        const out = image.adjust(orig, { contrast: -1 });
+        // Every color byte should now be 128. Alpha passes through.
+        const flat = out.data.every((v, i) => i % 4 === 3 ? v === 255 : v === 128);
+        console.log("flat", flat);
+      `,
+    );
+    expect(stdout).toBe("flat true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("saturation=-1 produces grayscale (R = G = B everywhere)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-adjust-desaturate",
+      `
+        import image from "bun:image";
+        // Full-saturation primary colors.
+        const data = Uint8Array.from([
+          255,   0,   0, 255,   // pure red
+            0, 255,   0, 255,   // pure green
+            0,   0, 255, 255,   // pure blue
+          200, 100,  50, 255,
+        ]);
+        const orig = { data, width: 4, height: 1, channels: 4, format: "png" };
+        const out = image.adjust(orig, { saturation: -1 });
+        // For each pixel, R == G == B.
+        let allGray = true;
+        for (let i = 0; i < 4; i++) {
+          const r = out.data[i * 4 + 0];
+          const g = out.data[i * 4 + 1];
+          const b = out.data[i * 4 + 2];
+          if (r !== g || g !== b) { allGray = false; break; }
+        }
+        console.log("allGray", allGray);
+      `,
+    );
+    expect(stdout).toBe("allGray true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("contrast=1 doubles the dynamic-range deviation from mid-gray", async () => {
+    // Math: contrast +1 → contrastMul = 2. (200 - 128) * 2 + 128 = 144+128 = 272 → clipped to 255.
+    // (50 - 128) * 2 + 128 = -156 + 128 = -28 → clipped to 0.
+    // 128 → identity (still 128).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-adjust-contrast-up",
+      `
+        import image from "bun:image";
+        const data = Uint8Array.from([200, 50, 128, 0]);
+        const orig = { data, width: 4, height: 1, channels: 1, format: "png" };
+        const out = image.adjust(orig, { contrast: 1 });
+        console.log(Array.from(out.data).join(","));
+      `,
+    );
+    expect(stdout).toBe("255,0,128,0");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects out-of-range parameters", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-adjust-range",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        let threw = 0;
+        for (const o of [
+          { brightness: 2 },
+          { brightness: -1.5 },
+          { contrast: 2 },
+          { saturation: -2 },
+          { contrast: NaN },
+          { brightness: Infinity },
+        ]) {
+          try { image.adjust(orig, o); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 6");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

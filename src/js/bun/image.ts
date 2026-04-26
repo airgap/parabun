@@ -58,6 +58,14 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
 };
+type AdjustOptions = {
+  /** Additive lightness shift, -1 = full black, 0 = unchanged, +1 = full white. */
+  brightness?: number;
+  /** Multiplicative dynamic-range scale around mid-gray, -1 = flat 50%, 0 = unchanged, +1 = doubled. */
+  contrast?: number;
+  /** Lerp toward / away from luma, -1 = grayscale, 0 = unchanged, +1 = 2× saturated. */
+  saturation?: number;
+};
 type CropOptions = {
   /** Left edge of the crop rectangle in pixels. >= 0. */
   x: number;
@@ -175,6 +183,13 @@ function toGrayscale(img: DecodedImage): DecodedImage {
   return native.toGrayscale(img);
 }
 
+function adjust(img: DecodedImage, opts?: AdjustOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.adjust: img must be the object returned from decode()");
+  }
+  return native.adjust(img, opts ?? {});
+}
+
 export default {
   decode,
   encode,
@@ -186,4 +201,5 @@ export default {
   flip,
   crop,
   toGrayscale,
+  adjust,
 };
