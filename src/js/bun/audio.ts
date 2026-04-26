@@ -649,6 +649,173 @@ class Denoiser {
   }
 }
 
+// ─── Auto Gain Control ─────────────────────────────────────────────────────
+// Voice-call mics deliver wildly varying levels — distance from the mic,
+// room loudness, headset vs laptop builtin, you name it. AGC tracks the
+// signal envelope and applies a smoothly-varying gain to bring the output
+// to a target loudness. This is the textbook companion to Denoiser in a
+// voice-call capture pipeline:
+//
+//   const den  = new audio.Denoiser();
+//   const agc  = new audio.Gain({ targetLevel: 0.1 });
+//   for each 10ms frame at 48 kHz mono:
+//     den.process(frame);         // suppress noise
+//     agc.process(frame);         // normalize loudness
+//
+// Algorithm: per-sample one-pole envelope detector (asymmetric attack /
+// release time constants), then `gain = targetLevel / envelope` clamped
+// to [0, maxGain], smoothed by another one-pole, then applied with hard
+// clipping at ±1 to prevent overshoot.
+//
+// "Peak follower" not "RMS follower" because for speech the instantaneous
+// peaks are what clip, and the perceptual difference between RMS and peak
+// AGC at conversational levels is small.
+//
+// Stateful — keep one Gain instance per audio stream so attack/release
+// state persists across frame boundaries.
+
+type GainOptions = {
+  /**
+   * Target output envelope (linear, 0..1). Default 0.1 — about -20 dBFS,
+   * the level voice-call apps typically aim for. Higher values = louder
+   * output but more risk of clipping.
+   */
+  targetLevel?: number;
+  /**
+   * Maximum amplification factor. Caps how much quiet input gets boosted —
+   * without it, near-silence would be amplified to full noise floor.
+   * Default 32 (≈ +30 dB).
+   */
+  maxGain?: number;
+  /**
+   * How fast (ms) the envelope follower reacts to level *increases*.
+   * Short attack catches transients before they clip the output.
+   * Default 5 ms.
+   */
+  attackMs?: number;
+  /**
+   * How fast (ms) the envelope follower decays after a level *decrease*.
+   * Longer release avoids "breathing" artifacts where soft passages get
+   * pumped up between words. Default 100 ms.
+   */
+  releaseMs?: number;
+  /**
+   * Sample rate, used to convert attack/release times to per-sample
+   * smoothing coefficients. Default 48000 (matches Denoiser).
+   */
+  sampleRate?: number;
+  /**
+   * Floor on the envelope detector to avoid amplifying pure noise into
+   * audible hiss. If the envelope drops below this, gain holds steady
+   * rather than chasing the noise floor up. Default 1e-4.
+   */
+  noiseFloor?: number;
+};
+
+function timeConstantToCoeff(timeMs: number, sampleRate: number): number {
+  // Standard one-pole IIR coefficient: e^(-1 / (sr * t_seconds))
+  // gives an envelope that reaches 1 - 1/e (~63%) of the target after
+  // t_seconds — the canonical "time constant" definition.
+  if (timeMs <= 0) return 0;
+  return Math.exp(-1 / (sampleRate * (timeMs / 1000)));
+}
+
+class Gain {
+  #targetLevel: number;
+  #maxGain: number;
+  #noiseFloor: number;
+  #attackCoeff: number;
+  #releaseCoeff: number;
+  // Persistent state — must survive across .process() calls so attack /
+  // release behavior is correct across frame boundaries.
+  #envelope: number;
+  #gain: number;
+
+  constructor(opts: GainOptions = {}) {
+    if (typeof opts !== "object" || opts === null) {
+      throw new TypeError("bun:audio.Gain: opts must be an object");
+    }
+    this.#targetLevel = opts.targetLevel ?? 0.1;
+    this.#maxGain = opts.maxGain ?? 32;
+    this.#noiseFloor = opts.noiseFloor ?? 1e-4;
+    const sr = opts.sampleRate ?? 48000;
+    if (this.#targetLevel <= 0 || this.#targetLevel > 1) {
+      throw new RangeError(`bun:audio.Gain: targetLevel must be in (0, 1]; got ${this.#targetLevel}`);
+    }
+    if (this.#maxGain <= 0) {
+      throw new RangeError(`bun:audio.Gain: maxGain must be > 0; got ${this.#maxGain}`);
+    }
+    if (sr <= 0) {
+      throw new RangeError(`bun:audio.Gain: sampleRate must be > 0; got ${sr}`);
+    }
+    this.#attackCoeff = timeConstantToCoeff(opts.attackMs ?? 5, sr);
+    this.#releaseCoeff = timeConstantToCoeff(opts.releaseMs ?? 100, sr);
+    this.#envelope = 0;
+    this.#gain = 1;
+  }
+
+  /**
+   * Apply AGC to a frame in place. Frame can be any length; the envelope
+   * and gain state persist across calls, so feeding 10ms or 1s frames
+   * gives the same long-term behavior. Returns the gain applied to the
+   * last sample (useful for telemetry / tests).
+   */
+  process(frame: Float32Array): number {
+    if (!(frame instanceof Float32Array)) {
+      throw new TypeError("bun:audio.Gain.process: frame must be a Float32Array");
+    }
+    let env = this.#envelope;
+    let gainState = this.#gain;
+    const target = this.#targetLevel;
+    const maxG = this.#maxGain;
+    const floor = this.#noiseFloor;
+    const aA = this.#attackCoeff;
+    const aR = this.#releaseCoeff;
+    // Gain smoothing: use the same release coefficient so gain glides
+    // back up smoothly after a loud passage instead of jumping the
+    // moment the envelope drops. Snappier-than-envelope gain smoothing
+    // would re-introduce the "pumping" we're explicitly avoiding.
+    const aG = aR;
+    for (let i = 0; i < frame.length; i++) {
+      const x = frame[i];
+      const ax = x < 0 ? -x : x;
+      // Asymmetric envelope: attack on rise (catch transients fast),
+      // release on fall (slow decay so soft tails don't get pumped).
+      const coeff = ax > env ? aA : aR;
+      env = coeff * env + (1 - coeff) * ax;
+      // Compute target gain. Below the noise floor we hold steady
+      // rather than chasing the floor up to maxGain.
+      let targetGain = env > floor ? target / env : gainState;
+      if (targetGain > maxG) targetGain = maxG;
+      if (targetGain < 0) targetGain = 0;
+      gainState = aG * gainState + (1 - aG) * targetGain;
+      let y = x * gainState;
+      if (y > 1) y = 1;
+      else if (y < -1) y = -1;
+      frame[i] = y;
+    }
+    this.#envelope = env;
+    this.#gain = gainState;
+    return gainState;
+  }
+
+  /** Current envelope reading (for telemetry / debug). */
+  get envelope(): number {
+    return this.#envelope;
+  }
+
+  /** Current applied gain (for telemetry / debug). */
+  get gain(): number {
+    return this.#gain;
+  }
+
+  /** Reset envelope + gain state. Useful when a new stream starts. */
+  reset(): void {
+    this.#envelope = 0;
+    this.#gain = 1;
+  }
+}
+
 export default {
   fft,
   ifft,
@@ -662,4 +829,5 @@ export default {
   OpusEncoder,
   OpusDecoder,
   Denoiser,
+  Gain,
 };

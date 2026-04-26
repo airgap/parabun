@@ -887,3 +887,174 @@ describe("bun:audio — spectrogram", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+describe("bun:audio — Gain (AGC)", () => {
+  it("brings a quiet sine wave up toward the target level", async () => {
+    // Quiet 440 Hz sine at amplitude 0.01 → AGC should boost it toward
+    // targetLevel=0.1 over the first ~release-window seconds. Compare
+    // peak amplitude of the second half of the buffer (after settling)
+    // against the input.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-quiet",
+      `
+        import audio from "bun:audio";
+        const SR = 48000;
+        const N = SR; // 1 second
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) input[i] = 0.01 * Math.sin(2 * Math.PI * 440 * i / SR);
+        const inPeak = Math.max(...input);
+        const agc = new audio.Gain({ targetLevel: 0.1, sampleRate: SR });
+        agc.process(input);
+        // Sample the settled second half.
+        let outPeak = 0;
+        for (let i = N / 2; i < N; i++) if (input[i] > outPeak) outPeak = input[i];
+        console.log("inPeak.lt.0.02", inPeak < 0.02);
+        // Should land near targetLevel — give generous tolerance for the
+        // peak (sine peak ≈ envelope, both should be ~0.1 once settled).
+        console.log("outPeak.in.0.05.0.2", outPeak > 0.05 && outPeak < 0.2);
+        console.log("amplified", outPeak > inPeak * 3);
+      `,
+    );
+    expect(stdout).toBe(["inPeak.lt.0.02 true", "outPeak.in.0.05.0.2 true", "amplified true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("attenuates a hot signal back toward target", async () => {
+    // Loud 440 Hz sine at amplitude 0.9 → AGC should reduce it toward 0.1.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-loud",
+      `
+        import audio from "bun:audio";
+        const SR = 48000;
+        const N = SR;
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) input[i] = 0.9 * Math.sin(2 * Math.PI * 440 * i / SR);
+        const agc = new audio.Gain({ targetLevel: 0.1, sampleRate: SR });
+        agc.process(input);
+        let outPeak = 0;
+        for (let i = N / 2; i < N; i++) if (input[i] > outPeak) outPeak = input[i];
+        console.log("outPeak.in.0.05.0.2", outPeak > 0.05 && outPeak < 0.2);
+        console.log("attenuated", outPeak < 0.5);
+      `,
+    );
+    expect(stdout).toBe(["outPeak.in.0.05.0.2 true", "attenuated true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("output never clips outside [-1, 1]", async () => {
+    // Pathological input — already-clipping square wave → AGC must not
+    // produce out-of-range samples regardless of the gain applied.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-noclip",
+      `
+        import audio from "bun:audio";
+        const SR = 48000;
+        const N = SR / 10; // 100 ms
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) input[i] = (i % 100) < 50 ? 0.99 : -0.99;
+        const agc = new audio.Gain({ targetLevel: 0.5, sampleRate: SR });
+        agc.process(input);
+        let inRange = true;
+        for (let i = 0; i < N; i++) {
+          if (input[i] > 1 || input[i] < -1 || Number.isNaN(input[i])) { inRange = false; break; }
+        }
+        console.log("inRange", inRange);
+      `,
+    );
+    expect(stdout).toBe("inRange true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("respects maxGain — pure silence does not get amplified to noise floor", async () => {
+    // All-zero input → envelope stays at 0 → gain holds at the initial
+    // value (1.0) rather than racing to maxGain. Output stays silent.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-silence",
+      `
+        import audio from "bun:audio";
+        const N = 4800;
+        const input = new Float32Array(N); // all zeros
+        const agc = new audio.Gain({ targetLevel: 0.1, sampleRate: 48000, maxGain: 100 });
+        agc.process(input);
+        let max = 0;
+        for (let i = 0; i < N; i++) if (Math.abs(input[i]) > max) max = Math.abs(input[i]);
+        console.log("output.silent", max === 0);
+        console.log("gain.lt.maxGain", agc.gain < 100);
+      `,
+    );
+    expect(stdout).toBe(["output.silent true", "gain.lt.maxGain true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("state persists across .process() calls", async () => {
+    // Feed the same loud sine in two halves; after the second half the
+    // envelope/gain should match what we get from one-shot processing.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-state",
+      `
+        import audio from "bun:audio";
+        const SR = 48000;
+        const N = SR;
+        const mkSine = () => {
+          const a = new Float32Array(N);
+          for (let i = 0; i < N; i++) a[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / SR);
+          return a;
+        };
+        const oneShot = new audio.Gain({ sampleRate: SR });
+        const oneShotInput = mkSine();
+        oneShot.process(oneShotInput);
+        const split = new audio.Gain({ sampleRate: SR });
+        const splitInput = mkSine();
+        split.process(splitInput.subarray(0, N / 2));
+        split.process(splitInput.subarray(N / 2));
+        const equalLen = oneShotInput.length === splitInput.length;
+        let sumAbs = 0;
+        for (let i = 0; i < N; i++) sumAbs += Math.abs(oneShotInput[i] - splitInput[i]);
+        console.log("equalLen", equalLen);
+        console.log("identical.output", sumAbs === 0);
+      `,
+    );
+    expect(stdout).toBe(["equalLen true", "identical.output true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects bad opts at construction time", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-bad-opts",
+      `
+        import audio from "bun:audio";
+        let threw = 0;
+        try { new audio.Gain({ targetLevel: 0 }); } catch { threw++; }
+        try { new audio.Gain({ targetLevel: 2 }); } catch { threw++; }
+        try { new audio.Gain({ maxGain: 0 }); } catch { threw++; }
+        try { new audio.Gain({ sampleRate: -1 }); } catch { threw++; }
+        try { new audio.Gain(null); } catch { threw++; }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 5");
+    expect(exitCode).toBe(0);
+  });
+
+  it("reset() returns the AGC to its initial state", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gain-reset",
+      `
+        import audio from "bun:audio";
+        const SR = 48000;
+        const N = SR;
+        const noisy = new Float32Array(N);
+        for (let i = 0; i < N; i++) noisy[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / SR);
+        const agc = new audio.Gain({ sampleRate: SR });
+        agc.process(noisy);
+        const gainBeforeReset = agc.gain;
+        agc.reset();
+        console.log("postReset.envelope", agc.envelope);
+        console.log("postReset.gain", agc.gain);
+        console.log("changed", gainBeforeReset !== agc.gain);
+      `,
+    );
+    expect(stdout).toBe(["postReset.envelope 0", "postReset.gain 1", "changed true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+});
