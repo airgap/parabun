@@ -200,6 +200,69 @@ kernel void conv2d_f32(
     outbuf[y * oW + x] = acc;
 }
 
+// ── Fused RGBA-uint8 Gaussian blur ────────────────────────────────────────
+// Mirror of cuda.ts's gaussian_blur_rgba_u8. Used by bun:image's
+// image.blur(img, gpu: true) path so the entire op happens in
+// one kernel invocation, sidestepping the JS-side per-channel
+// deinterleave that would dominate a per-channel conv2D dispatch.
+//
+// One thread per output pixel; computes all 4 channels in parallel
+// with float accumulators, packs back to uint8 with round + clamp.
+// Edge clamp on border samples. Kernel weights are passed as a 1D
+// Gaussian (the host builds it once); the kernel forms the 2D
+// outer product on the fly.
+//
+// Tiled shared-mem variant follows once we have a Metal host that
+// can validate it; for v1 this is the global-mem version (same shape
+// as conv2D).
+kernel void gaussian_blur_rgba_u8(
+    device const uchar *src       [[buffer(0)]],
+    device       uchar *dst       [[buffer(1)]],
+    constant     uint  &w         [[buffer(2)]],
+    constant     uint  &h         [[buffer(3)]],
+    device const float *kern1d    [[buffer(4)]],
+    constant     int   &radius    [[buffer(5)]],
+    uint2               gid       [[thread_position_in_grid]])
+{
+    int x = (int)gid.x;
+    int y = (int)gid.y;
+    if (x >= (int)w || y >= (int)h) return;
+
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+    int kSize = 2 * radius + 1;
+    for (int ky = 0; ky < kSize; ky++) {
+        int sy = y + ky - radius;
+        if (sy < 0) sy = 0;
+        if (sy >= (int)h) sy = (int)h - 1;
+        float kyW = kern1d[ky];
+        for (int kx = 0; kx < kSize; kx++) {
+            int sx = x + kx - radius;
+            if (sx < 0) sx = 0;
+            if (sx >= (int)w) sx = (int)w - 1;
+            float kw = kyW * kern1d[kx];
+            int idx = (sy * (int)w + sx) * 4;
+            r = fma((float)src[idx + 0], kw, r);
+            g = fma((float)src[idx + 1], kw, g);
+            b = fma((float)src[idx + 2], kw, b);
+            a = fma((float)src[idx + 3], kw, a);
+        }
+    }
+
+    int oIdx = (y * (int)w + x) * 4;
+    int ri = (int)(r + 0.5f);
+    int gi = (int)(g + 0.5f);
+    int bi = (int)(b + 0.5f);
+    int ai = (int)(a + 0.5f);
+    if (ri < 0) ri = 0; else if (ri > 255) ri = 255;
+    if (gi < 0) gi = 0; else if (gi > 255) gi = 255;
+    if (bi < 0) bi = 0; else if (bi > 255) bi = 255;
+    if (ai < 0) ai = 0; else if (ai > 255) ai = 255;
+    dst[oIdx + 0] = (uchar)ri;
+    dst[oIdx + 1] = (uchar)gi;
+    dst[oIdx + 2] = (uchar)bi;
+    dst[oIdx + 3] = (uchar)ai;
+}
+
 // ── Q4_K direct matVec ─────────────────────────────────────────────────────
 // Port of the CUDA matvec_q4k_f32 kernel (src/js/bun/gpu/cuda.ts).
 // Reads raw 144-byte super-blocks, dequantizes on chip, accumulates in f32.
@@ -995,6 +1058,8 @@ let matmulFn: bigint = 0n;
 let matmulPipeline: bigint = 0n;
 let conv2DFn: bigint = 0n;
 let conv2DPipeline: bigint = 0n;
+let gaussianBlurRGBAu8Fn: bigint = 0n;
+let gaussianBlurRGBAu8Pipeline: bigint = 0n;
 let matVecQ4KFn: bigint = 0n;
 let matVecQ4KPipeline: bigint = 0n;
 let matVecQ6KFn: bigint = 0n;
@@ -1251,6 +1316,16 @@ function probe(): boolean {
   }
   conv2DFn = cv.fn;
   conv2DPipeline = cv.pipe;
+
+  // Image-specific RGBA blur kernel — same optional-at-probe-time
+  // semantics as the quantized kernels below. If it doesn't compile
+  // we still return a usable backend with imageBlurRGBA falling back
+  // to the public wrapper's CPU path.
+  const gb = compileKernel(lib, "gaussian_blur_rgba_u8");
+  if (gb !== null) {
+    gaussianBlurRGBAu8Fn = gb.fn;
+    gaussianBlurRGBAu8Pipeline = gb.pipe;
+  }
 
   // Quantized matVec kernels. These are optional at the probe layer —
   // if the device's MSL compiler can't handle the Q-K source (shouldn't
@@ -1851,6 +1926,101 @@ function launchConv2D(
     if (inBufOwned) objcRelease(inBuf);
     if (kBufOwned) objcRelease(kBuf);
     if (outBuf !== 0n) objcRelease(outBuf);
+  }
+}
+
+// ─── Kernel launch: gaussian_blur_rgba_u8 ─────────────────────────────────
+// Single-launch fused RGBA blur — mirrors the CUDA path. Input + output
+// are Uint8Array of identical byte length; the kernel writes one
+// uint8 RGBA quad per output thread.
+//
+// Caller must ensure the kernel compiled (gaussianBlurRGBAu8Pipeline !== 0n);
+// the public wrapper falls back to the CPU path otherwise.
+
+function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radius: number): Uint8Array {
+  const bytes = BigInt(input.length);
+  const kSize = 2 * radius + 1;
+  const kBytes = BigInt(kSize * 4);
+
+  // Build the 1D Gaussian once on the host. Same coefficients as the C++
+  // path so callers see consistent output across CPU and GPU.
+  const sigma = radius / 3 + 1e-6;
+  const k1d = new Float32Array(kSize);
+  let sum = 0;
+  for (let i = 0; i < kSize; i++) {
+    const x = i - radius;
+    k1d[i] = Math.exp(-(x * x) / (2 * sigma * sigma));
+    sum += k1d[i];
+  }
+  for (let i = 0; i < kSize; i++) k1d[i] /= sum;
+
+  let inBuf: bigint = 0n;
+  let outBuf: bigint = 0n;
+  let kBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    // newBufferWithBytes copies into MTLBuffer-owned region (always
+    // available, no alignment requirement). For sustained-image
+    // pipelines callers can hold a residency wrapper later; for v1
+    // every dispatch allocates fresh.
+    inBuf = msgSend_5_ptr_u64_u64_ret!(
+      device,
+      sel("newBufferWithBytes:length:options:"),
+      ffiPtr!(input),
+      bytes,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    if (inBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes (input) failed");
+
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("bun:gpu metal: newBufferWithLength (output) failed");
+
+    kBuf = msgSend_5_ptr_u64_u64_ret!(
+      device,
+      sel("newBufferWithBytes:length:options:"),
+      ffiPtr!(k1d),
+      kBytes,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    if (kBuf === 0n) throw new Error("bun:gpu metal: newBufferWithBytes (kern) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    if (cmdBuf === 0n) throw new Error("bun:gpu metal: commandBuffer failed");
+
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (encoder === 0n) throw new Error("bun:gpu metal: computeCommandEncoder failed");
+
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), gaussianBlurRGBAu8Pipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 1n);
+    const pW = new Uint32Array([w]);
+    const pH = new Uint32Array([h]);
+    const pR = new Int32Array([radius]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pW), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pH), 4n, 3n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), kBuf, 0n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ffiPtr!(pR), 4n, 5n);
+
+    // 16×16 threadgroups — matches the CUDA dispatch shape.
+    const threads = new BigUint64Array([BigInt(w), BigInt(h), 1n]);
+    const tpt = new BigUint64Array([16n, 16n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ffiPtr!(threads), ffiPtr!(tpt));
+
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("bun:gpu metal: outBuf contents is null");
+    const out = new Uint8Array(input.length);
+    const view = new Uint8Array(ffiToArrayBuffer!(Number(contents), 0, input.length));
+    out.set(view);
+    return out;
+  } finally {
+    if (inBuf !== 0n) objcRelease(inBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
+    if (kBuf !== 0n) objcRelease(kBuf);
   }
 }
 
@@ -3081,6 +3251,23 @@ function conv2D(
   return launchConv2D(input, kernel, iW, iH, kW, kH);
 }
 
+// Image-specific RGBA-uint8 Gaussian blur. Mirrors cuda.ts. Single-launch
+// fused kernel — sidesteps the JS-side per-channel deinterleave that
+// dominates a per-channel conv2D-based dispatch path.
+function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number): Uint8Array | null {
+  if (radius < 0 || radius > 100) throw new RangeError("radius must be in [0, 100]");
+  if (radius === 0) {
+    const out = new Uint8Array(input.length);
+    out.set(input);
+    return out;
+  }
+  if (input.length !== w * h * 4) {
+    throw new RangeError(`imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`);
+  }
+  if (!probe() || gaussianBlurRGBAu8Pipeline === 0n) return null;
+  return launchGaussianBlurRGBAu8(input, w, h, radius);
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   if (typeof fn !== "function") throw new TypeError("fn must be a function");
   const view = unwrapHandle(a);
@@ -3121,6 +3308,14 @@ function dispose(): void {
   if (conv2DFn !== 0n) {
     objcRelease(conv2DFn);
     conv2DFn = 0n;
+  }
+  if (gaussianBlurRGBAu8Pipeline !== 0n) {
+    objcRelease(gaussianBlurRGBAu8Pipeline);
+    gaussianBlurRGBAu8Pipeline = 0n;
+  }
+  if (gaussianBlurRGBAu8Fn !== 0n) {
+    objcRelease(gaussianBlurRGBAu8Fn);
+    gaussianBlurRGBAu8Fn = 0n;
   }
   if (matVecPipeline !== 0n) {
     objcRelease(matVecPipeline);
@@ -3191,6 +3386,7 @@ export default {
   matVec,
   matmul,
   conv2D,
+  imageBlurRGBA,
   simdMap,
   alloc,
   isAligned,
