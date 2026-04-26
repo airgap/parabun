@@ -644,6 +644,92 @@ void sobelEdgeDetect(
     }
 }
 
+// ─── Geometric transforms (rotate / flip) ──────────────────────────────────
+// 90/180/270° rotations and horizontal/vertical flips. These are
+// memory-shuffles only — no resampling, every input pixel maps to exactly
+// one output pixel. Arbitrary angles need a separate path with bilinear
+// or Lanczos sampling and live elsewhere.
+//
+// Rotation conventions match every other image library: 90 = clockwise.
+
+void rotate90Clockwise(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels, uint8_t* dst /* sh × sw */)
+{
+    // Output is sh wide × sw tall. Output (x', y') ← input (y', sh-1-x').
+    const uint32_t dw = sh;
+    const uint32_t dh = sw;
+    for (uint32_t y = 0; y < dh; y++) {
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * dw * channels;
+        for (uint32_t x = 0; x < dw; x++) {
+            const uint32_t sx = y;
+            const uint32_t sy = sh - 1 - x;
+            const uint8_t* srcPx = src + static_cast<size_t>(sy) * sw * channels + static_cast<size_t>(sx) * channels;
+            uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
+            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+        }
+    }
+}
+
+void rotate180(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels, uint8_t* dst /* sw × sh */)
+{
+    // Output (x', y') ← input (sw-1-x', sh-1-y').
+    for (uint32_t y = 0; y < sh; y++) {
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * sw * channels;
+        const uint8_t* srcRow = src + static_cast<size_t>(sh - 1 - y) * sw * channels;
+        for (uint32_t x = 0; x < sw; x++) {
+            const uint8_t* srcPx = srcRow + static_cast<size_t>(sw - 1 - x) * channels;
+            uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
+            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+        }
+    }
+}
+
+void rotate270Clockwise(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels, uint8_t* dst /* sh × sw */)
+{
+    // Same as 90° counter-clockwise. Output (x', y') ← input (sw-1-y', x').
+    const uint32_t dw = sh;
+    const uint32_t dh = sw;
+    for (uint32_t y = 0; y < dh; y++) {
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * dw * channels;
+        for (uint32_t x = 0; x < dw; x++) {
+            const uint32_t sx = sw - 1 - y;
+            const uint32_t sy = x;
+            const uint8_t* srcPx = src + static_cast<size_t>(sy) * sw * channels + static_cast<size_t>(sx) * channels;
+            uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
+            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+        }
+    }
+}
+
+void flipHorizontal(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels, uint8_t* dst /* sw × sh */)
+{
+    // Mirror left-right. Output (x', y') ← input (sw-1-x', y').
+    for (uint32_t y = 0; y < sh; y++) {
+        const uint8_t* srcRow = src + static_cast<size_t>(y) * sw * channels;
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * sw * channels;
+        for (uint32_t x = 0; x < sw; x++) {
+            const uint8_t* srcPx = srcRow + static_cast<size_t>(sw - 1 - x) * channels;
+            uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
+            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+        }
+    }
+}
+
+void flipVertical(
+    const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels, uint8_t* dst /* sw × sh */)
+{
+    // Mirror top-bottom. Whole-row memcpy — no per-pixel inner loop needed.
+    const size_t rowBytes = static_cast<size_t>(sw) * channels;
+    for (uint32_t y = 0; y < sh; y++) {
+        const uint8_t* srcRow = src + static_cast<size_t>(sh - 1 - y) * rowBytes;
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * rowBytes;
+        std::memcpy(dstRow, srcRow, rowBytes);
+    }
+}
+
 // ─── Bilinear resize ───────────────────────────────────────────────────────
 // CPU-side bilinear resampling. Each output pixel samples the four nearest
 // input pixels with bilinear weights derived from the half-pixel-centered
@@ -1251,6 +1337,177 @@ JSC_DEFINE_HOST_FUNCTION(functionEdgeDetect,
     return JSValue::encode(obj);
 }
 
+// rotate(img, { degrees }) — degrees must be 90, 180, or 270. Output dims
+// swap for 90 / 270, stay the same for 180. Channels and format pass through.
+JSC_DEFINE_HOST_FUNCTION(functionRotate,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject() || !optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: expected (img, { degrees })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    auto* optsObj = asObject(optsArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    JSValue degVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "degrees"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!degVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: opts.degrees is required (number)"_s);
+        return {};
+    }
+    const int32_t degrees = degVal.toInt32(globalObject);
+    if (degrees != 90 && degrees != 180 && degrees != 270) {
+        throwTypeError(globalObject, scope, "bun:image.rotate: degrees must be 90, 180, or 270"_s);
+        return {};
+    }
+
+    const uint32_t dw = (degrees == 180) ? w : h;
+    const uint32_t dh = (degrees == 180) ? h : w;
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(dw) * dh * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    const uint8_t* srcPtr = static_cast<const uint8_t*>(srcRaw);
+    uint8_t* dstPtr = static_cast<uint8_t*>(dstArr->vector());
+    if (degrees == 90) {
+        rotate90Clockwise(srcPtr, w, h, channels, dstPtr);
+    } else if (degrees == 180) {
+        rotate180(srcPtr, w, h, channels, dstPtr);
+    } else {
+        rotate270Clockwise(srcPtr, w, h, channels, dstPtr);
+    }
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(dw));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(dh));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
+// flip(img, { axis }) — axis is "horizontal" (mirror left-right) or
+// "vertical" (mirror top-bottom). Dims, channels, format pass through.
+JSC_DEFINE_HOST_FUNCTION(functionFlip,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject() || !optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.flip: expected (img, { axis })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    auto* optsObj = asObject(optsArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.flip: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.flip: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.flip: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.flip: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    JSValue axisVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "axis"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!axisVal.isString()) {
+        throwTypeError(globalObject, scope, "bun:image.flip: opts.axis must be \"horizontal\" or \"vertical\""_s);
+        return {};
+    }
+    auto axisStr = axisVal.toWTFString(globalObject).utf8();
+    RETURN_IF_EXCEPTION(scope, {});
+    const bool isHorizontal = std::strcmp(axisStr.data(), "horizontal") == 0;
+    const bool isVertical = std::strcmp(axisStr.data(), "vertical") == 0;
+    if (!isHorizontal && !isVertical) {
+        throwTypeError(globalObject, scope, "bun:image.flip: opts.axis must be \"horizontal\" or \"vertical\""_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    const uint8_t* srcPtr = static_cast<const uint8_t*>(srcRaw);
+    uint8_t* dstPtr = static_cast<uint8_t*>(dstArr->vector());
+    if (isHorizontal) {
+        flipHorizontal(srcPtr, w, h, channels, dstPtr);
+    } else {
+        flipVertical(srcPtr, w, h, channels, dstPtr);
+    }
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1273,6 +1530,12 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "edgeDetect"_s), 1,
         functionEdgeDetect, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "rotate"_s), 2,
+        functionRotate, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "flip"_s), 2,
+        functionFlip, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

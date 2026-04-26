@@ -753,6 +753,199 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("rotate 90 swaps dims and maps top-left to top-right", async () => {
+    // Build a tiny 2×3 RGBA image with known per-pixel colors so we can
+    // verify the rotate-90 mapping pixel-by-pixel.
+    //  Layout (3 wide × 2 tall):
+    //    A B C
+    //    D E F
+    //  After 90° CW (2 wide × 3 tall):
+    //    D A
+    //    E B
+    //    F C
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-rotate-90",
+      `
+        import image from "bun:image";
+        const w = 3, h = 2;
+        const px = (r, g, b) => [r, g, b, 255];
+        const A = px(255, 0, 0);   // red
+        const B = px(0, 255, 0);   // green
+        const C = px(0, 0, 255);   // blue
+        const D = px(255, 255, 0); // yellow
+        const E = px(0, 255, 255); // cyan
+        const F = px(255, 0, 255); // magenta
+        const flatten = arr => Uint8Array.from(arr.flat());
+        const orig = {
+          data: flatten([A, B, C, D, E, F]),
+          width: w, height: h, channels: 4, format: "png",
+        };
+        const r = image.rotate(orig, { degrees: 90 });
+        console.log("dims", r.width, r.height, r.channels);
+        // Expected layout: row0=[D,A] row1=[E,B] row2=[F,C].
+        const expected = flatten([D, A, E, B, F, C]);
+        const equal = r.data.length === expected.length && r.data.every((v, i) => v === expected[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 2 3 4", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rotate 180 keeps dims and reverses both axes", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-rotate-180",
+      `
+        import image from "bun:image";
+        const w = 3, h = 2;
+        const px = (r, g, b) => [r, g, b, 255];
+        const A = px(255, 0, 0);
+        const B = px(0, 255, 0);
+        const C = px(0, 0, 255);
+        const D = px(255, 255, 0);
+        const E = px(0, 255, 255);
+        const F = px(255, 0, 255);
+        const flatten = arr => Uint8Array.from(arr.flat());
+        const orig = {
+          data: flatten([A, B, C, D, E, F]),
+          width: w, height: h, channels: 4, format: "png",
+        };
+        const r = image.rotate(orig, { degrees: 180 });
+        console.log("dims", r.width, r.height);
+        // 180° flips both axes: [A,B,C; D,E,F] → [F,E,D; C,B,A].
+        const expected = flatten([F, E, D, C, B, A]);
+        const equal = r.data.every((v, i) => v === expected[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 3 2", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rotate 270 is the inverse of rotate 90", async () => {
+    // Round-trip: rotate(90) then rotate(270) should reproduce the input.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-rotate-roundtrip",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);                   // 4×4 RGBA
+        const r = image.rotate(image.rotate(orig, { degrees: 90 }), { degrees: 270 });
+        console.log("dims", r.width, r.height, r.channels);
+        const equal = r.data.length === orig.data.length && r.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4 4", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rotate rejects non-cardinal degrees", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-rotate-bad-deg",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        let threw = 0;
+        for (const d of [0, 45, 91, 360, -90]) {
+          try { image.rotate(orig, { degrees: d }); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 5");
+    expect(exitCode).toBe(0);
+  });
+
+  it("flip horizontal reverses each row", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-flip-h",
+      `
+        import image from "bun:image";
+        const w = 3, h = 2;
+        const px = (r, g, b) => [r, g, b, 255];
+        const A = px(255, 0, 0);
+        const B = px(0, 255, 0);
+        const C = px(0, 0, 255);
+        const D = px(255, 255, 0);
+        const E = px(0, 255, 255);
+        const F = px(255, 0, 255);
+        const flatten = arr => Uint8Array.from(arr.flat());
+        const orig = {
+          data: flatten([A, B, C, D, E, F]),
+          width: w, height: h, channels: 4, format: "png",
+        };
+        const r = image.flip(orig, { axis: "horizontal" });
+        console.log("dims", r.width, r.height);
+        // Each row reversed: [A,B,C] → [C,B,A]; [D,E,F] → [F,E,D].
+        const expected = flatten([C, B, A, F, E, D]);
+        console.log("byteEqual", r.data.every((v, i) => v === expected[i]));
+      `,
+    );
+    expect(stdout).toBe(["dims 3 2", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("flip vertical swaps rows top-to-bottom", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-flip-v",
+      `
+        import image from "bun:image";
+        const w = 3, h = 2;
+        const px = (r, g, b) => [r, g, b, 255];
+        const A = px(255, 0, 0);
+        const B = px(0, 255, 0);
+        const C = px(0, 0, 255);
+        const D = px(255, 255, 0);
+        const E = px(0, 255, 255);
+        const F = px(255, 0, 255);
+        const flatten = arr => Uint8Array.from(arr.flat());
+        const orig = {
+          data: flatten([A, B, C, D, E, F]),
+          width: w, height: h, channels: 4, format: "png",
+        };
+        const r = image.flip(orig, { axis: "vertical" });
+        // Rows swapped: [A,B,C; D,E,F] → [D,E,F; A,B,C].
+        const expected = flatten([D, E, F, A, B, C]);
+        console.log("byteEqual", r.data.every((v, i) => v === expected[i]));
+      `,
+    );
+    expect(stdout).toBe("byteEqual true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("flip applied twice is the identity", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-flip-double",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const back = image.flip(image.flip(orig, { axis: "horizontal" }), { axis: "horizontal" });
+        const equal = back.data.length === orig.data.length && back.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe("byteEqual true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("flip rejects an unknown axis", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-flip-bad-axis",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        try {
+          image.flip(orig, { axis: "diagonal" });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("horizontal"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

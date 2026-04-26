@@ -58,6 +58,14 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
 };
+type RotateOptions = {
+  /** 90 (clockwise), 180, or 270. Arbitrary angles need resampling — not supported in v1. */
+  degrees: 90 | 180 | 270;
+};
+type FlipOptions = {
+  /** "horizontal" mirrors left-right; "vertical" mirrors top-bottom. */
+  axis: "horizontal" | "vertical";
+};
 type SharpenOptions = {
   /**
    * Strength of the high-frequency boost. Default 1 (one extra copy of the
@@ -120,6 +128,26 @@ function edgeDetect(img: DecodedImage): DecodedImage {
   return native.edgeDetect(img);
 }
 
+function rotate(img: DecodedImage, opts: RotateOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.rotate: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:image.rotate: opts must be { degrees }");
+  }
+  return native.rotate(img, opts);
+}
+
+function flip(img: DecodedImage, opts: FlipOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.flip: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:image.flip: opts must be { axis }");
+  }
+  return native.flip(img, opts);
+}
+
 export default {
   decode,
   encode,
@@ -127,4 +155,6 @@ export default {
   blur,
   sharpen,
   edgeDetect,
+  rotate,
+  flip,
 };
