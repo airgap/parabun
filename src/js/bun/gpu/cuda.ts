@@ -1254,6 +1254,242 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
   return out;
 }
 
+// ─── Kernel launch: reduce (sum / min / max) ──────────────────────────────
+// REDUCE_GRID blocks × 256 threads each, two-stage. Block phase computes
+// a per-block partial via tree reduction; host phase sums / mins / maxes
+// the GRID partials. Identity values match the JS conventions (sum→0,
+// min→+∞, max→-∞), so an empty input falls out correctly without a
+// special case.
+//
+// Held-handle inputs reuse the device buffer. Float32Array inputs go
+// through the standard cuMemAlloc / cuMemcpyHtoD round-trip — on Gen-3+
+// PCIe the GPU wins handily; on slow PCIe (Gen-1 x8 idle desktops) the
+// CPU reduce will beat this on a one-shot call. The held-handle path is
+// the production case.
+const REDUCE_BLOCK = 256;
+const REDUCE_GRID = 1024;
+
+function launchReduceF32(input: Float32Array | GpuHandle, op: "sum" | "min" | "max"): number {
+  if (!probeDevOps()) {
+    // No NVRTC — caller must fall back to CPU.
+    throw new Error("bun:gpu cuda: NVRTC not available; reduce requires devOps module");
+  }
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aView = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  const n = aView.length;
+
+  if (n === 0) {
+    return op === "sum" ? 0 : op === "min" ? Infinity : -Infinity;
+  }
+
+  const aBytes = BigInt(n * 4);
+  const partialsBytes = BigInt(REDUCE_GRID * 4);
+
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error("bun:gpu: reduce called on released handle");
+    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = input.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    }
+    dA = dABuf[0];
+    aOwned = true;
+    if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
+      s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    }
+  }
+
+  const dPartialsBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dPartialsBuf), partialsBytes) !== 0) {
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(partials) failed");
+  }
+  const dPartials = dPartialsBuf[0];
+
+  const fn = op === "sum" ? devOpsFns!.reduceSum : op === "min" ? devOpsFns!.reduceMin : devOpsFns!.reduceMax;
+
+  const pIn = new BigUint64Array([dA]);
+  const pOut = new BigUint64Array([dPartials]);
+  const pN = new Uint32Array([n]);
+  const paramPtrs = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pOut)), BigInt(ptr(pN))]);
+
+  const r = s.cuLaunchKernel(fn, REDUCE_GRID, 1, 1, REDUCE_BLOCK, 1, 1, 0, 0n, ptr(paramPtrs), null);
+  if (r !== 0) {
+    s.cuMemFree_v2(dPartials);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error(`bun:gpu cuda: cuLaunchKernel(reduce_${op}) failed (${r})`);
+  }
+  if (s.cuCtxSynchronize() !== 0) {
+    s.cuMemFree_v2(dPartials);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+  }
+
+  // Pull partials back, run final reduction on host. REDUCE_GRID = 1024
+  // floats is 4 KB — DtoH is essentially free vs the kernel time.
+  const partials = new Float32Array(REDUCE_GRID);
+  if (s.cuMemcpyDtoH_v2(ptr(partials), dPartials, partialsBytes) !== 0) {
+    s.cuMemFree_v2(dPartials);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials) failed");
+  }
+
+  s.cuMemFree_v2(dPartials);
+  if (aOwned) s.cuMemFree_v2(dA);
+
+  // Final host reduction. Use the same NaN-propagating semantics as the
+  // device kernel + the public CPU reference.
+  if (op === "sum") {
+    let sum = 0;
+    let c = 0;
+    for (let i = 0; i < REDUCE_GRID; i++) {
+      const y = partials[i] - c;
+      const t = sum + y;
+      c = t - sum - y;
+      sum = t;
+    }
+    return sum;
+  }
+  if (op === "min") {
+    let m = Infinity;
+    for (let i = 0; i < REDUCE_GRID; i++) {
+      const v = partials[i];
+      if (Number.isNaN(v)) return NaN;
+      if (v < m) m = v;
+    }
+    return m;
+  }
+  // max
+  let m = -Infinity;
+  for (let i = 0; i < REDUCE_GRID; i++) {
+    const v = partials[i];
+    if (Number.isNaN(v)) return NaN;
+    if (v > m) m = v;
+  }
+  return m;
+}
+
+// ─── Kernel launch: histogram ─────────────────────────────────────────────
+// Privatized histogram. Each block keeps its own bins[] in dynamic shared
+// memory (size = bins * 4 bytes), atomicAdds within the block, then merges
+// to global with one atomicAdd per non-zero bin per block.
+//
+// Shared-memory cap on most GPUs is 48 KB → up to 12K bins. Above that we
+// throw and let the public wrapper fall back to CPU. Image-style histograms
+// (256 bins) and latency buckets (~30 bins) are all comfortably small.
+
+const HIST_BLOCK = 256;
+const HIST_GRID = 512;
+
+function launchHistogramF32(
+  input: Float32Array | GpuHandle,
+  bins: number,
+  min: number,
+  max: number,
+): Uint32Array | null {
+  if (!probeDevOps()) return null;
+  if (bins <= 0 || bins > 12288) return null;
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aView = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  const n = aView.length;
+  const out = new Uint32Array(bins);
+  if (n === 0) return out;
+
+  const aBytes = BigInt(n * 4);
+  const outBytes = BigInt(bins * 4);
+
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error("bun:gpu: histogram called on released handle");
+    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = input.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    }
+    dA = dABuf[0];
+    aOwned = true;
+    if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
+      s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    }
+  }
+
+  const dOutBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) {
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+  }
+  const dOut = dOutBuf[0];
+  // Zero the output bins (MEM_SET_D32 would be cleaner but requires more
+  // FFI surface; a small HtoD of zeroes is fine).
+  const zero = new Uint32Array(bins);
+  if (s.cuMemcpyHtoD_v2(dOut, ptr(zero), outBytes) !== 0) {
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemcpyHtoD(zero) failed");
+  }
+
+  const pIn = new BigUint64Array([dA]);
+  const pOut = new BigUint64Array([dOut]);
+  const pN = new Uint32Array([n]);
+  const pBins = new Uint32Array([bins]);
+  const pMin = new Float32Array([min]);
+  const pMax = new Float32Array([max]);
+  const paramPtrs = new BigUint64Array([
+    BigInt(ptr(pIn)),
+    BigInt(ptr(pOut)),
+    BigInt(ptr(pN)),
+    BigInt(ptr(pBins)),
+    BigInt(ptr(pMin)),
+    BigInt(ptr(pMax)),
+  ]);
+
+  const r = s.cuLaunchKernel(
+    devOpsFns!.histogram,
+    HIST_GRID,
+    1,
+    1,
+    HIST_BLOCK,
+    1,
+    1,
+    Number(outBytes),
+    0n, // dynamic shared mem = bins * 4
+    ptr(paramPtrs),
+    null,
+  );
+  if (r !== 0) {
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error(`bun:gpu cuda: cuLaunchKernel(histogram) failed (${r})`);
+  }
+  if (s.cuCtxSynchronize() !== 0) {
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+  }
+
+  if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) {
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(out) failed");
+  }
+  s.cuMemFree_v2(dOut);
+  if (aOwned) s.cuMemFree_v2(dA);
+  return out;
+}
+
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
 //
 // a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
@@ -1982,6 +2218,73 @@ function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number):
   return launchGaussianBlurRGBAu8(input, w, h, radius);
 }
 
+// Reduce dispatch — see launchReduceF32 for kernel details. NVRTC-only path;
+// without dev-ops we return Number.NaN as a sentinel and the public wrapper
+// in gpu.ts falls back to the CPU reference. (The Backend.reduce contract
+// returns a number, so we can't return null here.)
+function reduce(input: FArray | GpuHandle, op: "sum" | "min" | "max"): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("bun:gpu cuda: reduce requires Float32Array (f64 not yet supported)");
+  }
+  if (!probeDevOps()) {
+    // Caller-side fallback: do the CPU reduce inline so the public wrapper
+    // doesn't need to know we punted.
+    if (op === "sum") {
+      let sum = 0,
+        c = 0;
+      for (let i = 0; i < view.length; i++) {
+        const y = view[i] - c;
+        const t = sum + y;
+        c = t - sum - y;
+        sum = t;
+      }
+      return sum;
+    }
+    if (op === "min") {
+      let m = Infinity;
+      for (let i = 0; i < view.length; i++) {
+        const v = view[i];
+        if (Number.isNaN(v)) return NaN;
+        if (v < m) m = v;
+      }
+      return m;
+    }
+    let m = -Infinity;
+    for (let i = 0; i < view.length; i++) {
+      const v = view[i];
+      if (Number.isNaN(v)) return NaN;
+      if (v > m) m = v;
+    }
+    return m;
+  }
+  return launchReduceF32(input as Float32Array | GpuHandle, op);
+}
+
+// Histogram dispatch — see launchHistogramF32. Returns null when the
+// backend can't service the request (no NVRTC, or bins > 12K shared-mem
+// cap) and the public wrapper drops to CPU.
+function histogram(input: FArray | GpuHandle, bins: number, min: number, max: number): Uint32Array {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("bun:gpu cuda: histogram requires Float32Array (f64 not yet supported)");
+  }
+  const out = launchHistogramF32(input as Float32Array | GpuHandle, bins, min, max);
+  if (out !== null) return out;
+  // Fallback to CPU when NVRTC isn't available or bins exceeds shared-mem.
+  const result = new Uint32Array(bins);
+  if (view.length === 0 || min >= max) return result;
+  const scale = bins / (max - min);
+  for (let i = 0; i < view.length; i++) {
+    const v = view[i];
+    if (Number.isNaN(v) || v < min || v > max) continue;
+    let bin = ((v - min) * scale) | 0;
+    if (bin >= bins) bin = bins - 1;
+    result[bin]++;
+  }
+  return result;
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
   if (typeof fn !== "function") throw new TypeError("fn must be a function");
   const view = unwrapHandle(a);
@@ -2271,6 +2574,7 @@ const DEV_CUDA_SOURCE = `
 // NVRTC ships without <math.h> / <limits>, so synthesize the constants.
 #define F_INF  __int_as_float(0x7f800000)
 #define F_NINF __int_as_float(0xff800000)
+#define F_NAN  __int_as_float(0x7fc00000)
 
 // fp16 → fp32 without <cuda_fp16.h>. The PTX "cvt.f32.f16" instruction
 // handles subnormals/Inf/NaN identically to __half2float. Used in K-quant
@@ -3162,6 +3466,160 @@ extern "C" __global__ void gaussian_blur_rgba_u8(
     dst[oIdx + 2] = (unsigned char)bi;
     dst[oIdx + 3] = (unsigned char)ai;
 }
+
+// ─── Reduction (sum / min / max) ──────────────────────────────────────────
+// Two-stage tree reduction. Each block reduces a strided slice of the input
+// into one float partial; the host (or a second kernel launch in fancier
+// implementations) sums the partials. Block size is fixed at 256, grid is
+// driven by the launcher (REDUCE_GRID = 1024 — same shape as dotF32).
+//
+// Shared-mem layout: 256 floats, one per thread. Final 32-thread reduction
+// uses warp-shuffle (__shfl_down_sync) so no syncthreads in the last stage.
+//
+// NaN behavior matches JS Math.min / Math.max — NaN propagates. The sum
+// path picks up NaN naturally via float add; min/max guard with isnan().
+
+__device__ __forceinline__ float reduce_min_op(float a, float b) {
+    if (isnan(a) || isnan(b)) return F_NAN;
+    return a < b ? a : b;
+}
+__device__ __forceinline__ float reduce_max_op(float a, float b) {
+    if (isnan(a) || isnan(b)) return F_NAN;
+    return a > b ? a : b;
+}
+
+extern "C" __global__ void reduce_sum_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partials,
+    unsigned int n
+) {
+    __shared__ float sdata[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+
+    float acc = 0.0f;
+    for (unsigned int i = idx; i < n; i += stride) acc += in[i];
+    sdata[tid] = acc;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid < 32) {
+        float v = sdata[tid] + sdata[tid + 32];
+        v += __shfl_down_sync(0xffffffff, v, 16);
+        v += __shfl_down_sync(0xffffffff, v, 8);
+        v += __shfl_down_sync(0xffffffff, v, 4);
+        v += __shfl_down_sync(0xffffffff, v, 2);
+        v += __shfl_down_sync(0xffffffff, v, 1);
+        if (tid == 0) partials[blockIdx.x] = v;
+    }
+}
+
+extern "C" __global__ void reduce_min_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partials,
+    unsigned int n
+) {
+    __shared__ float sdata[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+
+    float acc = F_INF;
+    for (unsigned int i = idx; i < n; i += stride) acc = reduce_min_op(acc, in[i]);
+    sdata[tid] = acc;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sdata[tid] = reduce_min_op(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }
+    if (tid < 32) {
+        float v = reduce_min_op(sdata[tid], sdata[tid + 32]);
+        v = reduce_min_op(v, __shfl_down_sync(0xffffffff, v, 16));
+        v = reduce_min_op(v, __shfl_down_sync(0xffffffff, v, 8));
+        v = reduce_min_op(v, __shfl_down_sync(0xffffffff, v, 4));
+        v = reduce_min_op(v, __shfl_down_sync(0xffffffff, v, 2));
+        v = reduce_min_op(v, __shfl_down_sync(0xffffffff, v, 1));
+        if (tid == 0) partials[blockIdx.x] = v;
+    }
+}
+
+extern "C" __global__ void reduce_max_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partials,
+    unsigned int n
+) {
+    __shared__ float sdata[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+
+    float acc = F_NINF;
+    for (unsigned int i = idx; i < n; i += stride) acc = reduce_max_op(acc, in[i]);
+    sdata[tid] = acc;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sdata[tid] = reduce_max_op(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }
+    if (tid < 32) {
+        float v = reduce_max_op(sdata[tid], sdata[tid + 32]);
+        v = reduce_max_op(v, __shfl_down_sync(0xffffffff, v, 16));
+        v = reduce_max_op(v, __shfl_down_sync(0xffffffff, v, 8));
+        v = reduce_max_op(v, __shfl_down_sync(0xffffffff, v, 4));
+        v = reduce_max_op(v, __shfl_down_sync(0xffffffff, v, 2));
+        v = reduce_max_op(v, __shfl_down_sync(0xffffffff, v, 1));
+        if (tid == 0) partials[blockIdx.x] = v;
+    }
+}
+
+// ─── Histogram (privatized atomic) ────────────────────────────────────────
+// Each block keeps its own bin counts in shared memory; threads atomicAdd
+// to shared (cheap, no contention beyond the ~32-way warp), then merge to
+// global with one atomicAdd per bin per block. Caller passes bins as the
+// dynamic shared-mem size in bytes (bins * 4); the kernel signature uses
+// extern __shared__ to size the bins array at launch time.
+//
+// Top edge inclusive: a value exactly equal to maxv lands in the last bin.
+// NaN and out-of-range values are dropped silently — matches the CPU
+// histogram and numpy.histogram's convention.
+
+extern "C" __global__ void histogram_f32(
+    const float* __restrict__ in,
+    unsigned int* __restrict__ out,
+    unsigned int n,
+    unsigned int bins,
+    float minv,
+    float maxv
+) {
+    extern __shared__ unsigned int sbins[];
+    unsigned int tid = threadIdx.x;
+
+    for (unsigned int i = tid; i < bins; i += blockDim.x) sbins[i] = 0;
+    __syncthreads();
+
+    float range = maxv - minv;
+    float scale = range > 0.0f ? (float)bins / range : 0.0f;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+    for (unsigned int i = idx; i < n; i += stride) {
+        float v = in[i];
+        if (isnan(v) || v < minv || v > maxv) continue;
+        unsigned int bin = (unsigned int)((v - minv) * scale);
+        if (bin >= bins) bin = bins - 1u;
+        atomicAdd(&sbins[bin], 1u);
+    }
+    __syncthreads();
+
+    for (unsigned int i = tid; i < bins; i += blockDim.x) {
+        if (sbins[i] != 0u) atomicAdd(&out[i], sbins[i]);
+    }
+}
 `;
 
 type DevOpsFns = {
@@ -3187,6 +3645,10 @@ type DevOpsFns = {
   conv2D: bigint;
   gaussianBlurRGBAu8: bigint;
   gaussianBlurRGBAu8Tiled: bigint;
+  reduceSum: bigint;
+  reduceMin: bigint;
+  reduceMax: bigint;
+  histogram: bigint;
 };
 
 let devOpsProbed = false;
@@ -3275,6 +3737,10 @@ function probeDevOps(): boolean {
     "conv2D",
     "gaussianBlurRGBAu8",
     "gaussianBlurRGBAu8Tiled",
+    "reduceSum",
+    "reduceMin",
+    "reduceMax",
+    "histogram",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -3299,6 +3765,10 @@ function probeDevOps(): boolean {
     conv2D: "conv2d_f32",
     gaussianBlurRGBAu8: "gaussian_blur_rgba_u8",
     gaussianBlurRGBAu8Tiled: "gaussian_blur_rgba_u8_tiled",
+    reduceSum: "reduce_sum_f32",
+    reduceMin: "reduce_min_f32",
+    reduceMax: "reduce_max_f32",
+    histogram: "histogram_f32",
   };
 
   const fns = {} as DevOpsFns;
@@ -3846,6 +4316,8 @@ export default {
   matmul,
   conv2D,
   imageBlurRGBA,
+  reduce,
+  histogram,
   simdMap,
   alloc,
   isAligned,
