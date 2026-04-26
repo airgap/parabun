@@ -1269,6 +1269,118 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("histogram returns one Uint32Array(256) per channel for RGBA", async () => {
+    // 4×4 RGBA: every pixel red=10, green=200, blue=50, alpha=255.
+    // Each channel histogram should have exactly 16 hits at one bin.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-histogram-rgba",
+      `
+        import image from "bun:image";
+        const N = 16;
+        const data = new Uint8Array(N * 4);
+        for (let i = 0; i < N; i++) {
+          data[i * 4 + 0] = 10;
+          data[i * 4 + 1] = 200;
+          data[i * 4 + 2] = 50;
+          data[i * 4 + 3] = 255;
+        }
+        const img = { data, width: 4, height: 4, channels: 4, format: "png" };
+        const h = image.histogram(img);
+        console.log("nChannels", h.length);
+        console.log("perBinLen", h[0].length, h[0].constructor.name);
+        // Each channel's histogram should have a single non-zero bin = N.
+        const r = h[0], g = h[1], b = h[2], a = h[3];
+        console.log("r[10]", r[10], "g[200]", g[200], "b[50]", b[50], "a[255]", a[255]);
+        // All other bins zero — sum should be exactly N per channel.
+        for (let c = 0; c < 4; c++) {
+          let sum = 0;
+          for (let i = 0; i < 256; i++) sum += h[c][i];
+          console.log("ch" + c + ".sum", sum);
+        }
+      `,
+    );
+    expect(stdout).toBe(
+      [
+        "nChannels 4",
+        "perBinLen 256 Uint32Array",
+        "r[10] 16 g[200] 16 b[50] 16 a[255] 16",
+        "ch0.sum 16",
+        "ch1.sum 16",
+        "ch2.sum 16",
+        "ch3.sum 16",
+      ].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("histogram on a grayscale ramp shows one count per intensity", async () => {
+    // 1-channel image with one pixel at every intensity 0..255 in order.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-histogram-ramp",
+      `
+        import image from "bun:image";
+        const data = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) data[i] = i;
+        const img = { data, width: 256, height: 1, channels: 1, format: "png" };
+        const h = image.histogram(img);
+        console.log("nChannels", h.length);
+        // Every bin should be exactly 1.
+        let allOne = true;
+        for (let i = 0; i < 256; i++) if (h[0][i] !== 1) { allOne = false; break; }
+        console.log("allOne", allOne);
+      `,
+    );
+    expect(stdout).toBe(["nChannels 1", "allOne true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("histogram total per channel equals pixel count for any image", async () => {
+    // Decoded fixture; just check the invariant that sum(hist[c]) === w*h.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-histogram-invariant",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);     // 4×4 RGBA
+        const expected = orig.width * orig.height;
+        const h = image.histogram(orig);
+        for (let c = 0; c < orig.channels; c++) {
+          let sum = 0;
+          for (let i = 0; i < 256; i++) sum += h[c][i];
+          console.log("ch" + c, sum === expected);
+        }
+      `,
+    );
+    expect(stdout).toBe(["ch0 true", "ch1 true", "ch2 true", "ch3 true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("histogram fixture composes with adjust to track tone shifts", async () => {
+    // Brighten an image; the histogram should shift right (no values below
+    // the brightness offset, more weight in the high bins).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-histogram-after-adjust",
+      `
+        import image from "bun:image";
+        // Mid-gray uniform image, then push brightness +0.3 (≈ +76 on 8-bit).
+        const data = new Uint8Array(64).fill(128);   // 4×4 RGBA all mid-gray
+        const orig = { data, width: 4, height: 4, channels: 4, format: "png" };
+        const bright = image.adjust(orig, { brightness: 0.3 });
+        const h = image.histogram(bright);
+        // R/G/B should now be concentrated at one high bin (around 128 + 76 = 204).
+        // Find the peak bin in the red channel.
+        let peakBin = 0, peakCount = 0;
+        for (let i = 0; i < 256; i++) {
+          if (h[0][i] > peakCount) { peakBin = i; peakCount = h[0][i]; }
+        }
+        console.log("peakBin.gt.150", peakBin > 150);
+        console.log("peakCount", peakCount);
+      `,
+    );
+    // 0.3 * 255 = 76.5 → 128 + 77 = 205. We just check >150 to be safe.
+    expect(stdout).toBe(["peakBin.gt.150 true", "peakCount 16"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

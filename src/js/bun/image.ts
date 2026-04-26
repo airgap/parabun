@@ -190,6 +190,13 @@ function adjust(img: DecodedImage, opts?: AdjustOptions): DecodedImage {
   return native.adjust(img, opts ?? {});
 }
 
+function histogram(img: DecodedImage): Uint32Array[] {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.histogram: img must be the object returned from decode()");
+  }
+  return native.histogram(img);
+}
+
 export default {
   decode,
   encode,
@@ -202,4 +209,5 @@ export default {
   crop,
   toGrayscale,
   adjust,
+  histogram,
 };

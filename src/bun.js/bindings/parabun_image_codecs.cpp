@@ -580,6 +580,30 @@ void unsharpSharpen(
     }
 }
 
+// ─── Per-channel histogram ────────────────────────────────────────────────
+// 256-bin pixel-intensity histogram, one bin per 8-bit value, computed
+// independently per channel. The output is `channels` separate Uint32Array
+// counts in row-major channel order — R, G, B for RGB; R, G, B, A for
+// RGBA; the lone channel for grayscale.
+//
+// Useful for exposure analysis (do we have any pure-black/pure-white
+// pixels?), auto-tone curve fitting, threshold finding (Otsu's method
+// derives its threshold from the channel histogram).
+
+void perChannelHistogramCpu(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint32_t* dst /* channels × 256, row-major by channel */)
+{
+    std::memset(dst, 0, sizeof(uint32_t) * channels * 256);
+    const size_t pixels = static_cast<size_t>(w) * h;
+    for (size_t i = 0; i < pixels; i++) {
+        for (uint32_t c = 0; c < channels; c++) {
+            const uint8_t v = src[i * channels + c];
+            dst[c * 256 + v]++;
+        }
+    }
+}
+
 // ─── Tone adjustment (brightness / contrast / saturation) ─────────────────
 // Single-pass per-pixel transform applied in this order:
 //   1. contrast   — pivot around 128, scale by (1 + contrast)
@@ -1865,6 +1889,72 @@ JSC_DEFINE_HOST_FUNCTION(functionAdjust,
     return JSValue::encode(obj);
 }
 
+// histogram(img) → Uint32Array[]. Returns one Uint32Array(256) per
+// channel, in channel order: 1-channel → [gray]; 3-channel → [R, G, B];
+// 4-channel → [R, G, B, A]. Each bin is the count of pixels at that
+// 8-bit intensity in that channel.
+JSC_DEFINE_HOST_FUNCTION(functionHistogram,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.histogram: expected (img)"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.histogram: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.histogram: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.histogram: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.histogram: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    // Compute into a flat scratch buffer first, then split into per-channel
+    // Uint32Array views packaged into a JSArray.
+    std::vector<uint32_t> hist(static_cast<size_t>(channels) * 256, 0);
+    perChannelHistogramCpu(static_cast<const uint8_t*>(srcRaw), w, h, channels, hist.data());
+
+    // Build the output: an Array of `channels` Uint32Arrays, each of length 256.
+    auto* arr = JSC::constructEmptyArray(globalObject, nullptr, channels);
+    RETURN_IF_EXCEPTION(scope, {});
+    for (uint32_t c = 0; c < channels; c++) {
+        auto* chanArr = JSC::JSUint32Array::createUninitialized(
+            globalObject,
+            globalObject->typedArrayStructure(JSC::TypeUint32, /* isResizableOrGrowableShared */ false),
+            256);
+        RETURN_IF_EXCEPTION(scope, {});
+        std::memcpy(chanArr->vector(), hist.data() + (c * 256), sizeof(uint32_t) * 256);
+        arr->putDirectIndex(globalObject, c, chanArr);
+        RETURN_IF_EXCEPTION(scope, {});
+    }
+    return JSValue::encode(arr);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1902,6 +1992,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "adjust"_s), 2,
         functionAdjust, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "histogram"_s), 1,
+        functionHistogram, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 
