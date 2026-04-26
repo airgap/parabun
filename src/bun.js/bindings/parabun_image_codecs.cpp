@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <csetjmp>
+#include <thread>
 #include <vector>
 
 extern "C" {
@@ -46,6 +47,71 @@ using namespace JSC;
 // ─── JPEG decode ───────────────────────────────────────────────────────────
 
 namespace {
+
+// ─── Parallel row dispatch ────────────────────────────────────────────────
+// Most of our pixel-pipeline kernels — resize, blur, sharpen, Sobel,
+// per-pixel transforms — are embarrassingly parallel by output row. This
+// helper splits a row range across threads so we get linear scaling on
+// multi-core hosts. Below a per-thread minimum we fall through to a
+// serial loop because std::thread's spawn-and-join cost (~50 µs each)
+// would dominate the work. Above the threshold we cap at
+// std::thread::hardware_concurrency() and let the OS scheduler handle
+// the rest.
+//
+// The "work cost" is callers' responsibility — pass the dominant
+// per-row work scaled to a single integer. Roughly: width × inner-loop
+// ops. Callers pass `0` to skip the threshold check entirely (always
+// parallelize), or a positive cost to enable the heuristic.
+
+namespace {
+// Tunable via PARABUN_IMAGE_THREADS env at runtime — default = number of
+// hardware threads, capped at 16. Cached on first call so we don't
+// re-read env / re-call hardware_concurrency every dispatch.
+int numWorkerThreads()
+{
+    static int cached = []() -> int {
+        if (const char* env = std::getenv("PARABUN_IMAGE_THREADS")) {
+            int v = std::atoi(env);
+            if (v > 0 && v <= 64) return v;
+        }
+        unsigned hc = std::thread::hardware_concurrency();
+        if (hc == 0) hc = 4;          // hardware_concurrency() can return 0
+        if (hc > 16) hc = 16;         // diminishing returns past 16
+        return static_cast<int>(hc);
+    }();
+    return cached;
+}
+
+// Run fn(rowStart, rowEnd) for [0, totalRows), splitting across worker
+// threads when there's enough work to justify the spawn-and-join cost.
+template <typename Fn>
+void parallelRows(uint32_t totalRows, size_t totalWorkUnits, Fn&& fn)
+{
+    // Below this threshold, serial wins because thread spawn cost
+    // dominates. Tuned by hand so a 256 × 256 RGBA image (~262 K
+    // pixel-channels) stays serial but a 1024 × 1024 (~4 M) parallelizes.
+    constexpr size_t kSerialThreshold = 1 << 20; // 1 M work units
+    const int threads = numWorkerThreads();
+    if (threads <= 1 || totalRows < 2 || totalWorkUnits < kSerialThreshold) {
+        fn(0u, totalRows);
+        return;
+    }
+    const int actualThreads = std::min(threads, static_cast<int>(totalRows));
+    const uint32_t chunk = (totalRows + actualThreads - 1) / actualThreads;
+    std::vector<std::thread> pool;
+    pool.reserve(actualThreads - 1);
+    for (int t = 1; t < actualThreads; t++) {
+        const uint32_t s = static_cast<uint32_t>(t) * chunk;
+        const uint32_t e = std::min(s + chunk, totalRows);
+        if (s >= e) break;
+        pool.emplace_back([&fn, s, e] { fn(s, e); });
+    }
+    // Run the first chunk on the calling thread — saves one thread
+    // spawn and keeps the work balanced.
+    fn(0u, std::min(chunk, totalRows));
+    for (auto& th : pool) th.join();
+}
+} // anonymous namespace
 
 // libjpeg's default error handler calls exit(EXIT_FAILURE) on a malformed
 // stream. Replace it with a longjmp so we can throw a JS exception cleanly
@@ -357,6 +423,7 @@ struct LanczosTaps {
     int outW;
     std::vector<int> firstSource; // outW entries — first source col for each output col
     std::vector<int> tapCount;    // outW entries — how many sources contribute
+    std::vector<int> tapOffset;   // outW entries — prefix-sum of tapCount; weights[tapOffset[i]..] is row i's slice
     std::vector<float> weights;   // flattened, sum(tapCount) entries
 };
 
@@ -367,6 +434,7 @@ LanczosTaps buildLanczosTaps(uint32_t inLen, uint32_t outLen, int radius)
     t.outW = static_cast<int>(outLen);
     t.firstSource.resize(outLen);
     t.tapCount.resize(outLen);
+    t.tapOffset.resize(outLen);
     const float ratio = static_cast<float>(inLen) / static_cast<float>(outLen);
     // Down-scaling case: stretch the kernel by `ratio` so it averages over
     // the larger input footprint. Up-scaling uses ratio = 1 (kernel
@@ -397,6 +465,7 @@ LanczosTaps buildLanczosTaps(uint32_t inLen, uint32_t outLen, int radius)
 
         t.firstSource[o] = first;
         t.tapCount[o] = n;
+        t.tapOffset[o] = static_cast<int>(t.weights.size());
         for (int i = 0; i < n; i++) t.weights.push_back(ws[i]);
     }
     return t;
@@ -408,46 +477,47 @@ void resizeLanczos(
     const uint8_t* src, uint32_t sw, uint32_t sh, uint32_t channels,
     uint8_t* dst, uint32_t dw, uint32_t dh, int radius = 3)
 {
-    // Pass 1: horizontal — produces a sw_collapsed × sh × channels float buffer.
+    // Pass 1: horizontal — produces a dw × sh × channels float buffer.
     // We use float for the intermediate so summing many low-weight taps
     // doesn't lose precision through repeated 0..255 clamps.
     LanczosTaps hT = buildLanczosTaps(sw, dw, radius);
     std::vector<float> mid(static_cast<size_t>(dw) * sh * channels);
-    {
-        size_t taps = 0;
-        for (uint32_t oy = 0; oy < sh; oy++) {
+    // Average taps per output column for the cost estimate.
+    const size_t hCost = static_cast<size_t>(dw) * sh * channels * radius * 2;
+    parallelRows(sh, hCost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t oy = y0; oy < y1; oy++) {
             const uint8_t* srcRow = src + static_cast<size_t>(oy) * sw * channels;
             float* midRow = mid.data() + static_cast<size_t>(oy) * dw * channels;
-            taps = 0;
             for (uint32_t ox = 0; ox < dw; ox++) {
                 const int first = hT.firstSource[ox];
                 const int n = hT.tapCount[ox];
+                const float* w = hT.weights.data() + hT.tapOffset[ox];
                 for (uint32_t c = 0; c < channels; c++) {
                     float acc = 0;
                     for (int i = 0; i < n; i++) {
-                        acc += static_cast<float>(srcRow[(first + i) * channels + c]) * hT.weights[taps + i];
+                        acc += static_cast<float>(srcRow[(first + i) * channels + c]) * w[i];
                     }
                     midRow[ox * channels + c] = acc;
                 }
-                taps += n;
             }
         }
-    }
+    });
 
-    // Pass 2: vertical — turns dw × sh into dw × dh.
+    // Pass 2: vertical — turns dw × sh into dw × dh. Same row-parallel split.
     LanczosTaps vT = buildLanczosTaps(sh, dh, radius);
-    {
-        size_t taps = 0;
-        for (uint32_t oy = 0; oy < dh; oy++) {
+    const size_t vCost = static_cast<size_t>(dw) * dh * channels * radius * 2;
+    parallelRows(dh, vCost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t oy = y0; oy < y1; oy++) {
             const int first = vT.firstSource[oy];
             const int n = vT.tapCount[oy];
+            const float* w = vT.weights.data() + vT.tapOffset[oy];
             uint8_t* dstRow = dst + static_cast<size_t>(oy) * dw * channels;
             for (uint32_t ox = 0; ox < dw; ox++) {
                 for (uint32_t c = 0; c < channels; c++) {
                     float acc = 0;
                     for (int i = 0; i < n; i++) {
                         const float* midRow = mid.data() + static_cast<size_t>(first + i) * dw * channels;
-                        acc += midRow[ox * channels + c] * vT.weights[taps + i];
+                        acc += midRow[ox * channels + c] * w[i];
                     }
                     int rounded = static_cast<int>(acc + 0.5f);
                     if (rounded < 0) rounded = 0;
@@ -455,9 +525,8 @@ void resizeLanczos(
                     dstRow[ox * channels + c] = static_cast<uint8_t>(rounded);
                 }
             }
-            taps += n;
         }
-    }
+    });
 }
 
 // ─── Gaussian blur ─────────────────────────────────────────────────────────
@@ -505,45 +574,50 @@ void gaussianBlur(
     std::vector<float> kernel;
     buildGaussianKernel1D(radius, kernel);
 
-    // Pass 1: horizontal blur, src → mid (float).
+    // Pass 1: horizontal blur, src → mid (float). Parallelized by output row.
     std::vector<float> mid(static_cast<size_t>(w) * h * channels);
-    for (uint32_t y = 0; y < h; y++) {
-        const uint8_t* srcRow = src + static_cast<size_t>(y) * w * channels;
-        float* midRow = mid.data() + static_cast<size_t>(y) * w * channels;
-        for (uint32_t x = 0; x < w; x++) {
-            for (uint32_t c = 0; c < channels; c++) {
-                float acc = 0.0f;
-                for (int k = -radius; k <= radius; k++) {
-                    int sx = static_cast<int>(x) + k;
-                    if (sx < 0) sx = 0;
-                    if (sx >= static_cast<int>(w)) sx = static_cast<int>(w) - 1;
-                    acc += static_cast<float>(srcRow[sx * channels + c]) * kernel[k + radius];
+    const size_t pass1Cost = static_cast<size_t>(w) * h * channels * (2 * radius + 1);
+    parallelRows(h, pass1Cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            const uint8_t* srcRow = src + static_cast<size_t>(y) * w * channels;
+            float* midRow = mid.data() + static_cast<size_t>(y) * w * channels;
+            for (uint32_t x = 0; x < w; x++) {
+                for (uint32_t c = 0; c < channels; c++) {
+                    float acc = 0.0f;
+                    for (int k = -radius; k <= radius; k++) {
+                        int sx = static_cast<int>(x) + k;
+                        if (sx < 0) sx = 0;
+                        if (sx >= static_cast<int>(w)) sx = static_cast<int>(w) - 1;
+                        acc += static_cast<float>(srcRow[sx * channels + c]) * kernel[k + radius];
+                    }
+                    midRow[x * channels + c] = acc;
                 }
-                midRow[x * channels + c] = acc;
             }
         }
-    }
+    });
 
-    // Pass 2: vertical blur, mid → dst (uint8 with clamp).
-    for (uint32_t y = 0; y < h; y++) {
-        uint8_t* dstRow = dst + static_cast<size_t>(y) * w * channels;
-        for (uint32_t x = 0; x < w; x++) {
-            for (uint32_t c = 0; c < channels; c++) {
-                float acc = 0.0f;
-                for (int k = -radius; k <= radius; k++) {
-                    int sy = static_cast<int>(y) + k;
-                    if (sy < 0) sy = 0;
-                    if (sy >= static_cast<int>(h)) sy = static_cast<int>(h) - 1;
-                    const float* midRow = mid.data() + static_cast<size_t>(sy) * w * channels;
-                    acc += midRow[x * channels + c] * kernel[k + radius];
+    // Pass 2: vertical blur, mid → dst (uint8 with clamp). Same per-row split.
+    parallelRows(h, pass1Cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            uint8_t* dstRow = dst + static_cast<size_t>(y) * w * channels;
+            for (uint32_t x = 0; x < w; x++) {
+                for (uint32_t c = 0; c < channels; c++) {
+                    float acc = 0.0f;
+                    for (int k = -radius; k <= radius; k++) {
+                        int sy = static_cast<int>(y) + k;
+                        if (sy < 0) sy = 0;
+                        if (sy >= static_cast<int>(h)) sy = static_cast<int>(h) - 1;
+                        const float* midRow = mid.data() + static_cast<size_t>(sy) * w * channels;
+                        acc += midRow[x * channels + c] * kernel[k + radius];
+                    }
+                    int rounded = static_cast<int>(acc + 0.5f);
+                    if (rounded < 0) rounded = 0;
+                    if (rounded > 255) rounded = 255;
+                    dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
                 }
-                int rounded = static_cast<int>(acc + 0.5f);
-                if (rounded < 0) rounded = 0;
-                if (rounded > 255) rounded = 255;
-                dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
             }
         }
-    }
+    });
 }
 
 // ─── Unsharp-mask sharpen ──────────────────────────────────────────────────
@@ -564,20 +638,59 @@ void unsharpSharpen(
 
     // sharpened = src + amount × (src − blurred), clamped to [0, 255].
     // For RGBA inputs we leave alpha untouched — sharpening alpha is
-    // never what callers want.
-    const size_t total = static_cast<size_t>(w) * h * channels;
-    for (size_t i = 0; i < total; i++) {
-        const uint32_t c = static_cast<uint32_t>(i % channels);
-        if (channels == 4 && c == 3) {
-            dst[i] = src[i]; // pass alpha through unchanged
-            continue;
+    // never what callers want. Per-row split across threads.
+    const size_t cost = static_cast<size_t>(w) * h * channels;
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            const size_t rowStart = static_cast<size_t>(y) * w * channels;
+            const size_t rowEnd = rowStart + static_cast<size_t>(w) * channels;
+            for (size_t i = rowStart; i < rowEnd; i++) {
+                const uint32_t c = static_cast<uint32_t>(i % channels);
+                if (channels == 4 && c == 3) {
+                    dst[i] = src[i];
+                    continue;
+                }
+                const float diff = static_cast<float>(src[i]) - static_cast<float>(blurred[i]);
+                const float v = static_cast<float>(src[i]) + amount * diff;
+                int rounded = static_cast<int>(v + 0.5f);
+                if (rounded < 0) rounded = 0;
+                if (rounded > 255) rounded = 255;
+                dst[i] = static_cast<uint8_t>(rounded);
+            }
         }
-        const float diff = static_cast<float>(src[i]) - static_cast<float>(blurred[i]);
-        const float v = static_cast<float>(src[i]) + amount * diff;
-        int rounded = static_cast<int>(v + 0.5f);
-        if (rounded < 0) rounded = 0;
-        if (rounded > 255) rounded = 255;
-        dst[i] = static_cast<uint8_t>(rounded);
+    });
+}
+
+// ─── Fill rectangle (solid color) ─────────────────────────────────────────
+// Paint a solid-color rectangle into a copy of the input. The simplest
+// 2D drawing primitive — useful for masking, backdrops behind composited
+// overlays, debug visualizations, and as a building block for fancier
+// drawing on top.
+//
+// `color` is given per-channel as a uint8_t array whose length matches
+// the source image's channel count. Out-of-bounds rectangles silently
+// clip to the source bounds (matching composite()'s semantics).
+
+void fillRect(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint8_t* dst,
+    int32_t rx, int32_t ry, uint32_t rw, uint32_t rh,
+    const uint8_t* color)
+{
+    // Copy base → dst, then overwrite the clipped rectangle.
+    std::memcpy(dst, src, static_cast<size_t>(w) * h * channels);
+    const int32_t startX = std::max(rx, 0);
+    const int32_t startY = std::max(ry, 0);
+    const int32_t endX = std::min(rx + static_cast<int32_t>(rw), static_cast<int32_t>(w));
+    const int32_t endY = std::min(ry + static_cast<int32_t>(rh), static_cast<int32_t>(h));
+    if (startX >= endX || startY >= endY) return;
+
+    for (int32_t y = startY; y < endY; y++) {
+        uint8_t* row = dst + (static_cast<size_t>(y) * w + startX) * channels;
+        for (int32_t x = startX; x < endX; x++) {
+            for (uint32_t c = 0; c < channels; c++) row[c] = color[c];
+            row += channels;
+        }
     }
 }
 
@@ -668,17 +781,22 @@ void compositeOver(
 void invertImage(
     const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels, uint8_t* dst)
 {
-    const size_t pixels = static_cast<size_t>(w) * h;
-    for (size_t i = 0; i < pixels; i++) {
-        for (uint32_t c = 0; c < channels; c++) {
-            const size_t idx = i * channels + c;
-            if (channels == 4 && c == 3) {
-                dst[idx] = src[idx]; // preserve alpha unchanged
-            } else {
-                dst[idx] = static_cast<uint8_t>(255 - src[idx]);
+    const size_t cost = static_cast<size_t>(w) * h * channels;
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            const size_t base = static_cast<size_t>(y) * w * channels;
+            for (uint32_t x = 0; x < w; x++) {
+                for (uint32_t c = 0; c < channels; c++) {
+                    const size_t idx = base + x * channels + c;
+                    if (channels == 4 && c == 3) {
+                        dst[idx] = src[idx];
+                    } else {
+                        dst[idx] = static_cast<uint8_t>(255 - src[idx]);
+                    }
+                }
             }
         }
-    }
+    });
 }
 
 // ─── Threshold (binarize via luma) ────────────────────────────────────────
@@ -696,19 +814,29 @@ void thresholdImage(
     const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
     uint8_t* dst /* w × h × 1 */, uint8_t value)
 {
-    const size_t pixels = static_cast<size_t>(w) * h;
+    const size_t cost = static_cast<size_t>(w) * h * channels;
     if (channels == 1) {
-        for (size_t i = 0; i < pixels; i++) dst[i] = src[i] > value ? 255 : 0;
+        parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+            for (uint32_t y = y0; y < y1; y++) {
+                const size_t base = static_cast<size_t>(y) * w;
+                for (uint32_t x = 0; x < w; x++) dst[base + x] = src[base + x] > value ? 255 : 0;
+            }
+        });
         return;
     }
-    // Collapse to luma on the fly so we don't need an intermediate buffer.
-    for (size_t i = 0; i < pixels; i++) {
-        const float r = static_cast<float>(src[i * channels + 0]);
-        const float g = static_cast<float>(src[i * channels + 1]);
-        const float b = static_cast<float>(src[i * channels + 2]);
-        const float L = 0.299f * r + 0.587f * g + 0.114f * b;
-        dst[i] = (L > static_cast<float>(value)) ? 255 : 0;
-    }
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            const size_t srcBase = static_cast<size_t>(y) * w * channels;
+            const size_t dstBase = static_cast<size_t>(y) * w;
+            for (uint32_t x = 0; x < w; x++) {
+                const float r = static_cast<float>(src[srcBase + x * channels + 0]);
+                const float g = static_cast<float>(src[srcBase + x * channels + 1]);
+                const float b = static_cast<float>(src[srcBase + x * channels + 2]);
+                const float L = 0.299f * r + 0.587f * g + 0.114f * b;
+                dst[dstBase + x] = (L > static_cast<float>(value)) ? 255 : 0;
+            }
+        }
+    });
 }
 
 // ─── Per-channel histogram ────────────────────────────────────────────────
@@ -756,9 +884,12 @@ void adjustToneCpu(
     const float contrastMul = 1.0f + contrast; // -1 → flat 128, +1 → 2× contrast
     const float brightnessAdd = brightness * 255.0f;
     const float satMul = 1.0f + saturation; // -1 → fully grayscale, +1 → 2× saturated
-    const size_t pixels = static_cast<size_t>(w) * h;
+    const size_t cost = static_cast<size_t>(w) * h * channels;
 
-    for (size_t i = 0; i < pixels; i++) {
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; y++) {
+    for (uint32_t x = 0; x < w; x++) {
+        const size_t i = static_cast<size_t>(y) * w + x;
         const size_t base = i * channels;
         // 1- and 3-channel inputs share most of the code; the 4-channel
         // case adds an alpha passthrough at the end.
@@ -803,6 +934,8 @@ void adjustToneCpu(
             dst[base + 3] = src[base + 3]; // alpha passthrough
         }
     }
+    }
+    });
 }
 
 // ─── Luma collapse (Rec. 601) ──────────────────────────────────────────────
@@ -819,18 +952,24 @@ void adjustToneCpu(
 void rgbToLuma(
     const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels, uint8_t* dst /* w × h × 1 */)
 {
-    const size_t pixels = static_cast<size_t>(w) * h;
     if (channels == 1) {
-        std::memcpy(dst, src, pixels);
+        std::memcpy(dst, src, static_cast<size_t>(w) * h);
         return;
     }
-    for (size_t i = 0; i < pixels; i++) {
-        const float r = static_cast<float>(src[i * channels + 0]);
-        const float g = static_cast<float>(src[i * channels + 1]);
-        const float b = static_cast<float>(src[i * channels + 2]);
-        const float L = 0.299f * r + 0.587f * g + 0.114f * b;
-        dst[i] = static_cast<uint8_t>(L + 0.5f);
-    }
+    const size_t cost = static_cast<size_t>(w) * h * channels;
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            const size_t srcBase = static_cast<size_t>(y) * w * channels;
+            const size_t dstBase = static_cast<size_t>(y) * w;
+            for (uint32_t x = 0; x < w; x++) {
+                const float r = static_cast<float>(src[srcBase + x * channels + 0]);
+                const float g = static_cast<float>(src[srcBase + x * channels + 1]);
+                const float b = static_cast<float>(src[srcBase + x * channels + 2]);
+                const float L = 0.299f * r + 0.587f * g + 0.114f * b;
+                dst[dstBase + x] = static_cast<uint8_t>(L + 0.5f);
+            }
+        }
+    });
 }
 
 // ─── Sobel edge detection ──────────────────────────────────────────────────
@@ -857,31 +996,31 @@ void sobelEdgeDetect(
     std::vector<uint8_t> luma(static_cast<size_t>(w) * h);
     rgbToLuma(src, w, h, channels, luma.data());
 
-    // Pass 2: Sobel on luma.
-    auto at = [&](int x, int y) -> int {
+    // Pass 2: Sobel on luma. Row-parallel.
+    auto at = [&luma, w, h](int x, int y) -> int {
         if (x < 0) x = 0;
         if (x >= static_cast<int>(w)) x = static_cast<int>(w) - 1;
         if (y < 0) y = 0;
         if (y >= static_cast<int>(h)) y = static_cast<int>(h) - 1;
         return luma[static_cast<size_t>(y) * w + x];
     };
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            const int xi = static_cast<int>(x);
-            const int yi = static_cast<int>(y);
-            const int gx =
-                -at(xi - 1, yi - 1) + at(xi + 1, yi - 1)
-                - 2 * at(xi - 1, yi) + 2 * at(xi + 1, yi)
-                - at(xi - 1, yi + 1) + at(xi + 1, yi + 1);
-            const int gy =
-                -at(xi - 1, yi - 1) - 2 * at(xi, yi - 1) - at(xi + 1, yi - 1)
-                + at(xi - 1, yi + 1) + 2 * at(xi, yi + 1) + at(xi + 1, yi + 1);
-            // Magnitudes with clamp.
-            int mag = static_cast<int>(std::sqrt(static_cast<float>(gx * gx + gy * gy)) + 0.5f);
-            if (mag > 255) mag = 255;
-            dst[static_cast<size_t>(y) * w + x] = static_cast<uint8_t>(mag);
+    const size_t cost = static_cast<size_t>(w) * h * 9; // ~9 ops per pixel
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                const int xi = static_cast<int>(x);
+                const int yi = static_cast<int>(y);
+                const int gx = -at(xi - 1, yi - 1) + at(xi + 1, yi - 1)
+                    - 2 * at(xi - 1, yi) + 2 * at(xi + 1, yi)
+                    - at(xi - 1, yi + 1) + at(xi + 1, yi + 1);
+                const int gy = -at(xi - 1, yi - 1) - 2 * at(xi, yi - 1) - at(xi + 1, yi - 1)
+                    + at(xi - 1, yi + 1) + 2 * at(xi, yi + 1) + at(xi + 1, yi + 1);
+                int mag = static_cast<int>(std::sqrt(static_cast<float>(gx * gx + gy * gy)) + 0.5f);
+                if (mag > 255) mag = 255;
+                dst[static_cast<size_t>(y) * w + x] = static_cast<uint8_t>(mag);
+            }
         }
-    }
+    });
 }
 
 // ─── Geometric transforms (rotate / flip) ──────────────────────────────────
@@ -1009,7 +1148,9 @@ void resizeBilinear(
 {
     const float xRatio = static_cast<float>(sw) / static_cast<float>(dw);
     const float yRatio = static_cast<float>(sh) / static_cast<float>(dh);
-    for (uint32_t oy = 0; oy < dh; oy++) {
+    const size_t cost = static_cast<size_t>(dw) * dh * channels * 4;
+    parallelRows(dh, cost, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t oy = y0; oy < y1; oy++) {
         const float syf = (static_cast<float>(oy) + 0.5f) * yRatio - 0.5f;
         int sy0 = static_cast<int>(std::floor(syf));
         int sy1 = sy0 + 1;
@@ -1050,6 +1191,7 @@ void resizeBilinear(
             }
         }
     }
+    });
 }
 
 // ─── PNG encode ────────────────────────────────────────────────────────────

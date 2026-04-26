@@ -18,7 +18,7 @@ noise so JPEG can't trivially compress to flat blocks) at three
 sizes: 512², 2048², and 4096². Both PNG and JPEG variants are
 emitted so the codec-time portion of each op is real.
 
-## Headline numbers
+## Headline numbers (after row-parallel kernels)
 
 16-core x86 release build, sharp 0.34.5, best-of-7 per cell after 2
 warmup runs:
@@ -26,51 +26,59 @@ warmup runs:
 ```
 # decode → encode (JPEG q85)
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             2.0                 2.1            1.08× faster
-medium           28.1                18.9            1.48× slower
-large           121.2                89.4            1.36× slower
+small             3.6                 2.3            1.57× slower
+medium           28.8                26.6            1.08× slower
+large           117.9                70.5            1.67× slower
 
 # resize to 1/2 (Lanczos, JPEG out)
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             3.7                 2.5            1.52× slower
-medium           56.9                15.4            3.69× slower
-large           234.4                57.3            4.09× slower
+small             3.9                 3.1            1.27× slower
+medium           26.3                16.9            1.55× slower
+large            96.5                58.0            1.66× slower
 
 # Gaussian blur (radius 5, JPEG out)
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small            11.6                 4.0            2.92× slower
-medium          187.9                27.6            6.81× slower
-large           776.1               107.4            7.23× slower
+small             5.5                 4.6            1.19× slower
+medium           57.2                28.6            2.00× slower
+large           250.6               113.2            2.21× slower
 
 # PNG → resize → PNG out
 fixture     parabun (med ms)    sharp   (med ms)    speedup
-small             9.5                 6.1            1.56× slower
-medium          120.0                22.2            5.41× slower
-large           406.6                48.5            8.38× slower
+small             9.0                 6.4            1.41× slower
+medium           87.2                22.0            3.97× slower
+large           232.3                51.7            4.49× slower
 ```
 
-## What the data says
+## Where we used to be vs where we are now
 
-**Sharp is faster pretty much everywhere.** That is the honest
-result and we shouldn't pretend otherwise. The only spot bun:image
-wins is the small-fixture JPEG round-trip, where the per-call
-overhead of a Sharp instance dominates the work, and the gap
-disappears as soon as the image grows.
+A previous version of this README documented the unoptimized
+scalar implementation. For honesty, here's the delta after
+parallelizing the row loops in resize / blur / sharpen / Sobel /
+adjust / invert / threshold / luma:
 
-Why Sharp wins:
+| op | size | before | after |
+|---|---|---|---|
+| Lanczos resize | large | 4.09× slower | **1.66× slower** |
+| Gaussian blur | large | 7.23× slower | **2.21× slower** |
+| Gaussian blur | medium | 6.81× slower | **2.00× slower** |
+| PNG pipeline | large | 8.38× slower | **4.49× slower** |
 
-- It's libvips under the hood, which has decades of mature SIMD-
-  optimized kernels for resize, blur, and color-space conversions.
-  bun:image's resize and blur are scalar two-pass C++ — correct
-  and reasonably tight, but no AVX2 / NEON.
-- libvips streams in tiles for large inputs; bun:image decodes the
-  whole image into one buffer, which is cache-unfriendly at 4K.
-- Sharp's PNG path uses libpng with tile-aware filtering; ours
-  uses libpng's simplified `png_image_read_from_memory` API, which
-  is convenient but slower on big inputs.
+Blur dropped from 7× to 2.2× from threading alone. Resize from
+4× to 1.66×. PNG pipeline is still the worst because libpng's
+simplified API is single-buffer (we don't tile-stream the codec).
 
-The slowdown grows with image size — that's the SIMD gap
-compounding, not a correctness gap.
+## What still costs us
+
+Threading covered most of the multi-core gap. The remaining
+factor-of-2 on blur and Lanczos comes from libvips's per-thread
+SIMD: AVX2 on x86, NEON on ARM, hand-tuned for the inner-loop
+shape of each kernel. bun:image's inner loops are still scalar.
+
+The PNG-pipeline gap is bigger because libpng's simplified
+`png_image_*` API forces single-buffer decode. libvips drops
+to libpng's lower-level row-callback API for tile-aware
+filtering. Switching to that is the next obvious move on the
+PNG side.
 
 ## When bun:image is still the right pick
 
