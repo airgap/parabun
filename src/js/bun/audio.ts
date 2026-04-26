@@ -934,6 +934,47 @@ function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
   return out;
 }
 
+// ─── Level measurement (peak / RMS) ───────────────────────────────────────
+// Two scalar summaries of a buffer's loudness:
+//   peak — max(|x|), the largest instantaneous excursion. Single-sample
+//          spikes dominate the answer, so peak is the right metric for
+//          "is this signal about to clip?" questions.
+//   rms  — sqrt(mean(x²)), the root-mean-square. Tracks perceived
+//          loudness over the whole buffer; not biased by individual
+//          spikes.
+//
+// Both treat empty input as 0 (no signal). NaN samples propagate through
+// max-comparison as no-ops on `peak` (since `NaN > m` is always false)
+// and into the sum on `rms` (so any NaN poisons the result with NaN);
+// callers who care should filter NaNs upstream.
+
+function peak(samples: Float32Array): number {
+  if (!(samples instanceof Float32Array)) {
+    throw new TypeError("bun:audio.peak: samples must be a Float32Array");
+  }
+  let m = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i];
+    const a = v < 0 ? -v : v;
+    if (a > m) m = a;
+  }
+  return m;
+}
+
+function rms(samples: Float32Array): number {
+  if (!(samples instanceof Float32Array)) {
+    throw new TypeError("bun:audio.rms: samples must be a Float32Array");
+  }
+  const n = samples.length;
+  if (n === 0) return 0;
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const v = samples[i];
+    sumSq += v * v;
+  }
+  return Math.sqrt(sumSq / n);
+}
+
 // ─── Normalize ─────────────────────────────────────────────────────────────
 // Whole-buffer one-shot leveling. Different intent from `Gain` (streaming
 // AGC): normalize is what you reach for when you have a complete recording
@@ -981,23 +1022,7 @@ function normalize(samples: Float32Array, opts: NormalizeOptions = {}): Float32A
   const out = new Float32Array(N);
   if (N === 0) return out;
 
-  let metric: number;
-  if (mode === "peak") {
-    let maxAbs = 0;
-    for (let i = 0; i < N; i++) {
-      const v = samples[i];
-      const a = v < 0 ? -v : v;
-      if (a > maxAbs) maxAbs = a;
-    }
-    metric = maxAbs;
-  } else {
-    let sumSq = 0;
-    for (let i = 0; i < N; i++) {
-      const v = samples[i];
-      sumSq += v * v;
-    }
-    metric = Math.sqrt(sumSq / N);
-  }
+  const metric = mode === "peak" ? peak(samples) : rms(samples);
 
   if (metric === 0) {
     // All-silent input — nothing to normalize. Return a fresh-buffer copy
@@ -1194,6 +1219,8 @@ export default {
   notch,
   mix,
   normalize,
+  peak,
+  rms,
   interleave,
   deinterleave,
   resample,

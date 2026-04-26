@@ -1354,6 +1354,104 @@ describe("bun:audio — mix", () => {
   });
 });
 
+describe("bun:audio — peak / rms", () => {
+  it("peak returns the largest absolute sample", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-peak-basic",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array([0.1, -0.2, 0.4, -0.05, 0.3, -0.7, 0.6]);
+        console.log("peak", audio.peak(input).toFixed(4));
+      `,
+    );
+    expect(stdout).toBe("peak 0.7000");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rms of a sine wave equals amplitude / sqrt(2)", async () => {
+    // Standard result for a pure sine: rms = amp / √2. With amp=0.5 → ~0.3535.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-rms-sine",
+      `
+        import audio from "bun:audio";
+        const SR = 16000, N = 4096;
+        const input = new Float32Array(N);
+        for (let i = 0; i < N; i++) input[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / SR);
+        const got = audio.rms(input);
+        const expected = 0.5 / Math.sqrt(2);
+        // Within 0.5% — small drift is from the buffer not being exactly
+        // an integer number of cycles.
+        console.log("rmsClose", Math.abs(got - expected) / expected < 0.005);
+      `,
+    );
+    expect(stdout).toBe("rmsClose true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("empty buffer: peak = 0, rms = 0", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-empty",
+      `
+        import audio from "bun:audio";
+        const empty = new Float32Array(0);
+        console.log("peak", audio.peak(empty));
+        console.log("rms",  audio.rms(empty));
+      `,
+    );
+    expect(stdout).toBe(["peak 0", "rms 0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("silent buffer: both are exactly 0", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-silent",
+      `
+        import audio from "bun:audio";
+        const silent = new Float32Array(1024);
+        console.log("peak", audio.peak(silent));
+        console.log("rms",  audio.rms(silent));
+      `,
+    );
+    expect(stdout).toBe(["peak 0", "rms 0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects non-Float32Array input", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-peak-rms-bad",
+      `
+        import audio from "bun:audio";
+        let threw = 0;
+        try { audio.peak([1, 2, 3]); } catch { threw++; }
+        try { audio.rms([1, 2, 3]); } catch { threw++; }
+        try { audio.peak(new Float64Array([1, 2, 3])); } catch { threw++; }
+        try { audio.rms(new Float64Array([1, 2, 3])); } catch { threw++; }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 4");
+    expect(exitCode).toBe(0);
+  });
+
+  it("composes naturally with normalize: peak after normalize matches target", async () => {
+    // The whole point of normalize is to drive peak to a known value.
+    // Verify the round-trip: normalize to 0.7, then audio.peak() should
+    // come back as ~0.7.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-peak-after-normalize",
+      `
+        import audio from "bun:audio";
+        const input = new Float32Array([0.1, -0.2, 0.4, -0.05, 0.3]);
+        const normed = audio.normalize(input, { target: 0.7, mode: "peak" });
+        const got = audio.peak(normed);
+        console.log("peakClose", Math.abs(got - 0.7) < 1e-5);
+      `,
+    );
+    expect(stdout).toBe("peakClose true");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — normalize", () => {
   it("peak mode brings max(|x|) exactly to the target", async () => {
     const { stdout, exitCode } = await runFixture(
