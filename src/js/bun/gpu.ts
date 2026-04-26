@@ -366,6 +366,57 @@ function cpuHistogramF32(input: Float32Array, bins: number, min: number, max: nu
   return out;
 }
 
+// CPU variance via numerically-stable two-pass. Pass 1 computes a Kahan-
+// compensated mean; pass 2 sums (x - mean)². The single-pass naive
+// formula sum(x²) - (sum(x))²/n is dramatically less stable for inputs
+// far from zero — by the time the values get squared the cancellation
+// dominates the answer. Two-pass costs an extra read but stays
+// well-conditioned across the whole f32 range.
+//
+// `ddof` controls the divisor. ddof = 0 (default, "population variance")
+// divides by n; ddof = 1 ("sample variance") divides by n - 1 to give
+// an unbiased estimator. ddof >= n returns NaN (the divisor would go
+// non-positive). Empty input also returns NaN.
+function cpuVarianceF32(input: Float32Array, ddof: number): number {
+  const n = input.length;
+  if (n === 0) return NaN;
+  if (n - ddof <= 0) return NaN;
+  // Pass 1: compensated mean.
+  let acc = 0;
+  let comp = 0;
+  for (let i = 0; i < n; i++) {
+    const y = input[i] - comp;
+    const t = acc + y;
+    comp = t - acc - y;
+    acc = t;
+  }
+  const mean = acc / n;
+  // Pass 2: sum of squared deviations from the mean.
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const d = input[i] - mean;
+    sumSq += d * d;
+  }
+  return sumSq / (n - ddof);
+}
+
+function cpuVarianceU32(input: Uint32Array, ddof: number): number {
+  const n = input.length;
+  if (n === 0) return NaN;
+  if (n - ddof <= 0) return NaN;
+  // u32 sums fit in f64 without loss for any plausible n (max value
+  // < 2^32 * 2^53 / 2^32 = 2^53), so a plain f64 accumulator is exact.
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += input[i];
+  const mean = sum / n;
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const d = input[i] - mean;
+    sumSq += d * d;
+  }
+  return sumSq / (n - ddof);
+}
+
 // CPU quantile (and median = quantile(0.5)). Sorts a fresh copy of the
 // input, then linearly interpolates between adjacent order statistics —
 // matches numpy's default "linear" interpolation:
@@ -976,6 +1027,43 @@ function histogram(
   return cpuHistogramF32(aV, bins, min, max);
 }
 
+type VarianceOptions = {
+  /**
+   * Delta degrees of freedom. Divisor is `n - ddof`.
+   *   `0` (default) — population variance, what numpy returns by default.
+   *   `1`           — sample variance (Bessel-corrected, unbiased estimator).
+   * Values >= n return NaN since the divisor would go non-positive.
+   */
+  ddof?: number;
+};
+
+// Variance via numerically-stable two-pass. Float32Array uses Kahan-
+// compensated mean, Uint32Array uses plain f64 (u32 sums fit exactly).
+// Empty input returns NaN; so does `ddof >= n`.
+function variance(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, opts: VarianceOptions = {}): number {
+  const ddof = opts.ddof ?? 0;
+  if (typeof ddof !== "number" || !Number.isFinite(ddof) || ddof < 0) {
+    throw new RangeError(`bun:gpu.variance: ddof must be a finite non-negative number; got ${ddof}`);
+  }
+  if (input instanceof Uint32Array) return cpuVarianceU32(input, ddof);
+  if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
+    throw new TypeError(
+      `bun:gpu.variance: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+        (input as any)?.constructor?.name ?? typeof input
+      }`,
+    );
+  }
+  const a = unwrapGpuArg(input as any);
+  const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  return cpuVarianceF32(aV, ddof);
+}
+
+// Standard deviation = sqrt(variance). Same options.
+function stddev(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, opts: VarianceOptions = {}): number {
+  const v = variance(input, opts);
+  return Math.sqrt(v);
+}
+
 // Quantile (linear-interpolated between adjacent order statistics).
 // `q` in [0, 1]: 0 → min, 0.5 → median, 1 → max. Float32Array input
 // returns a Float32 (well, a Number — JS doesn't distinguish in storage);
@@ -1180,6 +1268,8 @@ export default {
   histogram,
   median,
   quantile,
+  variance,
+  stddev,
   simdMap,
   alloc,
   isAligned,
