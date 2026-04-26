@@ -946,6 +946,119 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("crop extracts an interior rectangle pixel-exact", async () => {
+    // 4×4 RGBA image with one distinct color per pixel (encoded as
+    // [r, g, b, 255] where r = column-index*64, g = row-index*64).
+    // Crop a 2×2 from (1, 1) — should grab the four center pixels.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-crop-interior",
+      `
+        import image from "bun:image";
+        const w = 4, h = 4;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          data[off] = x * 64; data[off + 1] = y * 64; data[off + 2] = 0; data[off + 3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+        const c = image.crop(orig, { x: 1, y: 1, width: 2, height: 2 });
+        console.log("dims", c.width, c.height, c.channels);
+        // Expected pixels (x, y) for (1,1) (2,1) (1,2) (2,2):
+        //   (1,1) → R=64,  G=64
+        //   (2,1) → R=128, G=64
+        //   (1,2) → R=64,  G=128
+        //   (2,2) → R=128, G=128
+        const expected = Uint8Array.from([
+          64, 64, 0, 255,
+          128, 64, 0, 255,
+          64, 128, 0, 255,
+          128, 128, 0, 255,
+        ]);
+        const eq = c.data.length === expected.length && c.data.every((v, i) => v === expected[i]);
+        console.log("byteEqual", eq);
+      `,
+    );
+    expect(stdout).toBe(["dims 2 2 4", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("crop covering the full image is a copy of the original", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-crop-full",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);    // 4×4 RGBA
+        const c = image.crop(orig, { x: 0, y: 0, width: orig.width, height: orig.height });
+        const sameRef = c.data === orig.data;
+        const equal = c.data.length === orig.data.length && c.data.every((v, i) => v === orig.data[i]);
+        console.log("dims", c.width, c.height);
+        console.log("sameRef", sameRef);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4", "sameRef false", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("crop preserves the source format string", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-crop-format",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const c = image.crop(orig, { x: 0, y: 0, width: 2, height: 2 });
+        console.log("format", c.format);
+      `,
+    );
+    expect(stdout).toBe("format png");
+    expect(exitCode).toBe(0);
+  });
+
+  it("crop rejects out-of-bounds rectangles", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-crop-oob",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);    // 4×4
+        let threw = 0;
+        // Each of these extends past the right or bottom edge.
+        for (const r of [
+          { x: 0, y: 0, width: 5, height: 4 },
+          { x: 0, y: 0, width: 4, height: 5 },
+          { x: 1, y: 0, width: 4, height: 4 },
+          { x: 0, y: 1, width: 4, height: 4 },
+        ]) {
+          try { image.crop(orig, r); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 4");
+    expect(exitCode).toBe(0);
+  });
+
+  it("crop rejects negative offsets and zero / negative dims", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-crop-bad-args",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        let threw = 0;
+        for (const r of [
+          { x: -1, y: 0, width: 2, height: 2 },
+          { x: 0, y: -1, width: 2, height: 2 },
+          { x: 0, y: 0, width: 0, height: 2 },
+          { x: 0, y: 0, width: 2, height: -1 },
+        ]) {
+          try { image.crop(orig, r); } catch { threw++; }
+        }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 4");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

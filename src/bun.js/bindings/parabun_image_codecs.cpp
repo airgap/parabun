@@ -730,6 +730,25 @@ void flipVertical(
     }
 }
 
+// ─── Crop ──────────────────────────────────────────────────────────────────
+// Extract an axis-aligned rectangular region. Pure memcpy per row of
+// the contiguous slice — no per-pixel work. The crop rectangle must
+// fit entirely inside the source (callers who need clamping or
+// edge-padding are expected to handle that themselves).
+
+void cropRect(
+    const uint8_t* src, uint32_t sw, uint32_t /* sh */, uint32_t channels,
+    uint8_t* dst, uint32_t cropX, uint32_t cropY, uint32_t cropW, uint32_t cropH)
+{
+    const size_t srcStride = static_cast<size_t>(sw) * channels;
+    const size_t rowBytes = static_cast<size_t>(cropW) * channels;
+    for (uint32_t y = 0; y < cropH; y++) {
+        const uint8_t* srcRow = src + (static_cast<size_t>(cropY + y) * srcStride) + (static_cast<size_t>(cropX) * channels);
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * rowBytes;
+        std::memcpy(dstRow, srcRow, rowBytes);
+    }
+}
+
 // ─── Bilinear resize ───────────────────────────────────────────────────────
 // CPU-side bilinear resampling. Each output pixel samples the four nearest
 // input pixels with bilinear weights derived from the half-pixel-centered
@@ -1508,6 +1527,109 @@ JSC_DEFINE_HOST_FUNCTION(functionFlip,
     return JSValue::encode(obj);
 }
 
+// crop(img, { x, y, width, height }) → DecodedImage. The crop rectangle
+// must be fully inside the source — out-of-bounds throws rather than
+// silently clamping. Channels and format pass through.
+JSC_DEFINE_HOST_FUNCTION(functionCrop,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject() || !optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.crop: expected (img, { x, y, width, height })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    auto* optsObj = asObject(optsArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.crop: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.crop: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t sw = widthVal.toUInt32(globalObject);
+    const uint32_t sh = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.crop: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(sw) * sh * channels) {
+        throwTypeError(globalObject, scope, "bun:image.crop: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    JSValue xVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "x"_s));
+    JSValue yVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "y"_s));
+    JSValue cwVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue chVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!xVal.isNumber() || !yVal.isNumber() || !cwVal.isNumber() || !chVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.crop: opts.x, .y, .width, .height are all required (numbers)"_s);
+        return {};
+    }
+    const int32_t xS = xVal.toInt32(globalObject);
+    const int32_t yS = yVal.toInt32(globalObject);
+    const int32_t cwS = cwVal.toInt32(globalObject);
+    const int32_t chS = chVal.toInt32(globalObject);
+    if (xS < 0 || yS < 0) {
+        throwTypeError(globalObject, scope, "bun:image.crop: opts.x and opts.y must be >= 0"_s);
+        return {};
+    }
+    if (cwS < 1 || chS < 1) {
+        throwTypeError(globalObject, scope, "bun:image.crop: opts.width and opts.height must be >= 1"_s);
+        return {};
+    }
+    const uint32_t x = static_cast<uint32_t>(xS);
+    const uint32_t y = static_cast<uint32_t>(yS);
+    const uint32_t cw = static_cast<uint32_t>(cwS);
+    const uint32_t ch = static_cast<uint32_t>(chS);
+    // Bounds check — crop must fit entirely inside the source.
+    if (x + cw > sw || y + ch > sh) {
+        throwTypeError(globalObject, scope,
+            makeString("bun:image.crop: crop rectangle ("_s,
+                String::number(x), ","_s, String::number(y), " "_s,
+                String::number(cw), "x"_s, String::number(ch),
+                ") extends past source bounds ("_s,
+                String::number(sw), "x"_s, String::number(sh), ")"_s));
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(cw) * ch * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    cropRect(
+        static_cast<const uint8_t*>(srcRaw), sw, sh, channels,
+        static_cast<uint8_t*>(dstArr->vector()), x, y, cw, ch);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(cw));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(ch));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1536,6 +1658,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "flip"_s), 2,
         functionFlip, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "crop"_s), 2,
+        functionCrop, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

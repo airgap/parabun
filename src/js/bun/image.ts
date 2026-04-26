@@ -58,6 +58,16 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
 };
+type CropOptions = {
+  /** Left edge of the crop rectangle in pixels. >= 0. */
+  x: number;
+  /** Top edge of the crop rectangle in pixels. >= 0. */
+  y: number;
+  /** Width of the crop rectangle in pixels. >= 1. */
+  width: number;
+  /** Height of the crop rectangle in pixels. >= 1. */
+  height: number;
+};
 type RotateOptions = {
   /** 90 (clockwise), 180, or 270. Arbitrary angles need resampling — not supported in v1. */
   degrees: 90 | 180 | 270;
@@ -148,6 +158,16 @@ function flip(img: DecodedImage, opts: FlipOptions): DecodedImage {
   return native.flip(img, opts);
 }
 
+function crop(img: DecodedImage, opts: CropOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.crop: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:image.crop: opts must be { x, y, width, height }");
+  }
+  return native.crop(img, opts);
+}
+
 export default {
   decode,
   encode,
@@ -157,4 +177,5 @@ export default {
   edgeDetect,
   rotate,
   flip,
+  crop,
 };
