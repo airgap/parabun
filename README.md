@@ -1,18 +1,63 @@
 <h1 align="center">Parabun</h1>
 
 <p align="center">
-  A fork of <a href="https://bun.com">Bun</a> with on-device LLMs, GPU compute, image / audio / CSV primitives, parallel execution, and fine-grained reactivity — plus optional language extensions for purity and ergonomics.
+  A fork of <a href="https://bun.com">Bun</a> with the hardware-acceleration primitives JavaScript forgot.<br/>
+  Multithreaded compute, raw GPU kernels, SIMD intrinsics, and direct hardware access — from plain TypeScript.
 </p>
 
-## What is Parabun?
+## What Parabun fixes about JavaScript
 
-Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, image / audio codecs and DSP, streaming CSV, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, buffer pooling, and fine-grained reactivity — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges, `signal`/`effect { }`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
+Standard JavaScript runtimes leave performance on the table that the underlying hardware can deliver:
 
-Parabun introduces two new file extensions:
-- **`.pts`** — Parabun TypeScript (superset of TypeScript)
-- **`.pjs`** — Parabun JavaScript (superset of JavaScript)
+- **Multithreading is awkward.** `worker_threads` makes you reach for `postMessage` and structured-clone for every shared bit of state. No real shared mutable memory without manual `SharedArrayBuffer` + `Atomics` choreography.
+- **GPU access is portable-shader-only.** WebGPU and WebGL are the only mainstream options; raw CUDA / Metal kernels aren't reachable from JS without writing an N-API binding.
+- **SIMD lives in WebAssembly.** Native intrinsics aren't directly addressable from JS — you compile a WASM module and pay the boundary cost.
+- **Typed-array operations are sequential.** No parallel sort, no parallel map, no parallel reduce in the runtime itself.
+- **Hardware I/O wants an N-API module.** V4L2 cameras, ALSA audio, GGUF inference — anything that touches a kernel device means writing a binding (or shelling out to `ffmpeg` / Python).
 
-Standard `.ts`/`.js` files work exactly as they do in Bun.
+Parabun closes those gaps inside one statically-linked binary:
+
+| Module | What it gives you |
+|---|---|
+| [`bun:parallel`](#parallel-execution-bunparallel) | Persistent worker pool with `pmap` / `preduce`, SAB-shared state via `bun:arena` |
+| [`bun:gpu`](#gpu-compute-bungpu) | Raw CUDA + Metal kernels in TypeScript template strings, NVRTC at runtime, fallback chain |
+| [`bun:simd`](#simd-primitives-bunsimd) | Typed-array SIMD primitives without WASM gymnastics |
+| [`bun:pipeline`](#pipeline-fusion-bunpipeline) | Typed-array pipeline fusion that promotes to GPU when inputs are large enough |
+| [`bun:arena`](#buffer-pooling-bunarena) | Buffer pooling so worker boundaries don't cost a `Uint8Array` allocation per chunk |
+| [`bun:camera`](#camera-buncamera) / [`bun:audio`](#audio-codecs--dsp-bunaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
+| [`bun:image`](#image-codecs--filters-bunimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
+| [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + GPU residency. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
+
+If you've ever spawned a Python subprocess from your Node server because Node couldn't keep up — or written an N-API module because there was no other way to touch your camera / GPU / SIMD lanes — Parabun is the runtime that deletes the subprocess and the binding both.
+
+```ts
+// Multithreaded typed-array work — actual cores, no postMessage gymnastics
+import parallel from "bun:parallel";
+const scores = await parallel.pmap(scoreChunk, chunks, { concurrency: 8 });
+
+// Raw CUDA kernel from TypeScript — no WebGPU shader, no .cu file
+import gpu from "bun:gpu";
+gpu.setBackend("cuda");
+const result = gpu.matVec(matrix, vector, M, N);
+
+// On-device LLM — GGUF mmap, residency-held weights, single-process
+import llm from "bun:llm";
+using m = await llm.LLM.load("./Llama-3.2-1B-Instruct-Q4_K_M.gguf");
+for await (const piece of m.chat([{ role: "user", content: "..." }])) {
+  process.stdout.write(piece);
+}
+
+// Live camera + microphone — kernel-direct V4L2 / ALSA
+import camera from "bun:camera";
+import audio  from "bun:audio";
+await using cam = await camera.open("/dev/video0", { format: "mjpg", width: 1280, height: 720 });
+await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
+for await (const frame of cam.frames()) { /* ... */ }
+```
+
+Parabun is a drop-in replacement for Bun — your existing `.ts` / `.js` files run unchanged. The runtime modules above are the headline. Optional language extensions (`pure`, `..!`, `..&`, `..=`, `|>`, range literals, `signal`/`effect { }` blocks) live in `.pts` / `.pjs` files and desugar to standard JS at parse time; use them or ignore them, the modules don't depend on them.
+
+> **What this isn't:** a numerical-Python replacement. NumPy, JAX, PyTorch, and CuPy are deeply ahead in scientific computing and ML training, and Parabun won't catch them. The pitch is *for the developer who'd otherwise leave TypeScript* — to spawn a Python sidecar, to write an N-API module, or to put a perf-critical service in Rust. Parabun keeps that developer in TypeScript.
 
 ### LLM Inference (`bun:llm`)
 
@@ -183,6 +228,36 @@ await Bun.write("photo.webp", out);
 - **Analysis**: `histogram(img)` returns one `Uint32Array(256)` per channel.
 - **Composite**: `composite(base, overlay, { x?, y? })` — Porter-Duff source-over alpha blending; clipping handles out-of-bounds overlay regions silently.
 
+### Camera (`bun:camera`)
+
+`bun:camera` is a zero-dependency capture surface for V4L2 cameras on Linux — UVC webcams, CSI cameras, anything that exposes itself as `/dev/video*`. AVFoundation (macOS) and Media Foundation (Windows) backends mount on the same JS surface in follow-ups. No `ffmpeg` subprocess, no `node-gyp` binding, no shipping a separate native module per platform.
+
+```ts
+import camera from "bun:camera";
+
+const devs = await camera.devices();
+//   [{ path: "/dev/video0", name: "C920 HD Pro Webcam", driver: "uvcvideo",
+//      caps: ["video_capture", "streaming"] }]
+
+await using cam = await camera.open(devs[0].path, {
+  format: "mjpg",          // "yuyv" | "mjpg" | "nv12" | "rgb24"
+  width: 1280,
+  height: 720,
+});
+
+for await (const frame of cam.frames()) {
+  // frame: { data, width, height, format, timestampMs, sequence }
+  // For "mjpg" you can hand .data straight to image.decode() — every frame
+  // is an independent JPEG bitstream.
+}
+```
+
+- **Enumerate**: `devices()` walks `/sys/class/video4linux` and filters to true capture devices via `VIDIOC_QUERYCAP`.
+- **Probe**: `formats(path)` enumerates every supported `(format, width, height, fps)` tuple via `VIDIOC_ENUM_FMT` / `FRAMESIZES` / `FRAMEINTERVALS`.
+- **Capture**: `open(...)` configures the format, mmaps the kernel ring buffer, and starts the stream; `cam.frames()` yields frames as an async iterator with kernel timestamps + sequence numbers; `cam.grab()` does a single one-shot.
+- **Convert**: `toRgba(frame)` does a scalar BT.601 YUV→RGB shuffle for `yuyv` / `nv12` (and an alpha pad for `rgb24`); for `mjpg` you compose with `bun:image.decode()`.
+- **Lifecycle**: `await using` for streaming captures; a `FinalizationRegistry` backstops forgotten `.close()` calls so the kernel fd doesn't leak on a dropped reference.
+
 ### Audio Codecs + DSP (`bun:audio`)
 
 `bun:audio` is a from-scratch audio toolkit: WAV / MP3 decode, Opus encode and decode (libopus 1.6.1), rnnoise-based denoising, FFT, RBJ biquad filters, resampling, spectrograms, voice-activity detection, and the level / leveling primitives a voice-call capture pipeline needs. Like `bun:image`, the heavy codecs (libopus, minimp3, rnnoise) are vendored statically.
@@ -213,6 +288,7 @@ for (const i16Frame of micFrames) {
 - **Resample**: `resample(samples, { from, to })` — 4-cascade anti-alias filter + linear interpolation.
 - **Levels**: `peak`, `rms`, `envelope({ windowSize, hopSize, mode })`, `normalize({ target, mode })`.
 - **Layout**: `interleave` / `deinterleave` for planar ⇄ frame-major typed-array conversions, `i16ToF32` / `f32ToI16` for OS-audio ⇄ DSP-space PCM.
+- **OS audio I/O (Linux today)**: `audio.devices()` enumerates capture + playback devices via ALSA; `audio.capture({ device, sampleRate, channels })` returns a stream whose `.frames()` async-iterator yields `Float32Array` PCM chunks straight from `snd_pcm_readi`; `audio.play({ ... }).write(samples)` pushes PCM through `snd_pcm_writei`. Format on the wire is S16_LE; conversion to/from `Float32` happens in C++. CoreAudio + WASAPI backends mount on the same surface in follow-ups.
 
 ### Streaming CSV (`bun:csv`)
 
