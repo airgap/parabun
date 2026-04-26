@@ -420,6 +420,88 @@ function spectrogram(samples: Float32Array, opts: SpectrogramOptions): Float32Ar
   return frames;
 }
 
+// ─── Voice activity detection ──────────────────────────────────────────────
+// RMS energy per frame, classified against an adaptive noise floor. Useful
+// for push-to-talk (only encode when speaking), bandwidth saving in
+// transmit pipelines, and voice-note auto-trim.
+//
+// Algorithm (intentionally simple — speexdsp's noise-aware VAD lands later):
+//   1. Compute RMS per frame.
+//   2. Estimate noise floor as a slow moving min of frame energies.
+//   3. A frame is "speech" if its RMS exceeds the noise floor by `ratio`.
+//
+// Adaptive threshold beats a fixed one because mic gain / room noise
+// varies — a recording at 0.001 RMS background needs a far lower
+// absolute threshold than one at 0.01.
+
+type VadOptions = {
+  /** Samples per analysis frame. Default 480 (30 ms at 16 kHz). */
+  frameSize?: number;
+  /**
+   * Speech is detected when frame RMS > noiseFloor × ratio. Higher = more
+   * conservative (more silence false-negatives, fewer noise false-positives).
+   * Default 3.0 (~10 dB above noise floor).
+   */
+  ratio?: number;
+  /**
+   * Number of frames in the sliding-window minimum used as the noise-
+   * floor estimator. Bigger = more memory of past silence (robust against
+   * sustained loud regions); smaller = faster adaptation to drift.
+   * Default 100 frames (~3s at 30ms frames).
+   */
+  noiseWindow?: number;
+};
+
+type VadResult = {
+  /** Per-frame RMS energy. Length = ceil(samples.length / frameSize). */
+  energies: Float32Array;
+  /** Per-frame speech / non-speech classification. */
+  speech: boolean[];
+  /** Final noise-floor estimate at end of input. Useful for live pipelines
+   *  that want to seed the next batch. */
+  noiseFloor: number;
+};
+
+function detectVoice(samples: Float32Array, opts: VadOptions = {}): VadResult {
+  const frameSize = opts.frameSize ?? 480;
+  const ratio = opts.ratio ?? 3.0;
+  const noiseWindow = opts.noiseWindow ?? 100;
+  if (frameSize < 1) throw new RangeError("bun:audio detectVoice: frameSize must be >= 1");
+  if (ratio < 1) throw new RangeError("bun:audio detectVoice: ratio must be >= 1");
+  if (noiseWindow < 1) throw new RangeError("bun:audio detectVoice: noiseWindow must be >= 1");
+
+  const numFrames = Math.ceil(samples.length / frameSize);
+  const energies = new Float32Array(numFrames);
+  const speech: boolean[] = new Array(numFrames);
+
+  // Pass 1: per-frame RMS.
+  for (let f = 0; f < numFrames; f++) {
+    const start = f * frameSize;
+    const end = Math.min(start + frameSize, samples.length);
+    let sumSq = 0;
+    for (let i = start; i < end; i++) sumSq += samples[i] * samples[i];
+    energies[f] = Math.sqrt(sumSq / (end - start));
+  }
+
+  // Pass 2: sliding-window minimum noise-floor + speech classification.
+  // For each frame i, noise floor = min(energies[max(0, i-W+1)..i]). Naive
+  // O(N*W); fast enough for typical inputs (1s of audio at 30ms frames =
+  // 33 frames). For long batches, swap in a monotonic-deque O(N) version.
+  let lastFloor = 0;
+  for (let f = 0; f < numFrames; f++) {
+    const wStart = Math.max(0, f - noiseWindow + 1);
+    let m = energies[wStart];
+    for (let j = wStart + 1; j <= f; j++) if (energies[j] < m) m = energies[j];
+    lastFloor = m;
+    // Floor at a tiny positive value so a perfectly-silent intro doesn't
+    // produce a 0-floor that everything trivially exceeds.
+    const effective = Math.max(m, 1e-6);
+    speech[f] = energies[f] > effective * ratio;
+  }
+
+  return { energies, speech, noiseFloor: lastFloor };
+}
+
 // ─── MP3 decode (minimp3) ──────────────────────────────────────────────────
 // One-shot in-memory decode. Returns the same shape as readWav. MP3 is
 // decode-only — encode would pull in LAME with patent + license complexity
@@ -529,6 +611,7 @@ export default {
   lowpass,
   resample,
   spectrogram,
+  detectVoice,
   decodeMp3,
   OpusEncoder,
   OpusDecoder,

@@ -355,6 +355,113 @@ describe("bun:audio — resample", () => {
   });
 });
 
+describe("bun:audio — VAD (voice activity detection)", () => {
+  it("classifies pure silence as non-speech", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-vad-silence",
+      `
+        import audio from "bun:audio";
+        const samples = new Float32Array(48000);  // 1 s at 48 kHz, all zeros
+        const { energies, speech } = audio.detectVoice(samples, { frameSize: 480 });
+        console.log("frames", energies.length);
+        console.log("anySpeech", speech.some(s => s));
+      `,
+    );
+    expect(stdout).toBe(["frames 100", "anySpeech false"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("classifies a loud burst after silence as speech", async () => {
+    // A pure tone after a silent intro: the silence establishes the noise
+    // floor, then the loud region is classified as speech. (A *sustained*
+    // tone with no silence anywhere can't be classified — VAD needs a
+    // baseline to compare against; that's a documented limit of the
+    // sliding-window-minimum design.)
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-vad-burst",
+      `
+        import audio from "bun:audio";
+        const N = 48000, silentTo = N / 4;  // 250 ms silence + 750 ms loud
+        const samples = new Float32Array(N);
+        // Tiny background noise so noise floor settles non-zero
+        for (let i = 0; i < silentTo; i++) samples[i] = (Math.random() - 0.5) * 0.001;
+        for (let i = silentTo; i < N; i++) samples[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / 48000);
+
+        const { speech } = audio.detectVoice(samples, { frameSize: 480 });
+        const burstStartFrame = Math.ceil(silentTo / 480);
+        const burstFrames = speech.slice(burstStartFrame);
+        const fraction = burstFrames.filter(s => s).length / burstFrames.length;
+        console.log("burstFraction.gt.0.95", fraction > 0.95);
+      `,
+    );
+    expect(stdout).toBe("burstFraction.gt.0.95 true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("distinguishes silent vs loud regions in a mixed signal", async () => {
+    // First half silent (with tiny noise floor), second half loud tone.
+    // Speech labels should track the boundary roughly.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-vad-mixed",
+      `
+        import audio from "bun:audio";
+        const N = 48000, half = N / 2;
+        const samples = new Float32Array(N);
+        // Tiny background noise so the noise floor is non-zero
+        for (let i = 0; i < N; i++) samples[i] = (Math.random() - 0.5) * 0.001;
+        // Loud tone in second half
+        for (let i = half; i < N; i++) samples[i] = 0.5 * Math.sin(2 * Math.PI * 440 * i / 48000);
+
+        const { speech, energies } = audio.detectVoice(samples, { frameSize: 480 });
+        const nFrames = speech.length;
+        const halfFrames = nFrames / 2;
+        // Count speech frames in each half
+        let silentHalfSpeech = 0, loudHalfSpeech = 0;
+        for (let i = 0; i < halfFrames; i++) if (speech[i]) silentHalfSpeech++;
+        for (let i = halfFrames; i < nFrames; i++) if (speech[i]) loudHalfSpeech++;
+        console.log("silentHalf.lt.5", silentHalfSpeech < 5);
+        console.log("loudHalf.gt.40", loudHalfSpeech > 40);
+      `,
+    );
+    expect(stdout).toBe(["silentHalf.lt.5 true", "loudHalf.gt.40 true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("noiseFloor field exposes the final estimate", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-vad-noisefloor",
+      `
+        import audio from "bun:audio";
+        const samples = new Float32Array(4800);  // pure silence
+        const { noiseFloor } = audio.detectVoice(samples, { frameSize: 480 });
+        // Pure silence → noise floor should be 0 (or very close).
+        console.log("nearZero", noiseFloor < 1e-6);
+      `,
+    );
+    expect(stdout).toBe("nearZero true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("rejects invalid options", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-vad-bad-opts",
+      `
+        import audio from "bun:audio";
+        let n = 0;
+        function check(fn, msg) {
+          try { fn(); } catch (e) { if (e.message.includes(msg)) n++; }
+        }
+        check(() => audio.detectVoice(new Float32Array(48), { frameSize: 0 }), "frameSize");
+        check(() => audio.detectVoice(new Float32Array(48), { ratio: 0.5 }), "ratio");
+        check(() => audio.detectVoice(new Float32Array(48), { noiseWindow: 0 }), "noiseWindow");
+        console.log("rejected", n);
+      `,
+    );
+    expect(stdout).toBe("rejected 3");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — MP3 decode (minimp3)", () => {
   // Tiny 0.05s MP3 of a 440 Hz sine at 22050 Hz / 32 kbps mono. Generated
   // via `ffmpeg -f lavfi -i sine=frequency=440:duration=0.05:sample_rate=22050
