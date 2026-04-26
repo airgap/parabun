@@ -628,11 +628,33 @@ void gaussianBlur(
             // NEON on ARM64.
             if (channels == 4) {
 #if defined(PB_HAVE_X86_SIMD)
-                for (int x = interiorStart; x < interiorEnd; x++) {
+                // AVX2 path: process 2 RGBA output pixels per iteration.
+                // Adjacent output pixels x and x+1 sample input bytes that
+                // are exactly 4 apart (one pixel offset), so a single 8-byte
+                // load at base + i*4 picks up both pixels' tap-i contribution.
+                // Expand u8×8 → i32×8 → f32×8, multiply by broadcast kernel
+                // weight, FMA into a 256-bit accumulator. Each iteration
+                // does 2× the work of the SSE 128-bit path.
+                int x = interiorStart;
+                const int avx2End = interiorEnd - ((interiorEnd - interiorStart) & 1);
+                for (; x < avx2End; x += 2) {
+                    const uint8_t* base = srcRow + (x - radius) * 4;
+                    __m256 acc = _mm256_setzero_ps();
+                    for (int i = 0; i < kSize; i++) {
+                        __m128i b = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(base + i * 4));
+                        __m256i ext = _mm256_cvtepu8_epi32(b);
+                        __m256 pf = _mm256_cvtepi32_ps(ext);
+                        __m256 wf = _mm256_set1_ps(kPtr[i]);
+                        acc = _mm256_fmadd_ps(pf, wf, acc);
+                    }
+                    _mm256_storeu_ps(midRow + x * 4, acc);
+                }
+                // Tail (interior is odd-length): handle the last pixel via
+                // the SSE path. interior is at most 1 pixel here.
+                for (; x < interiorEnd; x++) {
                     const uint8_t* base = srcRow + (x - radius) * 4;
                     __m128 acc = _mm_setzero_ps();
                     for (int i = 0; i < kSize; i++) {
-                        // Load 4 bytes (1 RGBA pixel) → expand to 4 i32 → 4 f32
                         __m128i b = _mm_cvtsi32_si128(*reinterpret_cast<const int32_t*>(base + i * 4));
                         __m128i ext = _mm_cvtepu8_epi32(b);
                         __m128 pf = _mm_cvtepi32_ps(ext);
@@ -737,7 +759,37 @@ void gaussianBlur(
 
                 if (channels == 4) {
 #if defined(PB_HAVE_X86_SIMD)
-                    for (uint32_t x = 0; x < w; x++) {
+                    // AVX2 path: 2 RGBA pixels per iteration (8 floats).
+                    // The float-intermediate is contiguous so a single
+                    // 256-bit load gets both pixels' tap-i values for free.
+                    uint32_t x = 0;
+                    const uint32_t avx2End = w & ~1u;
+                    for (; x < avx2End; x += 2) {
+                        const size_t off = static_cast<size_t>(x) * 4;
+                        __m256 acc = _mm256_setzero_ps();
+                        for (int i = 0; i < kSize; i++) {
+                            __m256 pf = _mm256_loadu_ps(rows[i] + off);
+                            __m256 wf = _mm256_set1_ps(kPtr[i]);
+                            acc = _mm256_fmadd_ps(pf, wf, acc);
+                        }
+                        // Round-to-nearest, clamp [0, 255], pack 8 i32 → 8 u8.
+                        __m256i ri = _mm256_cvttps_epi32(_mm256_add_ps(acc, _mm256_set1_ps(0.5f)));
+                        __m256i clamped = _mm256_min_epi32(
+                            _mm256_set1_epi32(255), _mm256_max_epi32(_mm256_setzero_si256(), ri));
+                        // packus_epi32 is per-128-bit-lane; produces
+                        // [low4, low4_dup, high4, high4_dup] in i16 lanes.
+                        __m256i p16 = _mm256_packus_epi32(clamped, clamped);
+                        // packus_epi16 same lane behavior — yields i8 lanes
+                        // [low8 lo, low8 dup, high8 lo, high8 dup].
+                        __m256i p8 = _mm256_packus_epi16(p16, p16);
+                        // permute4x64 to gather lanes 0 (low) and 2 (high)
+                        // into the bottom 64 bits — yields linear 8-byte sequence.
+                        __m256i perm = _mm256_permute4x64_epi64(p8, 0b00001000);
+                        _mm_storel_epi64(reinterpret_cast<__m128i*>(dstRow + off),
+                                         _mm256_castsi256_si128(perm));
+                    }
+                    // Tail (w odd): one last pixel via SSE.
+                    for (; x < w; x++) {
                         const size_t off = static_cast<size_t>(x) * 4;
                         __m128 acc = _mm_setzero_ps();
                         for (int i = 0; i < kSize; i++) {
@@ -745,14 +797,11 @@ void gaussianBlur(
                             __m128 wf = _mm_set1_ps(kPtr[i]);
                             acc = _mm_fmadd_ps(pf, wf, acc);
                         }
-                        // Round, clamp [0, 255], pack to 4 bytes.
-                        __m128 half = _mm_set1_ps(0.5f);
-                        __m128i ri = _mm_cvttps_epi32(_mm_add_ps(acc, half));
-                        __m128i lo = _mm_max_epi32(_mm_setzero_si128(), ri);
-                        __m128i clamped = _mm_min_epi32(_mm_set1_epi32(255), lo);
-                        __m128i packed16 = _mm_packus_epi32(clamped, clamped);
-                        __m128i packed8 = _mm_packus_epi16(packed16, packed16);
-                        *reinterpret_cast<int32_t*>(dstRow + off) = _mm_cvtsi128_si32(packed8);
+                        __m128i ri = _mm_cvttps_epi32(_mm_add_ps(acc, _mm_set1_ps(0.5f)));
+                        __m128i clamped = _mm_min_epi32(_mm_set1_epi32(255), _mm_max_epi32(_mm_setzero_si128(), ri));
+                        __m128i p16 = _mm_packus_epi32(clamped, clamped);
+                        __m128i p8 = _mm_packus_epi16(p16, p16);
+                        *reinterpret_cast<int32_t*>(dstRow + off) = _mm_cvtsi128_si32(p8);
                     }
 #elif defined(PB_HAVE_NEON)
                     for (uint32_t x = 0; x < w; x++) {
