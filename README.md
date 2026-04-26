@@ -362,7 +362,11 @@ See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfo
 
 ## Roadmap
 
-Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU. The shipped modules (`bun:parallel`, `bun:simd`, `bun:gpu`, `bun:pipeline`, `bun:arena`, `bun:signals`, `bun:llm`, `bun:image`, `bun:audio`, `bun:csv`, `bun:rtp`) cover the typed-array, codec, and CPU/GPU-parallel surface; the remaining items below attack the next layer of "I have to shell out / use Python / write native code" pain points.
+Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU + direct hardware. Modules stack in three tiers:
+
+- **Tier 0 — primitives** (shipped): `bun:simd`, `bun:gpu`, `bun:parallel`, `bun:arena`, `bun:pipeline`, `bun:signals`, `bun:rtp`. These are the building blocks that reach hardware directly.
+- **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`. Codecs, capture devices, on-device LLM inference — built on Tier 0.
+- **Tier 2 — applications** (in progress): `bun:vision`, `bun:speech`, `bun:serve`, `bun:arrow`. Application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, inference servers, and analytical queries.
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
@@ -370,16 +374,18 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 |-------------|-----------------------|-------------------------------------------------------------------------------------------------------|
 | shipped     | `bun:image`           | JPEG / PNG / WebP decode + encode, resize (bilinear / Lanczos), blur / sharpen / edge-detect, rotate / flip / crop, adjust / threshold / invert / grayscale, histogram, alpha composite. |
 | shipped     | `bun:audio`           | WAV / MP3 / Opus codecs, RBJ biquads, FFT, resample, spectrogram, VAD, denoiser (rnnoise), AGC, mix / normalize / envelope, planar ⇄ frame-major + i16 ⇄ f32 PCM helpers. |
+| shipped     | `bun:camera`          | V4L2 capture on Linux — `devices()`, `formats(path)`, `open(...)` with async-iterator `frames()` over kernel-mmapped buffers. AVFoundation + Media Foundation follow. |
+| shipped     | OS audio I/O          | Live ALSA capture + playback on `bun:audio` (`devices()` / `capture()` / `play()`). Float32 PCM streams; CoreAudio + WASAPI follow. |
 | shipped     | `bun:csv`             | Streaming RFC 4180 parser with header / inference / quote handling. `parallel: true` is "off-the-main-thread" — see the inline disclaimer above. |
 | shipped     | `bun:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
-| shipped     | `bun:gpu` primitives  | `conv2D`, `scan`, `reduce`, `argMin` / `argMax`, `histogram`, `median` / `quantile`. CPU correctness paths today; GPU-side hooks for CUDA / Metal slot in via the existing dispatch. |
-| next        | `bun:gpu` device-side | Wire CUDA / Metal kernels for the primitives above (Hillis-Steele scan, parallel reductions, atomic-privatized histogram). |
+| partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
+| in progress | `bun:vision` (Tier 2) | Composes `bun:camera` + `bun:image` + `bun:gpu` + `bun:llm` into detection / tracking / OCR. Pi-camera headline. |
+| in progress | `bun:speech` (Tier 2) | VAD-gated mic capture (existing `bun:audio` DSP), Whisper STT via `bun:llm`'s GGUF runtime, Piper TTS. Voice-assistant headline. |
+| in progress | `bun:serve` (Tier 2)  | HTTP wrapper around `bun:llm` with batching, queueing, and an OpenAI-compatible API. Makes Parabun a viable Ollama alternative. |
+| in progress | `bun:arrow` (Tier 2)  | Columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB analytical query" pair to `bun:csv`. |
+| in progress | `bun:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
 | next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
-| next        | `bun:arrow`           | Columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB analytical query" story to pair with `bun:csv`. |
-| planned     | `bun:image` AVIF      | AVIF decode (libavif / libheif vendor add). Round out the codec coverage matrix.                      |
-| planned     | `bun:video`           | ffmpeg-class transcode / thumbnail / concat as a runtime module. No more `which ffmpeg`.              |
-| planned     | `bun:camera`          | Live video capture (V4L2 / AVFoundation / Media Foundation). Makes Parabun a real embedded runtime.   |
-| planned     | OS audio I/O          | Live capture + playback for `bun:audio` (ALSA / CoreAudio / WASAPI via `bun:ffi`). Closes the voice-call pipeline. |
+| planned     | `bun:image` AVIF      | AVIF decode + encode (libavif + AOM / dav1d vendor add). Rounds out the codec coverage matrix.        |
 
 `bun:llm` becomes the proof-of-concept for the stack — "we built llama inference using `bun:gpu` + `bun:simd` + `bun:parallel`; you can build similar things with the same building blocks" — rather than the headline product. Parabun is positioned as a perf runtime, not an AI runtime.
 
