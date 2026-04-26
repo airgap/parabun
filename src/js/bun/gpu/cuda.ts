@@ -1203,7 +1203,14 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
   // 16×16 blocks; cover ceil(w/16) × ceil(h/16).
   const gridX = Math.floor((w + 15) / 16);
   const gridY = Math.floor((h + 15) / 16);
-  const r = s.cuLaunchKernel(devOpsFns!.gaussianBlurRGBAu8, gridX, gridY, 1, 16, 16, 1, 0, 0n, ptr(paramPtrs), null);
+  // Tiled kernel for radius ≤ 16 — block-cooperative shared-mem load
+  // amortizes the kSize²-redundant reads of the global-memory version.
+  // For radius > 16 the (16+2r)² × 4 bytes shared-mem tile would be too
+  // large, so fall back to the global-mem kernel.
+  const useTiled = radius <= 16;
+  const fn = useTiled ? devOpsFns!.gaussianBlurRGBAu8Tiled : devOpsFns!.gaussianBlurRGBAu8;
+  const sharedBytes = useTiled ? (16 + 2 * radius) * (16 + 2 * radius) * 4 : 0;
+  const r = s.cuLaunchKernel(fn, gridX, gridY, 1, 16, 16, 1, sharedBytes, 0n, ptr(paramPtrs), null);
   if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(gaussianBlurRGBAu8) failed (${r})`);
   if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
 
@@ -2984,14 +2991,98 @@ extern "C" __global__ void conv2d_f32(
     outbuf[y * oW + x] = acc;
 }
 
-// Fused RGBA-uint8 Gaussian blur. Single-launch 2D convolution against a
-// separable Gaussian kernel — for radius r the kernel is (2r+1)² weights
-// supplied as the outer product of a 1D Gaussian, but applied as a flat
-// 2D kernel in one launch (one pass, no global sync). Edge clamp on
-// border samples. Each thread computes one output pixel = 4 channels in
-// parallel via float accumulators, then packed back to uint8 with round
-// + clamp. This sidesteps the JS-side deinterleave / reinterleave
-// overhead that dominates a per-channel conv2D dispatch.
+// Fused RGBA-uint8 Gaussian blur. Two kernel variants: a tile-aware
+// version that uses shared memory (radius ≤ 16, covers the common
+// case — most practical photo blurs are radius 1-10), and a global-
+// memory fallback for larger radii where the tile + halo wouldn't fit
+// in shared memory.
+
+// Tiled version. Each block computes a 16×16 output region. The block
+// also cooperatively loads the (16 + 2r) × (16 + 2r) source tile into
+// shared memory once; then each thread reads its kSize² weighted
+// samples from shared mem instead of global. Reduces global memory
+// traffic by ~kSize² (= 121 for radius=5).
+//
+// Shared mem usage: (16+32)² × 4 bytes = 9216 bytes max at radius 16.
+// Comfortably under the 48 KB / SM limit on every CUDA arch we target.
+extern "C" __global__ void gaussian_blur_rgba_u8_tiled(
+    const unsigned char* __restrict__ src,
+    unsigned char* __restrict__ dst,
+    unsigned int w,
+    unsigned int h,
+    const float* __restrict__ kern1d,
+    int radius
+) {
+    extern __shared__ unsigned char tile[];
+
+    const int TILE = 16;
+    const int tileW = TILE + 2 * radius;
+    const int tileH = TILE + 2 * radius;
+    const int tilePixels = tileW * tileH;
+
+    const int blockX = blockIdx.x * TILE;
+    const int blockY = blockIdx.y * TILE;
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tid = ty * TILE + tx;
+    const int totalThreads = TILE * TILE;
+
+    // Each thread loads (tilePixels / totalThreads) round-up source pixels
+    // into shared memory, with edge clamp on out-of-bounds reads. The
+    // load loop strides by totalThreads so contiguous threads load
+    // contiguous pixels (coalesced reads from global).
+    for (int i = tid; i < tilePixels; i += totalThreads) {
+        int ly = i / tileW;
+        int lx = i - ly * tileW;
+        int sx = blockX + lx - radius;
+        int sy = blockY + ly - radius;
+        if (sx < 0) sx = 0;
+        if (sx >= (int)w) sx = (int)w - 1;
+        if (sy < 0) sy = 0;
+        if (sy >= (int)h) sy = (int)h - 1;
+        // Copy 4 bytes (one RGBA pixel) at once.
+        const unsigned int* src32 = (const unsigned int*)src;
+        unsigned int* tile32 = (unsigned int*)tile;
+        tile32[i] = src32[sy * (int)w + sx];
+    }
+    __syncthreads();
+
+    const int x = blockX + tx;
+    const int y = blockY + ty;
+    if (x >= (int)w || y >= (int)h) return;
+
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+    int kSize = 2 * radius + 1;
+    for (int ky = 0; ky < kSize; ky++) {
+        float kyW = kern1d[ky];
+        const int tileRow = (ty + ky) * tileW;
+        for (int kx = 0; kx < kSize; kx++) {
+            float kw = kyW * kern1d[kx];
+            int tileIdx = (tileRow + tx + kx) * 4;
+            r = fmaf((float)tile[tileIdx + 0], kw, r);
+            g = fmaf((float)tile[tileIdx + 1], kw, g);
+            b = fmaf((float)tile[tileIdx + 2], kw, b);
+            a = fmaf((float)tile[tileIdx + 3], kw, a);
+        }
+    }
+
+    int oIdx = (y * (int)w + x) * 4;
+    int ri = (int)(r + 0.5f);
+    int gi = (int)(g + 0.5f);
+    int bi = (int)(b + 0.5f);
+    int ai = (int)(a + 0.5f);
+    if (ri < 0) ri = 0; else if (ri > 255) ri = 255;
+    if (gi < 0) gi = 0; else if (gi > 255) gi = 255;
+    if (bi < 0) bi = 0; else if (bi > 255) bi = 255;
+    if (ai < 0) ai = 0; else if (ai > 255) ai = 255;
+    dst[oIdx + 0] = (unsigned char)ri;
+    dst[oIdx + 1] = (unsigned char)gi;
+    dst[oIdx + 2] = (unsigned char)bi;
+    dst[oIdx + 3] = (unsigned char)ai;
+}
+
+// Global-memory fallback for radius > 16 where shared-mem tile + halo
+// wouldn't fit. Same correctness, naive direct global reads.
 extern "C" __global__ void gaussian_blur_rgba_u8(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
@@ -3062,6 +3153,7 @@ type DevOpsFns = {
   flashAttn: bigint;
   conv2D: bigint;
   gaussianBlurRGBAu8: bigint;
+  gaussianBlurRGBAu8Tiled: bigint;
 };
 
 let devOpsProbed = false;
@@ -3149,6 +3241,7 @@ function probeDevOps(): boolean {
     "flashAttn",
     "conv2D",
     "gaussianBlurRGBAu8",
+    "gaussianBlurRGBAu8Tiled",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -3172,6 +3265,7 @@ function probeDevOps(): boolean {
     flashAttn: "flash_attn_f32",
     conv2D: "conv2d_f32",
     gaussianBlurRGBAu8: "gaussian_blur_rgba_u8",
+    gaussianBlurRGBAu8Tiled: "gaussian_blur_rgba_u8_tiled",
   };
 
   const fns = {} as DevOpsFns;
