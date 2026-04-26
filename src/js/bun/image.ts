@@ -54,6 +54,10 @@ type ResizeOptions = {
    */
   kernel?: "bilinear" | "lanczos";
 };
+type BlurOptions = {
+  /** Blur radius in pixels. 0 = passthrough, 100 = max. */
+  radius: number;
+};
 
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
@@ -82,8 +86,19 @@ function resize(img: DecodedImage, opts: ResizeOptions): DecodedImage {
   return native.resize(img, opts);
 }
 
+function blur(img: DecodedImage, opts: BlurOptions): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.blur: img must be the object returned from decode()");
+  }
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError("bun:image.blur: opts must be { radius }");
+  }
+  return native.blur(img, opts);
+}
+
 export default {
   decode,
   encode,
   resize,
+  blur,
 };

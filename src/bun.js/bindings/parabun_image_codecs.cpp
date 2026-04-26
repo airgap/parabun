@@ -459,6 +459,92 @@ void resizeLanczos(
     }
 }
 
+// ─── Gaussian blur ─────────────────────────────────────────────────────────
+// Separable 1D Gaussian: horizontal pass into a float intermediate, then
+// vertical pass into the output buffer. σ is derived from the user-facing
+// radius parameter (matches the CSS / Pillow convention: radius is the
+// pixel-distance over which the kernel covers ~3σ of weight).
+//
+// Border handling: clamp-to-edge replication. For a 5-pixel-radius blur
+// at the corner pixel, sources beyond the image edge re-use the edge
+// pixel value. Most photo-blur use cases want this; for pure mathematical
+// "zero outside" semantics, callers can pad first.
+
+namespace {
+
+void buildGaussianKernel1D(int radius, std::vector<float>& kernel)
+{
+    const int size = 2 * radius + 1;
+    kernel.resize(size);
+    const float sigma = static_cast<float>(radius) / 3.0f + 1e-6f;
+    const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        const float x = static_cast<float>(i - radius);
+        kernel[i] = std::exp(-x * x * invTwoSigmaSq);
+        sum += kernel[i];
+    }
+    // Normalize to unit DC gain — output brightness matches input.
+    const float invSum = 1.0f / sum;
+    for (int i = 0; i < size; i++) kernel[i] *= invSum;
+}
+
+} // anonymous namespace
+
+void gaussianBlur(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint8_t* dst, int radius)
+{
+    if (radius <= 0) {
+        // Identity — copy through.
+        std::memcpy(dst, src, static_cast<size_t>(w) * h * channels);
+        return;
+    }
+
+    std::vector<float> kernel;
+    buildGaussianKernel1D(radius, kernel);
+
+    // Pass 1: horizontal blur, src → mid (float).
+    std::vector<float> mid(static_cast<size_t>(w) * h * channels);
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t* srcRow = src + static_cast<size_t>(y) * w * channels;
+        float* midRow = mid.data() + static_cast<size_t>(y) * w * channels;
+        for (uint32_t x = 0; x < w; x++) {
+            for (uint32_t c = 0; c < channels; c++) {
+                float acc = 0.0f;
+                for (int k = -radius; k <= radius; k++) {
+                    int sx = static_cast<int>(x) + k;
+                    if (sx < 0) sx = 0;
+                    if (sx >= static_cast<int>(w)) sx = static_cast<int>(w) - 1;
+                    acc += static_cast<float>(srcRow[sx * channels + c]) * kernel[k + radius];
+                }
+                midRow[x * channels + c] = acc;
+            }
+        }
+    }
+
+    // Pass 2: vertical blur, mid → dst (uint8 with clamp).
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t* dstRow = dst + static_cast<size_t>(y) * w * channels;
+        for (uint32_t x = 0; x < w; x++) {
+            for (uint32_t c = 0; c < channels; c++) {
+                float acc = 0.0f;
+                for (int k = -radius; k <= radius; k++) {
+                    int sy = static_cast<int>(y) + k;
+                    if (sy < 0) sy = 0;
+                    if (sy >= static_cast<int>(h)) sy = static_cast<int>(h) - 1;
+                    const float* midRow = mid.data() + static_cast<size_t>(sy) * w * channels;
+                    acc += midRow[x * channels + c] * kernel[k + radius];
+                }
+                int rounded = static_cast<int>(acc + 0.5f);
+                if (rounded < 0) rounded = 0;
+                if (rounded > 255) rounded = 255;
+                dstRow[x * channels + c] = static_cast<uint8_t>(rounded);
+            }
+        }
+    }
+}
+
 // ─── Bilinear resize ───────────────────────────────────────────────────────
 // CPU-side bilinear resampling. Each output pixel samples the four nearest
 // input pixels with bilinear weights derived from the half-pixel-centered
@@ -837,6 +923,84 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
     return JSValue::encode(obj);
 }
 
+// blur(img, { radius }) → DecodedImage with the same dims / channels /
+// format string. Channel count must be 1, 3, or 4 (gray, RGB, RGBA).
+JSC_DEFINE_HOST_FUNCTION(functionBlur,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue optsArg = callFrame->argument(1);
+    if (!imgArg.isObject() || !optsArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.blur: expected (img, { radius })"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    auto* optsObj = asObject(optsArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.blur: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.blur: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.blur: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.blur: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    JSValue radiusVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "radius"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+    if (!radiusVal.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.blur: opts.radius is required (number)"_s);
+        return {};
+    }
+    const int radius = radiusVal.toInt32(globalObject);
+    if (radius < 0 || radius > 100) {
+        throwTypeError(globalObject, scope, "bun:image.blur: radius must be in [0, 100]"_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    gaussianBlur(
+        static_cast<const uint8_t*>(srcRaw), w, h, channels,
+        static_cast<uint8_t*>(dstArr->vector()), radius);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -850,6 +1014,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "resize"_s), 2,
         functionResize, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "blur"_s), 2,
+        functionBlur, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

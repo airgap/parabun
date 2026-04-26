@@ -513,6 +513,97 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("blur with radius 0 returns the input unchanged", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-blur-zero",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const out = image.blur(orig, { radius: 0 });
+        console.log("dims", out.width, out.height, out.channels);
+        const equal = out.data.length === orig.data.length && out.data.every((v, i) => v === orig.data[i]);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 4 4", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("blur smooths a high-contrast edge — output variance much less than input", async () => {
+    // 32×32 image with vertical bands of all-0 and all-255. Variance is
+    // huge before blur, much smaller after. (Variance is the mean-square
+    // deviation from the mean — a uniform image has variance 0.)
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-blur-smooths",
+      `
+        import image from "bun:image";
+        const w = 32, h = 32;
+        const data = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const off = (y * w + x) * 4;
+          const v = (x % 2 === 0) ? 0 : 255;
+          data[off] = v; data[off + 1] = v; data[off + 2] = v; data[off + 3] = 255;
+        }
+        const orig = { data, width: w, height: h, channels: 4, format: "png" };
+
+        function rVariance(img) {
+          const N = img.width * img.height;
+          let sum = 0;
+          for (let i = 0; i < N; i++) sum += img.data[i * 4];
+          const mean = sum / N;
+          let var_ = 0;
+          for (let i = 0; i < N; i++) { const d = img.data[i * 4] - mean; var_ += d * d; }
+          return var_ / N;
+        }
+        const inVar = rVariance(orig);
+        const blurred = image.blur(orig, { radius: 5 });
+        const outVar = rVariance(blurred);
+        console.log("inVar.gt.10000", inVar > 10000);    // ~16,256 for ±127.5 step
+        console.log("outVar.lt.1000", outVar < 1000);    // bigger blur kernel → smaller variance
+        console.log("dims", blurred.width, blurred.height, blurred.channels);
+      `,
+    );
+    expect(stdout).toBe(["inVar.gt.10000 true", "outVar.lt.1000 true", "dims 32 32 4"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("blur preserves the alpha channel intact", async () => {
+    // Alpha at 255 everywhere should stay 255 (constant input → identity
+    // blur output, modulo edge-clamp behavior at the boundary which still
+    // gives 255 for a uniform input).
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-blur-alpha",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const blurred = image.blur(orig, { radius: 3 });
+        // Every alpha byte (offset 3, 7, 11, ...) should stay 255.
+        const allOpaque = blurred.data.every((v, i) => i % 4 !== 3 || v === 255);
+        console.log("allAlpha255", allOpaque);
+      `,
+    );
+    expect(stdout).toBe("allAlpha255 true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("blur rejects out-of-range radius", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-blur-bad-radius",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        try {
+          image.blur(orig, { radius: 999 });
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e.message.includes("[0, 100]"));
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
   it("resize rejects zero dims", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-zero",
