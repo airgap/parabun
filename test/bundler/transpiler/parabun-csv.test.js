@@ -231,6 +231,120 @@ describe("bun:csv", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("parallel mode produces identical rows to serial on large unquoted CSVs", async () => {
+    // Build a CSV big enough to trip the PARALLEL_MIN_BYTES gate (64 KB).
+    // No quote chars anywhere, so the no-quote fast path engages.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-csv-parallel-eq",
+      `
+        import { parseCsv } from "bun:csv";
+
+        const lines = ["id,name,score"];
+        for (let i = 0; i < 4000; i++) {
+          lines.push(\`\${i},user_\${i},\${i * 3.14}\`);
+        }
+        const text = lines.join("\\n") + "\\n";
+        console.log("text.length", text.length);  // should be > 64 KB
+
+        const collect = async (opts) => {
+          const out = [];
+          for await (const row of parseCsv(text, opts)) out.push(row);
+          return out;
+        };
+
+        const serial = await collect({});
+        const parallelRows = await collect({ parallel: true });
+        console.log("serial.len", serial.length);
+        console.log("parallel.len", parallelRows.length);
+        console.log("equal", JSON.stringify(serial) === JSON.stringify(parallelRows));
+      `,
+    );
+    const lines = stdout.split("\n");
+    expect(lines).toEqual([
+      expect.stringMatching(/^text\.length \d+$/),
+      "serial.len 4000",
+      "parallel.len 4000",
+      "equal true",
+    ]);
+    expect(exitCode).toBe(0);
+  });
+
+  it("parallel mode falls back to serial when input has quote chars", async () => {
+    // Same data, but include a quoted cell. The pre-scan finds the quote
+    // and falls through to the serial path. Result is still correct.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-csv-parallel-fallback",
+      `
+        import { parseCsv } from "bun:csv";
+        const lines = ["id,name"];
+        for (let i = 0; i < 3000; i++) {
+          // Inject a quoted cell every now and then.
+          if (i === 7) lines.push(\`\${i},"alice, the great"\`);
+          else lines.push(\`\${i},u\${i}\`);
+        }
+        const text = lines.join("\\n") + "\\n";
+
+        const out = [];
+        for await (const row of parseCsv(text, { parallel: true })) out.push(row);
+        // The quoted field with embedded comma should still parse correctly
+        // (serial handles it; parallel can't but defers to serial here).
+        console.log("len", out.length);
+        console.log("row7.name", out[7].name);
+      `,
+    );
+    expect(stdout).toBe(["len 3000", "row7.name alice, the great"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("parallel mode below the size threshold falls back to serial", async () => {
+    // Tiny input — well under 64 KB. parallel:true is silently a no-op;
+    // serial path runs, output is the same.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-csv-parallel-tiny",
+      `
+        import { parseCsv } from "bun:csv";
+        const text = "a,b\\n1,2\\n3,4\\n";
+        const out = [];
+        for await (const row of parseCsv(text, { parallel: true })) out.push(row);
+        console.log(JSON.stringify(out));
+      `,
+    );
+    expect(stdout).toBe(
+      JSON.stringify([
+        { a: 1, b: 2 },
+        { a: 3, b: 4 },
+      ]),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("parallel mode preserves header detection across chunks", async () => {
+    // The header lives in chunk 0; chunks 1..N-1 should NOT treat their
+    // first row as a header. Verify that a 4-column header is applied
+    // consistently to all rows.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-csv-parallel-headers",
+      `
+        import { parseCsv } from "bun:csv";
+        const lines = ["a,b,c,d"];
+        for (let i = 0; i < 5000; i++) {
+          lines.push(\`\${i},\${i*2},\${i*3},\${i*4}\`);
+        }
+        const text = lines.join("\\n") + "\\n";
+
+        const rows = [];
+        for await (const row of parseCsv(text, { parallel: true })) rows.push(row);
+        console.log("len", rows.length);
+        console.log("row0", JSON.stringify(rows[0]));
+        console.log("row4999", JSON.stringify(rows[4999]));
+      `,
+    );
+    expect(stdout).toBe(
+      ["len 5000", 'row0 {"a":0,"b":0,"c":0,"d":0}', 'row4999 {"a":4999,"b":9998,"c":14997,"d":19996}'].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
   it("throws on unterminated quoted field", async () => {
     const { stderr, exitCode } = await runFixture(
       "parabun-csv-bad-quote",

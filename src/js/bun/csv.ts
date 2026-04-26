@@ -15,9 +15,16 @@
 //     // row is ["v1", "v2", ...] — raw strings
 //   }
 //
-// Out of scope for v1: parallel chunk parsing (waiting on bun:parallel
-// improvements — LYK-728), Excel dialect quirks, multi-line fields with
-// custom record separators. Easy to add when needed.
+//   // Parallel mode — uses bun:parallel's worker pool. Materializes the
+//   // whole input first (loses streaming) and falls back to serial if the
+//   // input contains any quote characters (we'd need a pre-pass to find
+//   // safe chunk boundaries, which v1 doesn't do):
+//   for await (const row of parseCsv(bigCsv, { parallel: true })) { ... }
+//
+// Out of scope for v1: Excel dialect quirks, multi-line fields under
+// custom record separators, parallel mode for quoted CSVs.
+
+const parallel = require("./parallel.ts");
 
 type CsvSource = string | Uint8Array | Blob | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array | string>;
 
@@ -44,6 +51,18 @@ type ParseOptions = {
    * with a comment block at the top. Default 0.
    */
   skipLines?: number;
+  /**
+   * Opt-in parallel chunk parsing via bun:parallel's worker pool. Splits
+   * the input at line boundaries and parses chunks concurrently. Two
+   * caveats:
+   *   1. Input is materialized to a single string first (no streaming).
+   *   2. Falls back to serial if any quote character appears in the
+   *      input — finding safe chunk boundaries inside quoted regions
+   *      needs a pre-pass that v1 doesn't do.
+   * If both apply, the heuristic is "use parallel for big files of
+   * machine-generated data, serial for everything else."
+   */
+  parallel?: boolean;
 };
 
 type ResolvedOptions = Required<Omit<ParseOptions, "headers">> & { headers: ParseOptions["headers"] };
@@ -276,7 +295,114 @@ function resolveOptions(options: ParseOptions): ResolvedOptions {
     headers: options.headers ?? true,
     typeInference: options.typeInference ?? true,
     skipLines: options.skipLines ?? 0,
+    parallel: options.parallel ?? false,
   };
+}
+
+// Below this size, parallel mode's overhead (materialization + worker
+// dispatch) outweighs the speedup. Numbers under it stay on the serial
+// streaming path.
+const PARALLEL_MIN_BYTES = 64 * 1024;
+
+// ─── Parallel chunk parser (no-quote fast path) ────────────────────────────
+// This runs INSIDE a worker via bun:parallel.pmap. It must be a pure
+// function — no closures, no outside references — because pmap stringifies
+// it and re-evals on the worker side.
+//
+// The caller has already verified the input contains zero quote characters,
+// so a quoted-field state machine isn't needed. Plain split-on-delimiter
+// per line is correct.
+//
+// Input: { chunk, delimiter } — chunk is a substring split at line
+// boundaries (each chunk starts at line N, ends at line M, delimiter is
+// the same throughout the input).
+// Output: string[][] — one entry per non-empty line in the chunk.
+function parseCsvChunkPure(input: { chunk: string; delimiter: string }): string[][] {
+  const chunk = input.chunk;
+  const d = input.delimiter;
+  const rows: string[][] = [];
+  let start = 0;
+  while (start <= chunk.length) {
+    let end = chunk.indexOf("\n", start);
+    if (end === -1) end = chunk.length;
+    let lineEnd = end;
+    if (lineEnd > start && chunk.charCodeAt(lineEnd - 1) === 13) lineEnd--; // strip CR
+    if (lineEnd > start) rows.push(chunk.substring(start, lineEnd).split(d));
+    start = end + 1;
+  }
+  return rows;
+}
+
+// Split the input into approximately equal chunks at line boundaries.
+// Returns chunks that, concatenated, give back the input verbatim — every
+// `\n` ends up in the chunk it terminates.
+function splitAtLineBoundaries(input: string, n: number): string[] {
+  if (n <= 1 || input.length === 0) return [input];
+  const chunks: string[] = [];
+  const targetSize = Math.floor(input.length / n);
+  let start = 0;
+  for (let k = 0; k < n - 1; k++) {
+    const target = (k + 1) * targetSize;
+    const split = input.indexOf("\n", target);
+    if (split === -1) {
+      // No more newlines after the next target — push the rest as one
+      // chunk and stop. Caller may end up with fewer than `n` chunks;
+      // that's fine.
+      chunks.push(input.substring(start));
+      return chunks;
+    }
+    chunks.push(input.substring(start, split + 1));
+    start = split + 1;
+  }
+  chunks.push(input.substring(start));
+  return chunks;
+}
+
+function defaultConcurrency(): number {
+  // navigator.hardwareConcurrency is available in Bun. Cap at 8 for
+  // typical CSV workloads — beyond that, contention on the input string
+  // (it's structured-cloned to each worker) eats the speedup.
+  // @ts-ignore navigator is available in Bun
+  const hc = typeof navigator !== "undefined" ? navigator.hardwareConcurrency : 0;
+  return Math.min(typeof hc === "number" && hc > 0 ? hc : 4, 8);
+}
+
+async function* parseCsvParallelImpl(
+  full: string,
+  opts: ResolvedOptions,
+): AsyncGenerator<string[] | Record<string, string | number | boolean | null>> {
+  const concurrency = defaultConcurrency();
+  const chunks = splitAtLineBoundaries(full, concurrency).map(chunk => ({ chunk, delimiter: opts.delimiter }));
+  const rowsPerChunk: string[][][] = await parallel.pmap(parseCsvChunkPure, chunks);
+
+  // Apply the same header / type-inference / skipLines logic as the
+  // serial path, but flatten across chunks. Chunk order is preserved by
+  // pmap (it returns results indexed by input order).
+  let skipped = 0;
+  let headers: string[] | null = Array.isArray(opts.headers) ? [...opts.headers] : null;
+  for (const chunkRows of rowsPerChunk) {
+    for (const row of chunkRows) {
+      if (skipped < opts.skipLines) {
+        skipped++;
+        continue;
+      }
+      if (opts.headers === true && headers === null) {
+        headers = row;
+        continue;
+      }
+      if (opts.headers === false) {
+        yield opts.typeInference ? (row.map(inferCell) as unknown as string[]) : row;
+        continue;
+      }
+      const obj: Record<string, string | number | boolean | null> = {};
+      const hs = headers!;
+      for (let i = 0; i < hs.length; i++) {
+        const cell = row[i] ?? "";
+        obj[hs[i]] = opts.typeInference ? inferCell(cell) : cell;
+      }
+      yield obj;
+    }
+  }
 }
 
 async function* parseCsvImpl(
@@ -284,6 +410,21 @@ async function* parseCsvImpl(
   options: ParseOptions = {},
 ): AsyncGenerator<string[] | Record<string, string | number | boolean | null>> {
   const opts = resolveOptions(options);
+
+  // Parallel path: materialize the whole input, pre-scan for the quote
+  // character, fast-fork to workers if it's safe. Otherwise fall through
+  // to the serial state machine using the materialized string as input.
+  if (opts.parallel) {
+    let full = "";
+    for await (const piece of decodeSource(source)) full += piece;
+    const safe = full.length >= PARALLEL_MIN_BYTES && !full.includes(opts.quote);
+    if (safe) {
+      yield* parseCsvParallelImpl(full, opts);
+      return;
+    }
+    source = full; // Hand the materialized string to the serial path.
+  }
+
   const rows = tokenize(source, opts.delimiter, opts.quote);
 
   let skipped = 0;
