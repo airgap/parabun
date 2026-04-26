@@ -1059,6 +1059,86 @@ describe("bun:image — decode", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("toGrayscale collapses RGBA to channels=1 with Rec. 601 weights", async () => {
+    // Hand-computed test pixels:
+    //   pure red   (255, 0, 0, _)   → 0.299 * 255 ≈ 76
+    //   pure green (0, 255, 0, _)   → 0.587 * 255 ≈ 150
+    //   pure blue  (0, 0, 255, _)   → 0.114 * 255 ≈ 29
+    //   pure white (255, 255, 255)  → exactly 255 (weights sum to 1)
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-grayscale-rgba",
+      `
+        import image from "bun:image";
+        const data = Uint8Array.from([
+          255,   0,   0, 255,   // red
+            0, 255,   0, 255,   // green
+            0,   0, 255, 255,   // blue
+          255, 255, 255, 255,   // white
+        ]);
+        const orig = { data, width: 4, height: 1, channels: 4, format: "png" };
+        const g = image.toGrayscale(orig);
+        console.log("dims", g.width, g.height, g.channels);
+        console.log("pixels", Array.from(g.data).join(","));
+      `,
+    );
+    expect(stdout).toBe(["dims 4 1 1", "pixels 76,150,29,255"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("toGrayscale on a 1-channel input is an exact passthrough copy", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-grayscale-passthrough",
+      `
+        import image from "bun:image";
+        const data = Uint8Array.from([10, 20, 30, 40, 50, 60, 70, 80]);
+        const orig = { data, width: 4, height: 2, channels: 1, format: "png" };
+        const g = image.toGrayscale(orig);
+        console.log("dims", g.width, g.height, g.channels);
+        const sameRef = g.data === orig.data;
+        const equal = g.data.length === orig.data.length && g.data.every((v, i) => v === orig.data[i]);
+        console.log("sameRef", sameRef);
+        console.log("byteEqual", equal);
+      `,
+    );
+    expect(stdout).toBe(["dims 4 2 1", "sameRef false", "byteEqual true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("toGrayscale on RGB (no alpha) gives the same luma as RGBA at alpha=255", async () => {
+    // Rec. 601 weights ignore alpha entirely, so RGB and RGBA inputs that
+    // share the same R/G/B bytes must produce identical luma.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-grayscale-rgb-rgba-match",
+      `
+        import image from "bun:image";
+        const rgb = Uint8Array.from([128, 64, 200,  10, 220, 30]);
+        const rgba = Uint8Array.from([128, 64, 200, 255,  10, 220, 30, 255]);
+        const r1 = image.toGrayscale({ data: rgb,  width: 2, height: 1, channels: 3, format: "png" });
+        const r2 = image.toGrayscale({ data: rgba, width: 2, height: 1, channels: 4, format: "png" });
+        console.log("rgb",  Array.from(r1.data).join(","));
+        console.log("rgba", Array.from(r2.data).join(","));
+      `,
+    );
+    // 0.299*128 + 0.587*64 + 0.114*200 = 38.272 + 37.568 + 22.8 = 98.64 → 99
+    // 0.299*10 + 0.587*220 + 0.114*30 = 2.99 + 129.14 + 3.42 = 135.55 → 136
+    expect(stdout).toBe(["rgb 99,136", "rgba 99,136"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("toGrayscale preserves the source format string", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-image-grayscale-format",
+      `
+        import image from "bun:image";
+        const orig = image.decode(PNG);
+        const g = image.toGrayscale(orig);
+        console.log("format", g.format);
+      `,
+    );
+    expect(stdout).toBe("format png");
+    expect(exitCode).toBe(0);
+  });
+
   it("rejects malformed JPEG with a clear error message", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",

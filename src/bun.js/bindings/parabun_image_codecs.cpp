@@ -580,6 +580,34 @@ void unsharpSharpen(
     }
 }
 
+// ─── Luma collapse (Rec. 601) ──────────────────────────────────────────────
+// RGB → single-channel luminance using the standard Rec. 601 / ITU-R BT.601
+// weights (0.299 R + 0.587 G + 0.114 B). Alpha is dropped for RGBA inputs;
+// 1-channel input is a memcpy passthrough.
+//
+// These weights are the broadcast-TV default for "perceptual brightness"
+// of an sRGB-ish color — slightly under-weighting blue and over-weighting
+// green, matching the human eye's color sensitivity. Rec. 709 weights are
+// almost identical (0.2126 / 0.7152 / 0.0722) and would be ~1 LSB different
+// on an 8-bit channel, so the choice doesn't matter for image work.
+
+void rgbToLuma(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels, uint8_t* dst /* w × h × 1 */)
+{
+    const size_t pixels = static_cast<size_t>(w) * h;
+    if (channels == 1) {
+        std::memcpy(dst, src, pixels);
+        return;
+    }
+    for (size_t i = 0; i < pixels; i++) {
+        const float r = static_cast<float>(src[i * channels + 0]);
+        const float g = static_cast<float>(src[i * channels + 1]);
+        const float b = static_cast<float>(src[i * channels + 2]);
+        const float L = 0.299f * r + 0.587f * g + 0.114f * b;
+        dst[i] = static_cast<uint8_t>(L + 0.5f);
+    }
+}
+
 // ─── Sobel edge detection ──────────────────────────────────────────────────
 // Returns a single-channel grayscale image with the magnitude of the
 // per-pixel gradient. Operates on the luminance of the input — for RGB
@@ -600,22 +628,9 @@ void sobelEdgeDetect(
         std::memset(dst, 0, static_cast<size_t>(w) * h);
         return;
     }
-    // Pass 1: collapse to grayscale luma. For 1-channel inputs this is
-    // a memcpy. For multi-channel, weighted-sum the color channels into
-    // a luma buffer.
+    // Pass 1: collapse to grayscale luma via the shared helper.
     std::vector<uint8_t> luma(static_cast<size_t>(w) * h);
-    if (channels == 1) {
-        std::memcpy(luma.data(), src, luma.size());
-    } else {
-        const size_t pixels = static_cast<size_t>(w) * h;
-        for (size_t i = 0; i < pixels; i++) {
-            const float r = static_cast<float>(src[i * channels + 0]);
-            const float g = static_cast<float>(src[i * channels + 1]);
-            const float b = static_cast<float>(src[i * channels + 2]);
-            const float L = 0.299f * r + 0.587f * g + 0.114f * b;
-            luma[i] = static_cast<uint8_t>(L + 0.5f);
-        }
-    }
+    rgbToLuma(src, w, h, channels, luma.data());
 
     // Pass 2: Sobel on luma.
     auto at = [&](int x, int y) -> int {
@@ -1630,6 +1645,71 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
     return JSValue::encode(obj);
 }
 
+// toGrayscale(img) → DecodedImage with channels = 1. Rec. 601 luma
+// collapse; alpha is dropped for RGBA inputs. 1-channel inputs are a
+// passthrough copy (callers don't need to special-case the type).
+JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.toGrayscale: expected (img)"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.toGrayscale: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.toGrayscale: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.toGrayscale: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.toGrayscale: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h; // single channel
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    rgbToLuma(
+        static_cast<const uint8_t*>(srcRaw), w, h, channels,
+        static_cast<uint8_t*>(dstArr->vector()));
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(1u));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
 {
     auto& vm = JSC::getVM(globalObject);
@@ -1661,6 +1741,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "crop"_s), 2,
         functionCrop, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "toGrayscale"_s), 1,
+        functionToGrayscale, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

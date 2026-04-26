@@ -168,6 +168,13 @@ function crop(img: DecodedImage, opts: CropOptions): DecodedImage {
   return native.crop(img, opts);
 }
 
+function toGrayscale(img: DecodedImage): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.toGrayscale: img must be the object returned from decode()");
+  }
+  return native.toGrayscale(img);
+}
+
 export default {
   decode,
   encode,
@@ -178,4 +185,5 @@ export default {
   rotate,
   flip,
   crop,
+  toGrayscale,
 };
