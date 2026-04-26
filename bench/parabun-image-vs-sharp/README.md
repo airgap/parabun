@@ -77,6 +77,65 @@ to libpng's lower-level row-callback API for tile-aware
 filtering. Switching to that is the next obvious move on the
 PNG side.
 
+## GPU dispatch — `image.blur(img, { gpu: true })`
+
+There's an opt-in GPU path through `bun:gpu`'s `imageBlurRGBA` primitive
+(fused single-launch CUDA kernel; `cuda.ts` ships a tiled shared-memory
+variant for radius ≤ 16). On a desktop RTX 4070 Ti, this path is
+**slower than the CPU SIMD path** because of host-side power management,
+not the kernel itself.
+
+```sh
+bun run build:release --asan=off bench/parabun-image-vs-sharp/gpu-warm.ts
+```
+
+Output on this dev machine (RTX 4070 Ti, CUDA 12.8, Linux desktop):
+
+```
+# 4096² RGBA Gaussian blur (radius 5)
+
+CPU SIMD (steady):           39.9 ms
+GPU cold (idle GPU):        190.7 ms
+GPU sustained (warm):       111.0 ms     ← steady state after ~30 dispatches
+
+vs CPU baseline:
+  cold       0.21× GPU slower
+  sustained  0.36× GPU slower
+```
+
+Two findings:
+
+1. **GPU compute clocks ramp quickly** — sustained dispatch drops from
+   ~190 ms to ~111 ms within 30 iterations as the GPU exits P8 idle.
+   The kernel itself is fine; the warmup tax is real but bounded.
+2. **PCIe link stays in low-power mode** — even after 200 back-to-back
+   dispatches, `nvidia-smi --query-gpu=pcie.link.gen.current,...` still
+   reports **Gen 1 x8** (≈ 2 GB/s) instead of the rated Gen 4 x16
+   (≈ 32 GB/s). At Gen 1 x8, the 64 MB H2D + 64 MB D2H per call costs
+   ~64 ms of pure PCIe transfer — that alone is more than CPU SIMD's
+   total runtime.
+
+The CPU SIMD path runs at memory bandwidth (~30 GB/s on x86 DDR4),
+which is *higher* than this host's idle-state PCIe link. So GPU loses
+on a desktop where the link is in low-power mode and never ramped.
+
+When `image.blur({ gpu: true })` is the right call:
+
+- Server-class hosts that keep the GPU under constant traffic so the
+  PCIe link stays in Gen 4 x16. Re-run `gpu-warm.ts` on production
+  hardware before pitching this as a feature.
+- Hosts where `nvidia-smi -lgc` / persistent mode is set (admin
+  privilege).
+- Workloads with much heavier kernel work per byte transferred —
+  `bun:llm` matmul on a held weight buffer is the existing example.
+- Pipelines that batch many image ops on already-resident GPU buffers.
+
+The GPU dispatch architecture (`gpu.imageBlurRGBA`, the CUDA tiled
+kernel, persistent device + pinned host buffers, fall-through to CPU
+when no GPU is wired) is in place and correct. Wiring up Metal will
+mirror this same shape; WebGPU is deferred until there's a server-side
+use case for it.
+
 ## When bun:image is still the right pick
 
 Sharp's headline advantage is real. The cases where bun:image is
