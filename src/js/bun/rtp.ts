@@ -1,0 +1,215 @@
+// Hardcoded module "bun:rtp"
+//
+// Parabun: RFC 3550 RTP packet framing. Pure JS, no native deps. Lets
+// Parabun apps build voice/video transport over any wire (Bun.udp,
+// WebSocket, raw TCP, …) without dragging in a full WebRTC stack.
+//
+//   import rtp from "bun:rtp";
+//
+//   // Sender — wrap an Opus packet in RTP
+//   const wire = rtp.pack({
+//     payloadType: 111,   // Opus default in many sdp setups
+//     sequence: 1234,
+//     timestamp: 96000,   // tick at sample rate (48 kHz × ms)
+//     ssrc: 0xdeadbeef,
+//     marker: false,
+//     payload: opusPacket,
+//   });
+//   await udp.send(wire);
+//
+//   // Receiver
+//   const { sequence, timestamp, payload } = rtp.parse(wire);
+//
+// Out of scope for v1: SRTP (encryption), RTCP control packets,
+// jitter buffer, FEC. The core framing is what every higher-level
+// layer builds on; ship it tight first.
+
+// RTP fixed header is always 12 bytes. CSRC identifiers (4 bytes each)
+// follow, count given by the CC field (low 4 bits of byte 0). Optional
+// extension header follows CSRCs if X bit is set; we round-trip its
+// bytes verbatim without interpreting.
+const RTP_FIXED_HEADER_BYTES = 12;
+const RTP_VERSION = 2;
+
+type PackOptions = {
+  /**
+   * Payload type — 7-bit value. SDP-negotiated. Common: 0 = G.711 µ-law,
+   * 8 = G.711 A-law, 96-127 = dynamic (Opus, VP8, H.264 land here).
+   */
+  payloadType: number;
+  /** 16-bit sequence number. Monotonically increasing per stream. */
+  sequence: number;
+  /** 32-bit timestamp at the codec's sample rate. */
+  timestamp: number;
+  /** 32-bit synchronization source identifier — uniquely identifies the stream. */
+  ssrc: number;
+  /** Marker bit. Codec-specific meaning (e.g., last packet of a frame). Default false. */
+  marker?: boolean;
+  /** Optional CSRC list (up to 15 entries, each 32-bit). */
+  csrcs?: number[];
+  /** Codec-specific payload (Opus packet, VP8 frame slice, etc.). */
+  payload: Uint8Array;
+};
+
+type ParsedPacket = {
+  version: number;
+  padding: boolean;
+  extension: boolean;
+  marker: boolean;
+  payloadType: number;
+  sequence: number;
+  timestamp: number;
+  ssrc: number;
+  csrcs: number[];
+  /**
+   * Extension header bytes verbatim, if the X bit was set. Includes the
+   * 4-byte profile+length prefix per RFC 3550. Empty Uint8Array when X=0.
+   */
+  extension_data: Uint8Array;
+  /** Codec payload, with padding bytes (if any) already stripped. */
+  payload: Uint8Array;
+};
+
+function validatePackOptions(opts: PackOptions): void {
+  if ((opts.payloadType & ~0x7f) !== 0) {
+    throw new RangeError("bun:rtp pack: payloadType must fit in 7 bits (0-127)");
+  }
+  if ((opts.sequence & ~0xffff) !== 0) {
+    throw new RangeError("bun:rtp pack: sequence must fit in 16 bits (0-65535)");
+  }
+  // timestamp + ssrc are 32-bit unsigned. JS bitwise ops treat them as signed
+  // 32-bit, so we accept either the signed or unsigned representation as long
+  // as it round-trips.
+  if (!Number.isInteger(opts.timestamp) || opts.timestamp < 0 || opts.timestamp > 0xffffffff) {
+    throw new RangeError("bun:rtp pack: timestamp must fit in 32 bits (0-4294967295)");
+  }
+  if (!Number.isInteger(opts.ssrc) || opts.ssrc < 0 || opts.ssrc > 0xffffffff) {
+    throw new RangeError("bun:rtp pack: ssrc must fit in 32 bits (0-4294967295)");
+  }
+  if (opts.csrcs !== undefined) {
+    if (opts.csrcs.length > 15) {
+      throw new RangeError("bun:rtp pack: csrcs has at most 15 entries");
+    }
+    for (const c of opts.csrcs) {
+      if (!Number.isInteger(c) || c < 0 || c > 0xffffffff) {
+        throw new RangeError("bun:rtp pack: each csrc must fit in 32 bits");
+      }
+    }
+  }
+  if (!(opts.payload instanceof Uint8Array)) {
+    throw new TypeError("bun:rtp pack: payload must be a Uint8Array");
+  }
+}
+
+function pack(opts: PackOptions): Uint8Array {
+  validatePackOptions(opts);
+  const csrcs = opts.csrcs ?? [];
+  const cc = csrcs.length;
+  const headerBytes = RTP_FIXED_HEADER_BYTES + cc * 4;
+  const total = headerBytes + opts.payload.length;
+  const buf = new Uint8Array(total);
+  const dv = new DataView(buf.buffer);
+
+  // Byte 0: V (2 bits) | P (1) | X (1) | CC (4)
+  // Pack/parse are decoupled from extensions for v1 — pack never sets X
+  // or P. Receivers handle either gracefully via parse().
+  buf[0] = (RTP_VERSION << 6) | (cc & 0x0f);
+  // Byte 1: M (1 bit) | PT (7 bits)
+  buf[1] = (opts.marker ? 0x80 : 0) | (opts.payloadType & 0x7f);
+  dv.setUint16(2, opts.sequence, false);
+  dv.setUint32(4, opts.timestamp, false);
+  dv.setUint32(8, opts.ssrc, false);
+
+  for (let i = 0; i < cc; i++) {
+    dv.setUint32(RTP_FIXED_HEADER_BYTES + i * 4, csrcs[i], false);
+  }
+  if (opts.payload.length > 0) buf.set(opts.payload, headerBytes);
+  return buf;
+}
+
+function parse(bytes: Uint8Array): ParsedPacket {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("bun:rtp parse: expected Uint8Array");
+  }
+  if (bytes.length < RTP_FIXED_HEADER_BYTES) {
+    throw new RangeError(`bun:rtp parse: packet too short (${bytes.length} < ${RTP_FIXED_HEADER_BYTES})`);
+  }
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const b0 = bytes[0];
+  const version = (b0 >> 6) & 0x03;
+  if (version !== RTP_VERSION) {
+    throw new RangeError(`bun:rtp parse: unsupported RTP version ${version} (only v2 supported)`);
+  }
+  const padding = (b0 & 0x20) !== 0;
+  const extension = (b0 & 0x10) !== 0;
+  const cc = b0 & 0x0f;
+
+  const b1 = bytes[1];
+  const marker = (b1 & 0x80) !== 0;
+  const payloadType = b1 & 0x7f;
+  const sequence = dv.getUint16(2, false);
+  const timestamp = dv.getUint32(4, false);
+  const ssrc = dv.getUint32(8, false);
+
+  let cursor = RTP_FIXED_HEADER_BYTES;
+  if (cursor + cc * 4 > bytes.length) {
+    throw new RangeError("bun:rtp parse: CSRC list extends past packet end");
+  }
+  const csrcs: number[] = new Array(cc);
+  for (let i = 0; i < cc; i++) {
+    csrcs[i] = dv.getUint32(cursor, false);
+    cursor += 4;
+  }
+
+  let extensionData: Uint8Array;
+  if (extension) {
+    if (cursor + 4 > bytes.length) {
+      throw new RangeError("bun:rtp parse: extension header truncated");
+    }
+    // Extension structure: 16-bit profile-specific, 16-bit length-in-32-bit-words.
+    const extWords = dv.getUint16(cursor + 2, false);
+    const extTotalBytes = 4 + extWords * 4;
+    if (cursor + extTotalBytes > bytes.length) {
+      throw new RangeError("bun:rtp parse: extension data extends past packet end");
+    }
+    extensionData = bytes.slice(cursor, cursor + extTotalBytes);
+    cursor += extTotalBytes;
+  } else {
+    extensionData = new Uint8Array(0);
+  }
+
+  // Payload runs from cursor to end-of-packet, minus padding bytes if P set.
+  // Per RFC 3550: when P=1, the LAST byte of the packet contains the count
+  // of padding bytes (including itself).
+  let payloadEnd = bytes.length;
+  if (padding) {
+    if (payloadEnd === 0) {
+      throw new RangeError("bun:rtp parse: padding flag set but packet has no body");
+    }
+    const padBytes = bytes[payloadEnd - 1];
+    if (padBytes === 0 || padBytes > payloadEnd - cursor) {
+      throw new RangeError("bun:rtp parse: padding count is invalid");
+    }
+    payloadEnd -= padBytes;
+  }
+
+  const payload = bytes.slice(cursor, payloadEnd);
+  return {
+    version,
+    padding,
+    extension,
+    marker,
+    payloadType,
+    sequence,
+    timestamp,
+    ssrc,
+    csrcs,
+    extension_data: extensionData,
+    payload,
+  };
+}
+
+export default {
+  pack,
+  parse,
+};
