@@ -1034,6 +1034,157 @@ describe("bun:audio — spectrogram", () => {
   });
 });
 
+describe("bun:audio — interleave / deinterleave", () => {
+  it("stereo round-trip: deinterleave then interleave reproduces input bit-exactly", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-interleave-roundtrip",
+      `
+        import audio from "bun:audio";
+        // 4 stereo frames: L=[1,2,3,4], R=[10,20,30,40] interleaved.
+        const stereo = new Float32Array([1, 10, 2, 20, 3, 30, 4, 40]);
+        const planes = audio.deinterleave(stereo, 2);
+        console.log("nChannels", planes.length);
+        console.log("L", Array.from(planes[0]).join(","));
+        console.log("R", Array.from(planes[1]).join(","));
+        const back = audio.interleave(planes);
+        const equal = back.length === stereo.length && back.every((v, i) => v === stereo[i]);
+        console.log("roundTripExact", equal);
+      `,
+    );
+    expect(stdout).toBe(["nChannels 2", "L 1,2,3,4", "R 10,20,30,40", "roundTripExact true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("6-channel (5.1-style) layout works the same way", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-interleave-6ch",
+      `
+        import audio from "bun:audio";
+        // 2 frames × 6 channels. Frame 0: 0,1,2,3,4,5. Frame 1: 10,11,12,13,14,15.
+        const interleaved = new Float32Array([0,1,2,3,4,5, 10,11,12,13,14,15]);
+        const planes = audio.deinterleave(interleaved, 6);
+        const sums = planes.map(p => p.reduce((a, b) => a + b, 0));
+        // Channel c sums to c + (10+c) = 10 + 2c, so [10, 12, 14, 16, 18, 20].
+        console.log("sums", sums.join(","));
+        const back = audio.interleave(planes);
+        const equal = back.length === interleaved.length && back.every((v, i) => v === interleaved[i]);
+        console.log("roundTripExact", equal);
+      `,
+    );
+    expect(stdout).toBe(["sums 10,12,14,16,18,20", "roundTripExact true"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("mono is a passthrough copy on both functions", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-interleave-mono",
+      `
+        import audio from "bun:audio";
+        const m = new Float32Array([1, 2, 3, 4]);
+        const planes = audio.deinterleave(m, 1);
+        // Returns a *copy* — not the same buffer (so caller mutations don't leak).
+        const sameRef = planes[0] === m;
+        console.log("nChannels", planes.length);
+        console.log("vals", Array.from(planes[0]).join(","));
+        console.log("sameRef", sameRef);
+        const back = audio.interleave(planes);
+        const sameRefBack = back === planes[0];
+        console.log("backVals", Array.from(back).join(","));
+        console.log("backSameRef", sameRefBack);
+      `,
+    );
+    expect(stdout).toBe(
+      ["nChannels 1", "vals 1,2,3,4", "sameRef false", "backVals 1,2,3,4", "backSameRef false"].join("\n"),
+    );
+    expect(exitCode).toBe(0);
+  });
+
+  it("empty inputs return empty outputs", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-interleave-empty",
+      `
+        import audio from "bun:audio";
+        const a = audio.interleave([]);
+        const b = audio.deinterleave(new Float32Array(0), 2);
+        console.log("a.len", a.length, "ctor", a.constructor.name);
+        console.log("b.len", b.length, "innerLens", b.map(x => x.length).join(","));
+      `,
+    );
+    expect(stdout).toBe(["a.len 0 ctor Float32Array", "b.len 2 innerLens 0,0"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("interleave rejects mismatched channel lengths", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-interleave-mismatch",
+      `
+        import audio from "bun:audio";
+        try {
+          audio.interleave([new Float32Array(4), new Float32Array(7)]);
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e instanceof RangeError);
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("deinterleave rejects samples.length not divisible by channelCount", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-deinterleave-bad-len",
+      `
+        import audio from "bun:audio";
+        try {
+          // 7 samples can't divide cleanly into 2 channels.
+          audio.deinterleave(new Float32Array(7), 2);
+          console.log("NO_THROW");
+        } catch (e) {
+          console.log("THREW", e instanceof RangeError);
+        }
+      `,
+    );
+    expect(stdout).toBe("THREW true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("deinterleave rejects non-positive or non-integer channelCount", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-deinterleave-bad-count",
+      `
+        import audio from "bun:audio";
+        let threw = 0;
+        try { audio.deinterleave(new Float32Array(8), 0); } catch { threw++; }
+        try { audio.deinterleave(new Float32Array(8), -1); } catch { threw++; }
+        try { audio.deinterleave(new Float32Array(8), 2.5); } catch { threw++; }
+        console.log("threw", threw);
+      `,
+    );
+    expect(stdout).toBe("threw 3");
+    expect(exitCode).toBe(0);
+  });
+
+  it("composes naturally with mix to fold stereo down to mono", async () => {
+    // A common use case: take an interleaved stereo stream, deinterleave to
+    // L/R, then mix-with-equal-gain back down to mono. End result is the
+    // average of L and R per frame.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-audio-interleave-fold",
+      `
+        import audio from "bun:audio";
+        const stereo = new Float32Array([0.4, 0.6, -0.5, 0.5, 0.9, 0.1]);
+        const planes = audio.deinterleave(stereo, 2);
+        const mono = audio.mix(planes, { gains: [0.5, 0.5], clip: "none" });
+        // Expected: (0.4+0.6)/2=0.5,  (-0.5+0.5)/2=0,  (0.9+0.1)/2=0.5
+        console.log(Array.from(mono).map(x => x.toFixed(2)).join(","));
+      `,
+    );
+    expect(stdout).toBe("0.50,0.00,0.50");
+    expect(exitCode).toBe(0);
+  });
+});
+
 describe("bun:audio — mix", () => {
   it("two tracks sum sample-wise", async () => {
     const { stdout, exitCode } = await runFixture(

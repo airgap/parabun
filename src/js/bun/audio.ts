@@ -753,6 +753,83 @@ class Denoiser {
   }
 }
 
+// ─── Interleave / Deinterleave ────────────────────────────────────────────
+// Convert between planar layout (one Float32Array per channel) and
+// interleaved layout (frame-major: L₀ R₀ L₁ R₁ … for stereo).
+//
+// Interleaved is what file containers and most low-level audio I/O expect
+// (WAV's PCM payload, OS audio APIs, RTP payloads). Planar is what most
+// DSP wants — process the L and R channels independently with the same
+// pipeline, then re-interleave for output. Web Audio's `getChannelData(n)`
+// also returns planar buffers.
+//
+// Both functions are zero-state (no IIR memory) so they're safe to call
+// per frame in a streaming pipeline; cost is one O(N · channels) copy.
+
+function interleave(channels: Float32Array[]): Float32Array {
+  if (!Array.isArray(channels)) {
+    throw new TypeError("bun:audio.interleave: channels must be an array of Float32Arrays");
+  }
+  const C = channels.length;
+  if (C === 0) return new Float32Array(0);
+
+  const N = channels[0].length;
+  for (let c = 0; c < C; c++) {
+    if (!(channels[c] instanceof Float32Array)) {
+      throw new TypeError(`bun:audio.interleave: channels[${c}] must be a Float32Array`);
+    }
+    if (channels[c].length !== N) {
+      throw new RangeError(
+        `bun:audio.interleave: all channels must have the same length; channels[0] is ${N}, channels[${c}] is ${channels[c].length}`,
+      );
+    }
+  }
+
+  // Mono fast path — just copy through, callers can use this without a
+  // type-dispatch branch on their side.
+  if (C === 1) {
+    const out = new Float32Array(N);
+    out.set(channels[0]);
+    return out;
+  }
+
+  const out = new Float32Array(N * C);
+  for (let i = 0; i < N; i++) {
+    const base = i * C;
+    for (let c = 0; c < C; c++) out[base + c] = channels[c][i];
+  }
+  return out;
+}
+
+function deinterleave(samples: Float32Array, channelCount: number): Float32Array[] {
+  if (!(samples instanceof Float32Array)) {
+    throw new TypeError("bun:audio.deinterleave: samples must be a Float32Array");
+  }
+  if (!Number.isInteger(channelCount) || channelCount < 1) {
+    throw new RangeError(`bun:audio.deinterleave: channelCount must be a positive integer; got ${channelCount}`);
+  }
+  if (samples.length % channelCount !== 0) {
+    throw new RangeError(
+      `bun:audio.deinterleave: samples.length (${samples.length}) is not a multiple of channelCount (${channelCount})`,
+    );
+  }
+  const N = samples.length / channelCount;
+  if (channelCount === 1) {
+    // Mono fast path: a copy keeps the planar return type honest (caller
+    // shouldn't have to worry about whether they got back the same buffer).
+    const ch = new Float32Array(N);
+    ch.set(samples);
+    return [ch];
+  }
+  const out: Float32Array[] = [];
+  for (let c = 0; c < channelCount; c++) out.push(new Float32Array(N));
+  for (let i = 0; i < N; i++) {
+    const base = i * channelCount;
+    for (let c = 0; c < channelCount; c++) out[c][i] = samples[base + c];
+  }
+  return out;
+}
+
 // ─── Mix ───────────────────────────────────────────────────────────────────
 // Combine N parallel audio streams into one. Each output sample is the
 // (optionally weighted) sum of the input samples at that position.
@@ -1034,6 +1111,8 @@ export default {
   bandpass,
   notch,
   mix,
+  interleave,
+  deinterleave,
   resample,
   spectrogram,
   detectVoice,
