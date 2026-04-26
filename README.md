@@ -1,12 +1,12 @@
 <h1 align="center">Parabun</h1>
 
 <p align="center">
-  A fork of <a href="https://bun.com">Bun</a> with on-device LLMs, GPU compute, parallel primitives, and fine-grained reactivity — plus optional language extensions for purity and ergonomics.
+  A fork of <a href="https://bun.com">Bun</a> with on-device LLMs, GPU compute, image / audio / CSV primitives, parallel execution, and fine-grained reactivity — plus optional language extensions for purity and ergonomics.
 </p>
 
 ## What is Parabun?
 
-Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, buffer pooling, and fine-grained reactivity — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges, `signal`/`effect { }`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
+Parabun is a **Bun fork** focused on compute: on-device LLM inference, GPU kernels, image / audio codecs and DSP, streaming CSV, a persistent worker pool, SIMD primitives, typed-array pipeline fusion, buffer pooling, and fine-grained reactivity — all usable from plain TypeScript. An optional set of language extensions (`pure`, `..=`, `..!`, `..&`, `|>`, `..`/`..=` ranges, `signal`/`effect { }`) adds purity guarantees and ergonomic sugar that desugars to standard JS at parse time. You can ignore all of it and still get the runtime modules.
 
 Parabun introduces two new file extensions:
 - **`.pts`** — Parabun TypeScript (superset of TypeScript)
@@ -65,6 +65,17 @@ const out    = gpu.simdMap(x => x * 3 + 7, big);     // affine — dispatched to
 Two thresholds, not one: a **dispatch** threshold lets the GPU kernel run (so tests exercise the real path), and a **wins** threshold (`gpu.winsForSize(op, n, elemBytes)`) tells callers when routing through `bun:gpu` actually beats `bun:simd`. Today `simdMap` wins at ≥ 1<<18 f32 elements; `matVec` is compiled and correct but not yet winning (the naive MSL kernel is bandwidth-bound on M1/M2).
 
 `bun:pipeline`'s fusion tier reads `winsForSize` automatically — a fused affine chain over a large enough `Float32Array` promotes from stacked `simd.mulScalar`+`simd.addScalar` to `gpu.simdMap` without user code changes.
+
+Beyond `dot` / `matVec` / `matmul` / `simdMap`, the module exposes a growing set of data-parallel primitives that backends can override but otherwise ship with a CPU reference:
+
+- **`conv2D(input, kernel, iW, iH, kW, kH)`** — 2D valid-mode convolution. Used by `bun:image` resize / blur / sharpen and as a general 2D-correlation primitive.
+- **`scan(input)`** — inclusive prefix sum. `Float32Array` (Kahan-compensated) or `Uint32Array` (u32-wrapping); the latter is the standard parallel-compaction primitive.
+- **`reduce(input, op)`** — `"sum"` / `"min"` / `"max"`. Empty inputs follow JS conventions (sum=0, min=+∞, max=-∞).
+- **`argMin(input)` / `argMax(input)`** — index of the extremum, first-occurrence tie-break, NaN-propagating, throws on empty.
+- **`histogram(input, bins, opts?)`** — bin counting over a `Float32Array`; auto-resolves `[min, max]` from data when omitted, top-edge inclusive (numpy convention).
+- **`median(input)` / `quantile(input, q)`** — order statistics with linear interpolation between adjacent sorted samples.
+
+Backends (CUDA, Metal) plug in via optional hooks on the same dispatch surface; the CPU path is the correctness reference for every op.
 
 ### Parallel Execution (`bun:parallel`)
 
@@ -148,6 +159,75 @@ parabun (bun:arena Pool)    248.8 ms      → 2.85×
 
 This is a microbench by design — it isolates the allocator/zero-init/GC-tracking cost. If your handler spends 10 ms of real CPU per request and 20 µs on allocation, pooling won't move the needle. The win shows up where allocation is a measurable fraction of the workload (binary protocol gateways, columnar pre-processing, tight encode/decode loops). Pass `clear: true` if recycled buffers must not carry old bytes — defaults to off, since skipping the zero-init is the point of a pool.
 
+### Image Codecs + Filters (`bun:image`)
+
+`bun:image` is a Sharp-class image module baked into the runtime — JPEG / PNG / WebP decode and encode, plus a CPU pixel-pipeline of resize / blur / sharpen / edge-detect / rotate / flip / crop / compose / tone-correction / histogram / threshold / invert / grayscale. Codecs are vendored statically (libjpeg-turbo, libpng, libwebp + libsharpyuv), so there's no `npm install sharp` and no Node-ABI-versioned binary distribution.
+
+```ts
+import image from "bun:image";
+
+const bytes = await Bun.file("photo.jpg").bytes();
+const img = image.decode(bytes);                                // { data, width, height, channels, format }
+const small = image.resize(img, { width: 800, height: 600, kernel: "lanczos" });
+const sharp = image.sharpen(small, { amount: 1.5 });
+const out = image.encode(sharp, { format: "webp", quality: 85 });
+await Bun.write("photo.webp", out);
+```
+
+- **Decode**: JPEG (3-channel RGB), PNG (4-channel RGBA), WebP (lossy + lossless, 4-channel RGBA). Format auto-detected from the magic-byte prefix.
+- **Encode**: JPEG (quality 1-100), PNG (lossless), WebP (lossy `quality` + opt-in `lossless: true`).
+- **Resize**: bilinear (fast, default) or Lanczos-3 (`kernel: "lanczos"`, separable two-pass with pre-computed taps; sharper for downscaling).
+- **Filters**: `blur({ radius })` (separable Gaussian, edge-clamp), `sharpen({ amount?, radius? })` (unsharp mask via the blur scaffolding), `edgeDetect()` (Rec. 601 luma collapse + 3×3 Sobel magnitude).
+- **Geometric**: `rotate({ degrees: 90|180|270 })`, `flip({ axis })`, `crop({ x, y, width, height })` — pure index shuffles, no resampling.
+- **Tone**: `adjust({ brightness?, contrast?, saturation? })` (each in [-1, 1], 0 = no-op), `invert()`, `threshold({ value })`, `toGrayscale()`.
+- **Analysis**: `histogram(img)` returns one `Uint32Array(256)` per channel.
+- **Composite**: `composite(base, overlay, { x?, y? })` — Porter-Duff source-over alpha blending; clipping handles out-of-bounds overlay regions silently.
+
+### Audio Codecs + DSP (`bun:audio`)
+
+`bun:audio` is a from-scratch audio toolkit: WAV / MP3 decode, Opus encode and decode (libopus 1.6.1), rnnoise-based denoising, FFT, RBJ biquad filters, resampling, spectrograms, voice-activity detection, and the level / leveling primitives a voice-call capture pipeline needs. Like `bun:image`, the heavy codecs (libopus, minimp3, rnnoise) are vendored statically.
+
+```ts
+import audio from "bun:audio";
+import rtp from "bun:rtp";
+
+const enc = new audio.OpusEncoder({ sampleRate: 48000, channels: 1, application: "voip" });
+const den = new audio.Denoiser();                              // 480-sample frames @ 48 kHz
+const agc = new audio.Gain({ targetLevel: 0.1 });
+
+for (const i16Frame of micFrames) {
+  const f32 = audio.i16ToF32(i16Frame);                        // OS audio → DSP space
+  den.process(f32);                                            // suppress noise (in place)
+  agc.process(f32);                                            // normalize loudness
+  const opus = enc.encode(f32);                                // Opus packet
+  const packet = rtp.pack({ payloadType: 111, sequence, timestamp, ssrc, payload: opus });
+  send(packet);
+}
+```
+
+- **Codecs**: `OpusEncoder` / `OpusDecoder` (full libopus surface — bitrate, complexity, FEC, DTX, application modes), `decodeMp3` (minimp3, single-shot), `readWav` / `writeWav` (PCM-16, PCM-32, IEEE-754).
+- **Filters**: `lowpass`, `highpass`, `bandpass`, `notch` — all RBJ Audio EQ Cookbook biquads sharing one inner runner.
+- **Spectral**: `fft` / `ifft` (Cooley-Tukey radix-2 in place), `spectrogram` (STFT with Hann window).
+- **Voice-call building blocks**: `Denoiser` (rnnoise — RNN-based noise suppression at 480-sample @ 48 kHz frames), `Gain` (auto gain control with asymmetric attack/release envelope follower), `detectVoice` (sliding-window-min noise-floor VAD).
+- **Mixing**: `mix(tracks, { gains?, clip? })` for conference-call-style summing with hard / soft / no clipping.
+- **Resample**: `resample(samples, { from, to })` — 4-cascade anti-alias filter + linear interpolation.
+- **Levels**: `peak`, `rms`, `envelope({ windowSize, hopSize, mode })`, `normalize({ target, mode })`.
+- **Layout**: `interleave` / `deinterleave` for planar ⇄ frame-major typed-array conversions, `i16ToF32` / `f32ToI16` for OS-audio ⇄ DSP-space PCM.
+
+### Streaming CSV (`bun:csv`)
+
+`bun:csv.parseCsv(source, opts?)` is an async-generator CSV parser with full RFC 4180 quoting / escapes, configurable delimiter and quote character, header-mode (yields `Record<string, value>` rows), and per-cell type inference (`number` / `boolean` / `null`). An opt-in `parallel: true` mode chunks the input across `bun:parallel`'s worker pool when the input is large enough and contains no quoted cells; otherwise it falls through to the serial state machine.
+
+```ts
+import csv from "bun:csv";
+
+for await (const row of csv.parseCsv(Bun.file("rows.csv"), { header: true })) {
+  process(row.id, row.name, row.score);
+}
+```
+
+> ⚠️ **`parallel: true` is not a per-file speedup.** The honest measurement (`bench/parabun-csv-parallel/`, 16-core x86 release): **1.18× at 5 MB**, 0.95× at 50 MB, 0.93× at 200 MB. The serial state machine is already memory-bandwidth-bound, and the parallel path's materialize-and-fork overhead grows with input size. Use `parallel: true` when the parse is currently making your event loop unresponsive (it keeps the main thread free), not because you expect bigger files to go faster.
+
 ### Fine-Grained Reactivity (`bun:signals`)
 
 `bun:signals` is a reactive primitive — signals, computed derivations, and side-effects that re-run automatically when their reads change. Reads inside an `effect` or `derived` register a dep edge; writes invalidate downstream, and a microtask-scheduled flush re-runs only what observed a changed value.
@@ -206,19 +286,24 @@ See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfo
 
 ## Roadmap
 
-Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU. The modules already shipping (`bun:parallel`, `bun:simd`, `bun:gpu`, `bun:llm`, `bun:pipeline`, `bun:arena`, `bun:signals`) are the foundation; the next set attack the most common "I have to shell out / use Python / write native code" pain points in JS-land.
+Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU. The shipped modules (`bun:parallel`, `bun:simd`, `bun:gpu`, `bun:pipeline`, `bun:arena`, `bun:signals`, `bun:llm`, `bun:image`, `bun:audio`, `bun:csv`, `bun:rtp`) cover the typed-array, codec, and CPU/GPU-parallel surface; the remaining items below attack the next layer of "I have to shell out / use Python / write native code" pain points.
 
-Each module ships behind a compile-time feature flag. Production builds slim to only what your app actually imports — heavy codecs (ffmpeg, Apache Arrow) are opt-in, server / Lambda / Workers builds stay minimal.
+Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
 | Status      | Module                | What it does                                                                                          |
 |-------------|-----------------------|-------------------------------------------------------------------------------------------------------|
-| in flight   | `bun:image`           | JPEG / PNG / WebP / AVIF decode + GPU-accelerated resize / filter. Sharp-class but bundleable.        |
-| next        | `bun:gpu` expansion   | 2D convolution, FFT, sort, scan, histogram kernels. Composes into image / audio / video / data work. |
-| next        | `bun:csv` + `bun:arrow`| Parallel CSV parse + columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB CSV" story.       |
+| shipped     | `bun:image`           | JPEG / PNG / WebP decode + encode, resize (bilinear / Lanczos), blur / sharpen / edge-detect, rotate / flip / crop, adjust / threshold / invert / grayscale, histogram, alpha composite. |
+| shipped     | `bun:audio`           | WAV / MP3 / Opus codecs, RBJ biquads, FFT, resample, spectrogram, VAD, denoiser (rnnoise), AGC, mix / normalize / envelope, planar ⇄ frame-major + i16 ⇄ f32 PCM helpers. |
+| shipped     | `bun:csv`             | Streaming RFC 4180 parser with header / inference / quote handling. `parallel: true` is "off-the-main-thread" — see the inline disclaimer above. |
+| shipped     | `bun:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
+| shipped     | `bun:gpu` primitives  | `conv2D`, `scan`, `reduce`, `argMin` / `argMax`, `histogram`, `median` / `quantile`. CPU correctness paths today; GPU-side hooks for CUDA / Metal slot in via the existing dispatch. |
+| next        | `bun:gpu` device-side | Wire CUDA / Metal kernels for the primitives above (Hillis-Steele scan, parallel reductions, atomic-privatized histogram). |
 | next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
-| planned     | `bun:audio`           | FFT, spectrograms, filters, resampling. Currently zero good options in JS.                            |
+| next        | `bun:arrow`           | Columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB analytical query" story to pair with `bun:csv`. |
+| planned     | `bun:image` AVIF      | AVIF decode (libavif / libheif vendor add). Round out the codec coverage matrix.                      |
 | planned     | `bun:video`           | ffmpeg-class transcode / thumbnail / concat as a runtime module. No more `which ffmpeg`.              |
 | planned     | `bun:camera`          | Live video capture (V4L2 / AVFoundation / Media Foundation). Makes Parabun a real embedded runtime.   |
+| planned     | OS audio I/O          | Live capture + playback for `bun:audio` (ALSA / CoreAudio / WASAPI via `bun:ffi`). Closes the voice-call pipeline. |
 
 `bun:llm` becomes the proof-of-concept for the stack — "we built llama inference using `bun:gpu` + `bun:simd` + `bun:parallel`; you can build similar things with the same building blocks" — rather than the headline product. Parabun is positioned as a perf runtime, not an AI runtime.
 
