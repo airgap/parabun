@@ -283,6 +283,22 @@ function cpuScan(input: Float32Array): Float32Array {
   return out;
 }
 
+// Integer prefix sum. No Kahan compensation needed — `>>> 0` makes the
+// running total wrap at 2^32 like a u32 add, so the result matches what
+// a parallel scan kernel would produce on a u32 lane. Compaction-style
+// inputs (0/1 indicators marking elements to keep) never approach
+// 2^32, so the wrap is theoretical for those use cases.
+function cpuScanU32(input: Uint32Array): Uint32Array {
+  const n = input.length;
+  const out = new Uint32Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc = (acc + input[i]) >>> 0;
+    out[i] = acc;
+  }
+  return out;
+}
+
 // CPU reference for 2D valid-mode convolution. Naive triple loop with the
 // kernel-element accumulator promoted out of the inner loop. GPU backends
 // substitute their own kernels via Backend.conv2D; this also serves as the
@@ -618,8 +634,9 @@ function conv2D(
 }
 
 // Inclusive prefix sum (cumulative running total). Output[i] = sum(input[0..i]).
-// f32 only for v1 — integer compaction (Uint32Array) is the natural follow-up
-// once the parallel scan kernels are wired on CUDA / Metal.
+// Float32Array → Float32Array (Kahan-compensated). Uint32Array → Uint32Array
+// (u32-wrapping add). Both are useful: f32 for cumulative-distribution and
+// integral-image work, u32 for parallel compaction (count → write indices).
 //
 // Behavior on each backend:
 //   - cpu:   Kahan-compensated linear loop (correctness reference)
@@ -629,10 +646,19 @@ function conv2D(
 // Common uses: parallel compaction (compute write indices for stream-filter
 // outputs), cumulative distributions, integral images, summed-area tables,
 // and any algorithm that needs "where does my output go in a packed array".
-function scan(input: Float32Array | GpuHandle | GpuFloat32Array): Float32Array {
+function scan(input: Float32Array): Float32Array;
+function scan(input: Uint32Array): Uint32Array;
+function scan(input: GpuHandle | GpuFloat32Array): Float32Array;
+function scan(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): Float32Array | Uint32Array {
+  if (input instanceof Uint32Array) {
+    // u32 path doesn't go through the backend hook today — backends advertise
+    // f32 scan only; u32 compaction stays on CPU until there's a use case
+    // pulling for a device-side u32 kernel.
+    return cpuScanU32(input);
+  }
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.scan: input must be a Float32Array, GpuHandle, or GpuFloat32Array; got ${
+      `bun:gpu.scan: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );

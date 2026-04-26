@@ -121,6 +121,68 @@ describe("bun:gpu — scan (inclusive prefix sum)", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("Uint32Array input returns a Uint32Array of running totals", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-u32",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const input = new Uint32Array([3, 1, 4, 1, 5, 9, 2, 6]);
+        const out = gpu.scan(input);
+        console.log("ctor", out.constructor.name);
+        console.log("vals", Array.from(out).join(","));
+      `,
+    );
+    expect(stdout).toBe(["ctor Uint32Array", "vals 3,4,8,9,14,23,25,31"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("Uint32Array scan supports compaction (predicate → write indices)", async () => {
+    // Classic stream-compaction pattern: build a 0/1 indicator over which
+    // elements satisfy a predicate, scan it, and the (inclusive) result minus
+    // 1 at every kept slot is the destination index in the packed output.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-compaction",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const data = new Float32Array([5, 12, 3, 8, 17, 2, 11, 6]);
+        const keep = new Uint32Array(data.length);
+        for (let i = 0; i < data.length; i++) keep[i] = data[i] > 7 ? 1 : 0;
+        const idx = gpu.scan(keep);                   // inclusive
+        const total = idx[idx.length - 1];
+        const out = new Float32Array(total);
+        for (let i = 0; i < data.length; i++) {
+          if (keep[i]) out[idx[i] - 1] = data[i];
+        }
+        console.log("kept", total);
+        console.log("out", Array.from(out).join(","));
+      `,
+    );
+    // 12, 8, 17, 11 are > 7. Order preserved.
+    expect(stdout).toBe(["kept 4", "out 12,8,17,11"].join("\n"));
+    expect(exitCode).toBe(0);
+  });
+
+  it("Uint32Array scan wraps at 2^32 like a real u32 add", async () => {
+    // Two adds of 0x80000000 wrap to 0; verifies we don't accidentally
+    // promote to 53-bit Number without truncating back to u32.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-u32-wrap",
+      `
+        import gpu from "bun:gpu";
+        gpu.setBackend("cpu");
+        const input = new Uint32Array([0x80000000, 0x80000000, 7]);
+        const out = gpu.scan(input);
+        console.log(out[0], out[1], out[2]);
+      `,
+    );
+    // 0x80000000 = 2147483648. Second step wraps: 2*2^31 mod 2^32 = 0.
+    // Third step adds 7: 7.
+    expect(stdout).toBe("2147483648 0 7");
+    expect(exitCode).toBe(0);
+  });
+
   it("accepts a held GpuHandle (round-trips through the dispatcher)", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-handle",
