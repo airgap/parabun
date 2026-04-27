@@ -22,6 +22,7 @@ const llama = require("./llm/llama.ts");
 const grammarModule = require("./llm/grammar.ts");
 const schemaModule = require("./llm/schema.ts");
 const bertModule = require("./llm/bert.ts");
+const serveModule = require("./llm/serve.ts");
 
 type GenerateOptions = {
   maxTokens?: number;
@@ -839,4 +840,7 @@ export default {
   BertTokenizer: bertModule.BertTokenizer,
   bertFromGGUF: bertModule.fromGGUF,
   bertTokenizerFromGGUF: bertModule.tokenizerFromGGUF,
+  // OpenAI-compatible HTTP server. Wraps any object with .chat() /
+  // .generate() / .embed() — typically an LLM instance from above.
+  serve: serveModule.serve,
 };

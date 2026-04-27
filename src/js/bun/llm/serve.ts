@@ -1,20 +1,18 @@
-// Hardcoded module "bun:serve"
+// bun:llm — HTTP serving subsurface (`llm.serve(opts)`).
 //
-// Tier 2 orchestration module — turns any bun:llm-shaped engine into an
-// OpenAI-compatible HTTP API server. Built on Bun.serve, no native deps.
-// Lets callers point existing OpenAI client SDKs (openai-node, langchain,
-// llama-index, the wide world of OpenAI-API tooling) at a Parabun process
-// running a local GGUF model.
+// OpenAI-compatible HTTP API for any object with .chat() / .generate() /
+// .embed() methods. Built on Bun.serve, no native deps. Lets existing
+// OpenAI client SDKs (openai-node, langchain, llama-index) talk to a
+// Parabun process running a local GGUF model.
 //
-//   import llm   from "bun:llm";
-//   import serve from "bun:serve";
+//   import llm from "bun:llm";
 //
 //   using m = await llm.LLM.load("./Llama-3.2-1B-Instruct-Q4_K_M.gguf");
 //
-//   const server = serve.openai({
+//   const server = llm.serve({
 //     engine: m,            // any object with .chat() / .generate() / .embed()
 //     modelId: "llama-3.2-1b",
-//     port: 11434,          // ollama's default port — drop-in compat
+//     port: 11434,          // ollama's default port
 //   });
 //
 //   // curl http://localhost:11434/v1/chat/completions \
@@ -165,9 +163,9 @@ class Semaphore {
   }
 }
 
-// ─── OpenAI server ─────────────────────────────────────────────────────────
+// ─── serve() — start an OpenAI-compatible HTTP server ─────────────────────
 
-function openai(opts: ServeOptions): Server {
+export function serve(opts: ServeOptions): Server {
   if (!opts.engine) throw new TypeError("bun:serve.openai: opts.engine is required");
   if (!opts.modelId || typeof opts.modelId !== "string") {
     throw new TypeError("bun:serve.openai: opts.modelId must be a string");
@@ -460,7 +458,3 @@ function openai(opts: ServeOptions): Server {
     stop: () => server.stop(),
   };
 }
-
-export default {
-  openai,
-};

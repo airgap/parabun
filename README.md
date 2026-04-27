@@ -26,7 +26,7 @@ Parabun closes those gaps inside one statically-linked binary:
 | [`bun:arena`](#buffer-pooling-bunarena) | Buffer pooling so worker boundaries don't cost a `Uint8Array` allocation per chunk |
 | [`bun:camera`](#camera-buncamera) / [`bun:audio`](#audio-codecs--dsp-bunaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
 | [`bun:image`](#image-codecs--filters-bunimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
-| [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + GPU residency. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
+| [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
 
 If you've ever spawned a Python subprocess from your Node server because Node couldn't keep up — or written an N-API module because there was no other way to touch your camera / GPU / SIMD lanes — Parabun is the runtime that deletes the subprocess and the binding both.
 
@@ -366,7 +366,7 @@ Parabun's positioning is to open typical JS performance bottlenecks via multithr
 
 - **Tier 0 — primitives** (shipped): `bun:simd`, `bun:gpu`, `bun:parallel`, `bun:arena`, `bun:pipeline`, `bun:signals`, `bun:rtp`. These are the building blocks that reach hardware directly.
 - **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`. Codecs, capture devices, on-device LLM inference — built on Tier 0.
-- **Tier 2 — applications** (`bun:serve` shipped; `bun:vision` and `bun:speech` ship orchestration with engine stubs; `bun:arrow` not yet started): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, inference servers, and analytical queries.
+- **Tier 2 — applications** (`bun:vision` and `bun:speech` ship orchestration with engine stubs; `bun:arrow` not yet started): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `bun:llm` as `llm.serve()`.)
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
@@ -379,7 +379,6 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 | shipped     | `bun:csv`             | Streaming RFC 4180 parser with header / inference / quote handling. `parallel: true` is "off-the-main-thread" — see the inline disclaimer above. |
 | shipped     | `bun:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
 | partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
-| shipped     | `bun:serve` (Tier 2)  | OpenAI-compatible HTTP server against any `bun:llm`-shaped engine — `/v1/chat/completions` (sync + SSE streaming), `/v1/completions`, `/v1/embeddings`, `/v1/models`, optional bearer auth, FIFO concurrency gate. Pure orchestration, no stubs. |
 | partial     | `bun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
 | partial     | `bun:speech` (Tier 2) | VAD-gated utterance segmentation ships today (`speech.listen` over any audio chunk iterator). Whisper STT (`transcribe`) stubs pending encoder-decoder transformer support in `bun:llm`; Piper TTS (`speak`) stubs pending libpiper / ONNX vendor add. |
 | in progress | `bun:arrow` (Tier 2)  | Columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB analytical query" pair to `bun:csv`. |
