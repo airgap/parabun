@@ -126,6 +126,30 @@ class GpuFloat32Array {
     return this.#handle;
   }
 
+  /**
+   * Write `src` into the device buffer at the given element offset. Used
+   * by callers that maintain a growable device-resident cache (e.g.
+   * Whisper's KV caches, where each decode step appends one row of K and
+   * V without re-uploading the whole cache).
+   */
+  writeAt(offsetElems: number, src: Float32Array): void {
+    if (this.#disposed) throw new Error("GpuFloat32Array: already disposed");
+    if (!Number.isInteger(offsetElems) || offsetElems < 0) {
+      throw new RangeError("GpuFloat32Array.writeAt: offsetElems must be a non-negative integer");
+    }
+    if (offsetElems + src.length > this.#view.length) {
+      throw new RangeError(
+        `GpuFloat32Array.writeAt: ${src.length}@${offsetElems} overflows length ${this.#view.length}`,
+      );
+    }
+    // Mirror the write into the host view so .view stays consistent.
+    this.#view.set(src, offsetElems);
+    const backend = backends[this.#handle.backend] ?? resolveActive();
+    if (backend.writeHandleAt) {
+      backend.writeHandleAt(this.#handle, offsetElems, src);
+    }
+  }
+
   release(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -325,6 +349,15 @@ interface Backend {
   isAligned(arr: FArray): boolean;
   hold(arr: FArray): GpuHandle;
   releaseHandle(handle: GpuHandle): void;
+  /**
+   * Write a host typed array into a device-held handle at the given
+   * element offset. Used by GpuFloat32Array.writeAt for growable
+   * device-resident caches. Backends that don't expose partial-write
+   * primitives (CPU, where the handle is just a wrapper around the
+   * host array) can leave this undefined — the wrapper has already
+   * mirrored the write into its host view.
+   */
+  writeHandleAt?(handle: GpuHandle, offsetElems: number, src: FArray): void;
   releasePinned?(arr: FArray): boolean;
   calibrate?(): CalibrationResult;
   dispose(): void;

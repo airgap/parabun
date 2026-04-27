@@ -992,11 +992,22 @@ interface WhisperWeights {
 //     of projected keys/values as we step through tokens.
 //   - Cross-attention K/V: each layer's projection of the encoder output
 //     is computed once at encode-time and reused on every decoder step.
+// GpuFloat32Array wrapper from bun:gpu — same shape as a Float32Array
+// for code that just reads `.view`, but with a device-resident handle
+// underneath that the fused SDPA kernel can dispatch against without
+// HtoD per call.
+type GpuFloat32ArrayInstance = InstanceType<typeof gpu.GpuFloat32Array>;
+
 class WhisperState {
-  selfK: Float32Array[];
-  selfV: Float32Array[];
-  crossK: Float32Array[];
-  crossV: Float32Array[];
+  // K/V caches live on the device. The .view getter exposes the host
+  // shadow for fork() and any path that still wants a Float32Array. Each
+  // decode step appends one row via writeAt — small (1.5 KB on tiny.en)
+  // HtoD per layer per step instead of re-uploading the whole cache on
+  // every attention call.
+  selfK: GpuFloat32ArrayInstance[];
+  selfV: GpuFloat32ArrayInstance[];
+  crossK: GpuFloat32ArrayInstance[];
+  crossV: GpuFloat32ArrayInstance[];
   /** Number of populated rows in selfK/selfV (== current decoder position). */
   selfLen: number;
   /** Encoder context length (constant within a state — typically nAudioCtx). */
@@ -1012,10 +1023,10 @@ class WhisperState {
     this.crossK = new Array(nLayer);
     this.crossV = new Array(nLayer);
     for (let i = 0; i < nLayer; i++) {
-      this.selfK[i] = new Float32Array(maxLen * dim);
-      this.selfV[i] = new Float32Array(maxLen * dim);
-      this.crossK[i] = new Float32Array(encoderT * dim);
-      this.crossV[i] = new Float32Array(encoderT * dim);
+      this.selfK[i] = new gpu.GpuFloat32Array(new Float32Array(maxLen * dim));
+      this.selfV[i] = new gpu.GpuFloat32Array(new Float32Array(maxLen * dim));
+      this.crossK[i] = new gpu.GpuFloat32Array(new Float32Array(encoderT * dim));
+      this.crossV[i] = new gpu.GpuFloat32Array(new Float32Array(encoderT * dim));
     }
     this.selfLen = 0;
     this.encoderT = encoderT;
@@ -1034,8 +1045,8 @@ class WhisperState {
    * encoder output and are identical across beams within a single
    * transcription.
    *
-   * Only the populated [0, selfLen) rows of self-attn caches are copied;
-   * the trailing capacity is left zero-filled.
+   * The host views back the device handles, so the clone proceeds host-side
+   * (small per-fork cost; beam search isn't the steady-state path).
    */
   fork(): WhisperState {
     const nLayer = this.selfK.length;
@@ -1044,15 +1055,18 @@ class WhisperState {
     out.selfV = new Array(nLayer);
     const populated = this.selfLen * this.dim;
     for (let i = 0; i < nLayer; i++) {
-      out.selfK[i] = new Float32Array(this.maxLen * this.dim);
-      out.selfV[i] = new Float32Array(this.maxLen * this.dim);
+      const kCopy = new Float32Array(this.maxLen * this.dim);
+      const vCopy = new Float32Array(this.maxLen * this.dim);
       if (populated > 0) {
-        out.selfK[i].set(this.selfK[i].subarray(0, populated));
-        out.selfV[i].set(this.selfV[i].subarray(0, populated));
+        kCopy.set(this.selfK[i].view.subarray(0, populated));
+        vCopy.set(this.selfV[i].view.subarray(0, populated));
       }
+      out.selfK[i] = new gpu.GpuFloat32Array(kCopy);
+      out.selfV[i] = new gpu.GpuFloat32Array(vCopy);
     }
     // Cross-attn K/V are encoder-output-derived → identical across beams.
-    // Sharing the references is safe because decodeStep never writes into them.
+    // Sharing the GpuFloat32Array references is safe because decodeStep
+    // never writes into them.
     out.crossK = this.crossK;
     out.crossV = this.crossV;
     out.selfLen = this.selfLen;
@@ -1246,13 +1260,14 @@ class WhisperModel {
     }
     for (let i = 0; i < w.decBlocks.length; i++) {
       const block = w.decBlocks[i];
-      // K projection (no bias on K in Whisper). gpu.matmul writes into a
-      // fresh array; we copy into the state's pre-allocated cache slot.
+      // K projection (no bias on K in Whisper). gpu.matmul writes into
+      // a fresh host array; writeAt mirrors it into the device handle so
+      // subsequent decoder cross-attn calls dispatch off the device copy.
       const K = gpuMatmul(encoderOut, block.crossKWt, encT, dim, dim);
-      state.crossK[i].set(K);
+      state.crossK[i].writeAt(0, K);
       const V = gpuMatmul(encoderOut, block.crossVWt, encT, dim, dim);
       addBias(V, encT, dim, block.crossVB);
-      state.crossV[i].set(V);
+      state.crossV[i].writeAt(0, V);
     }
     state.selfLen = 0;
   }
@@ -1297,23 +1312,42 @@ class WhisperModel {
       layerNormInPlace(xn, 1, dim, block.attnLnW, block.attnLnB);
       const Q = gpu.matVec(block.attnQW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Q, 1, dim, block.attnQB);
-      // Project new K/V rows. matVec returns a fresh Float32Array each
-      // call; we copy into the cache slot at offset pos * dim.
+      // Project new K/V rows. matVec returns a fresh Float32Array; we
+      // append it into the device-resident cache via writeAt — small
+      // HtoD (1.5 KB on tiny.en) per layer per step instead of the JS
+      // host-scatter pattern.
       const Knew = gpu.matVec(block.attnKW as Float32Array, xn, dim, dim) as Float32Array;
       const Vnew = gpu.matVec(block.attnVW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Vnew, 1, dim, block.attnVB);
-      state.selfK[li].set(Knew, pos * dim);
-      state.selfV[li].set(Vnew, pos * dim);
+      state.selfK[li].writeAt(pos * dim, Knew);
+      state.selfV[li].writeAt(pos * dim, Vnew);
 
       // Attention: Q [1, dim] against K[0..pos+1] / V[0..pos+1]. Causal
-      // mask is implicit because we only see keys we've already written.
+      // mask is implicit — we only see keys we've already written.
       //
-      // gpu.sdpaSingleQuery exists but isn't used here yet — the K/V
-      // caches are Float32Arrays, so dispatch would HtoD them on every
-      // call (2.3 MB × 88 calls of waste per audio). Lifting state.selfK /
-      // selfV to device-resident handles is the prerequisite. The CPU JS
-      // loop wins at tiny.en sizes for now.
-      const attnOut = scaledDotProductAttention(Q, state.selfK[li], state.selfV[li], 1, pos + 1, nHead, headDim, false);
+      // Calibrated dispatch: at kvLen ≤ 64 (most of the decoder's work
+      // for tiny / base / small models), CPU JS scaled dot product wins
+      // because the kernel launch overhead exceeds the actual compute.
+      // The device-resident handle still has the right data via writeAt;
+      // we read through .view for the JS path. Above the threshold
+      // (medium / large models, very long outputs), the GPU fused SDPA
+      // amortizes its launch cost.
+      const SELF_ATTN_GPU_THRESHOLD = 64;
+      let attnOut: Float32Array;
+      if (pos + 1 >= SELF_ATTN_GPU_THRESHOLD) {
+        attnOut = gpu.sdpaSingleQuery(Q, state.selfK[li], state.selfV[li], pos + 1, nHead, headDim) as Float32Array;
+      } else {
+        attnOut = scaledDotProductAttention(
+          Q,
+          state.selfK[li].view,
+          state.selfV[li].view,
+          1,
+          pos + 1,
+          nHead,
+          headDim,
+          false,
+        );
+      }
       const proj1 = gpu.matVec(block.attnOW as Float32Array, attnOut, dim, dim) as Float32Array;
       addBias(proj1, 1, dim, block.attnOB);
       for (let j = 0; j < dim; j++) x[j] += proj1[j];
@@ -1323,20 +1357,19 @@ class WhisperModel {
       layerNormInPlace(xn, 1, dim, block.crossLnW, block.crossLnB);
       const Qc = gpu.matVec(block.crossQW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Qc, 1, dim, block.crossQB);
-      // Same story as decoder self-attention: gpu.sdpaSingleQuery exists,
-      // but state.crossK / crossV are host Float32Arrays so dispatch
-      // would re-upload encoder output on every step. JS fallback for
-      // now; revisit once state is device-resident.
-      const crossOut = scaledDotProductAttention(
+      // Cross-attn at kvLen = encoderT (1500 for tiny.en) is large enough
+      // that the GPU fused kernel beats the JS triple loop. Encoder K/V
+      // are precomputed in prepareState and stay device-resident across
+      // the entire decode — sdpaSingleQuery dispatches off the device
+      // handles directly.
+      const crossOut = gpu.sdpaSingleQuery(
         Qc,
         state.crossK[li],
         state.crossV[li],
-        1,
         state.encoderT,
         nHead,
         headDim,
-        false,
-      );
+      ) as Float32Array;
       const proj2 = gpu.matVec(block.crossOW as Float32Array, crossOut, dim, dim) as Float32Array;
       addBias(proj2, 1, dim, block.crossOB);
       for (let j = 0; j < dim; j++) x[j] += proj2[j];

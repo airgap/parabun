@@ -3517,6 +3517,33 @@ function releaseHandle(handle: GpuHandle): void {
   handle.released = true;
 }
 
+/**
+ * Write `src` into a device-resident handle at the given element offset.
+ * Used by GpuFloat32Array.writeAt for growable caches (Whisper KV).
+ * Returns immediately after queuing the HtoD; the next kernel that reads
+ * the handle implicitly synchronizes.
+ */
+function writeHandleAt(handle: GpuHandle, offsetElems: number, src: FArray): void {
+  if (!isGpuHandle(handle)) throw new TypeError(`writeHandleAt expected a GpuHandle; got ${typeof handle}`);
+  if (handle.released) throw new Error("bun:gpu: writeHandleAt on released handle");
+  if (handle.buffer === 0n) {
+    // f64 handles or backends-that-don't-allocate paths — no-op (the
+    // wrapper has already mirrored into the host view).
+    return;
+  }
+  if (!cudaLib) throw new Error("bun:gpu cuda: writeHandleAt called before tryLoadCuda");
+  if (handle.qFormat) {
+    throw new Error("bun:gpu cuda: writeHandleAt not supported on quantized handles");
+  }
+  const elemBytes = handle.type === "f32" ? 4 : 8;
+  const offsetBytes = BigInt(offsetElems * elemBytes);
+  const sizeBytes = BigInt(src.byteLength);
+  const dst = handle.buffer + offsetBytes;
+  if (cudaLib.symbols.cuMemcpyHtoD_v2(dst, ffiPtr!(src), sizeBytes) !== 0) {
+    throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in writeHandleAt");
+  }
+}
+
 // Hold a Q4_K quantized tensor on device. `blocks` contains raw 144-byte
 // super-blocks laid out row-major (one row's blocks contiguous, then
 // next row). `nElems` is the logical (dequantized) element count.
@@ -5768,6 +5795,7 @@ export default {
   holdQ4K,
   holdQ6K,
   releaseHandle,
+  writeHandleAt,
   releasePinned,
   dispose,
   getDeviceName,
