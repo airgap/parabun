@@ -1652,6 +1652,147 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
   return out;
 }
 
+// ─── Kernel launch: argmin / argmax ───────────────────────────────────────
+// Same shape as launchReduceF32 — REDUCE_GRID blocks × 256 threads each
+// emit per-block (value, index) partials, then the host scans the partials
+// for the global winner. Returns the index. Empty input throws (matches
+// gpu.ts argMin / argMax conventions); all-NaN input returns NaN.
+const ARGMIN_BLOCK = 256;
+const ARGMIN_GRID = 1024;
+
+function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): number {
+  if (!probeDevOps()) {
+    // CPU fallback that mirrors gpu.ts's cpuArgMinF32 / cpuArgMaxF32
+    // exactly: NaN is silently skipped via the false `<` / `>` comparison
+    // (no early return). All-NaN input returns 0 (the initial seed). This
+    // keeps the no-NVRTC and with-NVRTC paths byte-for-byte equivalent.
+    const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+    if (view.length === 0) {
+      throw new RangeError(`bun:gpu cuda: arg${mode} on empty input`);
+    }
+    let bestI = 0;
+    let bestV = view[0];
+    for (let i = 1; i < view.length; i++) {
+      const v = view[i];
+      if (mode === "min" ? v < bestV : v > bestV) {
+        bestV = v;
+        bestI = i;
+      }
+    }
+    return bestI;
+  }
+
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aView = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  const n = aView.length;
+  if (n === 0) throw new RangeError(`bun:gpu cuda: arg${mode} on empty input`);
+
+  const aBytes = BigInt(n * 4);
+  const partialVBytes = BigInt(ARGMIN_GRID * 4);
+  const partialIBytes = BigInt(ARGMIN_GRID * 4);
+
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error(`bun:gpu: arg${mode} called on released handle`);
+    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = input.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    }
+    dA = dABuf[0];
+    aOwned = true;
+    if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
+      s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    }
+  }
+
+  const dPVBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dPVBuf), partialVBytes) !== 0) {
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(partial_v) failed");
+  }
+  const dPIBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dPIBuf), partialIBytes) !== 0) {
+    s.cuMemFree_v2(dPVBuf[0]);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(partial_i) failed");
+  }
+  const dPV = dPVBuf[0];
+  const dPI = dPIBuf[0];
+
+  const cleanup = () => {
+    s.cuMemFree_v2(dPV);
+    s.cuMemFree_v2(dPI);
+    if (aOwned) s.cuMemFree_v2(dA);
+  };
+
+  const fn = mode === "min" ? devOpsFns!.argminGrid : devOpsFns!.argmaxGrid;
+  const pIn = new BigUint64Array([dA]);
+  const pPV = new BigUint64Array([dPV]);
+  const pPI = new BigUint64Array([dPI]);
+  const pN = new Uint32Array([n]);
+  const params = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pPV)), BigInt(ptr(pPI)), BigInt(ptr(pN))]);
+
+  const r = s.cuLaunchKernel(fn, ARGMIN_GRID, 1, 1, ARGMIN_BLOCK, 1, 1, 0, 0n, ptr(params), null);
+  if (r !== 0) {
+    cleanup();
+    throw new Error(`bun:gpu cuda: cuLaunchKernel(arg${mode}_f32) failed (${r})`);
+  }
+  if (s.cuCtxSynchronize() !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+  }
+
+  // Pull both partial buffers back, find the global winner host-side.
+  const partialV = new Float32Array(ARGMIN_GRID);
+  const partialI = new Uint32Array(ARGMIN_GRID);
+  if (s.cuMemcpyDtoH_v2(ptr(partialV), dPV, partialVBytes) !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partial_v) failed");
+  }
+  if (s.cuMemcpyDtoH_v2(ptr(partialI), dPI, partialIBytes) !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partial_i) failed");
+  }
+  cleanup();
+
+  // Host-side merge. SENTINEL = 0xffffffff for blocks that saw only NaN.
+  // The kernel already NaN-skipped, so partials we look at have valid
+  // (value, index) pairs. All-NaN input → no partial is valid → return 0
+  // to match gpu.ts's cpuArgMinF32 / cpuArgMaxF32 convention (which also
+  // returns 0 because nothing beats the initial NaN seed).
+  let bestI = -1;
+  let bestV = mode === "min" ? Infinity : -Infinity;
+  for (let p = 0; p < ARGMIN_GRID; p++) {
+    const i = partialI[p];
+    if (i === 0xffffffff) continue;
+    const v = partialV[p];
+    if (bestI < 0) {
+      bestI = i;
+      bestV = v;
+      continue;
+    }
+    if (mode === "min") {
+      if (v < bestV || (v === bestV && i < bestI)) {
+        bestI = i;
+        bestV = v;
+      }
+    } else {
+      if (v > bestV || (v === bestV && i < bestI)) {
+        bestI = i;
+        bestV = v;
+      }
+    }
+  }
+  return bestI < 0 ? 0 : bestI;
+}
+
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
 //
 // a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
@@ -2471,6 +2612,25 @@ function scan(input: FArray | GpuHandle): FArray {
     cpu[i] = sum;
   }
   return cpu;
+}
+
+// argMin / argMax dispatch — see launchArgF32. NVRTC-only path; the launcher
+// itself contains the CPU fallback for the no-NVRTC case so we don't need
+// to duplicate it here.
+function argMin(input: FArray | GpuHandle): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("bun:gpu cuda: argMin requires Float32Array (f64 not yet supported)");
+  }
+  return launchArgF32(input as Float32Array | GpuHandle, "min");
+}
+
+function argMax(input: FArray | GpuHandle): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("bun:gpu cuda: argMax requires Float32Array (f64 not yet supported)");
+  }
+  return launchArgF32(input as Float32Array | GpuHandle, "max");
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
@@ -3897,6 +4057,126 @@ extern "C" __global__ void scan_add_offsets_f32(
     if (idx >= n) return;
     out[idx] += blockSums[blockIdx.x - 1u];
 }
+
+// ─── argMin / argMax (index-of-extremum) ─────────────────────────────────
+// Multi-block tournament. Each thread walks a strided slice of the input
+// tracking its own (best_value, best_index) pair; threads then reduce
+// into shared memory pairwise, with the lower index winning on equal
+// values (matches JS .reduce()-with-< first-occurrence convention).
+// Each block emits one (value, index) partial; the host scans the
+// REDUCE_GRID partials for the global winner.
+//
+// NaN handling: skipped during the per-thread walk (NaN compares false
+// to anything via lt / gt, so we won't accidentally pick it as the
+// extremum). The host detects "no value found" (all-NaN input) and
+// returns NaN to match the JS argMin / argMax conventions.
+//
+// Sentinel for "no value yet seen": index = 0xffffffff. The pairwise
+// reducer treats sentinel-index as "lose any comparison".
+
+extern "C" __global__ void argmin_grid_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partial_v,
+    unsigned int* __restrict__ partial_i,
+    unsigned int n
+) {
+    __shared__ float sv[256];
+    __shared__ unsigned int si[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+
+    float bestV = F_INF;
+    unsigned int bestI = 0xffffffffu;
+    for (unsigned int i = idx; i < n; i += stride) {
+        float v = in[i];
+        if (isnan(v)) continue;
+        if (bestI == 0xffffffffu || v < bestV || (v == bestV && i < bestI)) {
+            bestV = v;
+            bestI = i;
+        }
+    }
+    sv[tid] = bestV;
+    si[tid] = bestI;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            float ov = sv[tid + s];
+            unsigned int oi = si[tid + s];
+            unsigned int mi = si[tid];
+            float mv = sv[tid];
+            bool better;
+            if (oi == 0xffffffffu) better = false;
+            else if (mi == 0xffffffffu) better = true;
+            else if (ov < mv) better = true;
+            else if (ov == mv && oi < mi) better = true;
+            else better = false;
+            if (better) {
+                sv[tid] = ov;
+                si[tid] = oi;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        partial_v[blockIdx.x] = sv[0];
+        partial_i[blockIdx.x] = si[0];
+    }
+}
+
+extern "C" __global__ void argmax_grid_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partial_v,
+    unsigned int* __restrict__ partial_i,
+    unsigned int n
+) {
+    __shared__ float sv[256];
+    __shared__ unsigned int si[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+
+    float bestV = F_NINF;
+    unsigned int bestI = 0xffffffffu;
+    for (unsigned int i = idx; i < n; i += stride) {
+        float v = in[i];
+        if (isnan(v)) continue;
+        if (bestI == 0xffffffffu || v > bestV || (v == bestV && i < bestI)) {
+            bestV = v;
+            bestI = i;
+        }
+    }
+    sv[tid] = bestV;
+    si[tid] = bestI;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            float ov = sv[tid + s];
+            unsigned int oi = si[tid + s];
+            unsigned int mi = si[tid];
+            float mv = sv[tid];
+            bool better;
+            if (oi == 0xffffffffu) better = false;
+            else if (mi == 0xffffffffu) better = true;
+            else if (ov > mv) better = true;
+            else if (ov == mv && oi < mi) better = true;
+            else better = false;
+            if (better) {
+                sv[tid] = ov;
+                si[tid] = oi;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        partial_v[blockIdx.x] = sv[0];
+        partial_i[blockIdx.x] = si[0];
+    }
+}
 `;
 
 type DevOpsFns = {
@@ -3929,6 +4209,11 @@ type DevOpsFns = {
   scanBlockInclusive: bigint;
   scanBlocksumsInclusive: bigint;
   scanAddOffsets: bigint;
+  /** General-purpose multi-block argmin/argmax over arbitrary-N Float32Arrays.
+   *  Distinct from the existing `argmax` field above, which is bun:llm's
+   *  hand-written single-block argmax for sampling logits. */
+  argminGrid: bigint;
+  argmaxGrid: bigint;
 };
 
 let devOpsProbed = false;
@@ -4024,6 +4309,8 @@ function probeDevOps(): boolean {
     "scanBlockInclusive",
     "scanBlocksumsInclusive",
     "scanAddOffsets",
+    "argminGrid",
+    "argmaxGrid",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -4055,6 +4342,8 @@ function probeDevOps(): boolean {
     scanBlockInclusive: "scan_block_inclusive_f32",
     scanBlocksumsInclusive: "scan_blocksums_inclusive_f32",
     scanAddOffsets: "scan_add_offsets_f32",
+    argminGrid: "argmin_grid_f32",
+    argmaxGrid: "argmax_grid_f32",
   };
 
   const fns = {} as DevOpsFns;
@@ -4605,6 +4894,8 @@ export default {
   reduce,
   histogram,
   scan,
+  argMin,
+  argMax,
   simdMap,
   alloc,
   isAligned,

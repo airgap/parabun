@@ -241,6 +241,13 @@ interface Backend {
    */
   reduce?(input: Float32Array | GpuHandle, op: "sum" | "min" | "max"): number;
   /**
+   * Index-of-extremum lookups. Both return -1 on empty input (the public
+   * wrapper translates that to a thrown RangeError); NaN propagates as
+   * NaN. Tie-break: first occurrence (lowest index wins).
+   */
+  argMin?(input: Float32Array | GpuHandle): number;
+  argMax?(input: Float32Array | GpuHandle): number;
+  /**
    * Single-launch fused Gaussian blur on packed RGBA uint8 — used by
    * bun:image's GPU dispatch path. Returns null if the backend has no
    * GPU implementation available (e.g. CUDA without NVRTC), so the
@@ -1147,7 +1154,9 @@ function argMin(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array)
       }`,
     );
   }
+  const backend = resolveActive();
   const a = unwrapGpuArg(input as any);
+  if (backend.argMin) return backend.argMin(a as any);
   const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
   return cpuArgMinF32(aV);
 }
@@ -1162,7 +1171,9 @@ function argMax(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array)
       }`,
     );
   }
+  const backend = resolveActive();
   const a = unwrapGpuArg(input as any);
+  if (backend.argMax) return backend.argMax(a as any);
   const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
   return cpuArgMaxF32(aV);
 }
