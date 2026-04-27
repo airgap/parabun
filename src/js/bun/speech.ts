@@ -310,19 +310,37 @@ type SpeakOptions = {
   sampleRate?: number;
 };
 
-const TRANSCRIBE_NOT_IMPL =
-  "bun:speech.transcribe: Whisper-class STT requires encoder-decoder transformer support in bun:llm — " +
-  "the current path runs decoder-only models (Llama / Qwen2). Tracked in the roadmap as bun:speech (Tier 2).";
-
 const SPEAK_NOT_IMPL =
   "bun:speech.speak: Piper TTS requires libpiper or ONNX runtime as a vendored dep — " +
   "neither is wired yet. Tracked in the roadmap as bun:speech (Tier 2).";
 
-async function transcribe(
-  _utterance: Utterance | { samples: Float32Array },
-  _opts: TranscribeOptions,
-): Promise<string> {
-  throw new Error(TRANSCRIBE_NOT_IMPL);
+// Cache loaded Whisper models by absolute path so repeated transcribe()
+// calls in the same process don't reload from disk.
+const whisperCache = new Map<string, Promise<unknown>>();
+
+async function transcribe(utterance: Utterance | { samples: Float32Array }, opts: TranscribeOptions): Promise<string> {
+  if (opts.engine !== "whisper") {
+    throw new Error(`bun:speech.transcribe: unknown engine "${opts.engine}" — only "whisper" is supported`);
+  }
+  if (!opts.model) {
+    throw new Error("bun:speech.transcribe: opts.model (path to ggml-*.bin) is required");
+  }
+  const path = require("node:path").resolve(opts.model);
+  let modelPromise = whisperCache.get(path);
+  if (!modelPromise) {
+    // Direct sibling-file require — the internal bundler doesn't allow
+    // bun:* → bun:* imports between top-level builtins, but it does allow
+    // relative requires inside src/js. Whisper lives under bun:llm but
+    // is shaped as a standalone class so it imports cleanly here.
+    const whisperMod = require("./llm/whisper.ts");
+    modelPromise = whisperMod.WhisperModel.load(path);
+    whisperCache.set(path, modelPromise);
+  }
+  const model = (await modelPromise) as {
+    transcribe(audio: Float32Array, o?: { maxTokens?: number; language?: string }): string;
+  };
+  const language = opts.language && opts.language !== "auto" ? opts.language : "en";
+  return model.transcribe(utterance.samples, { language });
 }
 
 async function speak(_text: string, _opts: SpeakOptions): Promise<Float32Array> {

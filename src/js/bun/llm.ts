@@ -23,6 +23,7 @@ const grammarModule = require("./llm/grammar.ts");
 const schemaModule = require("./llm/schema.ts");
 const bertModule = require("./llm/bert.ts");
 const serveModule = require("./llm/serve.ts");
+const whisperModule = require("./llm/whisper.ts");
 
 type GenerateOptions = {
   maxTokens?: number;
@@ -843,4 +844,9 @@ export default {
   // OpenAI-compatible HTTP server. Wraps any object with .chat() /
   // .generate() / .embed() — typically an LLM instance from above.
   serve: serveModule.serve,
+  // Whisper-class encoder-decoder STT. Loads whisper.cpp .bin files and
+  // runs greedy auto-regressive decoding. Pure-JS forward pass for now —
+  // a CUDA path follows once this matures past tiny.en.
+  WhisperModel: whisperModule.WhisperModel,
+  WhisperTokenizer: whisperModule.WhisperTokenizer,
 };
