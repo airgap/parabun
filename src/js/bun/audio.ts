@@ -1333,6 +1333,202 @@ class Gain {
   }
 }
 
+// ─── Compressor ───────────────────────────────────────────────────────────
+// Feed-forward dynamic range compressor. Above the threshold the signal is
+// scaled by a ratio in dB-space — input N dB above threshold ends up at
+// N/ratio dB above threshold. Hard knee for v1; soft knee with curvature
+// near the threshold can land later.
+//
+// Useful for evening out a loud-soft signal (voice, mic capture) before it
+// hits a downstream encoder or transmission. Different from Gain (AGC):
+//   - Gain  — chases a target level by amplifying everything; quiet signal
+//             gets boosted to the target.
+//   - Compressor — only attenuates LOUD parts; quiet signal passes through
+//                  unchanged. Use Compressor before Gain in a vocal chain
+//                  if you want both: tame peaks first, then ride level.
+
+type CompressorOptions = {
+  /** Sample rate (Hz). Required — used to convert attack/release ms → coefficients. */
+  sampleRate: number;
+  /** Threshold in dBFS. Default -20 dB. Levels above this get reduced. */
+  thresholdDb?: number;
+  /** Compression ratio above threshold. 4 = 4:1 (4 dB in → 1 dB out above thresh).
+   *  Use Infinity for limiting, but the dedicated Limiter class is more honest. */
+  ratio?: number;
+  /** Attack time in milliseconds — how fast gain reduction engages. Default 5 ms. */
+  attackMs?: number;
+  /** Release time in milliseconds — how fast gain returns. Default 50 ms. */
+  releaseMs?: number;
+  /** Makeup gain applied AFTER reduction (dB). Default 0. Use to compensate
+   *  for the level lost to compression. */
+  makeupDb?: number;
+};
+
+class Compressor {
+  #threshold: number; // linear
+  #invRatio: number;
+  #attackCoeff: number;
+  #releaseCoeff: number;
+  #makeup: number; // linear
+  #envelope: number = 0;
+
+  constructor(opts: CompressorOptions) {
+    if (typeof opts !== "object" || opts === null) {
+      throw new TypeError("bun:audio.Compressor: opts must be an object");
+    }
+    const sr = opts.sampleRate;
+    if (typeof sr !== "number" || sr <= 0) {
+      throw new RangeError(`bun:audio.Compressor: sampleRate must be > 0; got ${sr}`);
+    }
+    const threshDb = opts.thresholdDb ?? -20;
+    const ratio = opts.ratio ?? 4;
+    if (ratio < 1 || !Number.isFinite(ratio)) {
+      throw new RangeError(
+        `bun:audio.Compressor: ratio must be a finite number >= 1; got ${ratio}. Use the Limiter class for hard limiting.`,
+      );
+    }
+    this.#threshold = Math.pow(10, threshDb / 20);
+    this.#invRatio = 1 / ratio;
+    this.#attackCoeff = timeConstantToCoeff(opts.attackMs ?? 5, sr);
+    this.#releaseCoeff = timeConstantToCoeff(opts.releaseMs ?? 50, sr);
+    this.#makeup = Math.pow(10, (opts.makeupDb ?? 0) / 20);
+  }
+
+  /**
+   * Apply compression to a frame in place. Envelope state persists across
+   * calls so attack / release behavior is correct at frame boundaries.
+   * Returns the gain reduction (in dB) applied to the last sample —
+   * negative values mean the signal was attenuated.
+   */
+  process(frame: Float32Array): number {
+    if (!(frame instanceof Float32Array)) {
+      throw new TypeError("bun:audio.Compressor.process: frame must be a Float32Array");
+    }
+    let env = this.#envelope;
+    const t = this.#threshold;
+    const invR = this.#invRatio;
+    const aA = this.#attackCoeff;
+    const aR = this.#releaseCoeff;
+    const m = this.#makeup;
+    let lastGr = 1;
+    for (let i = 0; i < frame.length; i++) {
+      const x = frame[i];
+      const ax = x < 0 ? -x : x;
+      // Peak envelope follower with asymmetric attack / release.
+      const coeff = ax > env ? aA : aR;
+      env = coeff * env + (1 - coeff) * ax;
+      // Gain reduction: above threshold, linear ratio of (env/t)^(1/r - 1).
+      // Below threshold, gr = 1 (no reduction).
+      let gr = 1;
+      if (env > t) {
+        gr = Math.pow(env / t, invR - 1);
+      }
+      lastGr = gr;
+      frame[i] = x * gr * m;
+    }
+    this.#envelope = env;
+    return 20 * Math.log10(Math.max(lastGr, 1e-9));
+  }
+
+  get envelope(): number {
+    return this.#envelope;
+  }
+
+  reset(): void {
+    this.#envelope = 0;
+  }
+}
+
+// ─── Limiter ──────────────────────────────────────────────────────────────
+// Brick-wall peak limiter. Same envelope follower as Compressor, but with
+// a very fast attack and a hard ceiling — anything above the ceiling gets
+// pulled back to it. Use as the last stage of a chain to guarantee the
+// output won't clip a downstream encoder / DAC.
+//
+// No lookahead in v1 — a brief overshoot can occur on instantaneous
+// transients (~ attackMs / 2 worth of samples). Lookahead would mean
+// delaying the audio by N samples and computing the envelope on the
+// FUTURE samples; landing later if there's demand for true brick-wall.
+
+type LimiterOptions = {
+  sampleRate: number;
+  /** Output ceiling in dBFS. Default -1 dB (slight headroom from full scale). */
+  ceilingDb?: number;
+  /** Attack time in ms. Default 0.5 ms (≈24 samples at 48 kHz — fast). */
+  attackMs?: number;
+  /** Release time in ms. Default 50 ms. */
+  releaseMs?: number;
+};
+
+class Limiter {
+  #ceiling: number;
+  #attackCoeff: number;
+  #releaseCoeff: number;
+  #envelope: number = 0;
+
+  constructor(opts: LimiterOptions) {
+    if (typeof opts !== "object" || opts === null) {
+      throw new TypeError("bun:audio.Limiter: opts must be an object");
+    }
+    const sr = opts.sampleRate;
+    if (typeof sr !== "number" || sr <= 0) {
+      throw new RangeError(`bun:audio.Limiter: sampleRate must be > 0; got ${sr}`);
+    }
+    const ceilDb = opts.ceilingDb ?? -1;
+    if (ceilDb > 0) {
+      throw new RangeError(`bun:audio.Limiter: ceilingDb must be <= 0 (sub-fullscale); got ${ceilDb}`);
+    }
+    this.#ceiling = Math.pow(10, ceilDb / 20);
+    this.#attackCoeff = timeConstantToCoeff(opts.attackMs ?? 0.5, sr);
+    this.#releaseCoeff = timeConstantToCoeff(opts.releaseMs ?? 50, sr);
+  }
+
+  /**
+   * Apply limiting in place. Returns the maximum absolute output sample
+   * seen across the frame — useful for verifying the ceiling held.
+   *
+   * Uses an instant-attack envelope (no smoothing on rises) so a sudden
+   * peak is always caught and the ceiling is guaranteed even without a
+   * lookahead buffer. The release is smoothed via the configured time
+   * constant so gain doesn't snap back to unity audibly. The `attackMs`
+   * option is preserved for API compatibility but has no audible effect
+   * in v1 — true attack-shaped limiting needs lookahead, which is
+   * follow-up work.
+   */
+  process(frame: Float32Array): number {
+    if (!(frame instanceof Float32Array)) {
+      throw new TypeError("bun:audio.Limiter.process: frame must be a Float32Array");
+    }
+    let env = this.#envelope;
+    const c = this.#ceiling;
+    const aR = this.#releaseCoeff;
+    let peak = 0;
+    for (let i = 0; i < frame.length; i++) {
+      const x = frame[i];
+      const ax = x < 0 ? -x : x;
+      // Instant-rise envelope so the very first peak above the ceiling
+      // is caught and reduced.
+      if (ax > env) env = ax;
+      else env = aR * env + (1 - aR) * ax;
+      const gain = env > c ? c / env : 1;
+      const y = x * gain;
+      const ay = y < 0 ? -y : y;
+      if (ay > peak) peak = ay;
+      frame[i] = y;
+    }
+    this.#envelope = env;
+    return peak;
+  }
+
+  get envelope(): number {
+    return this.#envelope;
+  }
+
+  reset(): void {
+    this.#envelope = 0;
+  }
+}
+
 // ─── I/O: capture + playback (ALSA on Linux, CoreAudio on macOS) ──────────
 // Real-time capture and playback for the embedded edge runtime. These are
 // scaffolded against ALSA on Linux first because the bring-up target is a
@@ -1572,6 +1768,8 @@ export default {
   OpusDecoder,
   Denoiser,
   Gain,
+  Compressor,
+  Limiter,
   // I/O
   devices: listDevices,
   capture,
