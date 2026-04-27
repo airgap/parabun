@@ -354,6 +354,235 @@ function table(batches: RecordBatch[]): Table {
   return new Table(schema, batches);
 }
 
+// ─── Row-major ↔ columnar bridge ───────────────────────────────────────────
+//
+// JS data lives row-major (each object is one record); columnar formats live
+// column-major (each array is one column across every record). Converting
+// between the two is the seam between bun:csv (yields rows) and bun:arrow
+// (works on columns). The seam can't live inside either module — bun:* can't
+// cross-import bun:* — so it lives at the call site, with these helpers
+// taking the boilerplate.
+
+type RowSchema = Partial<Record<string, ArrowKind>>;
+
+type FromRowsOptions = {
+  /**
+   * Override the auto-inferred type for one or more columns. Inference
+   * picks `int32` for whole numbers in [-2³¹, 2³¹), `float64` for other
+   * numbers, `bool` for booleans, and `utf8` for strings. Pass entries
+   * here to widen ints to int64 (large values), narrow floats to float32,
+   * etc. Columns not listed are inferred as usual.
+   */
+  schema?: RowSchema;
+  /** Drop rows where any required field is null/undefined. Default false. */
+  skipNulls?: boolean;
+};
+
+function inferKindFromValue(v: unknown): ArrowKind | null {
+  if (typeof v === "number") {
+    return Number.isInteger(v) && v >= -2147483648 && v < 2147483648 ? "int32" : "float64";
+  }
+  if (typeof v === "bigint") return "int64";
+  if (typeof v === "boolean") return "bool";
+  if (typeof v === "string") return "utf8";
+  return null;
+}
+
+/**
+ * Build a RecordBatch from an array of plain JS objects. Column types are
+ * inferred from the first non-null value seen for each column, or pinned
+ * via `opts.schema`. Missing fields produce nulls in the validity bitmap.
+ *
+ *   const rows = [
+ *     { name: "alice", age: 30, score: 0.95 },
+ *     { name: "bob",   age: 25, score: 0.82 },
+ *   ];
+ *   const batch = arrow.fromRows(rows);
+ *   arrow.sum(batch.column("age"));     // 55
+ *
+ * Pairs with bun:csv at the call site:
+ *
+ *   const rows = [];
+ *   for await (const row of csv.parseCsv(file, { header: true, infer: true })) rows.push(row);
+ *   const batch = arrow.fromRows(rows);
+ */
+function fromRows<T extends Record<string, any>>(rows: T[], opts: FromRowsOptions = {}): RecordBatch {
+  if (!Array.isArray(rows)) {
+    throw new TypeError("bun:arrow.fromRows: rows must be an array");
+  }
+  // Collect every column name across rows (rows can have ragged keysets).
+  const colNames: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (row == null || typeof row !== "object") continue;
+    for (const key of Object.keys(row)) {
+      if (!seen.has(key)) {
+        seen.add(key);
+        colNames.push(key);
+      }
+    }
+  }
+
+  // Resolve per-column types: explicit schema first, else infer from first
+  // non-null value seen.
+  const kinds: Record<string, ArrowKind> = {};
+  for (const name of colNames) {
+    const pinned = opts.schema?.[name];
+    if (pinned) {
+      kinds[name] = pinned;
+      continue;
+    }
+    let inferred: ArrowKind | null = null;
+    for (const row of rows) {
+      if (row == null) continue;
+      const v = row[name];
+      if (v == null) continue;
+      inferred = inferKindFromValue(v);
+      if (inferred) break;
+    }
+    // If every row is null/missing for this column, default to utf8 (the
+    // most permissive type — the column will be all-null anyway).
+    kinds[name] = inferred ?? "utf8";
+  }
+
+  // Filter rows if requested.
+  const useRows = opts.skipNulls
+    ? rows.filter(row => {
+        if (row == null) return false;
+        for (const name of colNames) {
+          const v = (row as any)[name];
+          if (v == null) return false;
+        }
+        return true;
+      })
+    : rows;
+  const n = useRows.length;
+
+  // Allocate per-column storage.
+  const fields: Field[] = [];
+  const cols: Column[] = [];
+  for (const name of colNames) {
+    const kind = kinds[name];
+    let values: ColumnValues;
+    let validity: Uint8Array | undefined;
+    let hasNull = false;
+
+    switch (kind) {
+      case "int32": {
+        const arr = new Int32Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else {
+            arr[i] = Number(raw) | 0;
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+      case "int64": {
+        const arr = new BigInt64Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else {
+            arr[i] = typeof raw === "bigint" ? raw : BigInt(raw);
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+      case "float32":
+      case "float64": {
+        const arr = kind === "float32" ? new Float32Array(n) : new Float64Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else {
+            arr[i] = Number(raw);
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+      case "bool": {
+        const arr = new Uint8Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else {
+            arr[i] = raw ? 1 : 0;
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+      case "utf8": {
+        const arr: string[] = new Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+            arr[i] = "";
+          } else {
+            arr[i] = String(raw);
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+    }
+
+    fields.push({ name, type: { kind }, nullable: hasNull });
+    cols.push(new Column({ kind }, n, values, validity));
+  }
+
+  return new RecordBatch({ fields }, cols, n);
+}
+
+/**
+ * The reverse — turn a RecordBatch (or Table) back into an array of plain JS
+ * objects. Useful for handing data to row-shaped consumers (`fetch` JSON
+ * payload, ORM `insertMany`, etc.) after a columnar pipeline. Null rows
+ * become `null` for the field.
+ */
+function toRows(source: RecordBatch | Table): Array<Record<string, number | bigint | boolean | string | null>> {
+  if (source instanceof Table) {
+    const out: Array<Record<string, number | bigint | boolean | string | null>> = [];
+    for (const batch of source.batches) {
+      for (let i = 0; i < batch.numRows; i++) out.push(batch.row(i));
+    }
+    return out;
+  }
+  const out: Array<Record<string, number | bigint | boolean | string | null>> = new Array(source.numRows);
+  for (let i = 0; i < source.numRows; i++) out[i] = source.row(i);
+  return out;
+}
+
 // ─── Computes ──────────────────────────────────────────────────────────────
 
 function isNumeric(t: DataType): boolean {
@@ -628,6 +857,8 @@ export default {
   // Builders
   recordBatch,
   table,
+  fromRows,
+  toRows,
   // Computes
   sum,
   mean,
