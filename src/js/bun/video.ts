@@ -156,6 +156,19 @@ type EncodeOptions = {
   accel?: AccelMode;
   /** Output file path. If omitted, encode() returns the bytes once finalized. */
   path?: string;
+  /**
+   * Per-frame JPEG encoder. Required for the MJPEG codec (the only one
+   * unstubbed today). Pass `image.encode` from `bun:image` (cross-builtin
+   * imports between bun:* modules aren't supported, so the dep is injected
+   * here). The provided function should encode an `{ data, width, height,
+   * channels }` to JPEG bytes.
+   */
+  encodeJpg?: (
+    img: { data: Uint8Array; width: number; height: number; channels: number },
+    opts?: { format: "jpeg"; quality?: number },
+  ) => Uint8Array;
+  /** JPEG quality (0–100). Only used for the MJPEG codec. Default 85. */
+  jpegQuality?: number;
 };
 
 interface VideoEncoder extends AsyncDisposable {
@@ -210,7 +223,11 @@ const MP4_VIDEO_CODEC: Record<string, Codec> = {
   vp08: "vp8",
   vp09: "vp9",
   av01: "av1",
-  mp4v: "mjpeg",
+  // mp4v is MPEG-4 Visual (Part 2). Real MJPEG-in-MP4 uses the "jpeg"
+  // sample entry. Some legacy ffmpeg outputs put MJPEG into "mp4v" with
+  // no esds box — we don't try to disambiguate; users with those files
+  // can fall back to ffprobe + a re-mux.
+  jpeg: "mjpeg",
 };
 
 const MP4_AUDIO_CODEC: Record<string, string> = {
@@ -968,12 +985,378 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
 }
 
 /**
- * Open an encoder. With `{ path }` set, frames are streamed to disk as
- * they're pushed. Without, frames are buffered and the byte stream is
- * returned by `finalize()`.
+ * Open an encoder. The MJPEG-in-MP4 path ships today (pure-JS muxer
+ * over JPEG-encoded frames). Other codecs / containers wait for the
+ * libavcodec native binding.
  */
-function encode(_opts: EncodeOptions): Promise<VideoEncoder> {
-  todo();
+async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
+  if (opts.codec !== "mjpeg") {
+    throw new Error(
+      `bun:video.encode: codec "${opts.codec}" needs the libavcodec native binding (only "mjpeg" is unstubbed today)`,
+    );
+  }
+  if (opts.container !== "mp4") {
+    throw new Error(`bun:video.encode: container "${opts.container}" not supported on the MJPEG path (only "mp4")`);
+  }
+  if (!opts.encodeJpg) {
+    throw new Error("bun:video.encode: MJPEG outputs require opts.encodeJpg — pass `image.encode` from bun:image");
+  }
+  if (!opts.fps || opts.fps <= 0) throw new RangeError("bun:video.encode: fps must be > 0");
+  if (!opts.width || !opts.height) throw new RangeError("bun:video.encode: width and height required");
+
+  const encodeJpg = opts.encodeJpg;
+  const quality = opts.jpegQuality ?? 85;
+  const fps = opts.fps;
+  const width = opts.width;
+  const height = opts.height;
+
+  const samples: Uint8Array[] = [];
+  let bytesQueued = 0;
+  let closed = false;
+
+  const enc: VideoEncoder = {
+    get bytesWritten(): number {
+      return bytesQueued;
+    },
+    get duration(): number {
+      return Math.round((samples.length / fps) * 1000);
+    },
+    async pushFrame(frame): Promise<void> {
+      if (closed) throw new Error("bun:video.encode: pushFrame after close()");
+      // Normalize the input to { data, width, height, channels } that
+      // image.encode expects.
+      let data: Uint8Array;
+      let channels: number;
+      let frameW = (frame as any).width as number;
+      let frameH = (frame as any).height as number;
+      if ("channels" in frame) {
+        data = frame.data;
+        channels = frame.channels;
+      } else if ("pixelFormat" in frame) {
+        if (frame.pixelFormat === "rgba") {
+          data = frame.data;
+          channels = 4;
+        } else if (frame.pixelFormat === "rgb24") {
+          data = frame.data;
+          channels = 3;
+        } else {
+          throw new Error(`bun:video.encode: pixelFormat "${frame.pixelFormat}" needs YUV→RGB conversion (pending)`);
+        }
+      } else if ("format" in frame) {
+        // bun:camera RawFrame — only rgb24 / rgba pass through directly.
+        if (frame.format === "rgba" || frame.format === "rgb") {
+          data = frame.data;
+          channels = frame.format === "rgba" ? 4 : 3;
+        } else {
+          throw new Error(`bun:video.encode: camera format "${frame.format}" needs YUV→RGB conversion (pending)`);
+        }
+      } else {
+        throw new Error("bun:video.encode: unrecognized frame shape");
+      }
+      if (frameW !== width || frameH !== height) {
+        throw new Error(`bun:video.encode: frame ${frameW}x${frameH} doesn't match encoder ${width}x${height}`);
+      }
+      const jpeg = encodeJpg({ data, width: frameW, height: frameH, channels }, { format: "jpeg", quality });
+      samples.push(jpeg);
+      bytesQueued += jpeg.byteLength;
+    },
+    async finalize(): Promise<Uint8Array | void> {
+      if (closed) throw new Error("bun:video.encode: finalize after close()");
+      closed = true;
+      const bytes = muxMjpegMp4(samples, width, height, fps);
+      if (opts.path) {
+        await Bun.write(opts.path, bytes);
+        return;
+      }
+      return bytes;
+    },
+    async close(): Promise<void> {
+      closed = true;
+      samples.length = 0;
+    },
+    async [Symbol.asyncDispose](): Promise<void> {
+      await this.close();
+    },
+  };
+  return enc;
+}
+
+// ─── MP4 muxer (MJPEG, single video track) ────────────────────────────────
+// Writes a minimal but spec-compliant ISOBMFF container:
+//   ftyp + moov(mvhd + trak(tkhd + mdia(mdhd + hdlr + minf(vmhd + dinf +
+//   stbl(stsd(mp4v) + stts + stsc + stsz + stco))))) + mdat
+// Single video track, 1 chunk per sample, 32-bit chunk offsets (file
+// must fit in 4 GiB — for longer recordings the writer would emit co64
+// instead). All MJPEG samples are JPEG payloads back-to-back in mdat.
+
+const MP4_TIMESCALE = 90_000; // common video timescale, divides into typical fps cleanly
+
+function box(type: string, payload: Uint8Array): Uint8Array {
+  const size = 8 + payload.byteLength;
+  const out = new Uint8Array(size);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, size, false);
+  out[4] = type.charCodeAt(0);
+  out[5] = type.charCodeAt(1);
+  out[6] = type.charCodeAt(2);
+  out[7] = type.charCodeAt(3);
+  out.set(payload, 8);
+  return out;
+}
+
+function fullBox(type: string, version: number, flags: number, payload: Uint8Array): Uint8Array {
+  const wrapped = new Uint8Array(4 + payload.byteLength);
+  wrapped[0] = version & 0xff;
+  wrapped[1] = (flags >> 16) & 0xff;
+  wrapped[2] = (flags >> 8) & 0xff;
+  wrapped[3] = flags & 0xff;
+  wrapped.set(payload, 4);
+  return box(type, wrapped);
+}
+
+function concat(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const p of parts) total += p.byteLength;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.byteLength;
+  }
+  return out;
+}
+
+function u32be(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, value >>> 0, false);
+  return out;
+}
+
+function u16be(value: number): Uint8Array {
+  const out = new Uint8Array(2);
+  new DataView(out.buffer).setUint16(0, value & 0xffff, false);
+  return out;
+}
+
+function asciiPad(s: string, length: number): Uint8Array {
+  const out = new Uint8Array(length);
+  for (let i = 0; i < Math.min(s.length, length); i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+function muxMjpegMp4(samples: Uint8Array[], width: number, height: number, fps: number): Uint8Array {
+  const numSamples = samples.length;
+  const sampleDelta = Math.round(MP4_TIMESCALE / fps); // ticks per frame
+  const totalDuration = numSamples * sampleDelta;
+
+  // ftyp: brand "isom", minor 0x200, compatible {isom, mp41, mp42}.
+  const ftyp = box(
+    "ftyp",
+    concat([asciiPad("isom", 4), u32be(0x200), asciiPad("isom", 4), asciiPad("mp41", 4), asciiPad("mp42", 4)]),
+  );
+
+  // mvhd (full box, version 0).
+  const mvhd = fullBox(
+    "mvhd",
+    0,
+    0,
+    concat([
+      u32be(0), // creation_time
+      u32be(0), // modification_time
+      u32be(MP4_TIMESCALE), // timescale
+      u32be(totalDuration), // duration
+      u32be(0x00010000), // rate 1.0
+      u16be(0x0100), // volume 1.0
+      u16be(0), // reserved
+      u32be(0),
+      u32be(0), // reserved × 2
+      // Identity matrix.
+      u32be(0x00010000),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0x00010000),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0x40000000),
+      // pre_defined × 6
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(2), // next_track_id
+    ]),
+  );
+
+  // tkhd (track header, version 0).
+  const tkhd = fullBox(
+    "tkhd",
+    0,
+    0x000007, // track enabled + in movie + in preview
+    concat([
+      u32be(0), // creation
+      u32be(0), // modification
+      u32be(1), // track_id
+      u32be(0), // reserved
+      u32be(totalDuration), // duration
+      u32be(0),
+      u32be(0), // reserved × 2
+      u16be(0), // layer
+      u16be(0), // alternate_group
+      u16be(0), // volume (0 for video)
+      u16be(0), // reserved
+      u32be(0x00010000),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0x00010000),
+      u32be(0),
+      u32be(0),
+      u32be(0),
+      u32be(0x40000000),
+      u32be(width << 16), // width 16.16
+      u32be(height << 16), // height 16.16
+    ]),
+  );
+
+  // mdhd (media header).
+  const mdhd = fullBox(
+    "mdhd",
+    0,
+    0,
+    concat([
+      u32be(0), // creation
+      u32be(0), // modification
+      u32be(MP4_TIMESCALE), // timescale
+      u32be(totalDuration), // duration
+      u16be(0x55c4), // language "und"
+      u16be(0), // pre_defined
+    ]),
+  );
+
+  // hdlr (handler) — handler_type "vide".
+  const hdlr = fullBox(
+    "hdlr",
+    0,
+    0,
+    concat([
+      u32be(0), // pre_defined
+      asciiPad("vide", 4),
+      u32be(0),
+      u32be(0),
+      u32be(0), // reserved × 3
+      asciiPad("VideoHandler\0", 13), // name (null-terminated)
+    ]),
+  );
+
+  // vmhd (video media header).
+  const vmhd = fullBox(
+    "vmhd",
+    0,
+    0x000001, // graphicsmode + opcolor
+    concat([
+      u16be(0), // graphicsmode
+      u16be(0),
+      u16be(0),
+      u16be(0), // opcolor
+    ]),
+  );
+
+  // dinf > dref with self-reference url.
+  const url_ = fullBox("url ", 0, 0x000001, new Uint8Array(0));
+  const dref = fullBox("dref", 0, 0, concat([u32be(1), url_]));
+  const dinf = box("dinf", dref);
+
+  // stsd: sample description with one "jpeg" entry. The MJPEG-in-MP4
+  // FourCC is "jpeg" — the visual sample entry below has no codec-
+  // specific descriptor since each sample is a complete JPEG.
+  const visualSampleEntry = concat([
+    u32be(0),
+    u16be(0), // reserved (6 bytes)
+    u16be(1), // data_reference_index
+    u16be(0),
+    u16be(0), // pre_defined + reserved
+    u32be(0),
+    u32be(0),
+    u32be(0), // pre_defined × 3
+    u16be(width),
+    u16be(height),
+    u32be(0x00480000),
+    u32be(0x00480000), // h/v resolution 72 dpi
+    u32be(0), // reserved
+    u16be(1), // frame_count (1 sample = 1 frame)
+    asciiPad("\x0CMJPEG Parabun", 32), // compressorname (Pascal string padded to 32)
+    u16be(0x0018), // depth (24-bit)
+    u16be(0xffff), // pre_defined
+  ]);
+  const sampleEntry = box("jpeg", visualSampleEntry);
+  const stsd = fullBox("stsd", 0, 0, concat([u32be(1), sampleEntry]));
+
+  // stts (time-to-sample): single entry with constant delta.
+  const stts = fullBox("stts", 0, 0, concat([u32be(1), u32be(numSamples), u32be(sampleDelta)]));
+
+  // stsc (sample-to-chunk): every chunk has 1 sample, sample_desc_idx = 1.
+  const stsc = fullBox("stsc", 0, 0, concat([u32be(1), u32be(1), u32be(1), u32be(1)]));
+
+  // stsz (sample sizes): per-sample table, sample_size = 0 → use array.
+  const stszEntries: Uint8Array[] = [u32be(0), u32be(numSamples)];
+  for (const s of samples) stszEntries.push(u32be(s.byteLength));
+  const stsz = fullBox("stsz", 0, 0, concat(stszEntries));
+
+  // We need stco (chunk offsets) — but the chunk offsets depend on where
+  // mdat starts, which depends on the moov size. So we build moov twice
+  // with placeholder offsets, then patch when we know mdat's start.
+  const buildStco = (mdatPayloadStart: number): Uint8Array => {
+    const entries: Uint8Array[] = [u32be(numSamples)];
+    let off = mdatPayloadStart;
+    for (const s of samples) {
+      entries.push(u32be(off));
+      off += s.byteLength;
+    }
+    return fullBox("stco", 0, 0, concat(entries));
+  };
+
+  const buildMoov = (stco: Uint8Array): Uint8Array => {
+    const stbl = box("stbl", concat([stsd, stts, stsc, stsz, stco]));
+    const minf = box("minf", concat([vmhd, dinf, stbl]));
+    const mdia = box("mdia", concat([mdhd, hdlr, minf]));
+    const trak = box("trak", concat([tkhd, mdia]));
+    return box("moov", concat([mvhd, trak]));
+  };
+
+  // Determine moov size with placeholder stco. The placeholder must be
+  // the same size as the real one (depends only on numSamples), so we
+  // can build it with a dummy offset and the size is invariant.
+  const placeholderStco = buildStco(0);
+  const placeholderMoov = buildMoov(placeholderStco);
+  const ftypLen = ftyp.byteLength;
+  const moovLen = placeholderMoov.byteLength;
+  // mdat: 8-byte header + JPEG bytes.
+  const mdatPayloadStart = ftypLen + moovLen + 8;
+  const realStco = buildStco(mdatPayloadStart);
+  const realMoov = buildMoov(realStco);
+  if (realMoov.byteLength !== moovLen) {
+    // Sanity check — placeholder size invariance is the whole reason we
+    // can do offset-based muxing in a single pass.
+    throw new Error("bun:video.encode: moov-size invariance broke (encoder bug)");
+  }
+
+  const mdatHeader = (() => {
+    let total = 8;
+    for (const s of samples) total += s.byteLength;
+    const out = new Uint8Array(8);
+    new DataView(out.buffer).setUint32(0, total, false);
+    out[4] = "m".charCodeAt(0);
+    out[5] = "d".charCodeAt(0);
+    out[6] = "a".charCodeAt(0);
+    out[7] = "t".charCodeAt(0);
+    return out;
+  })();
+
+  return concat([ftyp, realMoov, mdatHeader, ...samples]);
 }
 
 /**
