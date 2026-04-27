@@ -366,7 +366,7 @@ Parabun's positioning is to open typical JS performance bottlenecks via multithr
 
 - **Tier 0 — primitives** (shipped): `bun:simd`, `bun:gpu`, `bun:parallel`, `bun:arena`, `bun:pipeline`, `bun:signals`, `bun:rtp`. These are the building blocks that reach hardware directly.
 - **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`. Codecs, capture devices, on-device LLM inference — built on Tier 0.
-- **Tier 2 — applications** (in progress): `bun:vision`, `bun:speech`, `bun:serve`, `bun:arrow`. Application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, inference servers, and analytical queries.
+- **Tier 2 — applications** (`bun:serve` shipped; `bun:vision` and `bun:speech` ship orchestration with engine stubs; `bun:arrow` not yet started): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, inference servers, and analytical queries.
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
@@ -379,9 +379,9 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 | shipped     | `bun:csv`             | Streaming RFC 4180 parser with header / inference / quote handling. `parallel: true` is "off-the-main-thread" — see the inline disclaimer above. |
 | shipped     | `bun:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
 | partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
-| in progress | `bun:vision` (Tier 2) | Composes `bun:camera` + `bun:image` + `bun:gpu` + `bun:llm` into detection / tracking / OCR. Pi-camera headline. |
-| in progress | `bun:speech` (Tier 2) | VAD-gated mic capture (existing `bun:audio` DSP), Whisper STT via `bun:llm`'s GGUF runtime, Piper TTS. Voice-assistant headline. |
-| in progress | `bun:serve` (Tier 2)  | HTTP wrapper around `bun:llm` with batching, queueing, and an OpenAI-compatible API. Makes Parabun a viable Ollama alternative. |
+| shipped     | `bun:serve` (Tier 2)  | OpenAI-compatible HTTP server against any `bun:llm`-shaped engine — `/v1/chat/completions` (sync + SSE streaming), `/v1/completions`, `/v1/embeddings`, `/v1/models`, optional bearer auth, FIFO concurrency gate. Pure orchestration, no stubs. |
+| partial     | `bun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
+| partial     | `bun:speech` (Tier 2) | VAD-gated utterance segmentation ships today (`speech.listen` over any audio chunk iterator). Whisper STT (`transcribe`) stubs pending encoder-decoder transformer support in `bun:llm`; Piper TTS (`speak`) stubs pending libpiper / ONNX vendor add. |
 | in progress | `bun:arrow` (Tier 2)  | Columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB analytical query" pair to `bun:csv`. |
 | in progress | `bun:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
 | next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
