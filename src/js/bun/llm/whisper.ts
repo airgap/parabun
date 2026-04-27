@@ -631,9 +631,17 @@ function addBias(Y: Float32Array, N: number, dim: number, b: Float32Array): void
 // Convention in whisper.cpp: the conv weights are stored with dims=[K, Cin, Cout]
 // (fastest-changing first), so W[ko + ki * K + co * (K * Cin)] addresses the
 // element at output channel co, input channel ki, kernel index ko.
-function conv1d(
+// 1D convolution as im2col + matmul. The im2col tile has shape
+// [Tout, Cin*K]; per output position t we lay out the kernel window
+// indexed by p = ki*K + ko. The reshaped weight Wt has shape [Cin*K, Cout]
+// — pre-transposed at load time from whisper.cpp's [Cout, Cin, K] layout
+// (where the original flat index is co*K*Cin + ki*K + ko, exactly p
+// across the inner two axes).
+//
+// Padding is materialized as zeros in the im2col tile.
+function conv1dGpu(
   X: Float32Array,
-  W: Float32Array,
+  Wt: GpuMat,
   B: Float32Array,
   T: number,
   Cin: number,
@@ -643,22 +651,21 @@ function conv1d(
   padding: number,
 ): { out: Float32Array; Tout: number } {
   const Tout = Math.floor((T + 2 * padding - K) / stride) + 1;
-  const out = new Float32Array(Tout * Cout);
+  const KC = Cin * K;
+  const tile = new Float32Array(Tout * KC);
   for (let t = 0; t < Tout; t++) {
-    for (let co = 0; co < Cout; co++) {
-      let acc = B[co];
-      for (let ki = 0; ki < Cin; ki++) {
-        for (let ko = 0; ko < K; ko++) {
-          const tin = t * stride - padding + ko;
-          if (tin < 0 || tin >= T) continue;
-          const xv = X[tin * Cin + ki];
-          const wv = W[co * (K * Cin) + ki * K + ko];
-          acc += xv * wv;
-        }
+    const tBase = t * KC;
+    for (let ki = 0; ki < Cin; ki++) {
+      const dstBase = tBase + ki * K;
+      for (let ko = 0; ko < K; ko++) {
+        const tin = t * stride - padding + ko;
+        if (tin < 0 || tin >= T) continue;
+        tile[dstBase + ko] = X[tin * Cin + ki];
       }
-      out[t * Cout + co] = acc;
     }
   }
+  const out = gpu.matmul(tile, Wt as Float32Array, Tout, KC, Cout) as Float32Array;
+  addBias(out, Tout, Cout, B);
   return { out, Tout };
 }
 
@@ -886,9 +893,11 @@ interface DecoderBlock {
 }
 
 interface WhisperWeights {
-  conv1W: Float32Array;
+  // Conv weights are pre-transposed for the conv1dGpu im2col formulation:
+  // original is [Cout, Cin, K] (inner = K), transposed is [Cin*K, Cout].
+  conv1Wt: GpuMat;
   conv1B: Float32Array;
-  conv2W: Float32Array;
+  conv2Wt: GpuMat;
   conv2B: Float32Array;
   encPosEmbed: Float32Array;
   encBlocks: EncoderBlock[];
@@ -999,10 +1008,10 @@ class WhisperModel {
     }
 
     // conv1: 80 → dim, kernel=3, stride=1, padding=1 → length T
-    const c1 = conv1d(melTC, w.conv1W, w.conv1B, T, h.nMels, dim, 3, 1, 1);
+    const c1 = conv1dGpu(melTC, w.conv1Wt, w.conv1B, T, h.nMels, dim, 3, 1, 1);
     geluInPlace(c1.out);
     // conv2: dim → dim, kernel=3, stride=2, padding=1 → length T/2 (=1500)
-    const c2 = conv1d(c1.out, w.conv2W, w.conv2B, c1.Tout, dim, dim, 3, 2, 1);
+    const c2 = conv1dGpu(c1.out, w.conv2Wt, w.conv2B, c1.Tout, dim, dim, 3, 2, 1);
     geluInPlace(c2.out);
 
     const Tenc = c2.Tout;
@@ -1369,10 +1378,22 @@ function mapWeights(bin: BinModel): WhisperWeights {
   }
 
   const tokenEmbedHost = get("decoder.token_embedding.weight");
+  // Conv weights from whisper.cpp are stored as [Cout, Cin, K] (innermost
+  // varying first in flat memory). For the im2col + gpu.matmul path we
+  // need [Cin*K, Cout] — i.e. transpose the leading axis (Cout) with the
+  // collapsed inner axis (Cin*K).
+  const transposeConv = (W: Float32Array, Cout: number, KC: number): Float32Array => {
+    const t = new Float32Array(KC * Cout);
+    for (let p = 0; p < KC; p++) for (let co = 0; co < Cout; co++) t[p * Cout + co] = W[co * KC + p];
+    return t;
+  };
+  const dimAudio = bin.hparams.nAudioState;
+  const conv1W = get("encoder.conv1.weight");
+  const conv2W = get("encoder.conv2.weight");
   return {
-    conv1W: get("encoder.conv1.weight"),
+    conv1Wt: toGpu(transposeConv(conv1W, dimAudio, bin.hparams.nMels * 3)),
     conv1B: get("encoder.conv1.bias"),
-    conv2W: get("encoder.conv2.weight"),
+    conv2Wt: toGpu(transposeConv(conv2W, dimAudio, dimAudio * 3)),
     conv2B: get("encoder.conv2.bias"),
     encPosEmbed: get("encoder.positional_embedding"),
     encBlocks,
@@ -1416,7 +1437,7 @@ function runEncoderBlock(
   const V = gpuMatmul(xn, b.attnVWt, N, dim, dim);
   addBias(V, N, dim, b.attnVB);
 
-  const attnOut = scaledDotProductAttention(Q, K, V, N, N, nHead, headDim, false);
+  const attnOut = gpuScaledDotProductAttention(Q, K, V, N, nHead, headDim);
   const projOut = gpuMatmul(attnOut, b.attnOWt, N, dim, dim);
   addBias(projOut, N, dim, b.attnOB);
   for (let i = 0; i < x.length; i++) x[i] += projOut[i];
@@ -1485,6 +1506,91 @@ function scaledDotProductAttention(
         if (wj === 0) continue;
         const vBase = j * dim + h * headDim;
         for (let d = 0; d < headDim; d++) out[outBase + d] += wj * V[vBase + d];
+      }
+    }
+  }
+  return out;
+}
+
+// GPU-batched scaled-dot-product attention. Same semantics as
+// `scaledDotProductAttention` but offloads the per-head Q@K^T and
+// attn@V matmuls to bun:gpu. Used by the encoder where N=1500 makes the
+// CPU triple-loop the dominant cost.
+//
+// Layout convention: Q, K, V are [N, dim=nHead*headDim] interleaved-by-
+// head as in the rest of this file. We:
+//   1. Reshape into head-major contiguous [nHead, N, headDim].
+//   2. Per head: matmul(Q_h, K_h_T, N, headDim, N) → scores [N, N].
+//   3. Scale by 1/sqrt(headDim), softmax (CPU; the [N, N] tile is the
+//      working set the softmax needs and it's already in host memory
+//      after matmul).
+//   4. Per head: matmul(scores, V_h, N, N, headDim) → out [N, headDim].
+//   5. Reshape head-major back to interleaved-by-head [N, dim].
+function gpuScaledDotProductAttention(
+  Q: Float32Array,
+  K: Float32Array,
+  V: Float32Array,
+  N: number,
+  nHead: number,
+  headDim: number,
+): Float32Array {
+  const dim = nHead * headDim;
+  // Head-major reshape with K transposed in the head axis: K_h_T is
+  // shape [headDim, N] so we can matmul Q_h [N, headDim] × K_h_T → [N, N].
+  // V_h stays in [N, headDim] for the second matmul.
+  const Qh = new Float32Array(N * dim); // [nHead, N, headDim]
+  const KhT = new Float32Array(N * dim); // [nHead, headDim, N]
+  const Vh = new Float32Array(N * dim); // [nHead, N, headDim]
+  for (let i = 0; i < N; i++) {
+    for (let h = 0; h < nHead; h++) {
+      const srcBase = i * dim + h * headDim;
+      const dstQVBase = h * (N * headDim) + i * headDim;
+      for (let d = 0; d < headDim; d++) {
+        Qh[dstQVBase + d] = Q[srcBase + d];
+        Vh[dstQVBase + d] = V[srcBase + d];
+        KhT[h * (N * headDim) + d * N + i] = K[srcBase + d];
+      }
+    }
+  }
+
+  const invSqrtHead = 1.0 / Math.sqrt(headDim);
+  const out = new Float32Array(N * dim);
+  const headStride = N * headDim;
+  for (let h = 0; h < nHead; h++) {
+    // scores [N, N] = Q_h @ K_h_T
+    const Q_h = Qh.subarray(h * headStride, (h + 1) * headStride);
+    const KT_h = KhT.subarray(h * headStride, (h + 1) * headStride);
+    const scores = gpu.matmul(Q_h, KT_h, N, headDim, N) as Float32Array;
+
+    // Scale + softmax row-wise.
+    for (let i = 0; i < N; i++) {
+      const rowBase = i * N;
+      let max = -Infinity;
+      for (let j = 0; j < N; j++) {
+        const v = scores[rowBase + j] * invSqrtHead;
+        scores[rowBase + j] = v;
+        if (v > max) max = v;
+      }
+      let sum = 0;
+      for (let j = 0; j < N; j++) {
+        const e = Math.exp(scores[rowBase + j] - max);
+        scores[rowBase + j] = e;
+        sum += e;
+      }
+      const inv = sum > 0 ? 1.0 / sum : 0;
+      for (let j = 0; j < N; j++) scores[rowBase + j] *= inv;
+    }
+
+    // out_h = scores @ V_h
+    const V_h = Vh.subarray(h * headStride, (h + 1) * headStride);
+    const out_h = gpu.matmul(scores, V_h, N, N, headDim) as Float32Array;
+
+    // Place out_h back into the interleaved layout.
+    for (let i = 0; i < N; i++) {
+      const dstBase = i * dim + h * headDim;
+      const srcBase = i * headDim;
+      for (let d = 0; d < headDim; d++) {
+        out[dstBase + d] = out_h[srcBase + d];
       }
     }
   }
