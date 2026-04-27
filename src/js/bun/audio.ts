@@ -528,6 +528,206 @@ function spectrogram(samples: Float32Array, opts: SpectrogramOptions): Float32Ar
   return frames;
 }
 
+// ─── Mel spectrogram ───────────────────────────────────────────────────────
+// log-Mel filterbank features. The standard input shape Whisper / Wav2Vec /
+// modern speech models all consume:
+//
+//   1. STFT with a power-of-two FFT window (default 400 zero-padded to
+//      512, since 400 isn't a power of 2 and we want a real FFT).
+//   2. Square the magnitudes (power spectrum).
+//   3. Project through a triangular mel filterbank (default 80 bins, edges
+//      at fmin=0 Hz and fmax=sampleRate/2 in mel-spaced steps).
+//   4. log10(max(power, 1e-10)) and clip to a fixed dynamic range.
+//   5. Whisper specifically: clip max-min to 8 dB (re-scaled by *0.5 + 1).
+//
+// Slaney-style mel filterbank (matches librosa.filters.mel(htk=False)):
+//   mel(f)   = 1127 * ln(1 + f/700)        for f >= 1000 Hz (log region)
+//   mel(f)   = (3 * f) / 200               for f <  1000 Hz (linear region)
+// The two regions meet at 1000 Hz where both = 15. Whisper uses this form.
+
+const MEL_BREAK_FREQ_HZ = 1000;
+const MEL_BREAK_MEL = 15;
+const MEL_LOG_STEP = 27.0 / Math.log(6.4); // == 1127.01 / log(...) approximately
+
+function hzToMel(hz: number): number {
+  if (hz < MEL_BREAK_FREQ_HZ) return (3 * hz) / 200;
+  return MEL_BREAK_MEL + Math.log(hz / MEL_BREAK_FREQ_HZ) * MEL_LOG_STEP;
+}
+
+function melToHz(mel: number): number {
+  if (mel < MEL_BREAK_MEL) return (200 * mel) / 3;
+  return MEL_BREAK_FREQ_HZ * Math.exp((mel - MEL_BREAK_MEL) / MEL_LOG_STEP);
+}
+
+// Build a Slaney-normalized triangular filterbank: [nMels × (nFft/2 + 1)].
+function buildMelFilters(nMels: number, nFft: number, sampleRate: number): Float32Array {
+  const nBins = (nFft >>> 1) + 1;
+  const filters = new Float32Array(nMels * nBins);
+  const fmin = 0;
+  const fmax = sampleRate / 2;
+  const melMin = hzToMel(fmin);
+  const melMax = hzToMel(fmax);
+  // nMels + 2 anchor points → nMels triangles.
+  const melPoints = new Float32Array(nMels + 2);
+  for (let i = 0; i < nMels + 2; i++) melPoints[i] = melMin + ((melMax - melMin) * i) / (nMels + 1);
+  const hzPoints = new Float32Array(nMels + 2);
+  for (let i = 0; i < nMels + 2; i++) hzPoints[i] = melToHz(melPoints[i]);
+
+  // FFT bin frequencies: bin k corresponds to k * sampleRate / nFft.
+  for (let m = 0; m < nMels; m++) {
+    const fLeft = hzPoints[m];
+    const fCenter = hzPoints[m + 1];
+    const fRight = hzPoints[m + 2];
+    // Slaney normalization: filter peaks at 2/(fRight - fLeft) so that the
+    // total filter energy stays constant as the bandwidth widens at higher
+    // frequencies.
+    const scale = 2 / (fRight - fLeft);
+    for (let k = 0; k < nBins; k++) {
+      const f = (k * sampleRate) / nFft;
+      let weight = 0;
+      if (f >= fLeft && f <= fCenter) weight = (f - fLeft) / (fCenter - fLeft);
+      else if (f > fCenter && f <= fRight) weight = (fRight - f) / (fRight - fCenter);
+      filters[m * nBins + k] = weight * scale;
+    }
+  }
+  return filters;
+}
+
+type MelOptions = {
+  /** Sample rate of the input audio in Hz. Default 16000 (Whisper's rate). */
+  sampleRate?: number;
+  /**
+   * Number of mel filterbank bins. Default 80 (Whisper's count; some models
+   * — Wav2Vec2 — use 128).
+   */
+  nMels?: number;
+  /**
+   * STFT window size in samples. Default 400 (Whisper's 25ms at 16 kHz).
+   * Internally zero-padded up to the next power of two for the FFT.
+   */
+  windowSize?: number;
+  /** Hop between successive frames in samples. Default 160 (Whisper's 10ms at 16 kHz). */
+  hop?: number;
+  /** FFT size — must be a power of two ≥ windowSize. Default the next power of two ≥ windowSize. */
+  nFft?: number;
+  /**
+   * Output mode. "log10" returns dB-style log10(power) (general purpose).
+   * "whisper" returns Whisper's specific normalization: log10(max(power, 1e-10))
+   * clipped to 8 dB dynamic range and rescaled to ~[-1, 1].
+   * Default "whisper".
+   */
+  mode?: "log10" | "whisper";
+};
+
+type MelSpectrogram = {
+  /** Per-frame mel feature vectors, each of length `nMels`. */
+  frames: Float32Array[];
+  /** Number of mel bins (rows). */
+  nMels: number;
+  /** FFT size used internally. */
+  nFft: number;
+  /** Hop size in samples. */
+  hop: number;
+};
+
+function nextPowerOfTwo(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+// Pad a real signal so that the centered STFT covers the very first and
+// last samples — librosa-style "reflect" padding by half a window. Whisper
+// does this implicitly by padding the input audio to 30 s; for general use
+// we emit symmetric reflect padding.
+function reflectPad(x: Float32Array, padLeft: number, padRight: number): Float32Array {
+  const out = new Float32Array(x.length + padLeft + padRight);
+  // left = x[1..padLeft] reversed
+  for (let i = 0; i < padLeft; i++) out[i] = x[Math.min(padLeft - i, x.length - 1)];
+  // body
+  out.set(x, padLeft);
+  // right = x[n-2..n-1-padRight] reversed
+  for (let i = 0; i < padRight; i++) {
+    const idx = x.length - 2 - i;
+    out[padLeft + x.length + i] = x[Math.max(idx, 0)];
+  }
+  return out;
+}
+
+function melSpectrogram(samples: Float32Array, opts: MelOptions = {}): MelSpectrogram {
+  const sampleRate = opts.sampleRate ?? 16000;
+  const nMels = opts.nMels ?? 80;
+  const windowSize = opts.windowSize ?? 400;
+  const hop = opts.hop ?? 160;
+  const nFft = opts.nFft ?? nextPowerOfTwo(windowSize);
+  const mode = opts.mode ?? "whisper";
+  if ((nFft & (nFft - 1)) !== 0) {
+    throw new RangeError("bun:audio melSpectrogram: nFft must be a power of two");
+  }
+  if (nFft < windowSize) {
+    throw new RangeError("bun:audio melSpectrogram: nFft must be >= windowSize");
+  }
+
+  // Reflect-pad so the centered STFT starts from t=0 (matches librosa /
+  // Whisper's reference preprocessor).
+  const padded = reflectPad(samples, nFft >>> 1, nFft >>> 1);
+
+  const filters = buildMelFilters(nMels, nFft, sampleRate);
+  const nBins = (nFft >>> 1) + 1;
+  const window = hannWindow(windowSize);
+
+  const frames: Float32Array[] = [];
+  const fftBuf = new Float32Array(nFft * 2);
+  const power = new Float32Array(nBins);
+  for (let start = 0; start + windowSize <= padded.length; start += hop) {
+    fftBuf.fill(0);
+    for (let i = 0; i < windowSize; i++) fftBuf[i << 1] = padded[start + i] * window[i];
+    fftInPlace(fftBuf, true);
+    for (let k = 0; k < nBins; k++) {
+      const re = fftBuf[k << 1];
+      const im = fftBuf[(k << 1) + 1];
+      power[k] = re * re + im * im;
+    }
+    // Project through the mel filterbank: out[m] = sum_k filters[m,k] * power[k].
+    const mel = new Float32Array(nMels);
+    for (let m = 0; m < nMels; m++) {
+      let acc = 0;
+      const base = m * nBins;
+      for (let k = 0; k < nBins; k++) acc += filters[base + k] * power[k];
+      mel[m] = acc;
+    }
+    frames.push(mel);
+  }
+
+  // Compress to log scale.
+  if (mode === "log10") {
+    for (const frame of frames) {
+      for (let m = 0; m < frame.length; m++) frame[m] = Math.log10(Math.max(frame[m], 1e-10));
+    }
+  } else {
+    // Whisper's specific normalization. clamp(log10(max(p, 1e-10)) - max + 8, ...) / 4 then -1.
+    let globalMax = -Infinity;
+    for (const frame of frames) {
+      for (let m = 0; m < frame.length; m++) {
+        const v = Math.log10(Math.max(frame[m], 1e-10));
+        frame[m] = v;
+        if (v > globalMax) globalMax = v;
+      }
+    }
+    const floor = globalMax - 8;
+    for (const frame of frames) {
+      for (let m = 0; m < frame.length; m++) {
+        if (frame[m] < floor) frame[m] = floor;
+        // Rescale from [floor, globalMax] = [globalMax-8, globalMax] to [-1, 1]
+        // via (x - floor) / 4 - 1 = (x + 8 - globalMax) / 4 - 1 = (x - globalMax) / 4 + 1.
+        frame[m] = (frame[m] - globalMax) / 4 + 1;
+      }
+    }
+  }
+
+  return { frames, nMels, nFft, hop };
+}
+
 // ─── Voice activity detection ──────────────────────────────────────────────
 // RMS energy per frame, classified against an adaptive noise floor. Useful
 // for push-to-talk (only encode when speaking), bandwidth saving in
@@ -1762,6 +1962,7 @@ export default {
   deinterleave,
   resample,
   spectrogram,
+  melSpectrogram,
   detectVoice,
   decodeMp3,
   OpusEncoder,
