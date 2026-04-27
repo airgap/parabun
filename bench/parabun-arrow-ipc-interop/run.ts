@@ -82,14 +82,13 @@ console.log(`  column-wise equality: ${pass ? "✓" : "✗"}`);
 
 console.log("\n[2] apache-arrow encode → Parabun decode");
 
-// Build the same logical batch on the apache-arrow side. Pass `new Utf8()`
-// explicitly so apache-arrow emits a plain Utf8 column instead of its
-// default Dictionary<Utf8> — our reader doesn't support dictionary batches
-// yet (separate IPC message; tracked as a follow-up to ship next).
+// Build the same logical batch on the apache-arrow side. We deliberately
+// let apache-arrow choose the encoding for the string column — its default
+// is Dictionary<Utf8>, which exercises our DictionaryBatch handling.
 const aaBuilt = new AATable({
   age: vectorFromArray([25, 30, 35, 40, 45], new Int32()),
   score: vectorFromArray([0.95, 0.82, 0.71, 0.58, 0.45], new Float64()),
-  name: vectorFromArray(["alice", "bob", "carol", "dave", "eve"], new Utf8()),
+  name: vectorFromArray(["alice", "bob", "carol", "dave", "eve"]),
 });
 
 const aaBytes = tableToIPC(aaBuilt, "stream");

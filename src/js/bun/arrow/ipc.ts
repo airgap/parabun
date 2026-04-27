@@ -497,6 +497,17 @@ const RB_F_LENGTH = 0;
 const RB_F_NODES = 1;
 const RB_F_BUFFERS = 2;
 
+// DictionaryEncoding { id:i64, indexType:Int, isOrdered:bool, dictionaryKind:i16 }
+const DICT_F_ID = 0;
+const DICT_F_INDEX_TYPE = 1;
+// FIELD slot 4 is the optional DictionaryEncoding sub-table.
+const FIELD_F_DICTIONARY = 4;
+
+// DictionaryBatch { id:i64, data:RecordBatch, isDelta:bool }
+const DBATCH_F_ID = 0;
+const DBATCH_F_DATA = 1;
+const DBATCH_F_IS_DELTA = 2;
+
 // Buffer struct: offset:i64, length:i64. (Flatbuffers struct = inline 16
 // bytes.) We emit it inline within the buffers vector.
 // FieldNode struct: length:i64, null_count:i64. Same.
@@ -795,6 +806,14 @@ type ParsedField = {
   name: string;
   nullable: boolean;
   kind: ArrowKind;
+  /** When set, this field is dictionary-encoded. The body buffers in a
+   *  RecordBatch carry index values into the dictionary identified by
+   *  `dictId`; the actual logical values come from a DictionaryBatch
+   *  message keyed by the same id. */
+  dictId?: bigint;
+  /** Index buffer's element type when dictionary-encoded. apache-arrow
+   *  defaults to int32 for utf8 dictionaries. We support int32 + int64. */
+  indexKind?: ArrowKind;
 };
 
 function parseFieldType(fbr: FBR, fieldTablePos: number): ArrowKind {
@@ -838,7 +857,30 @@ function parseSchema(fbr: FBR, schemaTablePos: number): ParsedField[] {
     const name = namePos === undefined ? "" : fbr.readString(namePos);
     const nullable = fbr.readBool(fieldPos, FIELD_F_NULLABLE, false);
     const kind = parseFieldType(fbr, fieldPos);
-    out.push({ name, nullable, kind });
+
+    // Dictionary encoding is optional. When present, the field's body
+    // buffers carry index values; the actual logical values come from a
+    // DictionaryBatch message with the same id.
+    const dictPos = fbr.readOffset(fieldPos, FIELD_F_DICTIONARY);
+    let dictId: bigint | undefined;
+    let indexKind: ArrowKind | undefined;
+    if (dictPos !== undefined) {
+      dictId = fbr.readI64(dictPos, DICT_F_ID, 0n);
+      const indexTypePos = fbr.readOffset(dictPos, DICT_F_INDEX_TYPE);
+      if (indexTypePos !== undefined) {
+        const bw = fbr.readI32(indexTypePos, INT_F_BITWIDTH, 32);
+        const signed = fbr.readBool(indexTypePos, INT_F_IS_SIGNED, true);
+        if (!signed) throw new Error("bun:arrow.fromIPC: unsigned dictionary indexType not supported");
+        if (bw === 32) indexKind = "int32";
+        else if (bw === 64) indexKind = "int64";
+        else throw new Error(`bun:arrow.fromIPC: dictionary indexType bitWidth ${bw} not supported`);
+      } else {
+        // Default per spec: signed int32.
+        indexKind = "int32";
+      }
+    }
+
+    out.push({ name, nullable, kind, dictId, indexKind });
   }
   return out;
 }
@@ -848,6 +890,21 @@ type ParsedRecordBatch = {
   nodes: Array<{ length: number; nullCount: number }>;
   buffers: Array<{ offset: number; length: number }>;
 };
+
+type ParsedDictionaryBatch = {
+  id: bigint;
+  isDelta: boolean;
+  inner: ParsedRecordBatch;
+};
+
+function parseDictionaryBatchHeader(fbr: FBR, dbTablePos: number): ParsedDictionaryBatch {
+  const id = fbr.readI64(dbTablePos, DBATCH_F_ID, 0n);
+  const isDelta = fbr.readBool(dbTablePos, DBATCH_F_IS_DELTA, false);
+  const dataPos = fbr.readOffset(dbTablePos, DBATCH_F_DATA);
+  if (dataPos === undefined) throw new Error("bun:arrow.fromIPC: DictionaryBatch has no data table");
+  const inner = parseRecordBatchHeader(fbr, dataPos);
+  return { id, isDelta, inner };
+}
 
 function parseRecordBatchHeader(fbr: FBR, rbTablePos: number): ParsedRecordBatch {
   const length = Number(fbr.readI64(rbTablePos, RB_F_LENGTH, 0n));
@@ -976,6 +1033,82 @@ function reconstructColumn(
   }
 }
 
+// Materialize a dictionary-encoded field by resolving each index to its
+// dictionary value. Returns a regular Column of the field's logical type.
+// Validity from the index column propagates: a null index → null output.
+function resolveDictColumn(indexCol: ColumnLike, dict: ColumnLike, logicalKind: ArrowKind): ColumnLike {
+  const { Column } = getTypes();
+  const n = indexCol.length;
+  // We forward the index column's validity bitmap (post-resolution
+  // null-ness equals null-ness of the index for these dictionary types).
+  const validity = indexCol.validity;
+  const idxAt = (i: number): number | null => {
+    if (validity && !((validity[i >> 3] >> (i & 7)) & 1)) return null;
+    const v = indexCol.get(i);
+    return v == null ? null : Number(v);
+  };
+
+  switch (logicalKind) {
+    case "int32": {
+      const out = new Int32Array(n);
+      for (let i = 0; i < n; i++) {
+        const idx = idxAt(i);
+        if (idx == null) continue;
+        out[i] = dict.get(idx) as number;
+      }
+      return new Column({ kind: "int32" }, n, out, validity);
+    }
+    case "int64": {
+      const out = new BigInt64Array(n);
+      for (let i = 0; i < n; i++) {
+        const idx = idxAt(i);
+        if (idx == null) continue;
+        out[i] = dict.get(idx) as bigint;
+      }
+      return new Column({ kind: "int64" }, n, out, validity);
+    }
+    case "float32": {
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const idx = idxAt(i);
+        if (idx == null) continue;
+        out[i] = dict.get(idx) as number;
+      }
+      return new Column({ kind: "float32" }, n, out, validity);
+    }
+    case "float64": {
+      const out = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        const idx = idxAt(i);
+        if (idx == null) continue;
+        out[i] = dict.get(idx) as number;
+      }
+      return new Column({ kind: "float64" }, n, out, validity);
+    }
+    case "bool": {
+      const out = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        const idx = idxAt(i);
+        if (idx == null) continue;
+        out[i] = (dict.get(idx) as boolean) ? 1 : 0;
+      }
+      return new Column({ kind: "bool" }, n, out, validity);
+    }
+    case "utf8": {
+      const out: string[] = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const idx = idxAt(i);
+        if (idx == null) {
+          out[i] = "";
+          continue;
+        }
+        out[i] = dict.get(idx) as string;
+      }
+      return new Column({ kind: "utf8" }, n, out, validity);
+    }
+  }
+}
+
 // ─── Public decode entry point ────────────────────────────────────────────
 
 export function fromIPC(bytes: Uint8Array): TableLike {
@@ -983,7 +1116,12 @@ export function fromIPC(bytes: Uint8Array): TableLike {
 
   let cursor = 0;
   let schema: Schema | null = null;
+  let parsedFields: ParsedField[] = [];
   const batches: RecordBatchLike[] = [];
+  // dict_id → resolved values column. Populated when DictionaryBatch
+  // messages arrive; consumed when a RecordBatch references a dict-
+  // encoded field.
+  const dictionaries = new Map<bigint, ColumnLike>();
 
   while (cursor < bytes.byteLength) {
     // Continuation prefix or pre-V5 length-only prefix.
@@ -1018,9 +1156,9 @@ export function fromIPC(bytes: Uint8Array): TableLike {
 
     if (headerType === MESSAGE_HEADER_SCHEMA) {
       if (headerPos === undefined) throw new Error("bun:arrow.fromIPC: Schema message has no header table");
-      const fields = parseSchema(fbr, headerPos);
+      parsedFields = parseSchema(fbr, headerPos);
       schema = {
-        fields: fields.map(f => ({ name: f.name, type: { kind: f.kind }, nullable: f.nullable })),
+        fields: parsedFields.map(f => ({ name: f.name, type: { kind: f.kind }, nullable: f.nullable })),
       };
     } else if (headerType === MESSAGE_HEADER_RECORD_BATCH) {
       if (!schema) throw new Error("bun:arrow.fromIPC: RecordBatch arrived before Schema");
@@ -1029,21 +1167,64 @@ export function fromIPC(bytes: Uint8Array): TableLike {
       const cols: ColumnLike[] = [];
       let bufIndex = 0;
       for (let i = 0; i < schema.fields.length; i++) {
-        const f = schema.fields[i];
+        const pf = parsedFields[i];
         const node = rb.nodes[i];
-        const { column, consumed } = reconstructColumn(
-          { name: f.name, nullable: f.nullable, kind: f.type.kind },
-          body,
-          rb.buffers,
-          bufIndex,
-          node.length,
-        );
-        cols.push(column);
-        bufIndex += consumed;
+        if (pf.dictId !== undefined) {
+          // Dictionary-encoded field: body buffers carry an index column of
+          // pf.indexKind. Reconstruct the index column, then resolve every
+          // value through dictionaries[pf.dictId].
+          const dict = dictionaries.get(pf.dictId);
+          if (!dict) {
+            throw new Error(
+              `bun:arrow.fromIPC: dictionary id ${pf.dictId} referenced before its DictionaryBatch arrived`,
+            );
+          }
+          const { column: indexCol, consumed } = reconstructColumn(
+            { name: pf.name, nullable: pf.nullable, kind: pf.indexKind ?? "int32" },
+            body,
+            rb.buffers,
+            bufIndex,
+            node.length,
+          );
+          cols.push(resolveDictColumn(indexCol, dict, pf.kind));
+          bufIndex += consumed;
+        } else {
+          const { column, consumed } = reconstructColumn(
+            { name: pf.name, nullable: pf.nullable, kind: pf.kind },
+            body,
+            rb.buffers,
+            bufIndex,
+            node.length,
+          );
+          cols.push(column);
+          bufIndex += consumed;
+        }
       }
       batches.push(new RecordBatch(schema, cols, rb.length));
     } else if (headerType === MESSAGE_HEADER_DICTIONARY_BATCH) {
-      throw new Error("bun:arrow.fromIPC: dictionary batches are not yet supported");
+      if (headerPos === undefined) {
+        throw new Error("bun:arrow.fromIPC: DictionaryBatch message has no header table");
+      }
+      const db = parseDictionaryBatchHeader(fbr, headerPos);
+      if (db.isDelta) {
+        throw new Error(
+          "bun:arrow.fromIPC: dictionary deltas (isDelta=true) are not yet supported — apache-arrow's default is non-delta",
+        );
+      }
+      // Find the field that uses this dict id to determine the logical type.
+      const owner = parsedFields.find(f => f.dictId === db.id);
+      if (!owner) {
+        throw new Error(`bun:arrow.fromIPC: DictionaryBatch id ${db.id} arrived but no schema field references it`);
+      }
+      const innerNode = db.inner.nodes[0];
+      const { column } = reconstructColumn(
+        { name: "", nullable: false, kind: owner.kind },
+        body,
+        db.inner.buffers,
+        0,
+        innerNode.length,
+      );
+      dictionaries.set(db.id, column);
     }
     // Unknown header types are silently skipped (they consumed 0 body
     // since bodyLength was 0).
