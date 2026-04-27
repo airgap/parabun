@@ -1793,6 +1793,159 @@ function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): num
   return bestI < 0 ? 0 : bestI;
 }
 
+// ─── Kernel launch: variance ──────────────────────────────────────────────
+// Two-pass: first reduce_sum_f32 → host divides by n for the mean, then
+// variance_sumsq_f32 with that mean → host divides by (n - ddof). Reuses
+// the existing reduce machinery for pass 1; allocates one dedicated
+// partials buffer for pass 2. Held-handle inputs skip both HtoD passes.
+//
+// Returns NaN on empty input or `ddof >= n`. CPU fallback (no NVRTC)
+// mirrors gpu.ts's cpuVarianceF32 — Kahan-compensated mean + Σ deviation²
+// in JS.
+function launchVarianceF32(input: Float32Array | GpuHandle, ddof: number): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  const n = view.length;
+  if (n === 0 || ddof >= n) return NaN;
+
+  if (!probeDevOps()) {
+    // CPU fallback that matches gpu.ts's cpuVarianceF32 semantics.
+    let sum = 0;
+    let c = 0;
+    for (let i = 0; i < n; i++) {
+      const y = view[i] - c;
+      const t = sum + y;
+      c = t - sum - y;
+      sum = t;
+    }
+    const mean = sum / n;
+    let sumSq = 0;
+    for (let i = 0; i < n; i++) {
+      const d = view[i] - mean;
+      sumSq += d * d;
+    }
+    return sumSq / (n - ddof);
+  }
+
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aBytes = BigInt(n * 4);
+  const partialsBytes = BigInt(REDUCE_GRID * 4);
+
+  // Stage input on device (or reuse the held buffer).
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error("bun:gpu: variance called on released handle");
+    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = input.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    }
+    dA = dABuf[0];
+    aOwned = true;
+    if (s.cuMemcpyHtoD_v2(dA, ptr(view), aBytes) !== 0) {
+      s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    }
+  }
+
+  const dPartialsBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dPartialsBuf), partialsBytes) !== 0) {
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(partials) failed");
+  }
+  const dPartials = dPartialsBuf[0];
+
+  const cleanup = () => {
+    s.cuMemFree_v2(dPartials);
+    if (aOwned) s.cuMemFree_v2(dA);
+  };
+
+  // ── Pass 1: reduce_sum_f32 → partials → host sum → mean.
+  {
+    const pIn = new BigUint64Array([dA]);
+    const pOut = new BigUint64Array([dPartials]);
+    const pN = new Uint32Array([n]);
+    const params = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pOut)), BigInt(ptr(pN))]);
+    const r = s.cuLaunchKernel(devOpsFns!.reduceSum, REDUCE_GRID, 1, 1, REDUCE_BLOCK, 1, 1, 0, 0n, ptr(params), null);
+    if (r !== 0) {
+      cleanup();
+      throw new Error(`bun:gpu cuda: cuLaunchKernel(reduce_sum for variance) failed (${r})`);
+    }
+  }
+
+  if (s.cuCtxSynchronize() !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuCtxSynchronize after pass 1 failed");
+  }
+
+  const partials = new Float32Array(REDUCE_GRID);
+  if (s.cuMemcpyDtoH_v2(ptr(partials), dPartials, partialsBytes) !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials pass 1) failed");
+  }
+  let totalSum = 0;
+  let c = 0;
+  for (let i = 0; i < REDUCE_GRID; i++) {
+    const y = partials[i] - c;
+    const t = totalSum + y;
+    c = t - totalSum - y;
+    totalSum = t;
+  }
+  const mean = totalSum / n;
+
+  // ── Pass 2: variance_sumsq_f32 with the precomputed mean.
+  {
+    const pIn = new BigUint64Array([dA]);
+    const pOut = new BigUint64Array([dPartials]);
+    const pN = new Uint32Array([n]);
+    const pMean = new Float32Array([mean]);
+    const params = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pOut)), BigInt(ptr(pN)), BigInt(ptr(pMean))]);
+    const r = s.cuLaunchKernel(
+      devOpsFns!.varianceSumsq,
+      REDUCE_GRID,
+      1,
+      1,
+      REDUCE_BLOCK,
+      1,
+      1,
+      0,
+      0n,
+      ptr(params),
+      null,
+    );
+    if (r !== 0) {
+      cleanup();
+      throw new Error(`bun:gpu cuda: cuLaunchKernel(variance_sumsq) failed (${r})`);
+    }
+  }
+
+  if (s.cuCtxSynchronize() !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuCtxSynchronize after pass 2 failed");
+  }
+
+  const partials2 = new Float32Array(REDUCE_GRID);
+  if (s.cuMemcpyDtoH_v2(ptr(partials2), dPartials, partialsBytes) !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials pass 2) failed");
+  }
+  cleanup();
+
+  let sumSq = 0;
+  let c2 = 0;
+  for (let i = 0; i < REDUCE_GRID; i++) {
+    const y = partials2[i] - c2;
+    const t = sumSq + y;
+    c2 = t - sumSq - y;
+    sumSq = t;
+  }
+  return sumSq / (n - ddof);
+}
+
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
 //
 // a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
@@ -2631,6 +2784,17 @@ function argMax(input: FArray | GpuHandle): number {
     throw new TypeError("bun:gpu cuda: argMax requires Float32Array (f64 not yet supported)");
   }
   return launchArgF32(input as Float32Array | GpuHandle, "max");
+}
+
+// Variance dispatch — see launchVarianceF32. Two-pass (reduce_sum for the
+// mean, then variance_sumsq with that mean). NVRTC-only path; the launcher
+// itself contains the CPU fallback.
+function variance(input: FArray | GpuHandle, ddof: number): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("bun:gpu cuda: variance requires Float32Array (f64 not yet supported)");
+  }
+  return launchVarianceF32(input as Float32Array | GpuHandle, ddof);
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
@@ -4126,6 +4290,44 @@ extern "C" __global__ void argmin_grid_f32(
     }
 }
 
+// Variance — second pass given a precomputed mean: emit Σ(x - mean)²
+// partials per block. The first pass is just reduce_sum_f32; the host
+// turns the resulting sum into a mean, then launches this kernel and
+// finally divides the post-launch partial sum by (n - ddof).
+extern "C" __global__ void variance_sumsq_f32(
+    const float* __restrict__ in,
+    float* __restrict__ partials,
+    unsigned int n,
+    float mean
+) {
+    __shared__ float sdata[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+    unsigned int stride = gridDim.x * blockDim.x;
+
+    float acc = 0.0f;
+    for (unsigned int i = idx; i < n; i += stride) {
+        float d = in[i] - mean;
+        acc += d * d;
+    }
+    sdata[tid] = acc;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid < 32) {
+        float v = sdata[tid] + sdata[tid + 32];
+        v += __shfl_down_sync(0xffffffff, v, 16);
+        v += __shfl_down_sync(0xffffffff, v, 8);
+        v += __shfl_down_sync(0xffffffff, v, 4);
+        v += __shfl_down_sync(0xffffffff, v, 2);
+        v += __shfl_down_sync(0xffffffff, v, 1);
+        if (tid == 0) partials[blockIdx.x] = v;
+    }
+}
+
 extern "C" __global__ void argmax_grid_f32(
     const float* __restrict__ in,
     float* __restrict__ partial_v,
@@ -4214,6 +4416,7 @@ type DevOpsFns = {
    *  hand-written single-block argmax for sampling logits. */
   argminGrid: bigint;
   argmaxGrid: bigint;
+  varianceSumsq: bigint;
 };
 
 let devOpsProbed = false;
@@ -4311,6 +4514,7 @@ function probeDevOps(): boolean {
     "scanAddOffsets",
     "argminGrid",
     "argmaxGrid",
+    "varianceSumsq",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -4344,6 +4548,7 @@ function probeDevOps(): boolean {
     scanAddOffsets: "scan_add_offsets_f32",
     argminGrid: "argmin_grid_f32",
     argmaxGrid: "argmax_grid_f32",
+    varianceSumsq: "variance_sumsq_f32",
   };
 
   const fns = {} as DevOpsFns;
@@ -4896,6 +5101,7 @@ export default {
   scan,
   argMin,
   argMax,
+  variance,
   simdMap,
   alloc,
   isAligned,

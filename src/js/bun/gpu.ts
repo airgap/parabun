@@ -248,6 +248,13 @@ interface Backend {
   argMin?(input: Float32Array | GpuHandle): number;
   argMax?(input: Float32Array | GpuHandle): number;
   /**
+   * Population (or sample, with `ddof: 1`) variance over `Float32Array`.
+   * Two-pass: backend reduces for the mean, then reduces (x - mean)².
+   * Returns NaN on empty input or `ddof >= n`. Backends MAY implement;
+   * the public wrapper falls back to the CPU reference.
+   */
+  variance?(input: Float32Array | GpuHandle, ddof: number): number;
+  /**
    * Single-launch fused Gaussian blur on packed RGBA uint8 — used by
    * bun:image's GPU dispatch path. Returns null if the backend has no
    * GPU implementation available (e.g. CUDA without NVRTC), so the
@@ -1095,7 +1102,9 @@ function variance(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Arra
       }`,
     );
   }
+  const backend = resolveActive();
   const a = unwrapGpuArg(input as any);
+  if (backend.variance) return backend.variance(a as any, ddof);
   const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
   return cpuVarianceF32(aV, ddof);
 }
