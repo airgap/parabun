@@ -190,8 +190,44 @@ function readBinModel(bytes: Uint8Array): BinModel {
         data[i] = f16ToF32(view.getUint16(cursor + i * 2, true));
       }
       cursor += nElements * 2;
+    } else if (tFtype === 2 || tFtype === 6 || tFtype === 7 || tFtype === 8) {
+      // Block-quantized formats (32 elements per block, dequantize on read).
+      // GGML tensor type IDs: Q4_0=2, Q5_0=6, Q5_1=7, Q8_0=8.
+      // Whisper.cpp doesn't pad block boundaries — element count must be
+      // an exact multiple of 32.
+      if (nElements % QK !== 0) {
+        throw new Error(
+          `bun:llm whisper: tensor "${name}" has ${nElements} elements, not a multiple of ${QK} (quantized block size)`,
+        );
+      }
+      const nBlocks = nElements / QK;
+      data = new Float32Array(nElements);
+      const blockBytes = quantBlockSize(tFtype);
+      const offset = bytes.byteOffset + cursor;
+      const need = nBlocks * blockBytes;
+      if (cursor + need > bytes.byteLength) {
+        throw new Error(`bun:llm whisper: tensor "${name}" runs past EOF`);
+      }
+      const src = new Uint8Array(bytes.buffer, offset, need);
+      switch (tFtype) {
+        case 2:
+          dequantizeQ4_0(src, nBlocks, data);
+          break;
+        case 6:
+          dequantizeQ5_0(src, nBlocks, data);
+          break;
+        case 7:
+          dequantizeQ5_1(src, nBlocks, data);
+          break;
+        case 8:
+          dequantizeQ8_0(src, nBlocks, data);
+          break;
+      }
+      cursor += need;
     } else {
-      throw new Error(`bun:llm whisper: unsupported tensor ftype=${tFtype} for "${name}" (only F32 / F16 supported)`);
+      throw new Error(
+        `bun:llm whisper: unsupported tensor ftype=${tFtype} for "${name}" (F32, F16, Q4_0, Q5_0, Q5_1, Q8_0 supported)`,
+      );
     }
 
     tensors.set(name, { dims, ftype: tFtype, data });
@@ -214,6 +250,116 @@ function f16ToF32(h: number): number {
     return frac === 0 ? (sign ? -Infinity : Infinity) : NaN;
   }
   return (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + frac / 1024);
+}
+
+// ─── Block-quantized weight dequantization ────────────────────────────────
+// All quantized formats here pack 32 elements into one block. Block layouts
+// match the GGML reference (whisper.cpp/ggml/src/ggml-quants.c).
+//
+// Q4_0: [f16 d][16 bytes 4-bit packed]                  18 bytes / 32 vals
+// Q4_1: [f16 d][f16 m][16 bytes 4-bit packed]           20 bytes / 32 vals  (not handled here)
+// Q5_0: [f16 d][4 bytes hi-bits][16 bytes 4-bit lo]     22 bytes / 32 vals
+// Q5_1: [f16 d][f16 m][4 bytes hi-bits][16 bytes lo]    24 bytes / 32 vals
+// Q8_0: [f16 d][32 × i8]                                34 bytes / 32 vals
+const QK = 32;
+
+function quantBlockSize(ftype: number): number {
+  switch (ftype) {
+    case 2:
+      return 18; // Q4_0
+    case 6:
+      return 22; // Q5_0
+    case 7:
+      return 24; // Q5_1
+    case 8:
+      return 34; // Q8_0
+  }
+  throw new Error(`bun:llm whisper: no block size for ftype=${ftype}`);
+}
+
+function readF16(src: Uint8Array, off: number): number {
+  return f16ToF32(src[off] | (src[off + 1] << 8));
+}
+
+function dequantizeQ4_0(src: Uint8Array, nBlocks: number, dst: Float32Array): void {
+  let off = 0;
+  let dstIdx = 0;
+  for (let b = 0; b < nBlocks; b++) {
+    const d = readF16(src, off);
+    const qBase = off + 2;
+    for (let j = 0; j < 16; j++) {
+      const byte = src[qBase + j];
+      // Element layout per byte: low nibble = j, high nibble = j+16.
+      const x0 = (byte & 0x0f) - 8;
+      const x1 = (byte >> 4) - 8;
+      dst[dstIdx + j] = d * x0;
+      dst[dstIdx + 16 + j] = d * x1;
+    }
+    off += 18;
+    dstIdx += QK;
+  }
+}
+
+function dequantizeQ8_0(src: Uint8Array, nBlocks: number, dst: Float32Array): void {
+  let off = 0;
+  let dstIdx = 0;
+  for (let b = 0; b < nBlocks; b++) {
+    const d = readF16(src, off);
+    const qBase = off + 2;
+    for (let j = 0; j < QK; j++) {
+      // i8 in twos-complement; shift-trick to sign-extend.
+      const v = (src[qBase + j] << 24) >> 24;
+      dst[dstIdx + j] = d * v;
+    }
+    off += 34;
+    dstIdx += QK;
+  }
+}
+
+function dequantizeQ5_0(src: Uint8Array, nBlocks: number, dst: Float32Array): void {
+  let off = 0;
+  let dstIdx = 0;
+  for (let b = 0; b < nBlocks; b++) {
+    const d = readF16(src, off);
+    // 4 bytes hi-bits = 32 single-bit flags packed little-endian.
+    const qhBase = off + 2;
+    const qhU32 = src[qhBase] | (src[qhBase + 1] << 8) | (src[qhBase + 2] << 16) | (src[qhBase + 3] << 24);
+    const qBase = off + 6;
+    for (let j = 0; j < 16; j++) {
+      const byte = src[qBase + j];
+      const xh0 = ((qhU32 >>> j) & 1) << 4;
+      const xh1 = ((qhU32 >>> (j + 16)) & 1) << 4;
+      const x0 = ((byte & 0x0f) | xh0) - 16;
+      const x1 = ((byte >> 4) | xh1) - 16;
+      dst[dstIdx + j] = d * x0;
+      dst[dstIdx + 16 + j] = d * x1;
+    }
+    off += 22;
+    dstIdx += QK;
+  }
+}
+
+function dequantizeQ5_1(src: Uint8Array, nBlocks: number, dst: Float32Array): void {
+  let off = 0;
+  let dstIdx = 0;
+  for (let b = 0; b < nBlocks; b++) {
+    const d = readF16(src, off);
+    const m = readF16(src, off + 2);
+    const qhBase = off + 4;
+    const qhU32 = src[qhBase] | (src[qhBase + 1] << 8) | (src[qhBase + 2] << 16) | (src[qhBase + 3] << 24);
+    const qBase = off + 8;
+    for (let j = 0; j < 16; j++) {
+      const byte = src[qBase + j];
+      const xh0 = ((qhU32 >>> j) & 1) << 4;
+      const xh1 = ((qhU32 >>> (j + 16)) & 1) << 4;
+      const x0 = (byte & 0x0f) | xh0;
+      const x1 = (byte >> 4) | xh1;
+      dst[dstIdx + j] = d * x0 + m;
+      dst[dstIdx + 16 + j] = d * x1 + m;
+    }
+    off += 24;
+    dstIdx += QK;
+  }
 }
 
 // ─── FFT + mel preprocessing (inlined from bun:audio) ─────────────────────
