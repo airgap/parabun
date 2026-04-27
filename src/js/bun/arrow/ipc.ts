@@ -818,6 +818,13 @@ type ParsedField = {
   name: string;
   nullable: boolean;
   kind: ArrowKind;
+  /** Wire byte-width for narrow-int columns we widen on read (int8/int16
+   *  → int32, uint32 → int64). Undefined when wire matches the logical
+   *  kind's natural width. */
+  wireWidth?: 1 | 2 | 4 | 8;
+  /** Wire-format signedness when widening — needed to decide between
+   *  sign-extension and zero-extension. */
+  wireSigned?: boolean;
   /** When set, this field is dictionary-encoded. The body buffers in a
    *  RecordBatch carry index values into the dictionary identified by
    *  `dictId`; the actual logical values come from a DictionaryBatch
@@ -828,7 +835,18 @@ type ParsedField = {
   indexKind?: ArrowKind;
 };
 
-function parseFieldType(fbr: FBR, fieldTablePos: number): ArrowKind {
+type ParsedFieldType = {
+  kind: ArrowKind;
+  /** Wire-format byte width per element when it differs from the logical
+   *  kind's natural width. Used for narrow ints (int8 / int16) and unsigned
+   *  variants (uint8 / uint16 / uint32) that we widen on read. */
+  wireWidth?: 1 | 2 | 4 | 8;
+  /** True if the wire-format integer is signed. Defaults to true for the
+   *  native widths int32 / int64. */
+  wireSigned?: boolean;
+};
+
+function parseFieldType(fbr: FBR, fieldTablePos: number): ParsedFieldType {
   const typeId = fbr.readU8(fieldTablePos, FIELD_F_TYPE_TYPE, 0);
   const typeTablePos = fbr.readOffset(fieldTablePos, FIELD_F_TYPE);
   if (typeTablePos === undefined) {
@@ -838,36 +856,50 @@ function parseFieldType(fbr: FBR, fieldTablePos: number): ArrowKind {
     case TYPE_INT: {
       const bw = fbr.readI32(typeTablePos, INT_F_BITWIDTH, 0);
       const signed = fbr.readBool(typeTablePos, INT_F_IS_SIGNED, false);
-      if (!signed) throw new Error(`bun:arrow.fromIPC: unsigned int columns are not yet supported (bitWidth=${bw})`);
-      if (bw === 32) return "int32";
-      if (bw === 64) return "int64";
+      // Wire-width-driven widening:
+      //   int8  / int16  → int32  (sign-extending read)
+      //   uint8 / uint16 → int32  (zero-extending read; always fits)
+      //   int32          → int32  (native)
+      //   uint32         → int64  (zero-extending; doesn't fit in i32)
+      //   int64          → int64  (native)
+      //   uint64         → throw  (doesn't fit losslessly anywhere)
+      if (bw === 8) return { kind: "int32", wireWidth: 1, wireSigned: signed };
+      if (bw === 16) return { kind: "int32", wireWidth: 2, wireSigned: signed };
+      if (bw === 32) {
+        if (signed) return { kind: "int32" };
+        return { kind: "int64", wireWidth: 4, wireSigned: false };
+      }
+      if (bw === 64) {
+        if (signed) return { kind: "int64" };
+        throw new Error("bun:arrow.fromIPC: uint64 columns are not supported (no lossless target)");
+      }
       throw new Error(`bun:arrow.fromIPC: int bitWidth ${bw} not supported`);
     }
     case TYPE_FLOATINGPOINT: {
       const prec = fbr.readI16(typeTablePos, FP_F_PRECISION, 0);
-      if (prec === FB_PRECISION_SINGLE) return "float32";
-      if (prec === FB_PRECISION_DOUBLE) return "float64";
+      if (prec === FB_PRECISION_SINGLE) return { kind: "float32" };
+      if (prec === FB_PRECISION_DOUBLE) return { kind: "float64" };
       throw new Error(`bun:arrow.fromIPC: floating-point precision ${prec} not supported`);
     }
     case TYPE_BOOL:
-      return "bool";
+      return { kind: "bool" };
     case TYPE_UTF8:
-      return "utf8";
+      return { kind: "utf8" };
     case TYPE_DATE: {
       // DateUnit: DAY=0 (32-bit days since epoch), MILLISECOND=1 (64-bit ms).
       const unit = fbr.readI16(typeTablePos, DATE_F_UNIT, 1);
-      if (unit === 0) return "int32";
-      if (unit === 1) return "int64";
+      if (unit === 0) return { kind: "int32" };
+      if (unit === 1) return { kind: "int64" };
       throw new Error(`bun:arrow.fromIPC: Date unit ${unit} not supported`);
     }
     case TYPE_TIMESTAMP:
       // Always 64-bit regardless of TimeUnit; timezone metadata dropped.
-      return "int64";
+      return { kind: "int64" };
     case TYPE_TIME: {
       // Time has its own bitWidth field (32 or 64).
       const bw = fbr.readI32(typeTablePos, TIME_F_BITWIDTH, 32);
-      if (bw === 32) return "int32";
-      if (bw === 64) return "int64";
+      if (bw === 32) return { kind: "int32" };
+      if (bw === 64) return { kind: "int64" };
       throw new Error(`bun:arrow.fromIPC: Time bitWidth ${bw} not supported`);
     }
     default:
@@ -885,7 +917,7 @@ function parseSchema(fbr: FBR, schemaTablePos: number): ParsedField[] {
     const namePos = fbr.readOffset(fieldPos, FIELD_F_NAME);
     const name = namePos === undefined ? "" : fbr.readString(namePos);
     const nullable = fbr.readBool(fieldPos, FIELD_F_NULLABLE, false);
-    const kind = parseFieldType(fbr, fieldPos);
+    const parsed = parseFieldType(fbr, fieldPos);
 
     // Dictionary encoding is optional. When present, the field's body
     // buffers carry index values; the actual logical values come from a
@@ -909,7 +941,15 @@ function parseSchema(fbr: FBR, schemaTablePos: number): ParsedField[] {
       }
     }
 
-    out.push({ name, nullable, kind, dictId, indexKind });
+    out.push({
+      name,
+      nullable,
+      kind: parsed.kind,
+      wireWidth: parsed.wireWidth,
+      wireSigned: parsed.wireSigned,
+      dictId,
+      indexKind,
+    });
   }
   return out;
 }
@@ -983,27 +1023,56 @@ function reconstructColumn(
   switch (field.kind) {
     case "int32": {
       const valBuf = buffers[bufIndex + 1];
-      const view = new Int32Array(body.buffer, body.byteOffset + valBuf.offset, rowCount);
+      const wireWidth = field.wireWidth ?? 4;
+      const wireSigned = field.wireSigned ?? true;
+      const out = new Int32Array(rowCount);
+      const valView = new DataView(body.buffer, body.byteOffset + valBuf.offset, valBuf.length);
+      if (wireWidth === 4 && wireSigned) {
+        // Native int32 — same-width copy.
+        const view = new Int32Array(body.buffer, body.byteOffset + valBuf.offset, rowCount);
+        out.set(view);
+      } else if (wireWidth === 1) {
+        if (wireSigned) {
+          for (let i = 0; i < rowCount; i++) out[i] = valView.getInt8(i);
+        } else {
+          for (let i = 0; i < rowCount; i++) out[i] = valView.getUint8(i);
+        }
+      } else if (wireWidth === 2) {
+        if (wireSigned) {
+          for (let i = 0; i < rowCount; i++) out[i] = valView.getInt16(i * 2, true);
+        } else {
+          for (let i = 0; i < rowCount; i++) out[i] = valView.getUint16(i * 2, true);
+        }
+      } else {
+        throw new Error(
+          `bun:arrow.fromIPC: int32 widen path: wireWidth=${wireWidth} signed=${wireSigned} not supported`,
+        );
+      }
       return {
-        column: new Column(
-          { kind: "int32" },
-          rowCount,
-          new Int32Array(view),
-          validitySlice ? new Uint8Array(validitySlice) : undefined,
-        ),
+        column: new Column({ kind: "int32" }, rowCount, out, validitySlice ? new Uint8Array(validitySlice) : undefined),
         consumed: 2,
       };
     }
     case "int64": {
       const valBuf = buffers[bufIndex + 1];
-      const view = new BigInt64Array(body.buffer, body.byteOffset + valBuf.offset, rowCount);
+      const wireWidth = field.wireWidth ?? 8;
+      const wireSigned = field.wireSigned ?? true;
+      const out = new BigInt64Array(rowCount);
+      const valView = new DataView(body.buffer, body.byteOffset + valBuf.offset, valBuf.length);
+      if (wireWidth === 8 && wireSigned) {
+        // Native int64 — same-width copy.
+        const view = new BigInt64Array(body.buffer, body.byteOffset + valBuf.offset, rowCount);
+        out.set(view);
+      } else if (wireWidth === 4 && !wireSigned) {
+        // uint32 → int64 (zero-extend).
+        for (let i = 0; i < rowCount; i++) out[i] = BigInt(valView.getUint32(i * 4, true));
+      } else {
+        throw new Error(
+          `bun:arrow.fromIPC: int64 widen path: wireWidth=${wireWidth} signed=${wireSigned} not supported`,
+        );
+      }
       return {
-        column: new Column(
-          { kind: "int64" },
-          rowCount,
-          new BigInt64Array(view),
-          validitySlice ? new Uint8Array(validitySlice) : undefined,
-        ),
+        column: new Column({ kind: "int64" }, rowCount, out, validitySlice ? new Uint8Array(validitySlice) : undefined),
         consumed: 2,
       };
     }
@@ -1218,13 +1287,7 @@ export function fromIPC(bytes: Uint8Array): TableLike {
           cols.push(resolveDictColumn(indexCol, dict, pf.kind));
           bufIndex += consumed;
         } else {
-          const { column, consumed } = reconstructColumn(
-            { name: pf.name, nullable: pf.nullable, kind: pf.kind },
-            body,
-            rb.buffers,
-            bufIndex,
-            node.length,
-          );
+          const { column, consumed } = reconstructColumn(pf, body, rb.buffers, bufIndex, node.length);
           cols.push(column);
           bufIndex += consumed;
         }

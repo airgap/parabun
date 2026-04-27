@@ -22,7 +22,11 @@ import {
   vectorFromArray,
   makeData,
   Type,
+  Int8,
+  Int16,
   Int32,
+  Uint16,
+  Uint32,
   Float64,
   Bool,
   Utf8,
@@ -100,6 +104,13 @@ const aaBuilt = new AATable({
   score: vectorFromArray([0.95, 0.82, 0.71, 0.58, 0.45], new Float64()),
   name: vectorFromArray(["alice", "bob", "carol", "dave", "eve"]),
   joined: vectorFromArray(joinedDates),
+  // Narrow int columns to exercise the widening read path:
+  //   int8  → int32 sign-extending
+  //   uint16 → int32 zero-extending
+  //   uint32 → int64 zero-extending (BigInt)
+  status: vectorFromArray([-1, 0, 1, 2, 127], new Int8()),
+  port: vectorFromArray([80, 443, 8080, 22, 65000], new Uint16()),
+  ip: vectorFromArray([3232235521, 3232235522, 3232235523, 3232235524, 3232235525], new Uint32()),
 });
 
 const aaBytes = tableToIPC(aaBuilt, "stream");
@@ -119,22 +130,36 @@ const restoredAge = parabunRestored.column("age");
 const restoredScore = parabunRestored.column("score");
 const restoredName = parabunRestored.column("name");
 const restoredJoined = parabunRestored.column("joined");
+const restoredStatus = parabunRestored.column("status");
+const restoredPort = parabunRestored.column("port");
+const restoredIp = parabunRestored.column("ip");
 const expectedJoined = joinedDates.map(d => BigInt(d.getTime()));
+const expectedStatus = [-1, 0, 1, 2, 127];
+const expectedPort = [80, 443, 8080, 22, 65000];
+const expectedIp = [3232235521n, 3232235522n, 3232235523n, 3232235524n, 3232235525n];
 for (let i = 0; i < parabunRestored.numRows; i++) {
   const a = restoredAge.get(i);
   const s = restoredScore.get(i);
   const n = restoredName.get(i);
   const j = restoredJoined.get(i);
+  const st = restoredStatus.get(i);
+  const p = restoredPort.get(i);
+  const ip = restoredIp.get(i);
   const expA = ageVec.get(i);
   const expS = scoreVec.get(i);
   const expN = nameVec.get(i);
   const expJ = expectedJoined[i];
-  if (a !== expA || s !== expS || n !== expN || j !== expJ) {
-    console.log(`  ✗ row ${i}: got (${a}, ${s}, ${n}, ${j}), expected (${expA}, ${expS}, ${expN}, ${expJ})`);
+  const expSt = expectedStatus[i];
+  const expP = expectedPort[i];
+  const expIp = expectedIp[i];
+  if (a !== expA || s !== expS || n !== expN || j !== expJ || st !== expSt || p !== expP || ip !== expIp) {
+    console.log(
+      `  ✗ row ${i}: got (${a}, ${s}, ${n}, ${j}, ${st}, ${p}, ${ip}), expected (${expA}, ${expS}, ${expN}, ${expJ}, ${expSt}, ${expP}, ${expIp})`,
+    );
     pass2 = false;
   }
 }
-console.log(`  column-wise equality (incl. Date64 → int64 ms): ${pass2 ? "✓" : "✗"}`);
+console.log(`  column-wise equality (Date64 + Int8 + Uint16 + Uint32 widened): ${pass2 ? "✓" : "✗"}`);
 
 // ─── Result ──────────────────────────────────────────────────────────────
 
