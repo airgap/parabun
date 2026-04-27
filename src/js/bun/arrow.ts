@@ -1326,11 +1326,14 @@ function fromIPC(bytes: Uint8Array): Table {
   return ipc.fromIPC(bytes) as Table;
 }
 
-function toIPC(source: Table | RecordBatch): Uint8Array {
+function toIPC(source: Table | RecordBatch, format: "stream" | "file" = "stream"): Uint8Array {
   if (!(source instanceof Table) && !(source instanceof RecordBatch)) {
     throw new TypeError("bun:arrow.toIPC: source must be a Table or RecordBatch");
   }
-  return ipc.toIPC(source) as Uint8Array;
+  if (format !== "stream" && format !== "file") {
+    throw new TypeError(`bun:arrow.toIPC: format must be "stream" or "file", got ${format}`);
+  }
+  return ipc.toIPC(source, format) as Uint8Array;
 }
 
 const PARQUET_NOT_IMPL =

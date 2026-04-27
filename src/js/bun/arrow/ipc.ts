@@ -811,18 +811,45 @@ function eosFrame(): Uint8Array {
 
 // ─── Public encode entry point ────────────────────────────────────────────
 
-export function toIPC(source: TableLike | RecordBatchLike): Uint8Array {
+// File format magic bytes. The leading magic is "ARROW1" (6 bytes) followed
+// by two NUL padding bytes for 8-byte alignment of the streaming messages.
+// The trailing magic is just "ARROW1" — no padding (per the format spec).
+const FILE_MAGIC_HEAD = new Uint8Array([0x41, 0x52, 0x52, 0x4f, 0x57, 0x31, 0x00, 0x00]);
+const FILE_MAGIC_TAIL = new Uint8Array([0x41, 0x52, 0x52, 0x4f, 0x57, 0x31]);
+
+// Footer { version:i16, schema:Schema, dictionaries:[Block], recordBatches:[Block], custom_metadata:[KV] }
+const FOOTER_F_VERSION = 0;
+const FOOTER_F_SCHEMA = 1;
+const FOOTER_F_DICTIONARIES = 2;
+const FOOTER_F_RECORD_BATCHES = 3;
+
+// Block is a flatbuffers struct: { offset:i64, metaDataLength:i32, bodyLength:i64 }.
+// With max-alignment 8 the layout is offset@0, metaDataLength@8, padding@12..15,
+// bodyLength@16, total size 24.
+const BLOCK_SIZE = 24;
+
+export function toIPC(source: TableLike | RecordBatchLike, format: "stream" | "file" = "stream"): Uint8Array {
   const batches: RecordBatchLike[] = "batches" in source ? source.batches : [source];
   const schema: Schema = source.schema;
 
   const out: Uint8Array[] = [];
+  // For the file format we record the absolute offset (and metadata + body
+  // lengths) of each message so the Footer can point at them.
+  const blocks: Array<{ offset: number; metaDataLength: number; bodyLength: number }> = [];
+  let offsetCursor = 0;
+  if (format === "file") {
+    out.push(FILE_MAGIC_HEAD);
+    offsetCursor += FILE_MAGIC_HEAD.byteLength;
+  }
 
   // Schema message — empty body.
   {
     const fbb = new FBB();
     const headerOffset = encodeSchemaMessage(fbb, schema);
     const meta = encodeMessage(fbb, MESSAGE_HEADER_SCHEMA, headerOffset, 0n);
-    out.push(frameMessage(meta, new Uint8Array(0)));
+    const framed = frameMessage(meta, new Uint8Array(0));
+    out.push(framed);
+    offsetCursor += framed.byteLength;
   }
 
   // RecordBatch messages.
@@ -831,10 +858,64 @@ export function toIPC(source: TableLike | RecordBatchLike): Uint8Array {
     const fbb = new FBB();
     const headerOffset = encodeRecordBatchHeader(fbb, plan, batch.numRows);
     const meta = encodeMessage(fbb, MESSAGE_HEADER_RECORD_BATCH, headerOffset, BigInt(plan.body.byteLength));
-    out.push(frameMessage(meta, plan.body));
+    const framed = frameMessage(meta, plan.body);
+    if (format === "file") {
+      // Block.metaDataLength includes the 8-byte prefix (continuation + len)
+      // and the padded metadata flatbuffer; body follows immediately after.
+      blocks.push({
+        offset: offsetCursor,
+        metaDataLength: framed.byteLength - plan.body.byteLength,
+        bodyLength: plan.body.byteLength,
+      });
+    }
+    out.push(framed);
+    offsetCursor += framed.byteLength;
   }
 
+  // Per spec, both stream and file formats end the message section with
+  // an EOS marker. The file format then continues with the footer.
   out.push(eosFrame());
+  if (format === "file") {
+    offsetCursor += 8; // EOS frame is 8 bytes
+    // Build the Footer flatbuffer, then append footer length + tail magic.
+    const fbb = new FBB();
+    const schemaOffset = encodeSchemaMessage(fbb, schema);
+
+    // recordBatches vector of inline Block structs (24 bytes each, 8-aligned).
+    fbb.prep(8, BLOCK_SIZE * blocks.length + 4);
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      // Block struct layout (reverse since FB writes back-to-front):
+      // [offset:i64 | metaLen:i32 | pad:4 | bodyLen:i64]
+      const b = blocks[i];
+      fbb.writeInt64(BigInt(b.bodyLength));
+      // 4 bytes padding before bodyLength to maintain i64 alignment for it.
+      fbb.writeUint32(0);
+      fbb.writeInt32(b.metaDataLength);
+      fbb.writeInt64(BigInt(b.offset));
+    }
+    fbb.writeUint32(blocks.length);
+    const recordBatchesVec = fbb.cursor;
+
+    // dictionaries vector — empty (we don't emit dict batches).
+    fbb.prep(8, 4);
+    fbb.writeUint32(0);
+    const dictionariesVec = fbb.cursor;
+
+    fbb.startObject(5);
+    fbb.addOffset(FOOTER_F_RECORD_BATCHES, recordBatchesVec);
+    fbb.addOffset(FOOTER_F_DICTIONARIES, dictionariesVec);
+    fbb.addOffset(FOOTER_F_SCHEMA, schemaOffset);
+    fbb.addInt16(FOOTER_F_VERSION, METADATA_VERSION_V5, 0);
+    const root = fbb.endObject();
+    const footerBytes = fbb.finish(root);
+
+    // Layout: [...messages][EOS][Footer flatbuffer][footer_length:i32][ARROW1]
+    out.push(footerBytes);
+    const tail = new Uint8Array(4 + FILE_MAGIC_TAIL.byteLength);
+    new DataView(tail.buffer).setInt32(0, footerBytes.byteLength, true);
+    tail.set(FILE_MAGIC_TAIL, 4);
+    out.push(tail);
+  }
 
   // Concatenate all frames.
   let total = 0;
@@ -1328,7 +1409,30 @@ function resolveDictColumn(indexCol: ColumnLike, dict: ColumnLike, logicalKind: 
 
 // ─── Public decode entry point ────────────────────────────────────────────
 
+// Returns true if `bytes` starts with the 8-byte head magic ("ARROW1\0\0")
+// and ends with the 6-byte tail magic ("ARROW1"). The format is asymmetric:
+// the head is padded to 8-byte alignment for the streaming messages that
+// follow it, the tail isn't.
+function looksLikeFileFormat(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < FILE_MAGIC_HEAD.byteLength + FILE_MAGIC_TAIL.byteLength + 4) return false;
+  for (let i = 0; i < FILE_MAGIC_HEAD.byteLength; i++) {
+    if (bytes[i] !== FILE_MAGIC_HEAD[i]) return false;
+  }
+  for (let i = 0; i < FILE_MAGIC_TAIL.byteLength; i++) {
+    if (bytes[bytes.byteLength - FILE_MAGIC_TAIL.byteLength + i] !== FILE_MAGIC_TAIL[i]) return false;
+  }
+  return true;
+}
+
 export function fromIPC(bytes: Uint8Array): TableLike {
+  // Auto-detect the file format. apache-arrow's file format puts the
+  // Schema in the Footer (not as a leading streaming Schema message) and
+  // identifies each RecordBatch / DictionaryBatch by the absolute byte
+  // offset and metadata-length / body-length recorded in the Footer's
+  // Block lists. We parse the footer up front, then decode each block.
+  if (looksLikeFileFormat(bytes)) {
+    return fromIPCFile(bytes);
+  }
   const { RecordBatch, Table, Column } = getTypes();
 
   let cursor = 0;
@@ -1459,30 +1563,191 @@ export function fromIPC(bytes: Uint8Array): TableLike {
   }
 
   if (!schema) throw new Error("bun:arrow.fromIPC: stream ended before any Schema message");
-  if (batches.length === 0) {
-    // Allow empty streams — return a table with one zero-length batch.
-    const makeEmpty = (type: DataType): ColumnLike => {
-      switch (type.kind) {
-        case "int32":
-          return new Column({ kind: "int32" }, 0, new Int32Array(0));
-        case "int64":
-          return new Column({ kind: "int64" }, 0, new BigInt64Array(0));
-        case "float32":
-          return new Column({ kind: "float32" }, 0, new Float32Array(0));
-        case "float64":
-          return new Column({ kind: "float64" }, 0, new Float64Array(0));
-        case "bool":
-          return new Column({ kind: "bool" }, 0, new Uint8Array(0));
-        case "utf8":
-          return new Column({ kind: "utf8" }, 0, []);
-        case "list":
-          // Single-entry offsets ([0]) — there are no rows so no per-row
-          // offset, but the offsets buffer still needs the trailing total.
-          return new Column(type, 0, new Int32Array([0]), undefined, makeEmpty(type.child));
-      }
-    };
-    const emptyCols: ColumnLike[] = schema.fields.map(f => makeEmpty(f.type));
-    return new Table(schema, [new RecordBatch(schema, emptyCols, 0)]);
+  if (batches.length === 0) return emptyTable(schema);
+  return new Table(schema, batches);
+}
+
+function emptyTable(schema: Schema): TableLike {
+  const { RecordBatch, Table, Column } = getTypes();
+  const makeEmpty = (type: DataType): ColumnLike => {
+    switch (type.kind) {
+      case "int32":
+        return new Column({ kind: "int32" }, 0, new Int32Array(0));
+      case "int64":
+        return new Column({ kind: "int64" }, 0, new BigInt64Array(0));
+      case "float32":
+        return new Column({ kind: "float32" }, 0, new Float32Array(0));
+      case "float64":
+        return new Column({ kind: "float64" }, 0, new Float64Array(0));
+      case "bool":
+        return new Column({ kind: "bool" }, 0, new Uint8Array(0));
+      case "utf8":
+        return new Column({ kind: "utf8" }, 0, []);
+      case "list":
+        // Single-entry offsets ([0]) — there are no rows so no per-row
+        // offset, but the offsets buffer still needs the trailing total.
+        return new Column(type, 0, new Int32Array([0]), undefined, makeEmpty(type.child));
+    }
+  };
+  const emptyCols: ColumnLike[] = schema.fields.map(f => makeEmpty(f.type));
+  return new Table(schema, [new RecordBatch(schema, emptyCols, 0)]);
+}
+
+// Decode a single RecordBatch message at the given absolute byte offset,
+// using the (already-parsed) schema to drive column reconstruction.
+// Returns the resulting RecordBatchLike.
+function decodeRecordBatchAt(
+  bytes: Uint8Array,
+  schema: Schema,
+  parsedFields: ParsedField[],
+  dictionaries: Map<bigint, ColumnLike>,
+  msgStart: number,
+): RecordBatchLike {
+  const { RecordBatch } = getTypes();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // Message framing: continuation (4) + metaLen (4) + meta bytes + body bytes.
+  const cont = view.getUint32(msgStart, true);
+  let metaLenPos = msgStart;
+  if (cont === 0xffffffff) metaLenPos = msgStart + 4;
+  const metaLen = view.getUint32(metaLenPos, true);
+  const metaStart = metaLenPos + 4;
+  const metaBytes = new Uint8Array(bytes.buffer, bytes.byteOffset + metaStart, metaLen);
+  const fbr = new FBR(metaBytes);
+  const root = fbr.rootOffset();
+  const headerType = fbr.readU8(root, MSG_F_HEADER_TYPE, 0);
+  const headerPos = fbr.readOffset(root, MSG_F_HEADER);
+  const bodyLength = Number(fbr.readI64(root, MSG_F_BODY_LENGTH, 0n));
+  const bodyStart = metaStart + metaLen;
+  const body =
+    bodyLength > 0 ? new Uint8Array(bytes.buffer, bytes.byteOffset + bodyStart, bodyLength) : new Uint8Array(0);
+
+  if (headerType !== MESSAGE_HEADER_RECORD_BATCH || headerPos === undefined) {
+    throw new Error(`bun:arrow.fromIPC: expected RecordBatch at offset ${msgStart}, got header type ${headerType}`);
   }
+  const rb = parseRecordBatchHeader(fbr, headerPos);
+  const cols: ColumnLike[] = [];
+  let bufIndex = 0;
+  let nodeIndex = 0;
+  for (let i = 0; i < schema.fields.length; i++) {
+    const pf = parsedFields[i];
+    const node = rb.nodes[nodeIndex];
+    if (pf.dictId !== undefined) {
+      const dict = dictionaries.get(pf.dictId);
+      if (!dict) {
+        throw new Error(`bun:arrow.fromIPC: dictionary id ${pf.dictId} referenced but no DictionaryBatch found`);
+      }
+      const {
+        column: indexCol,
+        consumedBuffers,
+        consumedNodes,
+      } = reconstructColumn(
+        { name: pf.name, nullable: pf.nullable, kind: pf.indexKind ?? "int32" },
+        body,
+        rb.buffers,
+        bufIndex,
+        node.length,
+        rb.nodes,
+        nodeIndex,
+      );
+      cols.push(resolveDictColumn(indexCol, dict, pf.kind));
+      bufIndex += consumedBuffers;
+      nodeIndex += consumedNodes;
+    } else {
+      const { column, consumedBuffers, consumedNodes } = reconstructColumn(
+        pf,
+        body,
+        rb.buffers,
+        bufIndex,
+        node.length,
+        rb.nodes,
+        nodeIndex,
+      );
+      cols.push(column);
+      bufIndex += consumedBuffers;
+      nodeIndex += consumedNodes;
+    }
+  }
+  return new RecordBatch(schema, cols, rb.length);
+}
+
+function fromIPCFile(bytes: Uint8Array): TableLike {
+  const { Table } = getTypes();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const footerLenPos = bytes.byteLength - FILE_MAGIC_TAIL.byteLength - 4;
+  const footerLen = view.getInt32(footerLenPos, true);
+  const minTailBytes = FILE_MAGIC_HEAD.byteLength + FILE_MAGIC_TAIL.byteLength + 4;
+  if (footerLen <= 0 || footerLen > bytes.byteLength - minTailBytes) {
+    throw new Error(`bun:arrow.fromIPC: file format footer length ${footerLen} is invalid`);
+  }
+  const footerStart = footerLenPos - footerLen;
+  const footerBytes = new Uint8Array(bytes.buffer, bytes.byteOffset + footerStart, footerLen);
+  const ffbr = new FBR(footerBytes);
+  const footerRoot = ffbr.rootOffset();
+
+  const schemaPos = ffbr.readOffset(footerRoot, FOOTER_F_SCHEMA);
+  if (schemaPos === undefined) {
+    throw new Error("bun:arrow.fromIPC: file format Footer is missing its Schema");
+  }
+  const parsedFields = parseSchema(ffbr, schemaPos);
+  const schema: Schema = {
+    fields: parsedFields.map(f => ({ name: f.name, type: dataTypeFromParsed(f), nullable: f.nullable })),
+  };
+
+  // Walk dictionaries vector first so RecordBatches can reference them.
+  const dictionaries = new Map<bigint, ColumnLike>();
+  const dictsVec = ffbr.readOffset(footerRoot, FOOTER_F_DICTIONARIES);
+  if (dictsVec !== undefined) {
+    const len = ffbr.u32(dictsVec);
+    for (let i = 0; i < len; i++) {
+      const blockBase = dictsVec + 4 + i * BLOCK_SIZE;
+      const offset = Number(ffbr.i64(blockBase));
+      // Decode the dictionary message at offset using the same logic as the
+      // streaming decoder. We construct a minimal "single message" decoder
+      // inline because the layout is fully self-describing.
+      const msgView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const cont = msgView.getUint32(offset, true);
+      let metaLenPos = offset;
+      if (cont === 0xffffffff) metaLenPos = offset + 4;
+      const metaLen = msgView.getUint32(metaLenPos, true);
+      const metaStart = metaLenPos + 4;
+      const metaBytes = new Uint8Array(bytes.buffer, bytes.byteOffset + metaStart, metaLen);
+      const mfbr = new FBR(metaBytes);
+      const mroot = mfbr.rootOffset();
+      const headerPos = mfbr.readOffset(mroot, MSG_F_HEADER);
+      const bodyLength = Number(mfbr.readI64(mroot, MSG_F_BODY_LENGTH, 0n));
+      const bodyStart = metaStart + metaLen;
+      const body =
+        bodyLength > 0 ? new Uint8Array(bytes.buffer, bytes.byteOffset + bodyStart, bodyLength) : new Uint8Array(0);
+      if (headerPos === undefined) throw new Error("bun:arrow.fromIPC: DictionaryBatch missing header table");
+      const db = parseDictionaryBatchHeader(mfbr, headerPos);
+      if (db.isDelta) {
+        throw new Error("bun:arrow.fromIPC: dictionary deltas not supported");
+      }
+      const owner = parsedFields.find(f => f.dictId === db.id);
+      if (!owner) continue;
+      const innerNode = db.inner.nodes[0];
+      const { column } = reconstructColumn(
+        { name: "", nullable: false, kind: owner.kind },
+        body,
+        db.inner.buffers,
+        0,
+        innerNode.length,
+      );
+      dictionaries.set(db.id, column);
+    }
+  }
+
+  const batches: RecordBatchLike[] = [];
+  const rbsVec = ffbr.readOffset(footerRoot, FOOTER_F_RECORD_BATCHES);
+  if (rbsVec !== undefined) {
+    const len = ffbr.u32(rbsVec);
+    for (let i = 0; i < len; i++) {
+      const blockBase = rbsVec + 4 + i * BLOCK_SIZE;
+      const offset = Number(ffbr.i64(blockBase));
+      batches.push(decodeRecordBatchAt(bytes, schema, parsedFields, dictionaries, offset));
+    }
+  }
+
+  if (batches.length === 0) return emptyTable(schema);
   return new Table(schema, batches);
 }

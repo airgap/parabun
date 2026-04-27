@@ -236,9 +236,73 @@ for (let i = 0; i < parabunRestoredList.numRows; i++) {
 }
 console.log(`  apache-arrow → Parabun list round-trip: ${pass4 ? "✓" : "✗"}`);
 
+// ─── Direction 4: file format wire compat ────────────────────────────────
+
+console.log("\n[4] Arrow file format (ARROW1 magic + Footer) wire compat");
+
+const fileBatch = parabunArrow.recordBatch({
+  age: new Int32Array([25, 30, 35, 40]),
+  score: new Float64Array([0.9, 0.8, 0.7, 0.6]),
+  name: ["alice", "bob", "carol", "dave"],
+});
+const fileBytes = parabunArrow.toIPC(fileBatch, "file");
+console.log(`  Parabun encoded ${fileBytes.byteLength} file bytes`);
+
+let aaFileTable: AATable;
+try {
+  aaFileTable = tableFromIPC(fileBytes);
+} catch (e: any) {
+  console.log(`  ✗ apache-arrow failed to read Parabun file bytes: ${e.message}`);
+  process.exit(1);
+}
+console.log(`  apache-arrow parsed: ${aaFileTable.numRows} rows × ${aaFileTable.numCols} cols`);
+
+let pass5 = true;
+for (let i = 0; i < aaFileTable.numRows; i++) {
+  const a = aaFileTable.getChild("age")!.get(i);
+  const s = aaFileTable.getChild("score")!.get(i);
+  const n = aaFileTable.getChild("name")!.get(i);
+  const expA = fileBatch.column("age").get(i);
+  const expS = fileBatch.column("score").get(i);
+  const expN = fileBatch.column("name").get(i);
+  if (a !== expA || s !== expS || n !== expN) {
+    console.log(`  ✗ row ${i}: got (${a}, ${s}, ${n}), expected (${expA}, ${expS}, ${expN})`);
+    pass5 = false;
+  }
+}
+console.log(`  Parabun → apache-arrow file round-trip: ${pass5 ? "✓" : "✗"}`);
+
+// Reverse direction: apache-arrow encodes file → Parabun decodes.
+const aaFileBytes = tableToIPC(aaFileTable, "file");
+console.log(`  apache-arrow encoded ${aaFileBytes.byteLength} file bytes`);
+
+let parabunFile: any;
+try {
+  parabunFile = parabunArrow.fromIPC(aaFileBytes);
+} catch (e: any) {
+  console.log(`  ✗ Parabun failed to read apache-arrow file bytes: ${e.message}`);
+  process.exit(1);
+}
+console.log(`  Parabun parsed: ${parabunFile.numRows} rows × ${parabunFile.batches[0].numColumns} cols`);
+
+let pass6 = true;
+for (let i = 0; i < parabunFile.numRows; i++) {
+  const a = parabunFile.column("age").get(i);
+  const s = parabunFile.column("score").get(i);
+  const n = parabunFile.column("name").get(i);
+  const expA = aaFileTable.getChild("age")!.get(i);
+  const expS = aaFileTable.getChild("score")!.get(i);
+  const expN = aaFileTable.getChild("name")!.get(i);
+  if (a !== expA || s !== expS || n !== expN) {
+    console.log(`  ✗ row ${i}: got (${a}, ${s}, ${n}), expected (${expA}, ${expS}, ${expN})`);
+    pass6 = false;
+  }
+}
+console.log(`  apache-arrow → Parabun file round-trip: ${pass6 ? "✓" : "✗"}`);
+
 // ─── Result ──────────────────────────────────────────────────────────────
 
-const allPass = pass && pass2 && pass3 && pass4;
+const allPass = pass && pass2 && pass3 && pass4 && pass5 && pass6;
 console.log(
   `\n${allPass ? "=== all directions ok — bun:arrow IPC is wire-compatible with apache-arrow ===" : "=== INTEROP FAILURES ==="}`,
 );
