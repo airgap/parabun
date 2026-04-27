@@ -723,6 +723,48 @@ interface WhisperWeights {
   decLnB: Float32Array;
 }
 
+// Per-call decoder state that lives across decoder steps within one
+// transcription. Holds:
+//   - Self-attention K/V cache: each layer accumulates a [pos+1, dim] tile
+//     of projected keys/values as we step through tokens.
+//   - Cross-attention K/V: each layer's projection of the encoder output
+//     is computed once at encode-time and reused on every decoder step.
+class WhisperState {
+  selfK: Float32Array[];
+  selfV: Float32Array[];
+  crossK: Float32Array[];
+  crossV: Float32Array[];
+  /** Number of populated rows in selfK/selfV (== current decoder position). */
+  selfLen: number;
+  /** Encoder context length (constant within a state — typically nAudioCtx). */
+  encoderT: number;
+  /** Decoder hidden dim (== nTextState). */
+  dim: number;
+  /** Max self-attn cache rows (== nTextCtx). */
+  maxLen: number;
+
+  constructor(nLayer: number, dim: number, maxLen: number, encoderT: number) {
+    this.selfK = new Array(nLayer);
+    this.selfV = new Array(nLayer);
+    this.crossK = new Array(nLayer);
+    this.crossV = new Array(nLayer);
+    for (let i = 0; i < nLayer; i++) {
+      this.selfK[i] = new Float32Array(maxLen * dim);
+      this.selfV[i] = new Float32Array(maxLen * dim);
+      this.crossK[i] = new Float32Array(encoderT * dim);
+      this.crossV[i] = new Float32Array(encoderT * dim);
+    }
+    this.selfLen = 0;
+    this.encoderT = encoderT;
+    this.dim = dim;
+    this.maxLen = maxLen;
+  }
+
+  reset(): void {
+    this.selfLen = 0;
+  }
+}
+
 class WhisperModel {
   hparams: WhisperHParams;
   weights: WhisperWeights;
@@ -850,6 +892,151 @@ class WhisperModel {
   }
 
   /**
+   * Allocate a fresh decoder state for this model. Reuse a single state
+   * across multiple transcribeMel calls within a process to avoid
+   * re-allocating the K/V buffers.
+   */
+  newState(): WhisperState {
+    const h = this.hparams;
+    return new WhisperState(h.nTextLayer, h.nTextState, h.nTextCtx, h.nAudioCtx);
+  }
+
+  /**
+   * Populate a state's cross-attention K/V caches from a fresh encoder
+   * output. Each decoder layer's cross_attn.key.weight and value.weight
+   * are applied to the encoder output once, so subsequent decoder steps
+   * never re-touch encOut.
+   */
+  prepareState(state: WhisperState, encoderOut: Float32Array): void {
+    const h = this.hparams;
+    const w = this.weights;
+    const dim = h.nTextState;
+    const encT = h.nAudioCtx;
+    if (state.encoderT !== encT || state.dim !== dim) {
+      throw new Error(
+        `bun:llm whisper: state shape mismatch — state expects [${state.encoderT}, ${state.dim}], model has [${encT}, ${dim}]`,
+      );
+    }
+    for (let i = 0; i < w.decBlocks.length; i++) {
+      const block = w.decBlocks[i];
+      // K projection (no bias on K in Whisper).
+      matMul(encoderOut, block.crossKW, encT, dim, dim, state.crossK[i]);
+      // V projection.
+      matMul(encoderOut, block.crossVW, encT, dim, dim, state.crossV[i]);
+      addBias(state.crossV[i], encT, dim, block.crossVB);
+    }
+    state.selfLen = 0;
+  }
+
+  /**
+   * Single-token decoder step. Reads `token` at position `state.selfLen`,
+   * appends its self-attn K/V row to the cache, performs causal self-
+   * attention against the cache and cross-attention against the
+   * pre-computed encoder K/V, runs the MLP, and returns vocab logits.
+   *
+   * Mutates state.selfLen (++).
+   */
+  decodeStep(token: number, state: WhisperState): Float32Array {
+    const h = this.hparams;
+    const w = this.weights;
+    const dim = h.nTextState;
+    const nHead = h.nTextHead;
+    const headDim = dim / nHead;
+    const pos = state.selfLen;
+    if (pos >= state.maxLen) {
+      throw new Error(`bun:llm whisper: decode position ${pos} exceeds nTextCtx=${state.maxLen}`);
+    }
+
+    // Token + positional embed for the single new token.
+    const x = new Float32Array(dim);
+    const tokBase = token * dim;
+    const posBase = pos * dim;
+    for (let j = 0; j < dim; j++) {
+      x[j] = w.decTokenEmbed[tokBase + j] + w.decPosEmbed[posBase + j];
+    }
+
+    for (let li = 0; li < w.decBlocks.length; li++) {
+      const block = w.decBlocks[li];
+
+      // ── Causal self-attention with KV cache ──
+      const xn = new Float32Array(dim);
+      xn.set(x);
+      layerNormInPlace(xn, 1, dim, block.attnLnW, block.attnLnB);
+      const Q = new Float32Array(dim);
+      matMul(xn, block.attnQW, 1, dim, dim, Q);
+      addBias(Q, 1, dim, block.attnQB);
+      // Project new K/V row directly into the cache slot.
+      const Kdst = state.selfK[li];
+      const Vdst = state.selfV[li];
+      // Single-row matmul into a slice — temporary buffer + copy is the
+      // simplest path. Could be optimized to write Kdst+offset directly.
+      const Knew = new Float32Array(dim);
+      const Vnew = new Float32Array(dim);
+      matMul(xn, block.attnKW, 1, dim, dim, Knew);
+      matMul(xn, block.attnVW, 1, dim, dim, Vnew);
+      addBias(Vnew, 1, dim, block.attnVB);
+      Kdst.set(Knew, pos * dim);
+      Vdst.set(Vnew, pos * dim);
+
+      // Attention: Q [1, dim] against K[0..pos+1] / V[0..pos+1]. Causal
+      // mask is implicit because we only see keys we've already written.
+      const attnOut = scaledDotProductAttention(Q, Kdst, Vdst, 1, pos + 1, nHead, headDim, false);
+      const proj1 = new Float32Array(dim);
+      matMul(attnOut, block.attnOW, 1, dim, dim, proj1);
+      addBias(proj1, 1, dim, block.attnOB);
+      for (let j = 0; j < dim; j++) x[j] += proj1[j];
+
+      // ── Cross-attention with precomputed encoder K/V ──
+      xn.set(x);
+      layerNormInPlace(xn, 1, dim, block.crossLnW, block.crossLnB);
+      const Qc = new Float32Array(dim);
+      matMul(xn, block.crossQW, 1, dim, dim, Qc);
+      addBias(Qc, 1, dim, block.crossQB);
+      const crossOut = scaledDotProductAttention(
+        Qc,
+        state.crossK[li],
+        state.crossV[li],
+        1,
+        state.encoderT,
+        nHead,
+        headDim,
+        false,
+      );
+      const proj2 = new Float32Array(dim);
+      matMul(crossOut, block.crossOW, 1, dim, dim, proj2);
+      addBias(proj2, 1, dim, block.crossOB);
+      for (let j = 0; j < dim; j++) x[j] += proj2[j];
+
+      // ── MLP ──
+      xn.set(x);
+      layerNormInPlace(xn, 1, dim, block.mlpLnW, block.mlpLnB);
+      const dFfn = block.mlp0W.length / dim;
+      const ffn1 = new Float32Array(dFfn);
+      matMul(xn, block.mlp0W, 1, dim, dFfn, ffn1);
+      addBias(ffn1, 1, dFfn, block.mlp0B);
+      geluInPlace(ffn1);
+      const ffn2 = new Float32Array(dim);
+      matMul(ffn1, block.mlp2W, 1, dFfn, dim, ffn2);
+      addBias(ffn2, 1, dim, block.mlp2B);
+      for (let j = 0; j < dim; j++) x[j] += ffn2[j];
+    }
+
+    layerNormInPlace(x, 1, dim, w.decLnW, w.decLnB);
+
+    // LM head.
+    const logits = new Float32Array(h.nVocab);
+    for (let v = 0; v < h.nVocab; v++) {
+      let acc = 0;
+      const eBase = v * dim;
+      for (let j = 0; j < dim; j++) acc += x[j] * w.decTokenEmbed[eBase + j];
+      logits[v] = acc;
+    }
+
+    state.selfLen = pos + 1;
+    return logits;
+  }
+
+  /**
    * Greedy auto-regressive transcription, given pre-computed mel features.
    *
    * `mel` is a flat [nMels, T] row-major array. `T` is the actual frame
@@ -882,29 +1069,39 @@ class WhisperModel {
     }
 
     const encoded = this.encode(melPacked, Tdesired);
-    const encoderT = h.nAudioCtx;
+
+    const state = this.newState();
+    this.prepareState(state, encoded);
 
     const tokens = this.tokenizer.prefix(language);
     const tokenizer = this.tokenizer;
+    // Feed prefix tokens through the decoder to populate the self-attn
+    // KV cache. The logits from these warm-up steps are discarded — we
+    // only consume the logits AFTER the last prefix token.
+    let logits: Float32Array | null = null;
+    for (const tok of tokens) {
+      logits = this.decodeStep(tok, state);
+    }
     for (let step = 0; step < maxTokens; step++) {
-      const logits = this.step(tokens, encoded, encoderT);
       // Greedy argmax with timestamp tokens masked out (we only run with
       // <|notimestamps|> active, so a timestamp emission would be a bug).
       let best = 0;
       let bestVal = -Infinity;
-      for (let v = 0; v < logits.length; v++) {
+      const lg = logits!;
+      for (let v = 0; v < lg.length; v++) {
         if (tokenizer.englishOnly) {
           if (v >= 50259 && v <= 51862) continue;
         } else {
           if (v >= 50363) continue;
         }
-        if (logits[v] > bestVal) {
-          bestVal = logits[v];
+        if (lg[v] > bestVal) {
+          bestVal = lg[v];
           best = v;
         }
       }
       tokens.push(best);
       if (best === tokenizer.eot) break;
+      logits = this.decodeStep(best, state);
     }
     return tokenizer.decode(tokens);
   }
