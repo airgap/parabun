@@ -21,6 +21,7 @@ import {
   RecordBatch as AARecordBatch,
   vectorFromArray,
   makeData,
+  makeBuilder,
   Type,
   Int8,
   Int16,
@@ -30,6 +31,7 @@ import {
   Float64,
   Bool,
   Utf8,
+  List as AAList,
   makeVector,
   Field as AAField,
   Schema as AASchema,
@@ -161,9 +163,83 @@ for (let i = 0; i < parabunRestored.numRows; i++) {
 }
 console.log(`  column-wise equality (Date64 + Int8 + Uint16 + Uint32 widened): ${pass2 ? "✓" : "✗"}`);
 
+// ─── Direction 3: List<int32> + List<utf8> round-trip ────────────────────
+
+console.log("\n[3] List<T> wire compat (Parabun ↔ apache-arrow)");
+
+const listBatch = parabunArrow.recordBatch({
+  tagIds: [[1, 2, 3], [], [4, 5], [6], [7, 8, 9, 10]],
+  labels: [["a", "bb"], ["ccc"], [], ["dd", "ee"], ["x", "yy", "zzz"]],
+});
+
+const listBytes = parabunArrow.toIPC(listBatch);
+console.log(`  Parabun encoded ${listBytes.byteLength} bytes`);
+
+let aaListTable: AATable;
+try {
+  aaListTable = tableFromIPC(listBytes);
+} catch (e: any) {
+  console.log(`  ✗ apache-arrow failed to parse Parabun list bytes: ${e.message}`);
+  process.exit(1);
+}
+console.log(`  apache-arrow parsed list table: ${aaListTable.numRows} rows × ${aaListTable.numCols} cols`);
+
+let pass3 = true;
+const aaTagIds = aaListTable.getChild("tagIds")!;
+const aaLabels = aaListTable.getChild("labels")!;
+for (let i = 0; i < aaListTable.numRows; i++) {
+  const expTags = listBatch.column("tagIds").get(i) as number[];
+  const expLabels = listBatch.column("labels").get(i) as string[];
+  const gotTags = aaTagIds.get(i)?.toArray ? Array.from(aaTagIds.get(i).toArray()) : aaTagIds.get(i);
+  const gotLabels = aaLabels.get(i)?.toArray ? Array.from(aaLabels.get(i).toArray()) : aaLabels.get(i);
+  if (JSON.stringify(gotTags) !== JSON.stringify(expTags) || JSON.stringify(gotLabels) !== JSON.stringify(expLabels)) {
+    console.log(
+      `  ✗ row ${i}: got tags=${JSON.stringify(gotTags)} labels=${JSON.stringify(gotLabels)}, expected ${JSON.stringify(expTags)} / ${JSON.stringify(expLabels)}`,
+    );
+    pass3 = false;
+  }
+}
+console.log(`  Parabun → apache-arrow list round-trip: ${pass3 ? "✓" : "✗"}`);
+
+// Reverse direction: apache-arrow encodes a list column → Parabun decodes.
+// Use apache-arrow's Builder API which knows how to construct a List
+// vector from JS arrays-of-arrays once the element type is given.
+const listType = new AAList(new AAField("item", new Float64(), true));
+const listBuilder = makeBuilder({
+  type: listType,
+  nullValues: [null, undefined],
+});
+const aaSourceRows: number[][] = [[1.5, 2.5, 3.5], [], [4.5, 5.5], [6.5], [7.5, 8.5, 9.5, 10.5]];
+for (const row of aaSourceRows) listBuilder.append(row);
+listBuilder.finish();
+const listVector = listBuilder.toVector();
+const aaListBuilt = new AATable({ tagScores: listVector });
+const aaListBytes = tableToIPC(aaListBuilt, "stream");
+console.log(`  apache-arrow encoded ${aaListBytes.byteLength} list bytes`);
+
+let parabunRestoredList: any;
+try {
+  parabunRestoredList = parabunArrow.fromIPC(aaListBytes);
+} catch (e: any) {
+  console.log(`  ✗ Parabun failed to parse apache-arrow list bytes: ${e.message}`);
+  process.exit(1);
+}
+const restoredTagScores = parabunRestoredList.column("tagScores");
+let pass4 = true;
+const expectedTagScores = [[1.5, 2.5, 3.5], [], [4.5, 5.5], [6.5], [7.5, 8.5, 9.5, 10.5]];
+for (let i = 0; i < parabunRestoredList.numRows; i++) {
+  const got = restoredTagScores.get(i);
+  if (JSON.stringify(got) !== JSON.stringify(expectedTagScores[i])) {
+    console.log(`  ✗ row ${i}: got ${JSON.stringify(got)}, expected ${JSON.stringify(expectedTagScores[i])}`);
+    pass4 = false;
+  }
+}
+console.log(`  apache-arrow → Parabun list round-trip: ${pass4 ? "✓" : "✗"}`);
+
 // ─── Result ──────────────────────────────────────────────────────────────
 
+const allPass = pass && pass2 && pass3 && pass4;
 console.log(
-  `\n${pass && pass2 ? "=== both directions ok — bun:arrow IPC is wire-compatible with apache-arrow ===" : "=== INTEROP FAILURES ==="}`,
+  `\n${allPass ? "=== all directions ok — bun:arrow IPC is wire-compatible with apache-arrow ===" : "=== INTEROP FAILURES ==="}`,
 );
-process.exit(pass && pass2 ? 0 : 1);
+process.exit(allPass ? 0 : 1);

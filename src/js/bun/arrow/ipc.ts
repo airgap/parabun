@@ -25,9 +25,11 @@
 // `..`-style imports between bun:* sub-files, and a plain string-key
 // registry is enough for our needs.
 
-type ArrowKind = "int32" | "int64" | "float32" | "float64" | "bool" | "utf8";
+type ArrowKind = "int32" | "int64" | "float32" | "float64" | "bool" | "utf8" | "list";
 
-type DataType = { kind: ArrowKind };
+type DataType =
+  | { kind: "int32" | "int64" | "float32" | "float64" | "bool" | "utf8" }
+  | { kind: "list"; child: DataType };
 
 type Field = { name: string; type: DataType; nullable: boolean };
 type Schema = { fields: Field[] };
@@ -37,7 +39,8 @@ interface ColumnLike {
   length: number;
   values: any;
   validity: Uint8Array | undefined;
-  get(i: number): number | bigint | boolean | string | null;
+  child: ColumnLike | undefined;
+  get(i: number): number | bigint | boolean | string | null | unknown[];
 }
 
 interface RecordBatchLike {
@@ -55,7 +58,7 @@ interface TableLike {
 }
 
 type ArrowTypes = {
-  Column: new (type: DataType, length: number, values: any, validity?: Uint8Array) => ColumnLike;
+  Column: new (type: DataType, length: number, values: any, validity?: Uint8Array, child?: ColumnLike) => ColumnLike;
   RecordBatch: new (schema: Schema, columns: ColumnLike[], numRows: number) => RecordBatchLike;
   Table: new (schema: Schema, batches: RecordBatchLike[]) => TableLike;
 };
@@ -83,6 +86,7 @@ const TYPE_UTF8 = 5;
 const TYPE_DATE = 8;
 const TYPE_TIME = 9;
 const TYPE_TIMESTAMP = 10;
+const TYPE_LIST = 12;
 // We emit Int / FloatingPoint / Bool / Utf8 directly. We READ Date / Time /
 // Timestamp by coercing to int32 / int64 — the unit + (for Timestamp) the
 // timezone are surfaced as integers without unit metadata, so round-trip
@@ -543,8 +547,8 @@ function encodeFloatingPointType(fbb: FBB, precision: number): number {
   return fbb.endObject();
 }
 
-function encodeFieldType(fbb: FBB, kind: ArrowKind): { typeId: number; typeOffset: number } {
-  switch (kind) {
+function encodeFieldType(fbb: FBB, type: DataType): { typeId: number; typeOffset: number } {
+  switch (type.kind) {
     case "int32":
       return { typeId: TYPE_INT, typeOffset: encodeIntType(fbb, 32, true) };
     case "int64":
@@ -557,17 +561,37 @@ function encodeFieldType(fbb: FBB, kind: ArrowKind): { typeId: number; typeOffse
       return { typeId: TYPE_BOOL, typeOffset: encodeEmptyTable(fbb) };
     case "utf8":
       return { typeId: TYPE_UTF8, typeOffset: encodeEmptyTable(fbb) };
+    case "list":
+      // List type-table is empty (the child element type is conveyed via
+      // the field's `children` vector, not the type table itself).
+      return { typeId: TYPE_LIST, typeOffset: encodeEmptyTable(fbb) };
   }
 }
 
 function encodeField(fbb: FBB, field: Field): number {
   // Children + name need to be written before the parent table.
   const nameOffset = fbb.writeString(field.name);
-  const { typeId, typeOffset } = encodeFieldType(fbb, field.type.kind);
+  const { typeId, typeOffset } = encodeFieldType(fbb, field.type);
+
+  // Lists carry their element type via a single child Field whose name is
+  // conventionally "item". Encode the child Field first (recursion handles
+  // arbitrarily-nested list-of-list-of-...), then write the children vec.
+  let childrenVec = 0;
+  if (field.type.kind === "list") {
+    const childField: Field = {
+      name: "item",
+      type: field.type.child,
+      // Children inherit nullability conservatively — assume nullable so
+      // round-trips that include nulls in the child column work.
+      nullable: true,
+    };
+    const childFieldOffset = encodeField(fbb, childField);
+    childrenVec = fbb.writeVectorOfOffsets([childFieldOffset]);
+  }
 
   fbb.startObject(7);
-  // children = empty vector
   // custom_metadata = absent
+  if (childrenVec !== 0) fbb.addOffset(FIELD_F_CHILDREN, childrenVec);
   fbb.addOffset(FIELD_F_TYPE, typeOffset);
   fbb.addUint8(FIELD_F_TYPE_TYPE, typeId, 0);
   fbb.addBool(FIELD_F_NULLABLE, field.nullable, false);
@@ -625,7 +649,8 @@ function planBody(batch: RecordBatchLike): BodyPlan {
     cursor += padded;
   };
 
-  for (const col of batch.columns) {
+  // Emit a single column (depth-first for nested list types).
+  const emitColumn = (col: ColumnLike): void => {
     let nullCount = 0;
     if (col.validity) {
       for (let i = 0; i < col.length; i++) {
@@ -702,8 +727,19 @@ function planBody(batch: RecordBatchLike): BodyPlan {
         push(data);
         break;
       }
+      case "list": {
+        // Parent buffer: i32 offsets (length+1 entries).
+        const offsets = col.values as Int32Array;
+        push(new Uint8Array(offsets.buffer, offsets.byteOffset, offsets.byteLength));
+        // Child column follows in depth-first order.
+        if (!col.child) throw new Error("bun:arrow.toIPC: list column has no child");
+        emitColumn(col.child);
+        break;
+      }
     }
-  }
+  };
+
+  for (const col of batch.columns) emitColumn(col);
 
   // Concat all chunks into one body buffer.
   const body = new Uint8Array(cursor);
@@ -833,6 +869,8 @@ type ParsedField = {
   /** Index buffer's element type when dictionary-encoded. apache-arrow
    *  defaults to int32 for utf8 dictionaries. We support int32 + int64. */
   indexKind?: ArrowKind;
+  /** For `kind === "list"`: the child element field, parsed recursively. */
+  child?: ParsedField;
 };
 
 type ParsedFieldType = {
@@ -885,6 +923,10 @@ function parseFieldType(fbr: FBR, fieldTablePos: number): ParsedFieldType {
       return { kind: "bool" };
     case TYPE_UTF8:
       return { kind: "utf8" };
+    case TYPE_LIST:
+      // List type table is empty — child element type lives in the field's
+      // children vector. The caller (parseField) handles that.
+      return { kind: "list" };
     case TYPE_DATE: {
       // DateUnit: DAY=0 (32-bit days since epoch), MILLISECOND=1 (64-bit ms).
       const unit = fbr.readI16(typeTablePos, DATE_F_UNIT, 1);
@@ -907,6 +949,72 @@ function parseFieldType(fbr: FBR, fieldTablePos: number): ParsedFieldType {
   }
 }
 
+// Parse one Field flatbuffer table into a ParsedField. Recurses into the
+// `children` vector for list types.
+function parseField(fbr: FBR, fieldPos: number): ParsedField {
+  const namePos = fbr.readOffset(fieldPos, FIELD_F_NAME);
+  const name = namePos === undefined ? "" : fbr.readString(namePos);
+  const nullable = fbr.readBool(fieldPos, FIELD_F_NULLABLE, false);
+  const parsed = parseFieldType(fbr, fieldPos);
+
+  // Dictionary encoding is optional. When present, the field's body buffers
+  // carry index values; the actual logical values come from a DictionaryBatch
+  // message with the same id.
+  const dictPos = fbr.readOffset(fieldPos, FIELD_F_DICTIONARY);
+  let dictId: bigint | undefined;
+  let indexKind: ArrowKind | undefined;
+  if (dictPos !== undefined) {
+    dictId = fbr.readI64(dictPos, DICT_F_ID, 0n);
+    const indexTypePos = fbr.readOffset(dictPos, DICT_F_INDEX_TYPE);
+    if (indexTypePos !== undefined) {
+      const bw = fbr.readI32(indexTypePos, INT_F_BITWIDTH, 32);
+      const signed = fbr.readBool(indexTypePos, INT_F_IS_SIGNED, true);
+      if (!signed) throw new Error("bun:arrow.fromIPC: unsigned dictionary indexType not supported");
+      if (bw === 32) indexKind = "int32";
+      else if (bw === 64) indexKind = "int64";
+      else throw new Error(`bun:arrow.fromIPC: dictionary indexType bitWidth ${bw} not supported`);
+    } else {
+      // Default per spec: signed int32.
+      indexKind = "int32";
+    }
+  }
+
+  let child: ParsedField | undefined;
+  if (parsed.kind === "list") {
+    const childrenVec = fbr.readOffset(fieldPos, FIELD_F_CHILDREN);
+    if (childrenVec === undefined) {
+      throw new Error("bun:arrow.fromIPC: List field is missing its children vector");
+    }
+    const { len } = fbr.readVector(childrenVec);
+    if (len !== 1) {
+      throw new Error(`bun:arrow.fromIPC: List field must have exactly one child, got ${len}`);
+    }
+    const childPos = fbr.vectorOffsetAt(childrenVec, 0);
+    child = parseField(fbr, childPos);
+  }
+
+  return {
+    name,
+    nullable,
+    kind: parsed.kind,
+    wireWidth: parsed.wireWidth,
+    wireSigned: parsed.wireSigned,
+    dictId,
+    indexKind,
+    child,
+  };
+}
+
+// Build a runtime DataType (the structural one stored on Column) from a
+// ParsedField. Recurses through list children.
+function dataTypeFromParsed(pf: ParsedField): DataType {
+  if (pf.kind === "list") {
+    if (!pf.child) throw new Error("bun:arrow.fromIPC: list ParsedField has no child");
+    return { kind: "list", child: dataTypeFromParsed(pf.child) };
+  }
+  return { kind: pf.kind } as DataType;
+}
+
 function parseSchema(fbr: FBR, schemaTablePos: number): ParsedField[] {
   const fieldsVec = fbr.readOffset(schemaTablePos, SCHEMA_F_FIELDS);
   if (fieldsVec === undefined) throw new Error("bun:arrow.fromIPC: Schema has no fields vector");
@@ -914,42 +1022,7 @@ function parseSchema(fbr: FBR, schemaTablePos: number): ParsedField[] {
   const out: ParsedField[] = [];
   for (let i = 0; i < len; i++) {
     const fieldPos = fbr.vectorOffsetAt(fieldsVec, i);
-    const namePos = fbr.readOffset(fieldPos, FIELD_F_NAME);
-    const name = namePos === undefined ? "" : fbr.readString(namePos);
-    const nullable = fbr.readBool(fieldPos, FIELD_F_NULLABLE, false);
-    const parsed = parseFieldType(fbr, fieldPos);
-
-    // Dictionary encoding is optional. When present, the field's body
-    // buffers carry index values; the actual logical values come from a
-    // DictionaryBatch message with the same id.
-    const dictPos = fbr.readOffset(fieldPos, FIELD_F_DICTIONARY);
-    let dictId: bigint | undefined;
-    let indexKind: ArrowKind | undefined;
-    if (dictPos !== undefined) {
-      dictId = fbr.readI64(dictPos, DICT_F_ID, 0n);
-      const indexTypePos = fbr.readOffset(dictPos, DICT_F_INDEX_TYPE);
-      if (indexTypePos !== undefined) {
-        const bw = fbr.readI32(indexTypePos, INT_F_BITWIDTH, 32);
-        const signed = fbr.readBool(indexTypePos, INT_F_IS_SIGNED, true);
-        if (!signed) throw new Error("bun:arrow.fromIPC: unsigned dictionary indexType not supported");
-        if (bw === 32) indexKind = "int32";
-        else if (bw === 64) indexKind = "int64";
-        else throw new Error(`bun:arrow.fromIPC: dictionary indexType bitWidth ${bw} not supported`);
-      } else {
-        // Default per spec: signed int32.
-        indexKind = "int32";
-      }
-    }
-
-    out.push({
-      name,
-      nullable,
-      kind: parsed.kind,
-      wireWidth: parsed.wireWidth,
-      wireSigned: parsed.wireSigned,
-      dictId,
-      indexKind,
-    });
+    out.push(parseField(fbr, fieldPos));
   }
   return out;
 }
@@ -1011,7 +1084,9 @@ function reconstructColumn(
   buffers: BodyPlan["buffers"],
   bufIndex: number,
   rowCount: number,
-): { column: ColumnLike; consumed: number } {
+  nodes?: ParsedRecordBatch["nodes"],
+  nodeIndex?: number,
+): { column: ColumnLike; consumedBuffers: number; consumedNodes: number } {
   const { Column } = getTypes();
   // Validity bitmap is always the first buffer per column.
   const validityBuf = buffers[bufIndex];
@@ -1050,7 +1125,8 @@ function reconstructColumn(
       }
       return {
         column: new Column({ kind: "int32" }, rowCount, out, validitySlice ? new Uint8Array(validitySlice) : undefined),
-        consumed: 2,
+        consumedBuffers: 2,
+        consumedNodes: 1,
       };
     }
     case "int64": {
@@ -1073,7 +1149,8 @@ function reconstructColumn(
       }
       return {
         column: new Column({ kind: "int64" }, rowCount, out, validitySlice ? new Uint8Array(validitySlice) : undefined),
-        consumed: 2,
+        consumedBuffers: 2,
+        consumedNodes: 1,
       };
     }
     case "float32": {
@@ -1086,7 +1163,8 @@ function reconstructColumn(
           new Float32Array(view),
           validitySlice ? new Uint8Array(validitySlice) : undefined,
         ),
-        consumed: 2,
+        consumedBuffers: 2,
+        consumedNodes: 1,
       };
     }
     case "float64": {
@@ -1099,7 +1177,8 @@ function reconstructColumn(
           new Float64Array(view),
           validitySlice ? new Uint8Array(validitySlice) : undefined,
         ),
-        consumed: 2,
+        consumedBuffers: 2,
+        consumedNodes: 1,
       };
     }
     case "bool": {
@@ -1110,7 +1189,8 @@ function reconstructColumn(
       for (let i = 0; i < rowCount; i++) out[i] = (packed[i >> 3] >> (i & 7)) & 1;
       return {
         column: new Column({ kind: "bool" }, rowCount, out, validitySlice ? new Uint8Array(validitySlice) : undefined),
-        consumed: 2,
+        consumedBuffers: 2,
+        consumedNodes: 1,
       };
     }
     case "utf8": {
@@ -1125,7 +1205,46 @@ function reconstructColumn(
       }
       return {
         column: new Column({ kind: "utf8" }, rowCount, out, validitySlice ? new Uint8Array(validitySlice) : undefined),
-        consumed: 3,
+        consumedBuffers: 3,
+        consumedNodes: 1,
+      };
+    }
+    case "list": {
+      if (!field.child) throw new Error("bun:arrow.fromIPC: list field has no child");
+      if (!nodes || nodeIndex === undefined) {
+        throw new Error("bun:arrow.fromIPC: list reconstruction requires the FieldNode list");
+      }
+      // Parent buffers: validity bitmap (already taken at bufIndex), then
+      // i32 offsets at bufIndex + 1.
+      const offsetsBuf = buffers[bufIndex + 1];
+      const offsets = new Int32Array(
+        body.buffer.slice(
+          body.byteOffset + offsetsBuf.offset,
+          body.byteOffset + offsetsBuf.offset + (rowCount + 1) * 4,
+        ),
+      );
+      // Child column starts at the next FieldNode (depth-first ordering),
+      // and consumes the remaining buffers from bufIndex + 2 onward.
+      const childNode = nodes[nodeIndex + 1];
+      const childResult = reconstructColumn(
+        field.child,
+        body,
+        buffers,
+        bufIndex + 2,
+        childNode.length,
+        nodes,
+        nodeIndex + 1,
+      );
+      return {
+        column: new Column(
+          dataTypeFromParsed(field),
+          rowCount,
+          offsets,
+          validitySlice ? new Uint8Array(validitySlice) : undefined,
+          childResult.column as ColumnLike,
+        ),
+        consumedBuffers: 2 + childResult.consumedBuffers,
+        consumedNodes: 1 + childResult.consumedNodes,
       };
     }
   }
@@ -1256,7 +1375,7 @@ export function fromIPC(bytes: Uint8Array): TableLike {
       if (headerPos === undefined) throw new Error("bun:arrow.fromIPC: Schema message has no header table");
       parsedFields = parseSchema(fbr, headerPos);
       schema = {
-        fields: parsedFields.map(f => ({ name: f.name, type: { kind: f.kind }, nullable: f.nullable })),
+        fields: parsedFields.map(f => ({ name: f.name, type: dataTypeFromParsed(f), nullable: f.nullable })),
       };
     } else if (headerType === MESSAGE_HEADER_RECORD_BATCH) {
       if (!schema) throw new Error("bun:arrow.fromIPC: RecordBatch arrived before Schema");
@@ -1264,9 +1383,10 @@ export function fromIPC(bytes: Uint8Array): TableLike {
       const rb = parseRecordBatchHeader(fbr, headerPos);
       const cols: ColumnLike[] = [];
       let bufIndex = 0;
+      let nodeIndex = 0;
       for (let i = 0; i < schema.fields.length; i++) {
         const pf = parsedFields[i];
-        const node = rb.nodes[i];
+        const node = rb.nodes[nodeIndex];
         if (pf.dictId !== undefined) {
           // Dictionary-encoded field: body buffers carry an index column of
           // pf.indexKind. Reconstruct the index column, then resolve every
@@ -1277,19 +1397,35 @@ export function fromIPC(bytes: Uint8Array): TableLike {
               `bun:arrow.fromIPC: dictionary id ${pf.dictId} referenced before its DictionaryBatch arrived`,
             );
           }
-          const { column: indexCol, consumed } = reconstructColumn(
+          const {
+            column: indexCol,
+            consumedBuffers,
+            consumedNodes,
+          } = reconstructColumn(
             { name: pf.name, nullable: pf.nullable, kind: pf.indexKind ?? "int32" },
             body,
             rb.buffers,
             bufIndex,
             node.length,
+            rb.nodes,
+            nodeIndex,
           );
           cols.push(resolveDictColumn(indexCol, dict, pf.kind));
-          bufIndex += consumed;
+          bufIndex += consumedBuffers;
+          nodeIndex += consumedNodes;
         } else {
-          const { column, consumed } = reconstructColumn(pf, body, rb.buffers, bufIndex, node.length);
+          const { column, consumedBuffers, consumedNodes } = reconstructColumn(
+            pf,
+            body,
+            rb.buffers,
+            bufIndex,
+            node.length,
+            rb.nodes,
+            nodeIndex,
+          );
           cols.push(column);
-          bufIndex += consumed;
+          bufIndex += consumedBuffers;
+          nodeIndex += consumedNodes;
         }
       }
       batches.push(new RecordBatch(schema, cols, rb.length));
@@ -1325,8 +1461,8 @@ export function fromIPC(bytes: Uint8Array): TableLike {
   if (!schema) throw new Error("bun:arrow.fromIPC: stream ended before any Schema message");
   if (batches.length === 0) {
     // Allow empty streams — return a table with one zero-length batch.
-    const emptyCols: ColumnLike[] = schema.fields.map(f => {
-      switch (f.type.kind) {
+    const makeEmpty = (type: DataType): ColumnLike => {
+      switch (type.kind) {
         case "int32":
           return new Column({ kind: "int32" }, 0, new Int32Array(0));
         case "int64":
@@ -1339,8 +1475,13 @@ export function fromIPC(bytes: Uint8Array): TableLike {
           return new Column({ kind: "bool" }, 0, new Uint8Array(0));
         case "utf8":
           return new Column({ kind: "utf8" }, 0, []);
+        case "list":
+          // Single-entry offsets ([0]) — there are no rows so no per-row
+          // offset, but the offsets buffer still needs the trailing total.
+          return new Column(type, 0, new Int32Array([0]), undefined, makeEmpty(type.child));
       }
-    });
+    };
+    const emptyCols: ColumnLike[] = schema.fields.map(f => makeEmpty(f.type));
     return new Table(schema, [new RecordBatch(schema, emptyCols, 0)]);
   }
   return new Table(schema, batches);

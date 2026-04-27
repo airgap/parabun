@@ -37,9 +37,13 @@
 
 // ─── Type system ───────────────────────────────────────────────────────────
 
-type ArrowKind = "int32" | "int64" | "float32" | "float64" | "bool" | "utf8";
+type ArrowKind = "int32" | "int64" | "float32" | "float64" | "bool" | "utf8" | "list";
 
-type DataType = { kind: ArrowKind };
+// `DataType` is a discriminated union: list types carry a `child` field
+// describing the element type; primitive types just have `kind`.
+type DataType =
+  | { kind: "int32" | "int64" | "float32" | "float64" | "bool" | "utf8" }
+  | { kind: "list"; child: DataType };
 
 type Field = {
   name: string;
@@ -53,32 +57,39 @@ type Schema = {
 
 // One column in a RecordBatch. `values` shape depends on `type.kind`:
 //   int32 → Int32Array, int64 → BigInt64Array, float32 → Float32Array,
-//   float64 → Float64Array, bool → Uint8Array (0/1 per row), utf8 → string[].
+//   float64 → Float64Array, bool → Uint8Array (0/1 per row), utf8 → string[]
+//   list  → Int32Array (offsets, length+1 entries), with the actual values
+//           in `child` (a Column of the element type whose length is the
+//           sum of all per-row list lengths).
 //
 // `validity` is an optional bitmap (one bit per row, 1 = present, 0 = null).
 // Length-bytes is ceil(length/8). Absent means no nulls.
 type ColumnValues = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array | string[];
+
+type ColumnGetResult = number | bigint | boolean | string | null | unknown[];
 
 class Column {
   type: DataType;
   length: number;
   values: ColumnValues;
   validity: Uint8Array | undefined;
+  /** Child column for list-typed columns. Undefined for primitives. */
+  child: Column | undefined;
 
-  constructor(type: DataType, length: number, values: ColumnValues, validity?: Uint8Array) {
+  constructor(type: DataType, length: number, values: ColumnValues, validity?: Uint8Array, child?: Column) {
     this.type = type;
     this.length = length;
     this.values = values;
     this.validity = validity;
+    this.child = child;
   }
 
   /**
    * Read the value at row `i`. Returns the JS-native form of the column's
-   * type — number for int32/float32/float64, bigint for int64, boolean for
-   * bool, string for utf8. Returns null when the row is masked off by the
-   * validity bitmap.
+   * type — number / bigint / boolean / string / array (for list) — or null
+   * when the row is masked off by the validity bitmap.
    */
-  get(i: number): number | bigint | boolean | string | null {
+  get(i: number): ColumnGetResult {
     if (i < 0 || i >= this.length) {
       throw new RangeError(`bun:arrow Column.get: index ${i} out of range [0, ${this.length})`);
     }
@@ -96,13 +107,24 @@ class Column {
         return ((this.values as Uint8Array)[i] & 1) === 1;
       case "utf8":
         return (this.values as string[])[i];
+      case "list": {
+        if (!this.child) {
+          throw new Error("bun:arrow Column.get: list column has no child");
+        }
+        const offsets = this.values as Int32Array;
+        const start = offsets[i];
+        const end = offsets[i + 1];
+        const out: unknown[] = new Array(end - start);
+        for (let k = 0; k < end - start; k++) out[k] = this.child.get(start + k);
+        return out;
+      }
     }
   }
 
   /**
    * Iterate every row. Useful when the row index isn't needed.
    */
-  *[Symbol.iterator](): IterableIterator<number | bigint | boolean | string | null> {
+  *[Symbol.iterator](): IterableIterator<ColumnGetResult> {
     for (let i = 0; i < this.length; i++) yield this.get(i);
   }
 }
@@ -232,7 +254,8 @@ type ColumnInput =
   | Uint8Array
   | boolean[]
   | string[]
-  | number[]; // numbers default to Float64Array
+  | number[] // numbers default to Float64Array
+  | unknown[][]; // arrays of arrays → list<T> (child type inferred from flattened first non-empty row)
 
 function inferColumn(name: string, input: ColumnInput): { field: Field; column: Column } {
   if (input instanceof Int32Array) {
@@ -295,6 +318,44 @@ function inferColumn(name: string, input: ColumnInput): { field: Field; column: 
       return {
         field: { name, type: { kind: "utf8" }, nullable: false },
         column: new Column({ kind: "utf8" }, input.length, input as string[]),
+      };
+    }
+    // Array-of-arrays → list<T>. Flatten all elements into a single child
+    // input, infer the child column from that flattened view, build offsets
+    // describing per-row list lengths.
+    if (Array.isArray(sample)) {
+      const rows = input as unknown[][];
+      const offsets = new Int32Array(rows.length + 1);
+      let total = 0;
+      for (let i = 0; i < rows.length; i++) {
+        offsets[i] = total;
+        total += rows[i].length;
+      }
+      offsets[rows.length] = total;
+
+      // Find first non-empty row to infer child type from.
+      let flat: unknown[] | null = null;
+      for (const row of rows) {
+        if (row.length > 0) {
+          flat = [];
+          for (const r of rows) for (const v of r) flat.push(v);
+          break;
+        }
+      }
+      // All-empty: default child to float64 (caller can pass a typed array
+      // for the child type by wrapping in a fully-typed Column manually if
+      // they care).
+      const childInferred =
+        flat !== null
+          ? inferColumn("__child", flat as ColumnInput)
+          : {
+              field: { name: "__child", type: { kind: "float64" } as DataType, nullable: false },
+              column: new Column({ kind: "float64" }, 0, new Float64Array(0)),
+            };
+      const listType: DataType = { kind: "list", child: childInferred.field.type };
+      return {
+        field: { name, type: listType, nullable: false },
+        column: new Column(listType, rows.length, offsets, undefined, childInferred.column),
       };
     }
   }
@@ -805,42 +866,7 @@ function filter(batch: RecordBatch, predicate: (row: Record<string, any>, index:
   for (let i = 0; i < batch.numRows; i++) {
     if (predicate(batch.row(i), i)) keepIdx.push(i);
   }
-  // Build filtered columns. Nullable columns retain validity in the filtered
-  // shape — copy bits for kept rows.
-  const filteredCols: Column[] = batch.columns.map(col => {
-    const t = col.type.kind;
-    if (t === "int32") {
-      const dst = new Int32Array(keepIdx.length);
-      for (let i = 0; i < keepIdx.length; i++) dst[i] = (col.values as Int32Array)[keepIdx[i]];
-      return new Column(col.type, keepIdx.length, dst, sliceValidity(col.validity, keepIdx));
-    }
-    if (t === "int64") {
-      const dst = new BigInt64Array(keepIdx.length);
-      for (let i = 0; i < keepIdx.length; i++) dst[i] = (col.values as BigInt64Array)[keepIdx[i]];
-      return new Column(col.type, keepIdx.length, dst, sliceValidity(col.validity, keepIdx));
-    }
-    if (t === "float32") {
-      const dst = new Float32Array(keepIdx.length);
-      for (let i = 0; i < keepIdx.length; i++) dst[i] = (col.values as Float32Array)[keepIdx[i]];
-      return new Column(col.type, keepIdx.length, dst, sliceValidity(col.validity, keepIdx));
-    }
-    if (t === "float64") {
-      const dst = new Float64Array(keepIdx.length);
-      for (let i = 0; i < keepIdx.length; i++) dst[i] = (col.values as Float64Array)[keepIdx[i]];
-      return new Column(col.type, keepIdx.length, dst, sliceValidity(col.validity, keepIdx));
-    }
-    if (t === "bool") {
-      const dst = new Uint8Array(keepIdx.length);
-      for (let i = 0; i < keepIdx.length; i++) dst[i] = (col.values as Uint8Array)[keepIdx[i]];
-      return new Column(col.type, keepIdx.length, dst, sliceValidity(col.validity, keepIdx));
-    }
-    // utf8
-    const src = col.values as string[];
-    const dst: string[] = new Array(keepIdx.length);
-    for (let i = 0; i < keepIdx.length; i++) dst[i] = src[keepIdx[i]];
-    return new Column(col.type, keepIdx.length, dst, sliceValidity(col.validity, keepIdx));
-  });
-  return new RecordBatch(batch.schema, filteredCols, keepIdx.length);
+  return gatherIndices(batch, keepIdx);
 }
 
 function sliceValidity(src: Uint8Array | undefined, keepIdx: number[]): Uint8Array | undefined {
@@ -894,6 +920,14 @@ function concat(col: Column): ColumnValues {
       const out: string[] = new Array(col.length);
       for (let i = 0; i < col.length; i++) out[i] = col.get(i) as string;
       return out;
+    }
+    case "list": {
+      // Concatenated form for list columns is the array of arrays per row.
+      // For materializing the underlying child buffer, callers can grab
+      // `col.child.values` directly.
+      throw new TypeError(
+        "bun:arrow.concat: list columns aren't a flat-typed-array shape — access col.child.values directly, or use col.get(i) per row",
+      );
     }
   }
 }
@@ -1093,11 +1127,39 @@ function gatherIndices(batch: RecordBatch, idx: number[]): RecordBatch {
       for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
       return new Column(col.type, idx.length, dst, validity);
     }
-    // utf8
-    const src = col.values as string[];
-    const dst: string[] = new Array(idx.length);
-    for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
-    return new Column(col.type, idx.length, dst, validity);
+    if (t === "utf8") {
+      const src = col.values as string[];
+      const dst: string[] = new Array(idx.length);
+      for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+      return new Column(col.type, idx.length, dst, validity);
+    }
+    // list: rebuild offsets so they reference the new dense child slice,
+    // and gather only the child-row range each kept parent row points at.
+    // Two passes: first compute new total length and per-row offsets, then
+    // build a fresh child column out of the gathered child indices.
+    const srcOffsets = col.values as Int32Array;
+    const dstOffsets = new Int32Array(idx.length + 1);
+    const childIdx: number[] = [];
+    let total = 0;
+    for (let i = 0; i < idx.length; i++) {
+      dstOffsets[i] = total;
+      const start = srcOffsets[idx[i]];
+      const end = srcOffsets[idx[i] + 1];
+      for (let k = start; k < end; k++) childIdx.push(k);
+      total += end - start;
+    }
+    dstOffsets[idx.length] = total;
+    // Use a synthetic single-column RecordBatch to recurse through gather.
+    // This handles arbitrarily-nested list-of-list-of-... types.
+    const childGathered = gatherIndices(
+      new RecordBatch(
+        { fields: [{ name: "__child", type: col.child!.type, nullable: !!col.child!.validity }] },
+        [col.child!],
+        col.child!.length,
+      ),
+      childIdx,
+    ).columns[0];
+    return new Column(col.type, idx.length, dstOffsets, validity, childGathered);
   });
   return new RecordBatch(batch.schema, cols, idx.length);
 }
