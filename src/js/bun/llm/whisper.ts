@@ -736,22 +736,24 @@ class WhisperTokenizer {
       this.translate = 50257;
       this.langToken = new Map();
     } else {
-      // Multilingual layout:
+      // Multilingual layout (whisper.cpp/whisper.h, matching openai/whisper):
       //   50257 : <|endoftext|>
       //   50258 : <|startoftranscript|>
-      //   50259..50356 : language tokens (en=50259, zh=50260, de=50261, ...)
-      //   50357 : <|translate|>
-      //   50358 : <|transcribe|>
-      //   ...
-      //   50362 : <|notimestamps|>
-      //   50363+ : timestamps
+      //   50259..50357 : 99 language tokens (en=50259, zh=50260, de=50261, ...)
+      //   50358 : <|translate|>
+      //   50359 : <|transcribe|>
+      //   50360 : <|startoflm|>
+      //   50361 : <|startofprev|>
+      //   50362 : <|nospeech|>
+      //   50363 : <|notimestamps|>
+      //   50364+ : timestamps
       this.eot = 50257;
       this.sot = 50258;
-      this.transcribe = 50358;
-      this.translate = 50357;
-      this.noTimestamps = 50362;
+      this.translate = 50358;
+      this.transcribe = 50359;
+      this.noTimestamps = 50363;
       this.langToken = new Map();
-      // Populate the most common languages — full table is in whisper.cpp's lang map.
+      // Whisper's full 99-language list, in token-id order. en=50259.
       const langs = [
         "en",
         "zh",
@@ -783,6 +785,75 @@ class WhisperTokenizer {
         "hu",
         "ta",
         "no",
+        "th",
+        "ur",
+        "hr",
+        "bg",
+        "lt",
+        "la",
+        "mi",
+        "ml",
+        "cy",
+        "sk",
+        "te",
+        "fa",
+        "lv",
+        "bn",
+        "sr",
+        "az",
+        "sl",
+        "kn",
+        "et",
+        "mk",
+        "br",
+        "eu",
+        "is",
+        "hy",
+        "ne",
+        "mn",
+        "bs",
+        "kk",
+        "sq",
+        "sw",
+        "gl",
+        "mr",
+        "pa",
+        "si",
+        "km",
+        "sn",
+        "yo",
+        "so",
+        "af",
+        "oc",
+        "ka",
+        "be",
+        "tg",
+        "sd",
+        "gu",
+        "am",
+        "yi",
+        "lo",
+        "uz",
+        "fo",
+        "ht",
+        "ps",
+        "tk",
+        "nn",
+        "mt",
+        "sa",
+        "lb",
+        "my",
+        "bo",
+        "tl",
+        "mg",
+        "as",
+        "tt",
+        "haw",
+        "ln",
+        "ha",
+        "ba",
+        "jw",
+        "su",
       ];
       for (let i = 0; i < langs.length; i++) this.langToken.set(langs[i], 50259 + i);
     }
@@ -812,14 +883,13 @@ class WhisperTokenizer {
    */
   decode(ids: number[]): string {
     const pieces: string[] = [];
+    // Strip every special token. Whisper's vocab places ALL specials
+    // (SOT, EOT, language tags, task tags, NoTimestamps, timestamp
+    // bins) at IDs ≥ EOT — emitting any of them mid-text would be
+    // either a prefix leak or a model artifact, never speech content.
+    const specialFloor = this.eot;
     for (const id of ids) {
-      if (id === this.eot || id === this.sot || id === this.noTimestamps) continue;
-      // Skip timestamp tokens (50259..51862 for .en, 50363+ for multilingual).
-      if (this.englishOnly) {
-        if (id >= 50259 && id <= 51862) continue;
-      } else {
-        if (id >= 50363) continue;
-      }
+      if (id >= specialFloor) continue;
       pieces.push(this.vocab[id] ?? "");
     }
     // Post-process: Whisper sometimes emits literal "[BLANK_AUDIO]",
@@ -1082,6 +1152,83 @@ class WhisperModel {
   }
 
   /**
+   * Detect the spoken language from a 30-second mel window. The standard
+   * Whisper recipe: feed [<|startoftranscript|>] to the decoder, then
+   * argmax over the language-token range (50259..50357 for multilingual).
+   *
+   * Returns `{ language, prob }` where `language` is the ISO-639-1 code
+   * and `prob` is the softmax probability over the language tokens. For
+   * English-only models this throws — they have no language tokens to
+   * detect.
+   *
+   * `mel` is a flat [nMels, T] row-major array (typically T = 3000 for a
+   * 30-second window). Use `audio.melSpectrogram(audio, { mode: "whisper" })`
+   * to produce one. The encoder output is computed inline; reuse via
+   * `detectLanguageFromEncoder` if you've already encoded.
+   */
+  detectLanguage(mel: Float32Array, T: number): { language: string; prob: number } {
+    if (this.tokenizer.englishOnly) {
+      throw new Error("bun:llm whisper: detectLanguage requires a multilingual model");
+    }
+    const h = this.hparams;
+    const Tdesired = h.nAudioCtx * 2;
+    let melPacked: Float32Array;
+    if (T === Tdesired) {
+      melPacked = mel;
+    } else {
+      melPacked = new Float32Array(h.nMels * Tdesired);
+      const Tcopy = Math.min(T, Tdesired);
+      for (let m = 0; m < h.nMels; m++) {
+        for (let t = 0; t < Tcopy; t++) {
+          melPacked[m * Tdesired + t] = mel[m * T + t];
+        }
+      }
+    }
+    const encoded = this.encode(melPacked, Tdesired);
+    return this.detectLanguageFromEncoder(encoded);
+  }
+
+  /**
+   * Same as detectLanguage but takes a pre-computed encoder output. Use
+   * when you've already encoded for transcription and want to avoid the
+   * second encode pass.
+   */
+  detectLanguageFromEncoder(encoderOut: Float32Array): { language: string; prob: number } {
+    if (this.tokenizer.englishOnly) {
+      throw new Error("bun:llm whisper: detectLanguage requires a multilingual model");
+    }
+    const state = this.newState();
+    this.prepareState(state, encoderOut);
+    // Feed only [SOT]; the next-token distribution is dominated by
+    // language tokens at this position.
+    const logits = this.decodeStep(this.tokenizer.sot, state);
+
+    // Build inverse map id → language code, then softmax over the
+    // language-token range and pick the best.
+    const langToId = this.tokenizer.langToken;
+    const idToLang = new Map<number, string>();
+    for (const [k, v] of langToId) idToLang.set(v, k);
+    const minId = Math.min(...idToLang.keys());
+    const maxId = Math.max(...idToLang.keys());
+
+    let max = -Infinity;
+    for (let v = minId; v <= maxId; v++) if (logits[v] > max) max = logits[v];
+    let sum = 0;
+    let bestId = minId;
+    let bestVal = -Infinity;
+    for (let v = minId; v <= maxId; v++) {
+      const lp = Math.exp(logits[v] - max);
+      sum += lp;
+      if (logits[v] > bestVal) {
+        bestVal = logits[v];
+        bestId = v;
+      }
+    }
+    const prob = Math.exp(logits[bestId] - max) / sum;
+    return { language: idToLang.get(bestId) ?? "en", prob };
+  }
+
+  /**
    * Populate a state's cross-attention K/V caches from a fresh encoder
    * output. Each decoder layer's cross_attn.key.weight and value.weight
    * are applied to the encoder output once, so subsequent decoder steps
@@ -1249,11 +1396,24 @@ class WhisperModel {
 
     const encoded = this.encode(melPacked, Tdesired);
 
+    // Auto language detection: when caller passes "auto" (or the default
+    // for a multilingual model), peek at the post-SOT distribution and
+    // pick the language token with the highest log-prob. English-only
+    // models silently keep "en".
+    let resolvedLanguage = language;
+    if (language === "auto") {
+      if (this.tokenizer.englishOnly) {
+        resolvedLanguage = "en";
+      } else {
+        resolvedLanguage = this.detectLanguageFromEncoder(encoded).language;
+      }
+    }
+
     const state = this.newState();
     this.prepareState(state, encoded);
 
     const tokenizer = this.tokenizer;
-    const prefix = tokenizer.prefix(language);
+    const prefix = tokenizer.prefix(resolvedLanguage);
     // Feed prefix tokens through the decoder to populate the self-attn
     // KV cache. Logits from prefix steps are discarded except the last,
     // which becomes the seed for beam expansion.
@@ -1263,11 +1423,10 @@ class WhisperModel {
     }
 
     // Mask out timestamp tokens — we run with <|notimestamps|> active so
-    // emitting a timestamp would be a bug.
-    const isMaskedToken = (v: number): boolean => {
-      if (tokenizer.englishOnly) return v >= 50259 && v <= 51862;
-      return v >= 50363;
-    };
+    // emitting a timestamp would be a bug. Timestamps live just past
+    // the no-timestamps sentinel for both english-only and multilingual.
+    const tsFloor = tokenizer.noTimestamps + 1;
+    const isMaskedToken = (v: number): boolean => v >= tsFloor;
 
     if (beamSize === 1) {
       // Greedy fast path. Same observable behavior as beam=1, but skips
