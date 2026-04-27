@@ -1490,6 +1490,168 @@ function launchHistogramF32(
   return out;
 }
 
+// ─── Kernel launch: scan (inclusive prefix sum) ───────────────────────────
+// Three-stage launch driven by the kernels above.
+//   Stage 1: per-block scan + emit blockSums[i] = block i's total.
+//   Stage 2: single-block scan over blockSums (rounded up to power-of-2).
+//   Stage 3: each block i ≥ 1 adds blockSums[i-1] to its own output.
+//
+// Bounded at SCAN_BLOCK² = 65,536 elements per call. Above that, returns
+// null so the public wrapper falls back to CPU. Recursive multi-stage
+// scan (which would lift the limit) is a follow-up.
+const SCAN_BLOCK = 256;
+const SCAN_MAX_ELEMS = SCAN_BLOCK * SCAN_BLOCK;
+
+function nextPow2(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
+  if (!probeDevOps()) return null;
+  const aView = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  const n = aView.length;
+  if (n === 0) return new Float32Array(0);
+  if (n > SCAN_MAX_ELEMS) return null; // caller falls back to CPU
+
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const aBytes = BigInt(n * 4);
+  const numBlocks = Math.ceil(n / SCAN_BLOCK);
+  const blockSumsLen = nextPow2(numBlocks);
+  const blockSumsBytes = BigInt(blockSumsLen * 4);
+
+  // Allocate input + output + blockSums on device.
+  let dA: bigint;
+  let aOwned: boolean;
+  if (isGpuHandle(input)) {
+    if (input.released) throw new Error("bun:gpu: scan called on released handle");
+    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    dA = input.buffer;
+    aOwned = false;
+  } else {
+    const dABuf = new BigUint64Array(1);
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
+      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    }
+    dA = dABuf[0];
+    aOwned = true;
+    if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
+      s.cuMemFree_v2(dA);
+      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    }
+  }
+
+  const dOutBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dOutBuf), aBytes) !== 0) {
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+  }
+  const dOut = dOutBuf[0];
+
+  const dSumsBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dSumsBuf), blockSumsBytes) !== 0) {
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemAlloc(blockSums) failed");
+  }
+  const dSums = dSumsBuf[0];
+  // Zero the padding tail of blockSums (rounded-up area beyond numBlocks)
+  // so the second-stage scan picks up zeros there. Simple: zero the
+  // whole buffer up front.
+  const zero = new Float32Array(blockSumsLen);
+  if (s.cuMemcpyHtoD_v2(dSums, ptr(zero), blockSumsBytes) !== 0) {
+    s.cuMemFree_v2(dSums);
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+    throw new Error("bun:gpu cuda: cuMemcpyHtoD(blockSums zero) failed");
+  }
+
+  const cleanup = () => {
+    s.cuMemFree_v2(dSums);
+    s.cuMemFree_v2(dOut);
+    if (aOwned) s.cuMemFree_v2(dA);
+  };
+
+  // ── Stage 1 — per-block scan + emit blockSums.
+  {
+    const pIn = new BigUint64Array([dA]);
+    const pOut = new BigUint64Array([dOut]);
+    const pSums = new BigUint64Array([dSums]);
+    const pN = new Uint32Array([n]);
+    const params = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pOut)), BigInt(ptr(pSums)), BigInt(ptr(pN))]);
+    const r = s.cuLaunchKernel(
+      devOpsFns!.scanBlockInclusive,
+      numBlocks,
+      1,
+      1,
+      SCAN_BLOCK,
+      1,
+      1,
+      0,
+      0n,
+      ptr(params),
+      null,
+    );
+    if (r !== 0) {
+      cleanup();
+      throw new Error(`bun:gpu cuda: cuLaunchKernel(scan_block_inclusive) failed (${r})`);
+    }
+  }
+
+  // ── Stage 2 — scan blockSums in a single block.
+  {
+    const pSums = new BigUint64Array([dSums]);
+    const pNB = new Uint32Array([numBlocks]);
+    const params = new BigUint64Array([BigInt(ptr(pSums)), BigInt(ptr(pNB))]);
+    const r = s.cuLaunchKernel(
+      devOpsFns!.scanBlocksumsInclusive,
+      1,
+      1,
+      1,
+      blockSumsLen,
+      1,
+      1,
+      0,
+      0n,
+      ptr(params),
+      null,
+    );
+    if (r !== 0) {
+      cleanup();
+      throw new Error(`bun:gpu cuda: cuLaunchKernel(scan_blocksums_inclusive) failed (${r})`);
+    }
+  }
+
+  // ── Stage 3 — add prior-block offsets back. Skipped if there's only one
+  // block (no offsets to add).
+  if (numBlocks > 1) {
+    const pOut = new BigUint64Array([dOut]);
+    const pSums = new BigUint64Array([dSums]);
+    const pN = new Uint32Array([n]);
+    const params = new BigUint64Array([BigInt(ptr(pOut)), BigInt(ptr(pSums)), BigInt(ptr(pN))]);
+    const r = s.cuLaunchKernel(devOpsFns!.scanAddOffsets, numBlocks, 1, 1, SCAN_BLOCK, 1, 1, 0, 0n, ptr(params), null);
+    if (r !== 0) {
+      cleanup();
+      throw new Error(`bun:gpu cuda: cuLaunchKernel(scan_add_offsets) failed (${r})`);
+    }
+  }
+
+  if (s.cuCtxSynchronize() !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+  }
+
+  const out = new Float32Array(n);
+  if (s.cuMemcpyDtoH_v2(ptr(out), dOut, aBytes) !== 0) {
+    cleanup();
+    throw new Error("bun:gpu cuda: cuMemcpyDtoH(out) failed");
+  }
+  cleanup();
+  return out;
+}
+
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
 //
 // a·b → scalar. Grid of DOT_GRID blocks × 32 threads. Each thread stride-loops
@@ -2283,6 +2445,32 @@ function histogram(input: FArray | GpuHandle, bins: number, min: number, max: nu
     result[bin]++;
   }
   return result;
+}
+
+// Scan dispatch — inclusive prefix sum over Float32Array. Returns null
+// (then a CPU fallback inline) when NVRTC isn't available or the input
+// exceeds the v1 SCAN_MAX_ELEMS cap of 65,536 — recursive multi-stage
+// scan to lift the cap is follow-up work.
+function scan(input: FArray | GpuHandle): FArray {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("bun:gpu cuda: scan requires Float32Array (f64 not yet supported)");
+  }
+  const out = launchScanF32(input as Float32Array | GpuHandle);
+  if (out !== null) return out;
+  // CPU fallback — Kahan-compensated inclusive scan, matches gpu.ts's
+  // CPU reference. Used when NVRTC is missing or n > SCAN_MAX_ELEMS.
+  const cpu = new Float32Array(view.length);
+  let sum = 0;
+  let c = 0;
+  for (let i = 0; i < view.length; i++) {
+    const y = view[i] - c;
+    const t = sum + y;
+    c = t - sum - y;
+    sum = t;
+    cpu[i] = sum;
+  }
+  return cpu;
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
@@ -3620,6 +3808,95 @@ extern "C" __global__ void histogram_f32(
         if (sbins[i] != 0u) atomicAdd(&out[i], sbins[i]);
     }
 }
+
+// ─── Inclusive prefix sum (scan) ──────────────────────────────────────────
+// Three-kernel two-stage scan:
+//
+//   1. scan_block_inclusive_f32 — each block scans its own segment of
+//      blockDim.x elements with Hillis-Steele in shared memory; thread 0
+//      writes that block's grand total to blockSums[blockIdx.x].
+//
+//   2. scan_blocksums_inclusive_f32 — single-block inclusive scan over
+//      blockSums (length numBlocks). Caller must launch with one block of
+//      ceil(numBlocks)-rounded-up-to-power-of-2 threads. The result is
+//      the cumulative offset that each block past the first needs to add
+//      to its scanned segment.
+//
+//   3. scan_add_offsets_f32 — block i ≥ 1 picks up blockSums[i-1] (now
+//      an exclusive offset relative to the global stream) and adds it to
+//      every element of its segment.
+//
+// Block size 256 throughout. With one stage of block-sum scanning we
+// support up to 256² = 65,536 elements per call. Larger inputs need
+// either a recursive scan-of-scans or a host-side split — both are
+// follow-up work; for now the launcher caps at 256² and routes larger
+// inputs through the existing CPU reference.
+
+extern "C" __global__ void scan_block_inclusive_f32(
+    const float* __restrict__ in,
+    float* __restrict__ out,
+    float* __restrict__ blockSums,
+    unsigned int n
+) {
+    __shared__ float sdata[256];
+    unsigned int tid = threadIdx.x;
+    unsigned int idx = blockIdx.x * blockDim.x + tid;
+
+    sdata[tid] = (idx < n) ? in[idx] : 0.0f;
+    __syncthreads();
+
+    // Hillis-Steele inclusive scan: log2(blockDim.x) steps. At step s,
+    // each thread tid >= s adds sdata[tid - s] into its slot. Need a
+    // separate read-then-sync-then-write to avoid races.
+    for (unsigned int s = 1; s < blockDim.x; s <<= 1) {
+        float v = (tid >= s) ? sdata[tid - s] : 0.0f;
+        __syncthreads();
+        sdata[tid] += v;
+        __syncthreads();
+    }
+
+    if (idx < n) out[idx] = sdata[tid];
+
+    // Last thread of the block writes the block's total. Threads beyond
+    // n contribute 0 so it's safe even on the tail block.
+    if (tid == blockDim.x - 1u) blockSums[blockIdx.x] = sdata[tid];
+}
+
+// Single-block inclusive scan. Block size = numBlocks rounded up to a
+// power of 2 (caller pads with zeroes). Used to convert per-block sums
+// into per-block offsets.
+extern "C" __global__ void scan_blocksums_inclusive_f32(
+    float* __restrict__ blockSums,
+    unsigned int numBlocks
+) {
+    __shared__ float sdata[1024];
+    unsigned int tid = threadIdx.x;
+
+    sdata[tid] = (tid < numBlocks) ? blockSums[tid] : 0.0f;
+    __syncthreads();
+
+    for (unsigned int s = 1; s < blockDim.x; s <<= 1) {
+        float v = (tid >= s) ? sdata[tid - s] : 0.0f;
+        __syncthreads();
+        sdata[tid] += v;
+        __syncthreads();
+    }
+
+    if (tid < numBlocks) blockSums[tid] = sdata[tid];
+}
+
+// Add prior-block offsets back to the per-block scanned values.
+// Block i (i >= 1) adds blockSums[i-1] to every element of its segment.
+extern "C" __global__ void scan_add_offsets_f32(
+    float* __restrict__ out,
+    const float* __restrict__ blockSums,
+    unsigned int n
+) {
+    if (blockIdx.x == 0u) return;
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    out[idx] += blockSums[blockIdx.x - 1u];
+}
 `;
 
 type DevOpsFns = {
@@ -3649,6 +3926,9 @@ type DevOpsFns = {
   reduceMin: bigint;
   reduceMax: bigint;
   histogram: bigint;
+  scanBlockInclusive: bigint;
+  scanBlocksumsInclusive: bigint;
+  scanAddOffsets: bigint;
 };
 
 let devOpsProbed = false;
@@ -3741,6 +4021,9 @@ function probeDevOps(): boolean {
     "reduceMin",
     "reduceMax",
     "histogram",
+    "scanBlockInclusive",
+    "scanBlocksumsInclusive",
+    "scanAddOffsets",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -3769,6 +4052,9 @@ function probeDevOps(): boolean {
     reduceMin: "reduce_min_f32",
     reduceMax: "reduce_max_f32",
     histogram: "histogram_f32",
+    scanBlockInclusive: "scan_block_inclusive_f32",
+    scanBlocksumsInclusive: "scan_blocksums_inclusive_f32",
+    scanAddOffsets: "scan_add_offsets_f32",
   };
 
   const fns = {} as DevOpsFns;
@@ -4318,6 +4604,7 @@ export default {
   imageBlurRGBA,
   reduce,
   histogram,
+  scan,
   simdMap,
   alloc,
   isAligned,
