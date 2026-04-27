@@ -936,10 +936,13 @@ type GpuMat = Float32Array | { readonly __bunGpuHandle?: true; readonly view?: F
 interface DecoderBlock {
   attnLnW: Float32Array;
   attnLnB: Float32Array;
-  attnQW: GpuMat;
+  // QKV weights are concatenated row-wise into a single [3*dim, dim]
+  // matrix (Q rows in [0, dim), K in [dim, 2*dim), V in [2*dim, 3*dim)).
+  // One matVec dispatch produces all three projections per layer per
+  // step instead of three — cuts decoder-self-attn launches from
+  // 3*nLayers to 1*nLayers.
+  attnQKVW: GpuMat;
   attnQB: Float32Array;
-  attnKW: GpuMat;
-  attnVW: GpuMat;
   attnVB: Float32Array;
   attnOW: GpuMat;
   attnOB: Float32Array;
@@ -1310,14 +1313,15 @@ class WhisperModel {
       const xn = new Float32Array(dim);
       xn.set(x);
       layerNormInPlace(xn, 1, dim, block.attnLnW, block.attnLnB);
-      const Q = gpu.matVec(block.attnQW as Float32Array, xn, dim, dim) as Float32Array;
+      // One fused matVec for Q || K || V — three projection launches
+      // become one. The output is sliced into Q/K/V views (no copy);
+      // K and V views are written directly into the device-resident
+      // cache via writeAt (small HtoD per layer per step).
+      const QKV = gpu.matVec(block.attnQKVW as Float32Array, xn, 3 * dim, dim) as Float32Array;
+      const Q = QKV.subarray(0, dim);
+      const Knew = QKV.subarray(dim, 2 * dim);
+      const Vnew = QKV.subarray(2 * dim, 3 * dim);
       addBias(Q, 1, dim, block.attnQB);
-      // Project new K/V rows. matVec returns a fresh Float32Array; we
-      // append it into the device-resident cache via writeAt — small
-      // HtoD (1.5 KB on tiny.en) per layer per step instead of the JS
-      // host-scatter pattern.
-      const Knew = gpu.matVec(block.attnKW as Float32Array, xn, dim, dim) as Float32Array;
-      const Vnew = gpu.matVec(block.attnVW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Vnew, 1, dim, block.attnVB);
       state.selfK[li].writeAt(pos * dim, Knew);
       state.selfV[li].writeAt(pos * dim, Vnew);
@@ -1727,14 +1731,27 @@ function mapWeights(bin: BinModel): WhisperWeights {
   }
 
   const decBlocks: DecoderBlock[] = [];
+  const dimText = bin.hparams.nTextState;
+  // Pre-pack [Q | K | V] weights as one [3*dimText, dimText] block per
+  // decoder layer. matVec consumes a single contiguous matrix; the slot
+  // layout matches the projection order so we can slice the output back
+  // into Q/K/V views without copying.
+  const concatQKV = (q: Float32Array, k: Float32Array, v: Float32Array): Float32Array => {
+    const out = new Float32Array(q.length + k.length + v.length);
+    out.set(q, 0);
+    out.set(k, q.length);
+    out.set(v, q.length + k.length);
+    return out;
+  };
   for (let i = 0; i < bin.hparams.nTextLayer; i++) {
+    const qW = get(`decoder.blocks.${i}.attn.query.weight`);
+    const kW = get(`decoder.blocks.${i}.attn.key.weight`);
+    const vW = get(`decoder.blocks.${i}.attn.value.weight`);
     decBlocks.push({
       attnLnW: get(`decoder.blocks.${i}.attn_ln.weight`),
       attnLnB: get(`decoder.blocks.${i}.attn_ln.bias`),
-      attnQW: toGpu(get(`decoder.blocks.${i}.attn.query.weight`)),
+      attnQKVW: toGpu(concatQKV(qW, kW, vW)),
       attnQB: get(`decoder.blocks.${i}.attn.query.bias`),
-      attnKW: toGpu(get(`decoder.blocks.${i}.attn.key.weight`)),
-      attnVW: toGpu(get(`decoder.blocks.${i}.attn.value.weight`)),
       attnVB: get(`decoder.blocks.${i}.attn.value.bias`),
       attnOW: toGpu(get(`decoder.blocks.${i}.attn.out.weight`)),
       attnOB: get(`decoder.blocks.${i}.attn.out.bias`),
