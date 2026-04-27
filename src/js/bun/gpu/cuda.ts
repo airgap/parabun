@@ -104,6 +104,26 @@ type CublasSymbols = {
     C: bigint,
     ldc: number,
   ) => number;
+  cublasSgemmStridedBatched: (
+    handle: bigint,
+    transA: number,
+    transB: number,
+    m: number,
+    n: number,
+    k: number,
+    alpha: number,
+    A: bigint,
+    lda: number,
+    strideA: bigint,
+    B: bigint,
+    ldb: number,
+    strideB: bigint,
+    beta: number,
+    C: bigint,
+    ldc: number,
+    strideC: bigint,
+    batchCount: number,
+  ) => number;
 };
 
 const CUBLAS_OP_N = 0;
@@ -136,20 +156,43 @@ function tryLoadCublas(): boolean {
         cublasDestroy_v2: { args: [FFIType.u64], returns: FFIType.i32 },
         cublasSgemm_v2: {
           args: [
-            FFIType.u64, // handle
-            FFIType.i32, // transA
-            FFIType.i32, // transB
-            FFIType.i32, // m
-            FFIType.i32, // n
-            FFIType.i32, // k
-            FFIType.ptr, // alpha (host f32*)
-            FFIType.u64, // A device ptr
-            FFIType.i32, // lda
-            FFIType.u64, // B device ptr
-            FFIType.i32, // ldb
-            FFIType.ptr, // beta (host f32*)
-            FFIType.u64, // C device ptr
-            FFIType.i32, // ldc
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.ptr,
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.ptr,
+            FFIType.u64,
+            FFIType.i32,
+          ],
+          returns: FFIType.i32,
+        },
+        cublasSgemmStridedBatched: {
+          args: [
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.i32,
+            FFIType.ptr,
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.i64,
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.i64,
+            FFIType.ptr,
+            FFIType.u64,
+            FFIType.i32,
+            FFIType.i64,
+            FFIType.i32,
           ],
           returns: FFIType.i32,
         },
@@ -2482,6 +2525,134 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
       if (x === 0) continue;
       const bRow = p * n;
       for (let j = 0; j < n; j++) dst[oRow + j] += x * bv[bRow + j];
+    }
+  }
+  return dst;
+}
+
+// Batched matmul. Computes `batchCount` independent [m,k]·[k,n] = [m,n]
+// products in a single kernel launch when cuBLAS is available, falling
+// back to a per-batch loop otherwise. Strides are in elements (not bytes)
+// — the offset between successive matrices in each input/output array.
+function matmulBatched(
+  a: FArray | GpuHandle,
+  b: FArray | GpuHandle,
+  batchCount: number,
+  m: number,
+  k: number,
+  n: number,
+  strideA: number,
+  strideB: number,
+  strideC: number,
+  out?: FArray,
+): FArray {
+  if (batchCount <= 0) throw new RangeError("matmulBatched: batchCount must be > 0");
+  if (batchCount === 1) return matmul(a, b, m, k, n, out);
+
+  const aIsHandle = isGpuHandle(a);
+  const bIsHandle = isGpuHandle(b);
+  if (aIsHandle && a.released) throw new Error("bun:gpu: matmulBatched called on released handle");
+  if (bIsHandle && b.released) throw new Error("bun:gpu: matmulBatched called on released handle");
+  const av = aIsHandle ? a.view : (a as FArray);
+  const bv = bIsHandle ? b.view : (b as FArray);
+  if (!(av instanceof Float32Array) || !(bv instanceof Float32Array)) {
+    throw new TypeError("matmulBatched: f32 only for now");
+  }
+
+  const totalC = batchCount * strideC;
+  const dst = (out as Float32Array | undefined) ?? new Float32Array(totalC);
+
+  if (cublasLib && probe()) {
+    // Stage inputs onto the device. For handle inputs, reuse the
+    // already-resident device buffer; for raw arrays, do an HtoD.
+    const s = cudaLib!.symbols;
+    const ptr = ffiPtr!;
+    const totalA = batchCount * strideA;
+    const totalB = batchCount * strideB;
+    const aBytes = BigInt(totalA * 4);
+    const bBytes = BigInt(totalB * 4);
+    const cBytes = BigInt(totalC * 4);
+
+    let dA: bigint;
+    let aOwned = false;
+    if (aIsHandle && a.buffer !== 0n) {
+      dA = a.buffer;
+    } else {
+      const buf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(buf), aBytes) !== 0) throw new Error("cuMemAlloc(A) failed");
+      dA = buf[0];
+      aOwned = true;
+      if (s.cuMemcpyHtoD_v2(dA, ptr(av), aBytes) !== 0) throw new Error("cuMemcpyHtoD(A) failed");
+    }
+    let dB: bigint;
+    let bOwned = false;
+    if (bIsHandle && b.buffer !== 0n) {
+      dB = b.buffer;
+    } else {
+      const buf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(buf), bBytes) !== 0) {
+        if (aOwned) s.cuMemFree_v2(dA);
+        throw new Error("cuMemAlloc(B) failed");
+      }
+      dB = buf[0];
+      bOwned = true;
+      if (s.cuMemcpyHtoD_v2(dB, ptr(bv), bBytes) !== 0) throw new Error("cuMemcpyHtoD(B) failed");
+    }
+
+    let dC: bigint = 0n;
+    try {
+      const cBuf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(cBuf), cBytes) !== 0) throw new Error("cuMemAlloc(C) failed");
+      dC = cBuf[0];
+
+      // Same row-major→column-major flip as matmul: compute C^T = B^T · A^T,
+      // pass B/A swapped with OP_N for both.
+      const alphaBuf = new Float32Array([1.0]);
+      const betaBuf = new Float32Array([0.0]);
+      const r = cublasLib.symbols.cublasSgemmStridedBatched(
+        cublasHandle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        n,
+        m,
+        k,
+        ptr(alphaBuf),
+        dB,
+        n,
+        BigInt(strideB),
+        dA,
+        k,
+        BigInt(strideA),
+        ptr(betaBuf),
+        dC,
+        n,
+        BigInt(strideC),
+        batchCount,
+      );
+      if (r !== 0) throw new Error(`cublasSgemmStridedBatched failed (${r})`);
+      if (s.cuCtxSynchronize() !== 0) throw new Error("cuCtxSynchronize failed");
+      if (s.cuMemcpyDtoH_v2(ptr(dst), dC, cBytes) !== 0) throw new Error("cuMemcpyDtoH(C) failed");
+      return dst;
+    } finally {
+      if (aOwned && dA !== 0n) s.cuMemFree_v2(dA);
+      if (bOwned && dB !== 0n) s.cuMemFree_v2(dB);
+      if (dC !== 0n) s.cuMemFree_v2(dC);
+    }
+  }
+
+  // CPU fallback: per-batch loop.
+  for (let b = 0; b < batchCount; b++) {
+    const aSlice = av.subarray(b * strideA, b * strideA + m * k);
+    const bSlice = bv.subarray(b * strideB, b * strideB + k * n);
+    const cSlice = dst.subarray(b * strideC, b * strideC + m * n);
+    for (let i = 0; i < m; i++) {
+      const aRow = i * k;
+      const oRow = i * n;
+      for (let j = 0; j < n; j++) {
+        let s = 0;
+        for (let p = 0; p < k; p++) s += aSlice[aRow + p] * bSlice[p * n + j];
+        cSlice[oRow + j] = s;
+      }
     }
   }
   return dst;
@@ -5226,6 +5397,7 @@ export default {
   dot,
   matVec,
   matmul,
+  matmulBatched,
   conv2D,
   imageBlurRGBA,
   reduce,

@@ -215,6 +215,26 @@ interface Backend {
   matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
   matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray;
   /**
+   * Batched matmul: `batchCount` independent [m,k]·[k,n] = [m,n] products
+   * in one call. Strides are in elements (not bytes). On CUDA with cuBLAS
+   * available this dispatches to `cublasSgemmStridedBatched` — one launch
+   * regardless of batchCount; on other backends, it loops. Useful for
+   * per-head attention (Q@K^T, attn@V) where head-major layouts let one
+   * call cover all heads.
+   */
+  matmulBatched?(
+    a: FArray | GpuHandle,
+    b: FArray | GpuHandle,
+    batchCount: number,
+    m: number,
+    k: number,
+    n: number,
+    strideA: number,
+    strideB: number,
+    strideC: number,
+    out?: FArray,
+  ): FArray;
+  /**
    * 2D valid-mode convolution. `input` is iH×iW row-major Float32Array,
    * `kernel` is kH×kW row-major Float32Array. Output is (iH-kH+1)×(iW-kW+1)
    * row-major Float32Array. Backends MAY implement this; if a backend
@@ -875,6 +895,41 @@ function matmul(
   return resolveActive().matmul(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n, out);
 }
 
+function matmulBatched(
+  a: FArray | GpuHandle | GpuFloat32Array,
+  b: FArray | GpuHandle | GpuFloat32Array,
+  batchCount: number,
+  m: number,
+  k: number,
+  n: number,
+  strideA: number,
+  strideB: number,
+  strideC: number,
+  out?: FArray,
+): FArray {
+  if (!Number.isInteger(batchCount) || batchCount < 0) {
+    throw new RangeError("matmulBatched: batchCount must be a non-negative integer");
+  }
+  if (!Number.isInteger(m) || m < 0) throw new RangeError("matmulBatched: m must be a non-negative integer");
+  if (!Number.isInteger(k) || k < 0) throw new RangeError("matmulBatched: k must be a non-negative integer");
+  if (!Number.isInteger(n) || n < 0) throw new RangeError("matmulBatched: n must be a non-negative integer");
+  const backend = resolveActive();
+  if (backend.matmulBatched) {
+    return backend.matmulBatched(unwrapGpuArg(a), unwrapGpuArg(b), batchCount, m, k, n, strideA, strideB, strideC, out);
+  }
+  // Fallback: per-batch loop through the regular matmul.
+  const av = unwrapGpuArg(a) as FArray;
+  const bv = unwrapGpuArg(b) as FArray;
+  const dst = (out as Float32Array | undefined) ?? new Float32Array(batchCount * strideC);
+  for (let bi = 0; bi < batchCount; bi++) {
+    const aSlice = av.subarray(bi * strideA, bi * strideA + m * k) as Float32Array;
+    const bSlice = bv.subarray(bi * strideB, bi * strideB + k * n) as Float32Array;
+    const cSlice = dst.subarray(bi * strideC, bi * strideC + m * n) as Float32Array;
+    backend.matmul(aSlice, bSlice, m, k, n, cSlice);
+  }
+  return dst;
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: Float32Array): Float32Array;
 function simdMap(fn: (x: number, i: number) => number, a: Float64Array): Float64Array;
 function simdMap(fn: (x: number, i: number) => number, a: GpuHandle | GpuFloat32Array): FArray;
@@ -1315,6 +1370,7 @@ export default {
   dot,
   matVec,
   matmul,
+  matmulBatched,
   conv2D,
   scan,
   reduce,
