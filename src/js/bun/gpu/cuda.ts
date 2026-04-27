@@ -76,6 +76,103 @@ let cudaLib: { symbols: CudaSymbols; close: () => void } | null = null;
 let ffiPtr: ((x: any) => number) | null = null;
 let ffiToArrayBuffer: ((ptr: bigint | number, byteOffset: number, byteLength: number) => ArrayBuffer) | null = null;
 
+// ─── cuBLAS FFI bindings (optional) ───────────────────────────────────────
+// libcublas ships with the CUDA toolkit, NOT the driver. Hosts that have
+// only the NVIDIA driver (a common production setup) won't have it. We
+// dlopen lazily and silently fall back to our hand-rolled PTX matmul
+// when libcublas isn't available.
+//
+// Probe order: standard linker paths → versioned sonames (.13 / .12 / .11) →
+// the BUN_PARABUN_CUBLAS_PATH env var as a last-resort override.
+
+type CublasSymbols = {
+  cublasCreate_v2: (handlePtr: number) => number;
+  cublasDestroy_v2: (handle: bigint) => number;
+  cublasSgemm_v2: (
+    handle: bigint,
+    transA: number,
+    transB: number,
+    m: number,
+    n: number,
+    k: number,
+    alpha: number,
+    A: bigint,
+    lda: number,
+    B: bigint,
+    ldb: number,
+    beta: number,
+    C: bigint,
+    ldc: number,
+  ) => number;
+};
+
+const CUBLAS_OP_N = 0;
+const CUBLAS_OP_T = 1;
+
+let cublasLib: { symbols: CublasSymbols; close: () => void } | null = null;
+let cublasHandle: bigint = 0n;
+let cublasProbed = false;
+
+function tryLoadCublas(): boolean {
+  if (cublasProbed) return cublasLib !== null;
+  cublasProbed = true;
+  if (!cudaLib) return false; // need driver loaded first
+
+  const { dlopen, FFIType } = require("../ffi.ts");
+
+  const candidates: string[] = [];
+  const envOverride = (process.env as any)?.BUN_PARABUN_CUBLAS_PATH as string | undefined;
+  if (envOverride) candidates.push(envOverride);
+  if (process.platform === "win32") {
+    candidates.push("cublas64_13.dll", "cublas64_12.dll", "cublas64_11.dll");
+  } else {
+    candidates.push("libcublas.so", "libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
+  }
+
+  for (const name of candidates) {
+    try {
+      const lib = dlopen(name, {
+        cublasCreate_v2: { args: [FFIType.ptr], returns: FFIType.i32 },
+        cublasDestroy_v2: { args: [FFIType.u64], returns: FFIType.i32 },
+        cublasSgemm_v2: {
+          args: [
+            FFIType.u64, // handle
+            FFIType.i32, // transA
+            FFIType.i32, // transB
+            FFIType.i32, // m
+            FFIType.i32, // n
+            FFIType.i32, // k
+            FFIType.ptr, // alpha (host f32*)
+            FFIType.u64, // A device ptr
+            FFIType.i32, // lda
+            FFIType.u64, // B device ptr
+            FFIType.i32, // ldb
+            FFIType.ptr, // beta (host f32*)
+            FFIType.u64, // C device ptr
+            FFIType.i32, // ldc
+          ],
+          returns: FFIType.i32,
+        },
+      });
+      // Create a handle bound to the current CUDA context.
+      const handleBuf = new BigUint64Array(1);
+      const r = lib.symbols.cublasCreate_v2(ffiPtr!(handleBuf));
+      if (r !== 0) {
+        try {
+          lib.close();
+        } catch {}
+        continue;
+      }
+      cublasLib = lib;
+      cublasHandle = handleBuf[0];
+      return true;
+    } catch {
+      // try next candidate
+    }
+  }
+  return false;
+}
+
 function tryLoadCuda(): boolean {
   if (cudaLib !== null) return true;
   try {
@@ -716,6 +813,11 @@ function probe(): boolean {
   }
   fnMatmulF32 = matmulBuf[0];
 
+  // Best-effort cuBLAS probe — if libcublas is on the system we use its
+  // matmul (cublasSgemm) instead of the PTX kernel above. The PTX kernel
+  // stays loaded as the fallback; nothing else here changes.
+  tryLoadCublas();
+
   const dotName = new TextEncoder().encode("dotF32\0");
   const dotBuf = new BigUint64Array(1);
   if (s.cuModuleGetFunction(ptr(dotBuf), mod, ptr(dotName)) !== 0) {
@@ -970,28 +1072,58 @@ function launchMatmulF32(
 
     const pABuf = new BigUint64Array([dA]);
     const pBBuf = new BigUint64Array([dB]);
-    const pCBuf = new BigUint64Array([dC]);
-    const pM = new Uint32Array([m]);
-    const pK = new Uint32Array([k]);
-    const pN = new Uint32Array([n]);
-    const paramPtrs = new BigUint64Array([
-      BigInt(ptr(pABuf)),
-      BigInt(ptr(pBBuf)),
-      BigInt(ptr(pCBuf)),
-      BigInt(ptr(pM)),
-      BigInt(ptr(pK)),
-      BigInt(ptr(pN)),
-    ]);
+    if (cublasLib !== null) {
+      // cuBLAS path: dispatch through cublasSgemm. cuBLAS uses column-major,
+      // but our row-major layout maps cleanly via the standard transpose
+      // trick: row-major C[m,n] = A[m,k] · B[k,n] becomes column-major
+      // C^T[n,m] = B^T_col[n,k] · A^T_col[k,m], so we call sgemm with the
+      // pointers swapped and OP_N for both, ldA=k, ldB=n, ldC=n.
+      const alphaBuf = new Float32Array([1.0]);
+      const betaBuf = new Float32Array([0.0]);
+      const r = cublasLib.symbols.cublasSgemm_v2(
+        cublasHandle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        n,
+        m,
+        k,
+        ptr(alphaBuf),
+        dB,
+        n,
+        dA,
+        k,
+        ptr(betaBuf),
+        dC,
+        n,
+      );
+      if (r !== 0) throw new Error(`bun:gpu cublasSgemm failed (${r})`);
+      if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    } else {
+      const pABuf = new BigUint64Array([dA]);
+      const pBBuf = new BigUint64Array([dB]);
+      const pCBuf = new BigUint64Array([dC]);
+      const pM = new Uint32Array([m]);
+      const pK = new Uint32Array([k]);
+      const pN = new Uint32Array([n]);
+      const paramPtrs = new BigUint64Array([
+        BigInt(ptr(pABuf)),
+        BigInt(ptr(pBBuf)),
+        BigInt(ptr(pCBuf)),
+        BigInt(ptr(pM)),
+        BigInt(ptr(pK)),
+        BigInt(ptr(pN)),
+      ]);
 
-    // 8×8 threadblock (64 threads = 2 warps); each thread accumulates a
-    // 4×4 output sub-tile, so the block still computes a 32×32 output tile.
-    // Grid covers ceil(n/32) × ceil(m/32) — identical to the naive kernel.
-    const OUT_TILE = 32;
-    const gridX = Math.floor((n + OUT_TILE - 1) / OUT_TILE);
-    const gridY = Math.floor((m + OUT_TILE - 1) / OUT_TILE);
-    const r = s.cuLaunchKernel(fnMatmulF32!, gridX, gridY, 1, 8, 8, 1, 0, 0n, ptr(paramPtrs), null);
-    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
-    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+      // 8×8 threadblock (64 threads = 2 warps); each thread accumulates a
+      // 4×4 output sub-tile, so the block still computes a 32×32 output tile.
+      // Grid covers ceil(n/32) × ceil(m/32) — identical to the naive kernel.
+      const OUT_TILE = 32;
+      const gridX = Math.floor((n + OUT_TILE - 1) / OUT_TILE);
+      const gridY = Math.floor((m + OUT_TILE - 1) / OUT_TILE);
+      const r = s.cuLaunchKernel(fnMatmulF32!, gridX, gridY, 1, 8, 8, 1, 0, 0n, ptr(paramPtrs), null);
+      if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
+      if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    }
 
     // DtoH directly into the caller's buffer when provided — including
     // SharedArrayBuffer-backed Float32Arrays. From CUDA's perspective it's
