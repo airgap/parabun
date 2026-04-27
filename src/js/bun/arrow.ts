@@ -824,6 +824,210 @@ function concat(col: Column): ColumnValues {
   }
 }
 
+// ─── Statistics: variance / stddev / quantile ─────────────────────────────
+
+type VarianceOptions = {
+  /**
+   * Delta degrees of freedom. Divisor is `n - ddof`.
+   *   `0` (default) — population variance, what numpy returns by default.
+   *   `1`           — sample variance (Bessel-corrected, unbiased).
+   * Values >= n return NaN.
+   */
+  ddof?: number;
+};
+
+/**
+ * Population variance (or sample with `{ ddof: 1 }`). Two-pass — Kahan-
+ * compensated mean, then sum of squared deviations. Null rows are skipped.
+ * int64 columns widen to f64 internally for the divide.
+ */
+function variance(col: Column, opts: VarianceOptions = {}): number {
+  requireNumeric(col, "variance");
+  const ddof = opts.ddof ?? 0;
+  if (typeof ddof !== "number" || !Number.isFinite(ddof) || ddof < 0) {
+    throw new RangeError(`bun:arrow.variance: ddof must be a finite non-negative number; got ${ddof}`);
+  }
+  // Pass 1: count + Kahan mean.
+  let mean = 0;
+  let c = 0;
+  let n = 0;
+  for (let i = 0; i < col.length; i++) {
+    const v = col.get(i);
+    if (v == null) continue;
+    const num = typeof v === "bigint" ? Number(v) : (v as number);
+    n++;
+    // Welford-style online mean would also work; Kahan is the reference here.
+    const y = num - c;
+    const t = mean + y;
+    c = t - mean - y;
+    mean = t;
+  }
+  if (n === 0 || ddof >= n) return NaN;
+  mean = mean / n;
+  // Pass 2: sum of squared deviations.
+  let sumSq = 0;
+  for (let i = 0; i < col.length; i++) {
+    const v = col.get(i);
+    if (v == null) continue;
+    const num = typeof v === "bigint" ? Number(v) : (v as number);
+    const d = num - mean;
+    sumSq += d * d;
+  }
+  return sumSq / (n - ddof);
+}
+
+/**
+ * Standard deviation = sqrt(variance(col, opts)). Same nullity / ddof rules.
+ */
+function stddev(col: Column, opts: VarianceOptions = {}): number {
+  return Math.sqrt(variance(col, opts));
+}
+
+/**
+ * Quantile (linear interpolation between adjacent ordered samples). `q` in
+ * [0, 1]; q=0.5 is the median, q=0.95 is the 95th percentile. NaN
+ * propagates — any NaN in the column produces NaN. Null rows are skipped.
+ */
+function quantile(col: Column, q: number): number {
+  requireNumeric(col, "quantile");
+  if (typeof q !== "number" || q < 0 || q > 1) {
+    throw new RangeError(`bun:arrow.quantile: q must be a number in [0, 1]; got ${q}`);
+  }
+  // Materialize non-null values into a typed array for sorting. Use Float64
+  // regardless of source type for numerical comparison — int64 widens, the
+  // ordering is preserved within the safe-integer range that anyone calling
+  // quantile actually cares about.
+  const values: number[] = [];
+  for (let i = 0; i < col.length; i++) {
+    const v = col.get(i);
+    if (v == null) continue;
+    const num = typeof v === "bigint" ? Number(v) : (v as number);
+    if (Number.isNaN(num)) return NaN;
+    values.push(num);
+  }
+  if (values.length === 0) return NaN;
+  values.sort((a, b) => a - b);
+  if (values.length === 1) return values[0];
+  const pos = q * (values.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return values[lo];
+  const frac = pos - lo;
+  return values[lo] * (1 - frac) + values[hi] * frac;
+}
+
+/**
+ * Median = quantile(col, 0.5).
+ */
+function median(col: Column): number {
+  return quantile(col, 0.5);
+}
+
+// ─── Distinct + groupBy ────────────────────────────────────────────────────
+
+/**
+ * Unique values from a column, preserving first-occurrence order. Returns
+ * a JS array — for small cardinality columns this is the right shape.
+ * Null rows are skipped. Bigint columns return bigint values; bool returns
+ * booleans; numeric types return numbers; utf8 returns strings.
+ */
+function distinct(col: Column): Array<number | bigint | boolean | string> {
+  const seen = new Set<number | bigint | boolean | string>();
+  const out: Array<number | bigint | boolean | string> = [];
+  for (let i = 0; i < col.length; i++) {
+    const v = col.get(i);
+    if (v == null) continue;
+    if (!seen.has(v as any)) {
+      seen.add(v as any);
+      out.push(v as any);
+    }
+  }
+  return out;
+}
+
+type GroupResult = Map<string | number | bigint | boolean, RecordBatch>;
+
+/**
+ * Partition a RecordBatch by the values of one column. Returns a Map keyed
+ * by the group value; each entry is a RecordBatch containing the rows that
+ * shared that key. Null group values land under the `null` key (stored as
+ * the string "null" since Map keys can't sort by null cleanly).
+ *
+ *   const byCategory = arrow.groupBy(batch, "category");
+ *   for (const [key, group] of byCategory) {
+ *     console.log(`${key}: ${arrow.sum(group.column("score"))}`);
+ *   }
+ */
+function groupBy(batch: RecordBatch, columnName: string): GroupResult {
+  const keyCol = batch.column(columnName);
+  // Collect indices per group key in one pass over the batch.
+  const byKey = new Map<any, number[]>();
+  for (let i = 0; i < batch.numRows; i++) {
+    const k = keyCol.get(i);
+    const norm = k == null ? null : k;
+    let bucket = byKey.get(norm);
+    if (!bucket) {
+      bucket = [];
+      byKey.set(norm, bucket);
+    }
+    bucket.push(i);
+  }
+  // Build each group's RecordBatch by gathering the column data at the
+  // index list — single pass per column per group, no rescan of the
+  // full batch.
+  const result: GroupResult = new Map();
+  for (const [key, idx] of byKey) {
+    result.set(key, gatherIndices(batch, idx));
+  }
+  return result;
+}
+
+// Build a new RecordBatch from the rows of `batch` at positions `idx`.
+// Used by groupBy and available as a building block for any other
+// index-driven slice.
+function gatherIndices(batch: RecordBatch, idx: number[]): RecordBatch {
+  const cols: Column[] = batch.columns.map(col => {
+    const t = col.type.kind;
+    const validity = sliceValidity(col.validity, idx);
+    if (t === "int32") {
+      const dst = new Int32Array(idx.length);
+      const src = col.values as Int32Array;
+      for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+      return new Column(col.type, idx.length, dst, validity);
+    }
+    if (t === "int64") {
+      const dst = new BigInt64Array(idx.length);
+      const src = col.values as BigInt64Array;
+      for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+      return new Column(col.type, idx.length, dst, validity);
+    }
+    if (t === "float32") {
+      const dst = new Float32Array(idx.length);
+      const src = col.values as Float32Array;
+      for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+      return new Column(col.type, idx.length, dst, validity);
+    }
+    if (t === "float64") {
+      const dst = new Float64Array(idx.length);
+      const src = col.values as Float64Array;
+      for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+      return new Column(col.type, idx.length, dst, validity);
+    }
+    if (t === "bool") {
+      const dst = new Uint8Array(idx.length);
+      const src = col.values as Uint8Array;
+      for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+      return new Column(col.type, idx.length, dst, validity);
+    }
+    // utf8
+    const src = col.values as string[];
+    const dst: string[] = new Array(idx.length);
+    for (let i = 0; i < idx.length; i++) dst[i] = src[idx[i]];
+    return new Column(col.type, idx.length, dst, validity);
+  });
+  return new RecordBatch(batch.schema, cols, idx.length);
+}
+
 // ─── IPC reader / writer (stubs) ───────────────────────────────────────────
 
 const IPC_READ_NOT_IMPL =
@@ -865,7 +1069,13 @@ export default {
   min,
   max,
   count,
+  variance,
+  stddev,
+  quantile,
+  median,
+  distinct,
   filter,
+  groupBy,
   concat,
   // I/O — stubs, see error messages
   fromIPC,
