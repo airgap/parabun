@@ -1307,6 +1307,12 @@ class WhisperModel {
 
       // Attention: Q [1, dim] against K[0..pos+1] / V[0..pos+1]. Causal
       // mask is implicit because we only see keys we've already written.
+      //
+      // gpu.sdpaSingleQuery exists but isn't used here yet — the K/V
+      // caches are Float32Arrays, so dispatch would HtoD them on every
+      // call (2.3 MB × 88 calls of waste per audio). Lifting state.selfK /
+      // selfV to device-resident handles is the prerequisite. The CPU JS
+      // loop wins at tiny.en sizes for now.
       const attnOut = scaledDotProductAttention(Q, state.selfK[li], state.selfV[li], 1, pos + 1, nHead, headDim, false);
       const proj1 = gpu.matVec(block.attnOW as Float32Array, attnOut, dim, dim) as Float32Array;
       addBias(proj1, 1, dim, block.attnOB);
@@ -1317,6 +1323,10 @@ class WhisperModel {
       layerNormInPlace(xn, 1, dim, block.crossLnW, block.crossLnB);
       const Qc = gpu.matVec(block.crossQW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Qc, 1, dim, block.crossQB);
+      // Same story as decoder self-attention: gpu.sdpaSingleQuery exists,
+      // but state.crossK / crossV are host Float32Arrays so dispatch
+      // would re-upload encoder output on every step. JS fallback for
+      // now; revisit once state is device-resident.
       const crossOut = scaledDotProductAttention(
         Qc,
         state.crossK[li],

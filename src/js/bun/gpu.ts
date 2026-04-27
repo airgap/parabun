@@ -252,6 +252,22 @@ interface Backend {
     out?: Float32Array,
   ): Float32Array;
   /**
+   * Single-query multi-head SDPA — one query row against `kvLen` cached
+   * keys/values. The per-token decoder pattern (decoder self-attention
+   * with growing KV cache, decoder cross-attention against precomputed
+   * encoder K/V). Backends that implement this fuse the per-head
+   * Q · K^T → softmax → attn · V into one kernel launch.
+   */
+  sdpaSingleQuery?(
+    Q: FArray | GpuHandle,
+    K: FArray | GpuHandle,
+    V: FArray | GpuHandle,
+    kvLen: number,
+    nHead: number,
+    headDim: number,
+    out?: Float32Array,
+  ): Float32Array;
+  /**
    * 2D valid-mode convolution. `input` is iH×iW row-major Float32Array,
    * `kernel` is kH×kW row-major Float32Array. Output is (iH-kH+1)×(iW-kW+1)
    * row-major Float32Array. Backends MAY implement this; if a backend
@@ -1005,6 +1021,59 @@ function sdpaSelf(
   return dst;
 }
 
+function sdpaSingleQuery(
+  Q: FArray | GpuHandle | GpuFloat32Array,
+  K: FArray | GpuHandle | GpuFloat32Array,
+  V: FArray | GpuHandle | GpuFloat32Array,
+  kvLen: number,
+  nHead: number,
+  headDim: number,
+  out?: Float32Array,
+): Float32Array {
+  if (!Number.isInteger(kvLen) || kvLen <= 0) throw new RangeError("sdpaSingleQuery: kvLen must be a positive integer");
+  if (!Number.isInteger(nHead) || nHead <= 0) throw new RangeError("sdpaSingleQuery: nHead must be a positive integer");
+  if (!Number.isInteger(headDim) || headDim <= 0) {
+    throw new RangeError("sdpaSingleQuery: headDim must be a positive integer");
+  }
+  const backend = resolveActive();
+  if (backend.sdpaSingleQuery) {
+    return backend.sdpaSingleQuery(unwrapGpuArg(Q), unwrapGpuArg(K), unwrapGpuArg(V), kvLen, nHead, headDim, out);
+  }
+  // CPU fallback (matches the streaming softmax kernel semantics).
+  const dim = nHead * headDim;
+  const Qh = unwrapGpuArg(Q) as Float32Array;
+  const Kh = unwrapGpuArg(K) as Float32Array;
+  const Vh = unwrapGpuArg(V) as Float32Array;
+  const dst = out ?? new Float32Array(dim);
+  const invSqrtHead = 1.0 / Math.sqrt(headDim);
+  for (let h = 0; h < nHead; h++) {
+    const scores = new Float32Array(kvLen);
+    let max = -Infinity;
+    for (let t = 0; t < kvLen; t++) {
+      let sc = 0;
+      for (let d = 0; d < headDim; d++) sc += Qh[h * headDim + d] * Kh[t * dim + h * headDim + d];
+      sc *= invSqrtHead;
+      scores[t] = sc;
+      if (sc > max) max = sc;
+    }
+    let sum = 0;
+    for (let t = 0; t < kvLen; t++) {
+      const e = Math.exp(scores[t] - max);
+      scores[t] = e;
+      sum += e;
+    }
+    const inv = sum > 0 ? 1.0 / sum : 0;
+    const oBase = h * headDim;
+    for (let d = 0; d < headDim; d++) dst[oBase + d] = 0;
+    for (let t = 0; t < kvLen; t++) {
+      const w = scores[t] * inv;
+      if (w === 0) continue;
+      for (let d = 0; d < headDim; d++) dst[oBase + d] += w * Vh[t * dim + h * headDim + d];
+    }
+  }
+  return dst;
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: Float32Array): Float32Array;
 function simdMap(fn: (x: number, i: number) => number, a: Float64Array): Float64Array;
 function simdMap(fn: (x: number, i: number) => number, a: GpuHandle | GpuFloat32Array): FArray;
@@ -1447,6 +1516,7 @@ export default {
   matmul,
   matmulBatched,
   sdpaSelf,
+  sdpaSingleQuery,
   conv2D,
   scan,
   reduce,

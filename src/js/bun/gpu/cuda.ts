@@ -2782,6 +2782,124 @@ function sdpaSelf(
   return dst;
 }
 
+// Single-query multi-head scaled-dot-product attention. One query row
+// against `kvLen` cached keys/values — the per-token decoder pattern.
+// Reuses the existing flash_attn_f32 kernel (developed for Llama's
+// cross-attention against a KV cache); generalized here so Whisper's
+// decoder self/cross-attention can use it too.
+//
+// Q layout: [nHead * headDim] flat (single query). K, V layout:
+// [kvLen, nHead * headDim] row-major. groupSize = 1 (no GQA).
+function sdpaSingleQuery(
+  Q: FArray | GpuHandle,
+  K: FArray | GpuHandle,
+  V: FArray | GpuHandle,
+  kvLen: number,
+  nHead: number,
+  headDim: number,
+  out?: Float32Array,
+): Float32Array {
+  if (!Number.isInteger(kvLen) || kvLen <= 0) throw new RangeError("sdpaSingleQuery: kvLen must be a positive integer");
+  if (!Number.isInteger(nHead) || nHead <= 0) throw new RangeError("sdpaSingleQuery: nHead must be a positive integer");
+  if (!Number.isInteger(headDim) || headDim <= 0 || headDim > 256) {
+    throw new RangeError("sdpaSingleQuery: headDim must be in (0, 256]");
+  }
+  const dim = nHead * headDim;
+
+  if (probeDevOps()) {
+    const s = cudaLib!.symbols;
+    const ptr = ffiPtr!;
+    const qBytes = BigInt(dim * 4);
+    const kvBytes = BigInt(kvLen * dim * 4);
+    const outBytes = BigInt(dim * 4);
+    const scale = 1.0 / Math.sqrt(headDim);
+
+    const wrap = (x: FArray | GpuHandle, bytes: bigint): { dev: bigint; owned: boolean } => {
+      if (isGpuHandle(x)) {
+        if (x.released) throw new Error("bun:gpu: sdpaSingleQuery called on released handle");
+        if (x.buffer === 0n) throw new Error("bun:gpu cuda: sdpaSingleQuery: handle has no device buffer");
+        return { dev: x.buffer, owned: false };
+      }
+      const buf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(buf), bytes) !== 0) throw new Error("cuMemAlloc(sdpa1) failed");
+      if (s.cuMemcpyHtoD_v2(buf[0], ptr(x as Float32Array), bytes) !== 0) {
+        s.cuMemFree_v2(buf[0]);
+        throw new Error("cuMemcpyHtoD(sdpa1) failed");
+      }
+      return { dev: buf[0], owned: true };
+    };
+
+    const wQ = wrap(Q, qBytes);
+    let wK: { dev: bigint; owned: boolean } | null = null;
+    let wV: { dev: bigint; owned: boolean } | null = null;
+    let dOut: bigint = 0n;
+    try {
+      wK = wrap(K, kvBytes);
+      wV = wrap(V, kvBytes);
+      const outBuf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(outBuf), outBytes) !== 0) throw new Error("cuMemAlloc(sdpa1 out) failed");
+      dOut = outBuf[0];
+
+      const fakeScratch = (dev: bigint): GpuScratch => ({ buffer: dev }) as any;
+      launchFlashAttnDev(
+        fakeScratch(wQ.dev),
+        fakeScratch(wK.dev),
+        fakeScratch(wV.dev),
+        fakeScratch(dOut),
+        nHead,
+        headDim,
+        dim, // kvRowSize: every kv row is dim floats long
+        1, // groupSize: no GQA
+        kvLen,
+        scale,
+      );
+      if (s.cuCtxSynchronize() !== 0) throw new Error("cuCtxSynchronize(sdpa1) failed");
+
+      const dst = out ?? new Float32Array(dim);
+      if (s.cuMemcpyDtoH_v2(ptr(dst), dOut, outBytes) !== 0) throw new Error("cuMemcpyDtoH(sdpa1) failed");
+      return dst;
+    } finally {
+      if (wQ.owned && wQ.dev !== 0n) s.cuMemFree_v2(wQ.dev);
+      if (wK?.owned && wK.dev !== 0n) s.cuMemFree_v2(wK.dev);
+      if (wV?.owned && wV.dev !== 0n) s.cuMemFree_v2(wV.dev);
+      if (dOut !== 0n) s.cuMemFree_v2(dOut);
+    }
+  }
+
+  // CPU fallback — straight scalar loop matching the kernel semantics.
+  const Qh = isGpuHandle(Q) ? (Q.view as Float32Array) : (Q as Float32Array);
+  const Kh = isGpuHandle(K) ? (K.view as Float32Array) : (K as Float32Array);
+  const Vh = isGpuHandle(V) ? (V.view as Float32Array) : (V as Float32Array);
+  const dst = out ?? new Float32Array(dim);
+  const invSqrtHead = 1.0 / Math.sqrt(headDim);
+  for (let h = 0; h < nHead; h++) {
+    const scores = new Float32Array(kvLen);
+    let max = -Infinity;
+    for (let t = 0; t < kvLen; t++) {
+      let sc = 0;
+      for (let d = 0; d < headDim; d++) sc += Qh[h * headDim + d] * Kh[t * dim + h * headDim + d];
+      sc *= invSqrtHead;
+      scores[t] = sc;
+      if (sc > max) max = sc;
+    }
+    let sum = 0;
+    for (let t = 0; t < kvLen; t++) {
+      const e = Math.exp(scores[t] - max);
+      scores[t] = e;
+      sum += e;
+    }
+    const inv = sum > 0 ? 1.0 / sum : 0;
+    const oBase = h * headDim;
+    for (let d = 0; d < headDim; d++) dst[oBase + d] = 0;
+    for (let t = 0; t < kvLen; t++) {
+      const w = scores[t] * inv;
+      if (w === 0) continue;
+      for (let d = 0; d < headDim; d++) dst[oBase + d] += w * Vh[t * dim + h * headDim + d];
+    }
+  }
+  return dst;
+}
+
 // ─── Dynamic kernel compilation via NVRTC ─────────────────────────────────
 //
 // For non-affine pure numeric functions, translate JS → CUDA C → PTX via
@@ -5634,6 +5752,7 @@ export default {
   matmul,
   matmulBatched,
   sdpaSelf,
+  sdpaSingleQuery,
   conv2D,
   imageBlurRGBA,
   reduce,
