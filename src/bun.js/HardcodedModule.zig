@@ -22,6 +22,7 @@ pub const HardcodedModule = enum {
     @"bun:rtp",
     @"bun:signals",
     @"bun:simd",
+    @"bun:speech",
     @"node:assert",
     @"node:assert/strict",
     @"node:async_hooks",
@@ -122,6 +123,7 @@ pub const HardcodedModule = enum {
         .{ "bun:rtp", .@"bun:rtp" },
         .{ "bun:signals", .@"bun:signals" },
         .{ "bun:simd", .@"bun:simd" },
+        .{ "bun:speech", .@"bun:speech" },
         .{ "bun:wrap", .@"bun:wrap" },
         .{ "bun:internal-for-testing", .@"bun:internal-for-testing" },
         // Node.js
@@ -402,6 +404,7 @@ pub const HardcodedModule = enum {
             .{ "bun:rtp", .{ .path = "bun:rtp" } },
             .{ "bun:signals", .{ .path = "bun:signals" } },
             .{ "bun:simd", .{ .path = "bun:simd" } },
+            .{ "bun:speech", .{ .path = "bun:speech" } },
             .{ "bun:wrap", .{ .path = "bun:wrap" } },
             .{ "bun:internal-for-testing", .{ .path = "bun:internal-for-testing" } },
             .{ "ffi", .{ .path = "bun:ffi" } },
