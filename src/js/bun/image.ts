@@ -273,6 +273,23 @@ function adjust(img: DecodedImage, opts?: AdjustOptions): DecodedImage {
   return native.adjust(img, opts ?? {});
 }
 
+/**
+ * Pure hue rotation in degrees. Implemented via a YIQ-derived 3×3 RGB
+ * rotation matrix (precomputed once per call) — preserves luma and
+ * saturation, just rotates the chrominance angle. 360° is a no-op.
+ *
+ *   const out = image.hueShift(img, 180); // colors → complements
+ */
+function hueShift(img: DecodedImage, degrees: number): DecodedImage {
+  if (typeof img !== "object" || img === null) {
+    throw new TypeError("bun:image.hueShift: img must be the object returned from decode()");
+  }
+  if (typeof degrees !== "number" || !Number.isFinite(degrees)) {
+    throw new TypeError("bun:image.hueShift: degrees must be a finite number");
+  }
+  return native.hueShift(img, degrees);
+}
+
 function histogram(img: DecodedImage): Uint32Array[] {
   if (typeof img !== "object" || img === null) {
     throw new TypeError("bun:image.histogram: img must be the object returned from decode()");
@@ -428,6 +445,7 @@ export default {
   crop,
   toGrayscale,
   adjust,
+  hueShift,
   histogram,
   composite,
   invert,

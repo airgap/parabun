@@ -1233,6 +1233,68 @@ void perChannelHistogramCpu(
     }
 }
 
+// ─── Hue rotation (YIQ matrix) ────────────────────────────────────────────
+// Per-pixel hue shift via a 3×3 RGB-space rotation matrix derived from the
+// YIQ color space — equivalent to RGB → YIQ → rotate (I, Q) by θ → YIQ → RGB
+// but expressed as a single 3×3 matrix that's precomputed once per call.
+// Lightness (luma) is preserved; saturation is unchanged.
+//
+// Per-pixel cost: 9 multiplies + 6 adds, no conditionals. Plays well with
+// auto-vectorization. The cosine / sine pair is computed once on the
+// host before parallelRows fans out.
+
+void hueShiftCpu(
+    const uint8_t* src, uint32_t w, uint32_t h, uint32_t channels,
+    uint8_t* dst, float radians)
+{
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+
+    // YIQ-derived hue rotation matrix in RGB space. The constants are the
+    // luma weights (0.213, 0.715, 0.072 from Rec. 709) on the diagonal of
+    // the no-rotation matrix; the off-diagonals interpolate between
+    // (cos θ, -sin θ) and (cos θ, sin θ) along chrominance axes.
+    const float m00 = 0.213f + 0.787f * c - 0.213f * s;
+    const float m01 = 0.715f - 0.715f * c - 0.715f * s;
+    const float m02 = 0.072f - 0.072f * c + 0.928f * s;
+    const float m10 = 0.213f - 0.213f * c + 0.143f * s;
+    const float m11 = 0.715f + 0.285f * c + 0.140f * s;
+    const float m12 = 0.072f - 0.072f * c - 0.283f * s;
+    const float m20 = 0.213f - 0.213f * c - 0.787f * s;
+    const float m21 = 0.715f - 0.715f * c + 0.715f * s;
+    const float m22 = 0.072f + 0.928f * c + 0.072f * s;
+
+    const size_t cost = static_cast<size_t>(w) * h * channels;
+    parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
+    for (uint32_t y = y0; y < y1; y++) {
+    for (uint32_t x = 0; x < w; x++) {
+        const size_t i = static_cast<size_t>(y) * w + x;
+        const size_t base = i * channels;
+        if (channels == 1) {
+            // Grayscale has no hue — pass through.
+            dst[base] = src[base];
+            continue;
+        }
+        const float r = static_cast<float>(src[base + 0]);
+        const float g = static_cast<float>(src[base + 1]);
+        const float b = static_cast<float>(src[base + 2]);
+        float R = r * m00 + g * m01 + b * m02;
+        float G = r * m10 + g * m11 + b * m12;
+        float B = r * m20 + g * m21 + b * m22;
+        if (R < 0) R = 0; else if (R > 255) R = 255;
+        if (G < 0) G = 0; else if (G > 255) G = 255;
+        if (B < 0) B = 0; else if (B > 255) B = 255;
+        dst[base + 0] = static_cast<uint8_t>(R + 0.5f);
+        dst[base + 1] = static_cast<uint8_t>(G + 0.5f);
+        dst[base + 2] = static_cast<uint8_t>(B + 0.5f);
+        if (channels == 4) {
+            dst[base + 3] = src[base + 3]; // alpha passthrough
+        }
+    }
+    }
+    });
+}
+
 // ─── Tone adjustment (brightness / contrast / saturation) ─────────────────
 // Single-pass per-pixel transform applied in this order:
 //   1. contrast   — pivot around 128, scale by (1 + contrast)
@@ -2481,6 +2543,80 @@ JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
 // adjust(img, { brightness?, contrast?, saturation? }) → DecodedImage with
 // the same dims / channels / format. All three parameters default to 0
 // (identity); each is a number in [-1, 1].
+JSC_DEFINE_HOST_FUNCTION(functionHueShift,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSValue imgArg = callFrame->argument(0);
+    JSValue degArg = callFrame->argument(1);
+    if (!imgArg.isObject()) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: expected (img, degrees)"_s);
+        return {};
+    }
+    auto* imgObj = asObject(imgArg);
+    JSValue widthVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "width"_s));
+    JSValue heightVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
+    JSValue channelsVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "channels"_s));
+    JSValue dataVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "data"_s));
+    JSValue formatVal = imgObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: img.data must be a Uint8Array"_s);
+        return {};
+    }
+    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    void* srcRaw = srcView->vector();
+    if (!srcRaw) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: img.data is detached"_s);
+        return {};
+    }
+    const uint32_t w = widthVal.toUInt32(globalObject);
+    const uint32_t h = heightVal.toUInt32(globalObject);
+    const uint32_t channels = channelsVal.toUInt32(globalObject);
+    if (channels != 1 && channels != 3 && channels != 4) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: channels must be 1, 3, or 4"_s);
+        return {};
+    }
+    if (srcView->length() != static_cast<size_t>(w) * h * channels) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: img.data length doesn't match width*height*channels"_s);
+        return {};
+    }
+
+    if (!degArg.isNumber()) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: degrees must be a number"_s);
+        return {};
+    }
+    double degrees = degArg.toNumber(globalObject);
+    if (!std::isfinite(degrees)) {
+        throwTypeError(globalObject, scope, "bun:image.hueShift: degrees must be finite"_s);
+        return {};
+    }
+    // Wrap to [-360, 360] equivalent — full rotations cancel.
+    const float radians = static_cast<float>(degrees * (M_PI / 180.0));
+
+    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
+    const size_t outBytes = static_cast<size_t>(w) * h * channels;
+    auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
+    RETURN_IF_EXCEPTION(scope, {});
+    hueShiftCpu(
+        static_cast<const uint8_t*>(srcRaw), w, h, channels,
+        static_cast<uint8_t*>(dstArr->vector()), radians);
+
+    auto* obj = JSC::constructEmptyObject(globalObject);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "data"_s), dstArr);
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "width"_s), jsNumber(w));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "height"_s), jsNumber(h));
+    obj->putDirect(vm, JSC::Identifier::fromString(vm, "channels"_s), jsNumber(channels));
+    if (formatVal.isString()) {
+        obj->putDirect(vm, JSC::Identifier::fromString(vm, "format"_s), formatVal);
+    }
+    return JSValue::encode(obj);
+}
+
 JSC_DEFINE_HOST_FUNCTION(functionAdjust,
     (JSGlobalObject * globalObject, CallFrame* callFrame))
 {
@@ -3333,6 +3469,9 @@ JSC::JSObject* createParabunImageCodecs(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "adjust"_s), 2,
         functionAdjust, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "hueShift"_s), 2,
+        functionHueShift, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "histogram"_s), 1,
         functionHistogram, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
