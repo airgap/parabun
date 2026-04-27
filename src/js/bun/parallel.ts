@@ -770,10 +770,59 @@ interface PendingCall {
 interface Pool {
   /** Run an exported function on an idle worker. Resolves with the function's return value. */
   run<T = unknown>(fnName: string, ...args: unknown[]): Promise<T>;
+  /**
+   * Chunk an array and dispatch each chunk to a different worker via a
+   * named export. The export takes one chunk (an array) and returns a
+   * mapped chunk; map() concatenates the results in source order.
+   *
+   * Closure-aware (the user's module evaluates in workers with full scope
+   * — imports, module-level state, the works) and persistent (workers
+   * are reused across map / reduce / run calls). This is the v2 path on
+   * top of the persistent Pool: closures and shared state cross naturally
+   * because the function lives in a real module file rather than being
+   * eval'd from `fn.toString()`.
+   *
+   *   // worker.js
+   *   import { lookupTable } from "./lookups.js";
+   *   export function scoreChunk(rows) {
+   *     return rows.map(r => r.value * lookupTable[r.key]);
+   *   }
+   *
+   *   // main
+   *   await using p = parallel.pool({ module: "/abs/worker.js", size: 8 });
+   *   const scores = await p.map("scoreChunk", rows);
+   */
+  map<T = unknown, U = unknown>(fnName: string, array: readonly T[], opts?: { chunks?: number }): Promise<U[]>;
+  /**
+   * Chunk an array and reduce. Each worker receives a chunk and folds it
+   * with the named export, returning a partial. Partials are then merged
+   * pairwise on the main thread via a second named export.
+   *
+   *   // worker.js
+   *   export function sumChunk(rows) {
+   *     let s = 0;
+   *     for (const r of rows) s += r.value;
+   *     return s;
+   *   }
+   *   export function sumMerge(a, b) {
+   *     return a + b;
+   *   }
+   *
+   *   // main
+   *   const total = await p.reduce("sumChunk", "sumMerge", rows);
+   */
+  reduce<T = unknown, A = unknown>(
+    chunkFn: string,
+    mergeFn: string,
+    array: readonly T[],
+    opts?: { chunks?: number; init?: A },
+  ): Promise<A>;
   /** Terminate all workers and reject any pending calls. */
   dispose(): void;
   /** Number of workers in the pool. */
   readonly size: number;
+  /** AsyncDisposable so callers can `await using p = pool(...)`. */
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 function pool(opts: { size?: number; module: string }): Pool {
@@ -927,11 +976,100 @@ function pool(opts: { size?: number; module: string }): Pool {
     URL.revokeObjectURL(blobUrl);
   }
 
+  // Chunk-based fan-out helpers. Each chunk crosses the worker boundary
+  // intact (one postMessage per chunk), so the named export handles a
+  // batch rather than per-element calls. That amortizes the per-call
+  // dispatch overhead across the chunk size.
+  function chunkBounds(len: number, requested?: number): number[] {
+    if (len === 0) return [];
+    const target = Math.max(1, Math.floor(requested ?? Math.max(1, workers.length || 1)));
+    const chunks = Math.min(len, target);
+    const base = Math.floor(len / chunks);
+    const extra = len % chunks;
+    const bounds: number[] = [0];
+    let cursor = 0;
+    for (let c = 0; c < chunks; c++) {
+      cursor += base + (c < extra ? 1 : 0);
+      bounds.push(cursor);
+    }
+    return bounds;
+  }
+
+  async function map<T, U>(fnName: string, array: readonly T[], opts?: { chunks?: number }): Promise<U[]> {
+    if (typeof fnName !== "string" || fnName.length === 0) {
+      throw new TypeError("bun:parallel pool.map: fnName must be a non-empty string");
+    }
+    if (!Array.isArray(array)) {
+      throw new TypeError("bun:parallel pool.map: array must be a JS array");
+    }
+    const len = array.length;
+    if (len === 0) return [];
+    const bounds = chunkBounds(len, opts?.chunks);
+    const promises: Array<Promise<U[]>> = [];
+    for (let c = 0; c < bounds.length - 1; c++) {
+      const slice = (array as T[]).slice(bounds[c], bounds[c + 1]);
+      promises.push(run<U[]>(fnName, slice));
+    }
+    const partials = await Promise.all(promises);
+    let total = 0;
+    for (const p of partials) total += (p as U[]).length;
+    const out: U[] = new Array(total);
+    let offset = 0;
+    for (const p of partials) {
+      for (let i = 0; i < (p as U[]).length; i++) out[offset + i] = (p as U[])[i];
+      offset += (p as U[]).length;
+    }
+    return out;
+  }
+
+  async function reduce<T, A>(
+    chunkFn: string,
+    mergeFn: string,
+    array: readonly T[],
+    opts?: { chunks?: number; init?: A },
+  ): Promise<A> {
+    if (typeof chunkFn !== "string" || chunkFn.length === 0) {
+      throw new TypeError("bun:parallel pool.reduce: chunkFn must be a non-empty string");
+    }
+    if (typeof mergeFn !== "string" || mergeFn.length === 0) {
+      throw new TypeError("bun:parallel pool.reduce: mergeFn must be a non-empty string");
+    }
+    if (!Array.isArray(array)) {
+      throw new TypeError("bun:parallel pool.reduce: array must be a JS array");
+    }
+    const len = array.length;
+    const init = opts?.init;
+    if (len === 0) return init as A;
+
+    const bounds = chunkBounds(len, opts?.chunks);
+    const promises: Array<Promise<A>> = [];
+    for (let c = 0; c < bounds.length - 1; c++) {
+      const slice = (array as T[]).slice(bounds[c], bounds[c + 1]);
+      promises.push(run<A>(chunkFn, slice));
+    }
+    const partials = await Promise.all(promises);
+
+    // Merge pairwise via the named merge fn. Run the merge on the workers
+    // too — most merges are tiny (sum of numbers, union of sets) so the
+    // overhead is comparable to running on the main thread, but using
+    // workers means the merge doesn't block other code on the main thread.
+    let acc: A = init !== undefined ? init : (partials.shift() as A);
+    for (const p of partials) {
+      acc = await run<A>(mergeFn, acc, p);
+    }
+    return acc;
+  }
+
   return {
     run,
+    map,
+    reduce,
     dispose,
     get size() {
       return workers.length;
+    },
+    [Symbol.asyncDispose]: async () => {
+      dispose();
     },
   };
 }
