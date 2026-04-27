@@ -956,6 +956,41 @@ class WhisperState {
   reset(): void {
     this.selfLen = 0;
   }
+
+  /**
+   * Fork this state for beam search: produces a new state with self-attn
+   * K/V *copied* (the new beam will append divergent rows after `selfLen`),
+   * but cross-attn K/V *shared by reference* — they're a function of the
+   * encoder output and are identical across beams within a single
+   * transcription.
+   *
+   * Only the populated [0, selfLen) rows of self-attn caches are copied;
+   * the trailing capacity is left zero-filled.
+   */
+  fork(): WhisperState {
+    const nLayer = this.selfK.length;
+    const out = Object.create(WhisperState.prototype) as WhisperState;
+    out.selfK = new Array(nLayer);
+    out.selfV = new Array(nLayer);
+    const populated = this.selfLen * this.dim;
+    for (let i = 0; i < nLayer; i++) {
+      out.selfK[i] = new Float32Array(this.maxLen * this.dim);
+      out.selfV[i] = new Float32Array(this.maxLen * this.dim);
+      if (populated > 0) {
+        out.selfK[i].set(this.selfK[i].subarray(0, populated));
+        out.selfV[i].set(this.selfV[i].subarray(0, populated));
+      }
+    }
+    // Cross-attn K/V are encoder-output-derived → identical across beams.
+    // Sharing the references is safe because decodeStep never writes into them.
+    out.crossK = this.crossK;
+    out.crossV = this.crossV;
+    out.selfLen = this.selfLen;
+    out.encoderT = this.encoderT;
+    out.dim = this.dim;
+    out.maxLen = this.maxLen;
+    return out;
+  }
 }
 
 class WhisperModel {
@@ -1184,10 +1219,18 @@ class WhisperModel {
    * Use `audio.melSpectrogram(audio, { mode: "whisper" })` from `bun:audio`
    * to produce `mel` from raw 16 kHz mono PCM.
    */
-  transcribeMel(mel: Float32Array, T: number, opts?: { maxTokens?: number; language?: string }): string {
+  transcribeMel(
+    mel: Float32Array,
+    T: number,
+    opts?: { maxTokens?: number; language?: string; beamSize?: number },
+  ): string {
     const h = this.hparams;
     const maxTokens = opts?.maxTokens ?? 224;
     const language = opts?.language ?? "en";
+    const beamSize = opts?.beamSize ?? 1;
+    if (!Number.isInteger(beamSize) || beamSize < 1 || beamSize > 16) {
+      throw new RangeError(`bun:llm whisper: beamSize must be an integer in [1, 16], got ${beamSize}`);
+    }
 
     // Pad / trim to exactly nAudioCtx*2 = 3000 frames.
     const Tdesired = h.nAudioCtx * 2;
@@ -1209,37 +1252,181 @@ class WhisperModel {
     const state = this.newState();
     this.prepareState(state, encoded);
 
-    const tokens = this.tokenizer.prefix(language);
     const tokenizer = this.tokenizer;
+    const prefix = tokenizer.prefix(language);
     // Feed prefix tokens through the decoder to populate the self-attn
-    // KV cache. The logits from these warm-up steps are discarded — we
-    // only consume the logits AFTER the last prefix token.
+    // KV cache. Logits from prefix steps are discarded except the last,
+    // which becomes the seed for beam expansion.
     let logits: Float32Array | null = null;
-    for (const tok of tokens) {
+    for (const tok of prefix) {
       logits = this.decodeStep(tok, state);
     }
-    for (let step = 0; step < maxTokens; step++) {
-      // Greedy argmax with timestamp tokens masked out (we only run with
-      // <|notimestamps|> active, so a timestamp emission would be a bug).
-      let best = 0;
-      let bestVal = -Infinity;
-      const lg = logits!;
-      for (let v = 0; v < lg.length; v++) {
-        if (tokenizer.englishOnly) {
-          if (v >= 50259 && v <= 51862) continue;
-        } else {
-          if (v >= 50363) continue;
+
+    // Mask out timestamp tokens — we run with <|notimestamps|> active so
+    // emitting a timestamp would be a bug.
+    const isMaskedToken = (v: number): boolean => {
+      if (tokenizer.englishOnly) return v >= 50259 && v <= 51862;
+      return v >= 50363;
+    };
+
+    if (beamSize === 1) {
+      // Greedy fast path. Same observable behavior as beam=1, but skips
+      // all the beam bookkeeping for the common case.
+      const tokens = [...prefix];
+      for (let step = 0; step < maxTokens; step++) {
+        let best = 0;
+        let bestVal = -Infinity;
+        const lg = logits!;
+        for (let v = 0; v < lg.length; v++) {
+          if (isMaskedToken(v)) continue;
+          if (lg[v] > bestVal) {
+            bestVal = lg[v];
+            best = v;
+          }
         }
-        if (lg[v] > bestVal) {
-          bestVal = lg[v];
-          best = v;
+        tokens.push(best);
+        if (best === tokenizer.eot) break;
+        logits = this.decodeStep(best, state);
+      }
+      return tokenizer.decode(tokens);
+    }
+
+    // ── Beam search ────────────────────────────────────────────────────
+    // After prefix prefill, we have one beam. Expand it to top-k tokens
+    // (k = beamSize) to seed the beam set. From there each step:
+    //   1. Compute logits per active beam from its previous emission.
+    //   2. Form expansion candidates (beam × top-k tokens) with combined
+    //      log-probs (parent + log-softmax(logit)).
+    //   3. Keep top beamSize by score. Forks the parent state when more
+    //      than one new beam comes from the same parent.
+    //   4. Beams that emit EOT move to `finished`. When all active beams
+    //      are finished — or we hit maxTokens — pick the best finished
+    //      beam (or the best active one if nothing finished) and decode.
+
+    type Beam = {
+      state: WhisperState;
+      tokens: number[];
+      logProb: number;
+      logits: Float32Array | null; // null when frozen (finished)
+      finished: boolean;
+    };
+
+    const seedBeam: Beam = {
+      state,
+      tokens: [...prefix],
+      logProb: 0,
+      logits,
+      finished: false,
+    };
+    let beams: Beam[] = [seedBeam];
+    const finished: Beam[] = [];
+
+    // Compute log-softmax over masked logits, returning [{tokenId, logProb}, ...]
+    // for the top `k` candidates.
+    const topKLogProbs = (lg: Float32Array, k: number): Array<{ id: number; logProb: number }> => {
+      // log-softmax: lp[v] = lg[v] - logSumExp(lg)
+      let max = -Infinity;
+      for (let v = 0; v < lg.length; v++) {
+        if (isMaskedToken(v)) continue;
+        if (lg[v] > max) max = lg[v];
+      }
+      let lse = 0;
+      for (let v = 0; v < lg.length; v++) {
+        if (isMaskedToken(v)) continue;
+        lse += Math.exp(lg[v] - max);
+      }
+      lse = max + Math.log(lse);
+      // Top-k by logit (== top-k by log-prob since logSoftmax is monotonic).
+      const top: Array<{ id: number; logProb: number }> = [];
+      for (let v = 0; v < lg.length; v++) {
+        if (isMaskedToken(v)) continue;
+        const lp = lg[v] - lse;
+        if (top.length < k) {
+          top.push({ id: v, logProb: lp });
+          // Bubble up to keep ascending order.
+          for (let i = top.length - 1; i > 0 && top[i].logProb < top[i - 1].logProb; i--) {
+            const t = top[i];
+            top[i] = top[i - 1];
+            top[i - 1] = t;
+          }
+        } else if (lp > top[0].logProb) {
+          top[0] = { id: v, logProb: lp };
+          for (let i = 0; i < top.length - 1 && top[i].logProb > top[i + 1].logProb; i++) {
+            const t = top[i];
+            top[i] = top[i + 1];
+            top[i + 1] = t;
+          }
         }
       }
-      tokens.push(best);
-      if (best === tokenizer.eot) break;
-      logits = this.decodeStep(best, state);
+      return top.reverse(); // descending order
+    };
+
+    for (let step = 0; step < maxTokens && beams.length > 0; step++) {
+      // Expand each beam to top-`beamSize` candidates.
+      const candidates: Array<{ parent: number; id: number; logProb: number }> = [];
+      for (let b = 0; b < beams.length; b++) {
+        const beam = beams[b];
+        const top = topKLogProbs(beam.logits!, beamSize);
+        for (const c of top) {
+          candidates.push({
+            parent: b,
+            id: c.id,
+            logProb: beam.logProb + c.logProb,
+          });
+        }
+      }
+      // Keep top `beamSize` candidates by combined log-prob.
+      candidates.sort((a, b) => b.logProb - a.logProb);
+      const kept = candidates.slice(0, beamSize);
+
+      // Build next beams. Track per-parent fork count: the first child of
+      // each parent reuses the parent's state; subsequent children fork.
+      const nextBeams: Beam[] = [];
+      const parentChildCount = new Map<number, number>();
+      for (const c of kept) {
+        const parent = beams[c.parent];
+        const isFirstChild = !parentChildCount.has(c.parent);
+        parentChildCount.set(c.parent, (parentChildCount.get(c.parent) ?? 0) + 1);
+        const childState = isFirstChild ? parent.state : parent.state.fork();
+        const childTokens = [...parent.tokens, c.id];
+        if (c.id === tokenizer.eot) {
+          finished.push({
+            state: childState,
+            tokens: childTokens,
+            logProb: c.logProb,
+            logits: null,
+            finished: true,
+          });
+          continue;
+        }
+        const childLogits = this.decodeStep(c.id, childState);
+        nextBeams.push({
+          state: childState,
+          tokens: childTokens,
+          logProb: c.logProb,
+          logits: childLogits,
+          finished: false,
+        });
+      }
+      beams = nextBeams;
+
+      // Early termination: if best finished beam outscores best active, stop.
+      // (Active beams can only get worse since adding more tokens lowers
+      // the cumulative log-prob.)
+      if (finished.length > 0) {
+        let bestFinished = -Infinity;
+        for (const f of finished) if (f.logProb > bestFinished) bestFinished = f.logProb;
+        let bestActive = -Infinity;
+        for (const b of beams) if (b.logProb > bestActive) bestActive = b.logProb;
+        if (bestFinished >= bestActive) break;
+      }
     }
-    return tokenizer.decode(tokens);
+
+    // Pick the highest-scoring beam (prefer finished if present).
+    const pool = finished.length > 0 ? finished : beams;
+    let bestBeam = pool[0];
+    for (const b of pool) if (b.logProb > bestBeam.logProb) bestBeam = b;
+    return tokenizer.decode(bestBeam.tokens);
   }
 
   /**
