@@ -1,0 +1,72 @@
+// Whisper STT benchmark — tiny.en + base.en against the JFK clip.
+//
+//   bun run build:release --asan=off bench/parabun-whisper/run.pjs
+//
+// Reports load time, encode time, decode time, ms/token and throughput.
+// Useful for sanity-checking each GPU dispatch change in bun:llm whisper.
+
+import llm from "bun:llm";
+import audio from "bun:audio";
+import gpu from "bun:gpu";
+import { existsSync } from "node:fs";
+
+const FIXTURES = [
+  { name: "tiny.en", path: "/raid/parabun/.cache/whisper/ggml-tiny.en.bin" },
+  { name: "base.en", path: "/raid/parabun/.cache/whisper/ggml-base.en.bin" },
+];
+const WAV_PATH = "/raid/parabun/.cache/whisper/jfk.wav";
+
+const desc = gpu.describe();
+console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}`);
+
+if (!existsSync(WAV_PATH)) {
+  console.error(`missing wav: ${WAV_PATH}`);
+  process.exit(1);
+}
+const wavBytes = new Uint8Array(await Bun.file(WAV_PATH).arrayBuffer());
+const wav = audio.readWav(wavBytes);
+console.log(`wav: ${wav.samples.length} samples @ ${wav.sampleRate} Hz (${(wav.samples.length / wav.sampleRate).toFixed(2)}s)`);
+
+const melResult = audio.melSpectrogram(wav.samples, { mode: "whisper" });
+const T = melResult.frames.length;
+const nMels = melResult.nMels;
+// Flatten frames (per-frame Float32Array[]) into a [nMels, T] row-major array.
+const melFlat = new Float32Array(nMels * T);
+for (let m = 0; m < nMels; m++) {
+  for (let t = 0; t < T; t++) {
+    melFlat[m * T + t] = melResult.frames[t][m];
+  }
+}
+console.log(`mel: ${nMels} × ${T} frames\n`);
+
+for (const fx of FIXTURES) {
+  if (!existsSync(fx.path)) {
+    console.log(`skipping ${fx.name}: missing ${fx.path}\n`);
+    continue;
+  }
+
+  const tLoad0 = Bun.nanoseconds();
+  const model = await llm.WhisperModel.load(fx.path);
+  const loadMs = (Bun.nanoseconds() - tLoad0) / 1e6;
+
+  // Warm-up: build everything once so JIT, NVRTC and PCIe upload don't taint
+  // the timed run.
+  model.transcribeMel(melFlat, T);
+
+  const RUNS = 3;
+  const records = [];
+  for (let r = 0; r < RUNS; r++) {
+    const t0 = Bun.nanoseconds();
+    const text = model.transcribeMel(melFlat, T);
+    const totalMs = (Bun.nanoseconds() - t0) / 1e6;
+    records.push({ totalMs, text });
+  }
+
+  const best = records.reduce((a, b) => (a.totalMs < b.totalMs ? a : b));
+  const median = records.map((r) => r.totalMs).sort((a, b) => a - b)[Math.floor(records.length / 2)];
+  console.log(`── ${fx.name} ──`);
+  console.log(`  load        : ${loadMs.toFixed(0)} ms`);
+  console.log(`  total       : best=${best.totalMs.toFixed(1)} ms  median=${median.toFixed(1)} ms  (n=${RUNS})`);
+  console.log(`  text        : ${JSON.stringify(best.text.trim().slice(0, 80))}`);
+  console.log();
+}

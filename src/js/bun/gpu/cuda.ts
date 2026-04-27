@@ -146,7 +146,17 @@ function tryLoadCublas(): boolean {
   if (process.platform === "win32") {
     candidates.push("cublas64_13.dll", "cublas64_12.dll", "cublas64_11.dll");
   } else {
-    candidates.push("libcublas.so", "libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
+    candidates.push(
+      "libcublas.so",
+      "libcublas.so.13",
+      "libcublas.so.12",
+      "libcublas.so.11",
+      // Bundled with NVIDIA's ollama distribution — common on Linux desktops
+      // that don't have the full CUDA toolkit installed but do have the
+      // proprietary driver + an ollama install via the official installer.
+      "/usr/local/lib/ollama/cuda_v13/libcublas.so.13",
+      "/usr/local/lib/ollama/cuda_v12/libcublas.so.12",
+    );
   }
 
   for (const name of candidates) {
