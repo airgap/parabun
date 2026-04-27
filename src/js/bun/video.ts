@@ -108,6 +108,12 @@ type DecodeOptions = {
   startMs?: number;
   /** Stop decoding when presentation timestamp exceeds this (ms). Default Infinity. */
   endMs?: number;
+  /**
+   * Per-frame JPEG decoder. Required for MJPEG-encoded inputs. Pass
+   * `image.decode` from `bun:image` (cross-builtin imports between bun:*
+   * modules aren't supported, so the dep is injected here).
+   */
+  decodeMjpg?: (bytes: Uint8Array) => { data: Uint8Array; width: number; height: number; channels?: number };
 };
 
 type DecodedFrame = {
@@ -748,12 +754,217 @@ async function probe(input: Uint8Array | ArrayBuffer): Promise<ProbeInfo> {
 }
 
 /**
- * Open a video for decoding. `bytes` may be the entire file (small clips)
- * or a path string for streaming reads. Returns a Decoder whose `.frames()`
- * yields decoded frames as an async iterator.
+ * Open a video for decoding. Pure-JS MJPEG-in-MP4 path ships today —
+ * the container's sample table is walked, each MJPEG sample's bytes are
+ * sliced, and `opts.decodeMjpg` is called per frame to lift JPEG → RGBA.
+ * Other codecs still need the libavcodec native binding.
  */
-function decode(_bytes: Uint8Array | ArrayBuffer | string, _opts?: DecodeOptions): Promise<VideoDecoder> {
-  todo();
+async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOptions): Promise<VideoDecoder> {
+  if (typeof input === "string") {
+    throw new Error("bun:video.decode: streaming-from-path not yet supported (pass a Uint8Array / ArrayBuffer)");
+  }
+  const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+  if (bytes.length < 8) throw new Error("bun:video.decode: input too short to identify container");
+
+  const isMp4 =
+    (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) ||
+    (bytes[4] === 0x73 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) ||
+    (bytes[4] === 0x6d && bytes[5] === 0x6f && bytes[6] === 0x6f && bytes[7] === 0x76);
+  if (!isMp4) throw new Error(NOT_IMPLEMENTED_MSG);
+
+  // Find the moov + the first video trak.
+  const moov = findMp4Box(bytes, 0, bytes.length, "moov");
+  if (!moov) throw new Error("bun:video.decode: MP4 has no moov box");
+
+  let videoTrak: Mp4Box | null = null;
+  let videoCodec: Codec = "auto";
+  let mediaTimescale = 1;
+  let mediaDuration = 0n;
+  let widthOut = 0;
+  let heightOut = 0;
+  for (const trak of iterMp4Boxes(bytes, moov.start, moov.end)) {
+    if (trak.type !== "trak") continue;
+    const mdia = findMp4Box(bytes, trak.start, trak.end, "mdia");
+    if (!mdia) continue;
+    const hdlr = findMp4Box(bytes, mdia.start, mdia.end, "hdlr");
+    if (!hdlr || parseMp4Hdlr(bytes, hdlr) !== "vide") continue;
+    const minf = findMp4Box(bytes, mdia.start, mdia.end, "minf");
+    const stbl = minf && findMp4Box(bytes, minf.start, minf.end, "stbl");
+    const stsd = stbl && findMp4Box(bytes, stbl.start, stbl.end, "stsd");
+    const mdhd = findMp4Box(bytes, mdia.start, mdia.end, "mdhd");
+    if (!stsd || !mdhd) continue;
+    const stsdInfo = parseMp4Stsd(bytes, stsd);
+    if (!stsdInfo) continue;
+    videoTrak = trak;
+    videoCodec = MP4_VIDEO_CODEC[stsdInfo.codecFourCC] ?? "auto";
+    widthOut = stsdInfo.width;
+    heightOut = stsdInfo.height;
+    const m = parseMp4Mdhd(bytes, mdhd);
+    mediaTimescale = m.timescale;
+    mediaDuration = m.duration;
+    break;
+  }
+  if (!videoTrak) throw new Error("bun:video.decode: no video track in MP4");
+
+  if (videoCodec !== "mjpeg") {
+    throw new Error(
+      `bun:video.decode: codec "${videoCodec}" needs the libavcodec native binding (only MJPEG-in-MP4 is unstubbed today)`,
+    );
+  }
+  if (!opts?.decodeMjpg) {
+    throw new Error("bun:video.decode: MJPEG inputs require opts.decodeMjpg — pass `image.decode` from bun:image");
+  }
+  const decodeMjpg = opts.decodeMjpg;
+
+  // Parse sample tables.
+  const mdia = findMp4Box(bytes, videoTrak.start, videoTrak.end, "mdia")!;
+  const minf = findMp4Box(bytes, mdia.start, mdia.end, "minf")!;
+  const stbl = findMp4Box(bytes, minf.start, minf.end, "stbl")!;
+  const stsz = findMp4Box(bytes, stbl.start, stbl.end, "stsz");
+  const stco = findMp4Box(bytes, stbl.start, stbl.end, "stco");
+  const co64 = findMp4Box(bytes, stbl.start, stbl.end, "co64");
+  const stsc = findMp4Box(bytes, stbl.start, stbl.end, "stsc");
+  const stts = findMp4Box(bytes, stbl.start, stbl.end, "stts");
+  if (!stsz || (!stco && !co64) || !stsc || !stts) {
+    throw new Error("bun:video.decode: required sample tables missing");
+  }
+
+  // stsz: { sample_size:u32, sample_count:u32, [size:u32 × sample_count if sample_size==0] }
+  const stszSampleSize = readU32BE(bytes, stsz.start + 4);
+  const stszSampleCount = readU32BE(bytes, stsz.start + 8);
+  const sampleSizes = new Uint32Array(stszSampleCount);
+  if (stszSampleSize === 0) {
+    for (let i = 0; i < stszSampleCount; i++) sampleSizes[i] = readU32BE(bytes, stsz.start + 12 + i * 4);
+  } else {
+    sampleSizes.fill(stszSampleSize);
+  }
+
+  // stco / co64: { entry_count:u32, [chunk_offset × entry_count] (32 or 64 bits) }
+  const useCo64 = co64 != null;
+  const coBox = (useCo64 ? co64 : stco)!;
+  const chunkCount = readU32BE(bytes, coBox.start + 4);
+  const chunkOffsets: number[] = new Array(chunkCount);
+  for (let i = 0; i < chunkCount; i++) {
+    chunkOffsets[i] = useCo64
+      ? Number(readU64BE(bytes, coBox.start + 8 + i * 8))
+      : readU32BE(bytes, coBox.start + 8 + i * 4);
+  }
+
+  // stsc: { entry_count, [first_chunk:u32, samples_per_chunk:u32, sample_desc_idx:u32] }
+  const stscEntryCount = readU32BE(bytes, stsc.start + 4);
+  type StscEntry = { firstChunk: number; samplesPerChunk: number; sampleDescIdx: number };
+  const stscEntries: StscEntry[] = [];
+  for (let i = 0; i < stscEntryCount; i++) {
+    const off = stsc.start + 8 + i * 12;
+    stscEntries.push({
+      firstChunk: readU32BE(bytes, off),
+      samplesPerChunk: readU32BE(bytes, off + 4),
+      sampleDescIdx: readU32BE(bytes, off + 8),
+    });
+  }
+
+  // Build per-sample (offset, size) by walking chunks.
+  const sampleOffsets = new Float64Array(stszSampleCount); // f64 to safely hold 53-bit offsets
+  let stscIdx = 0;
+  let nextStscChunk = stscEntries.length > 1 ? stscEntries[1].firstChunk : Infinity;
+  let sampleIdx = 0;
+  for (let chunkIdx = 1; chunkIdx <= chunkCount && sampleIdx < stszSampleCount; chunkIdx++) {
+    if (stscIdx + 1 < stscEntries.length && chunkIdx >= stscEntries[stscIdx + 1].firstChunk) {
+      stscIdx++;
+      nextStscChunk = stscIdx + 1 < stscEntries.length ? stscEntries[stscIdx + 1].firstChunk : Infinity;
+      void nextStscChunk;
+    }
+    const samplesPerChunk = stscEntries[stscIdx].samplesPerChunk;
+    let chunkOffset = chunkOffsets[chunkIdx - 1];
+    for (let s = 0; s < samplesPerChunk && sampleIdx < stszSampleCount; s++) {
+      sampleOffsets[sampleIdx] = chunkOffset;
+      chunkOffset += sampleSizes[sampleIdx];
+      sampleIdx++;
+    }
+  }
+  if (sampleIdx !== stszSampleCount) {
+    throw new Error(`bun:video.decode: sample count mismatch (${sampleIdx} mapped vs ${stszSampleCount} expected)`);
+  }
+
+  // stts: per-sample decode timing.
+  const stsEntryCount = readU32BE(bytes, stts.start + 4);
+  const samplePts = new Float64Array(stszSampleCount);
+  let cumulativeTicks = 0;
+  let sIdx = 0;
+  for (let i = 0; i < stsEntryCount; i++) {
+    const off = stts.start + 8 + i * 8;
+    const count = readU32BE(bytes, off);
+    const delta = readU32BE(bytes, off + 4);
+    for (let s = 0; s < count && sIdx < stszSampleCount; s++) {
+      samplePts[sIdx++] = cumulativeTicks;
+      cumulativeTicks += delta;
+    }
+  }
+
+  const startMs = opts?.startMs ?? 0;
+  const endMs = opts?.endMs ?? Infinity;
+  const totalDurationMs = mediaTimescale > 0 ? Number((mediaDuration * 1000n) / BigInt(mediaTimescale)) : 0;
+
+  const finalWidth = widthOut;
+  const finalHeight = heightOut;
+  const captureCodec = videoCodec;
+
+  const dec: VideoDecoder = {
+    width: finalWidth,
+    height: finalHeight,
+    codec: captureCodec,
+    durationMs: totalDurationMs,
+    async *frames() {
+      for (let i = 0; i < stszSampleCount; i++) {
+        const ptsMs = (samplePts[i] * 1000) / mediaTimescale;
+        if (ptsMs < startMs) continue;
+        if (ptsMs > endMs) break;
+        const offset = sampleOffsets[i];
+        const size = sampleSizes[i];
+        const jpegBytes = bytes.subarray(offset, offset + size);
+        const decoded = decodeMjpg(jpegBytes);
+        // bun:image returns RGB or RGBA depending on the source. Promote
+        // to RGBA so consumers don't have to branch.
+        let rgba: Uint8Array;
+        const ch = decoded.channels ?? 3;
+        if (ch === 4) {
+          rgba = decoded.data instanceof Uint8Array ? decoded.data : new Uint8Array(decoded.data);
+        } else if (ch === 3) {
+          rgba = new Uint8Array(decoded.width * decoded.height * 4);
+          for (let p = 0; p < decoded.width * decoded.height; p++) {
+            rgba[p * 4] = decoded.data[p * 3];
+            rgba[p * 4 + 1] = decoded.data[p * 3 + 1];
+            rgba[p * 4 + 2] = decoded.data[p * 3 + 2];
+            rgba[p * 4 + 3] = 0xff;
+          }
+        } else {
+          throw new Error(`bun:video.decode: unexpected channel count ${ch} from JPEG decoder`);
+        }
+        yield {
+          data: rgba,
+          width: decoded.width,
+          height: decoded.height,
+          pixelFormat: "rgba",
+          ptsMs,
+          index: i,
+          keyframe: true, // every MJPEG sample is a complete JPEG = keyframe.
+        };
+      }
+    },
+    async seek(_ptsMs: number): Promise<void> {
+      // MJPEG is all keyframes, so seek would just skip ahead — but the
+      // current frames() iterator doesn't support resuming; documented as a
+      // follow-up.
+      throw new Error("bun:video.decode: seek() on the MJPEG path is pending");
+    },
+    async close(): Promise<void> {
+      /* no resources to release for the in-memory MJPEG path */
+    },
+    async [Symbol.asyncDispose](): Promise<void> {
+      await this.close();
+    },
+  };
+  return dec;
 }
 
 /**
