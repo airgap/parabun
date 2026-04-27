@@ -801,7 +801,13 @@ class WhisperTokenizer {
       }
       pieces.push(this.vocab[id] ?? "");
     }
-    return pieces.join("");
+    // Post-process: Whisper sometimes emits literal "[BLANK_AUDIO]",
+    // "[silent]", "[ Silence ]" etc. as text annotations for non-speech
+    // regions. These are spelled out via BPE so they can't be filtered
+    // at the token level — strip them from the joined string instead.
+    let text = pieces.join("");
+    text = text.replace(/\s*\[\s*(BLANK_AUDIO|silent|silence|music|inaudible)\s*\]\s*/gi, " ");
+    return text.trim();
   }
 }
 
@@ -1253,18 +1259,43 @@ class WhisperModel {
   }
 
   /**
-   * High-level greedy transcription. `audio` is mono 16 kHz Float32 PCM in
-   * [-1, 1]. The audio is padded/truncated to 30 s, mel-preprocessed, run
-   * through the encoder once, and then the decoder is auto-regressed
-   * greedily until <|endoftext|> or `maxTokens` is reached.
+   * High-level greedy transcription of arbitrary-length audio. `audio` is
+   * mono 16 kHz Float32 PCM in [-1, 1]. The audio is split into 30-second
+   * chunks; each is mel-preprocessed, encoded, and greedily decoded until
+   * <|endoftext|> or `maxTokensPerChunk`. Outputs are concatenated.
+   *
+   * For audio ≤ 30 s this is a single encoder + decoder pass. For longer
+   * audio, chunks are processed sequentially; the previous chunk's tail
+   * tokens are NOT (yet) carried as a prompt to the next chunk — that
+   * trades a small accuracy bump for simpler boundary handling and is
+   * follow-up work.
    */
   transcribe(audio: Float32Array, opts?: { maxTokens?: number; language?: string }): string {
-    // Pad/trim to 30 s @ 16 kHz = 480000 samples.
-    const N_SAMPLES = 480000;
-    const pcm = new Float32Array(N_SAMPLES);
-    pcm.set(audio.length > N_SAMPLES ? audio.subarray(0, N_SAMPLES) : audio);
-    const { mel, T } = whisperMel(pcm);
-    return this.transcribeMel(mel, T, opts);
+    const N_SAMPLES = 480000; // 30 s @ 16 kHz
+    if (audio.length <= N_SAMPLES) {
+      const pcm = new Float32Array(N_SAMPLES);
+      pcm.set(audio);
+      const { mel, T } = whisperMel(pcm);
+      return this.transcribeMel(mel, T, opts);
+    }
+    // Long-audio path: non-overlapping 30-second chunks. Skip trailing
+    // chunks that are pure silence (< 0.1 s of nonzero samples).
+    const out: string[] = [];
+    for (let start = 0; start < audio.length; start += N_SAMPLES) {
+      const end = Math.min(start + N_SAMPLES, audio.length);
+      const slice = audio.subarray(start, end);
+      // Drop chunks that are below a tiny RMS threshold — pure silence
+      // produces no useful tokens and just wastes a forward pass.
+      let energy = 0;
+      for (let i = 0; i < slice.length; i++) energy += slice[i] * slice[i];
+      const rms = Math.sqrt(energy / slice.length);
+      if (rms < 1e-4) continue;
+      const pcm = new Float32Array(N_SAMPLES);
+      pcm.set(slice);
+      const { mel, T } = whisperMel(pcm);
+      out.push(this.transcribeMel(mel, T, opts));
+    }
+    return out.join("");
   }
 }
 
