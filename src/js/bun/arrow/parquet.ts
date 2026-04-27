@@ -1038,3 +1038,726 @@ export function fromParquet(bytes: Uint8Array): TableLike {
   };
   return new Table(tableSchema, batches);
 }
+
+// ─── Writer ───────────────────────────────────────────────────────────────
+// toParquet emits a single row group, PLAIN-encoded, with optional SNAPPY
+// or GZIP compression. Output is bit-for-bit readable by pyarrow / arrow-rs
+// / duckdb on the basic types — narrow but correct.
+//
+// The writer doesn't dictionary-encode strings or bit-pack low-cardinality
+// columns yet; for a tiny.en-style toy fixture both pyarrow and Parabun
+// ship roughly equivalent file sizes thanks to SNAPPY. For workloads where
+// density matters, the dictionary path lands as a follow-up.
+
+class ByteWriter {
+  buf: Uint8Array;
+  view: DataView;
+  pos: number;
+
+  constructor(initial: number = 4096) {
+    this.buf = new Uint8Array(initial);
+    this.view = new DataView(this.buf.buffer);
+    this.pos = 0;
+  }
+
+  private grow(min: number): void {
+    if (this.buf.length >= min) return;
+    let cap = this.buf.length;
+    while (cap < min) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.buf, 0);
+    this.buf = next;
+    this.view = new DataView(next.buffer);
+  }
+
+  writeBytes(src: Uint8Array): void {
+    this.grow(this.pos + src.length);
+    this.buf.set(src, this.pos);
+    this.pos += src.length;
+  }
+
+  writeU8(v: number): void {
+    this.grow(this.pos + 1);
+    this.buf[this.pos++] = v & 0xff;
+  }
+
+  writeI32LE(v: number): void {
+    this.grow(this.pos + 4);
+    this.view.setInt32(this.pos, v, true);
+    this.pos += 4;
+  }
+
+  writeF32LE(v: number): void {
+    this.grow(this.pos + 4);
+    this.view.setFloat32(this.pos, v, true);
+    this.pos += 4;
+  }
+
+  writeF64LE(v: number): void {
+    this.grow(this.pos + 8);
+    this.view.setFloat64(this.pos, v, true);
+    this.pos += 8;
+  }
+
+  writeI64LE(v: bigint): void {
+    this.grow(this.pos + 8);
+    this.view.setBigInt64(this.pos, v, true);
+    this.pos += 8;
+  }
+
+  // Unsigned varint.
+  writeVarint(v: number): void {
+    while (v > 0x7f) {
+      this.writeU8((v & 0x7f) | 0x80);
+      v >>>= 7;
+    }
+    this.writeU8(v & 0x7f);
+  }
+
+  writeZigzagI32(v: number): void {
+    this.writeVarint(((v << 1) ^ (v >> 31)) >>> 0);
+  }
+
+  writeZigzagI64(v: bigint): void {
+    let zz = (v << 1n) ^ (v >> 63n);
+    while ((zz & ~0x7fn) !== 0n) {
+      this.writeU8(Number(zz & 0x7fn) | 0x80);
+      zz >>= 7n;
+    }
+    this.writeU8(Number(zz & 0x7fn));
+  }
+
+  finish(): Uint8Array {
+    return this.buf.slice(0, this.pos);
+  }
+}
+
+// ─── Thrift compact writer ────────────────────────────────────────────────
+//
+// Field header: a 1-byte head where the high nibble is the delta from
+// the last field id (1..15) and the low nibble is the element type. If
+// the delta is > 15, the high nibble is 0 and the field id follows as a
+// zigzag varint.
+
+class ThriftWriter {
+  out: ByteWriter;
+
+  constructor() {
+    this.out = new ByteWriter();
+  }
+
+  writeFieldHeader(lastFieldId: number, fieldId: number, type: number): void {
+    const delta = fieldId - lastFieldId;
+    if (delta > 0 && delta <= 15) {
+      this.out.writeU8(((delta & 0x0f) << 4) | (type & 0x0f));
+    } else {
+      this.out.writeU8(type & 0x0f);
+      this.out.writeZigzagI32(fieldId);
+    }
+  }
+
+  writeStop(): void {
+    this.out.writeU8(0);
+  }
+
+  writeBool(lastFieldId: number, fieldId: number, value: boolean): number {
+    this.writeFieldHeader(lastFieldId, fieldId, value ? TC_BOOL_TRUE : TC_BOOL_FALSE);
+    return fieldId;
+  }
+
+  writeI32(lastFieldId: number, fieldId: number, value: number): number {
+    this.writeFieldHeader(lastFieldId, fieldId, TC_I32);
+    this.out.writeZigzagI32(value);
+    return fieldId;
+  }
+
+  writeI64(lastFieldId: number, fieldId: number, value: bigint): number {
+    this.writeFieldHeader(lastFieldId, fieldId, TC_I64);
+    this.out.writeZigzagI64(value);
+    return fieldId;
+  }
+
+  writeBinary(lastFieldId: number, fieldId: number, bytes: Uint8Array): number {
+    this.writeFieldHeader(lastFieldId, fieldId, TC_BINARY);
+    this.out.writeVarint(bytes.length);
+    this.out.writeBytes(bytes);
+    return fieldId;
+  }
+
+  writeString(lastFieldId: number, fieldId: number, value: string): number {
+    return this.writeBinary(lastFieldId, fieldId, new TextEncoder().encode(value));
+  }
+
+  // List header: 1 byte high-nibble = size (or 15 for long form), low nibble = element type.
+  writeListHeader(elementType: number, size: number): void {
+    if (size < 15) {
+      this.out.writeU8(((size & 0x0f) << 4) | (elementType & 0x0f));
+    } else {
+      this.out.writeU8(0xf0 | (elementType & 0x0f));
+      this.out.writeVarint(size);
+    }
+  }
+
+  finish(): Uint8Array {
+    return this.out.finish();
+  }
+}
+
+// ─── Snappy compression ───────────────────────────────────────────────────
+// Hash-based compressor matching the reference algorithm: scan a sliding
+// window, look up the current 4-byte prefix in a hash table for the most
+// recent occurrence, emit a copy if a match is found, otherwise extend the
+// pending literal run. The reference picks 14-bit hash table sizes for
+// good speed/ratio balance.
+
+function snappyCompress(input: Uint8Array): Uint8Array {
+  const out: number[] = [];
+
+  // Uncompressed length prefix (varint).
+  let len = input.length;
+  while (len > 0x7f) {
+    out.push((len & 0x7f) | 0x80);
+    len >>>= 7;
+  }
+  out.push(len & 0x7f);
+
+  if (input.length === 0) return new Uint8Array(out);
+
+  const HASH_BITS = 14;
+  const HASH_SIZE = 1 << HASH_BITS;
+  const table = new Int32Array(HASH_SIZE).fill(-1);
+
+  const hashAt = (i: number): number => {
+    // 32-bit FNV-ish; matches reference behavior closely enough.
+    const u = (input[i] | (input[i + 1] << 8) | (input[i + 2] << 16) | (input[i + 3] << 24)) >>> 0;
+    return (u * 0x1e35a7bd) >>> (32 - HASH_BITS);
+  };
+
+  const writeLiteral = (start: number, end: number): void => {
+    if (end <= start) return;
+    const litLen = end - start;
+    const tag = litLen - 1;
+    if (tag < 60) {
+      out.push((tag << 2) | 0);
+    } else {
+      // Use n bytes of length.
+      let extras = 0;
+      let v = tag;
+      while (v > 0) {
+        extras++;
+        v >>>= 8;
+      }
+      out.push(((59 + extras) << 2) | 0);
+      v = tag;
+      for (let i = 0; i < extras; i++) {
+        out.push(v & 0xff);
+        v >>>= 8;
+      }
+    }
+    for (let i = start; i < end; i++) out.push(input[i]);
+  };
+
+  const writeCopy = (offset: number, length: number): void => {
+    while (length >= 68) {
+      // 64-byte 2-byte-offset copy at most per emission.
+      out.push((63 << 2) | 2);
+      out.push(offset & 0xff);
+      out.push((offset >> 8) & 0xff);
+      length -= 64;
+    }
+    if (length > 64) {
+      // Split into 60 + remainder.
+      out.push((59 << 2) | 2);
+      out.push(offset & 0xff);
+      out.push((offset >> 8) & 0xff);
+      length -= 60;
+    }
+    if (length >= 4 && length < 12 && offset < 2048) {
+      // 1-byte-offset variant.
+      out.push(((length - 4) << 2) | 1 | (((offset >> 8) & 0x07) << 5));
+      out.push(offset & 0xff);
+    } else {
+      out.push(((length - 1) << 2) | 2);
+      out.push(offset & 0xff);
+      out.push((offset >> 8) & 0xff);
+    }
+  };
+
+  const inputLen = input.length;
+  const skipMargin = 4;
+  let cursor = 0;
+  let nextLiteralStart = 0;
+
+  while (cursor + skipMargin < inputLen) {
+    const h = hashAt(cursor);
+    const cand = table[h];
+    table[h] = cursor;
+
+    if (
+      cand >= 0 &&
+      cursor - cand < 65536 &&
+      input[cand] === input[cursor] &&
+      input[cand + 1] === input[cursor + 1] &&
+      input[cand + 2] === input[cursor + 2] &&
+      input[cand + 3] === input[cursor + 3]
+    ) {
+      // Flush any pending literal run.
+      writeLiteral(nextLiteralStart, cursor);
+      const offset = cursor - cand;
+      // Extend match.
+      let matchLen = 4;
+      while (cursor + matchLen < inputLen && input[cand + matchLen] === input[cursor + matchLen]) {
+        matchLen++;
+      }
+      writeCopy(offset, matchLen);
+      cursor += matchLen;
+      nextLiteralStart = cursor;
+    } else {
+      cursor++;
+    }
+  }
+  // Flush trailing literal.
+  writeLiteral(nextLiteralStart, inputLen);
+  return new Uint8Array(out);
+}
+
+// ─── Page writer ──────────────────────────────────────────────────────────
+
+function encodePlainTyped(values: any, count: number, type: number): Uint8Array {
+  const w = new ByteWriter();
+  switch (type) {
+    case PQ_TYPE_INT32:
+      for (let i = 0; i < count; i++) w.writeI32LE(values[i]);
+      break;
+    case PQ_TYPE_INT64:
+      for (let i = 0; i < count; i++) w.writeI64LE(values[i]);
+      break;
+    case PQ_TYPE_FLOAT:
+      for (let i = 0; i < count; i++) w.writeF32LE(values[i]);
+      break;
+    case PQ_TYPE_DOUBLE:
+      for (let i = 0; i < count; i++) w.writeF64LE(values[i]);
+      break;
+    case PQ_TYPE_BYTE_ARRAY: {
+      const enc = new TextEncoder();
+      for (let i = 0; i < count; i++) {
+        const bytes = enc.encode(values[i] ?? "");
+        w.writeI32LE(bytes.length);
+        w.writeBytes(bytes);
+      }
+      break;
+    }
+    case PQ_TYPE_BOOLEAN: {
+      // Bit-pack LSB-first.
+      const packed = new Uint8Array(Math.ceil(count / 8));
+      for (let i = 0; i < count; i++) {
+        if (values[i]) packed[i >> 3] |= 1 << (i & 7);
+      }
+      w.writeBytes(packed);
+      break;
+    }
+    default:
+      throw new Error(`parquet writer: PLAIN encode: unsupported type ${type}`);
+  }
+  return w.finish();
+}
+
+// Encode an array of {0,1} definition levels as a single RLE run wrapped
+// in the i32-length-prefixed RLE/bit-pack hybrid expected for V1 pages
+// when the def level is at most 1.
+function encodeDefLevelsAllOne(count: number): Uint8Array {
+  // bitWidth=1 (max level=1). Two cases:
+  //   - All 1s (no nulls) → single RLE run of `count` × 1.
+  //   - Mixed → bit-packed group(s).
+  // For simplicity emit a single RLE run; callers that need null handling
+  // use encodeDefLevelsRle below.
+  void count;
+  throw new Error("internal: use encodeDefLevelsRle");
+}
+
+function encodeDefLevelsRle(defLevels: Uint8Array, count: number): Uint8Array {
+  // Hybrid format: varint header + body. For a run, header = (runLen << 1) | 0,
+  // body = bitWidth-bytes value (1 byte for bitWidth=1).
+  // For bit-packed, header = (numGroups << 1) | 1, body = numGroups × 8 × bitWidth bits.
+  //
+  // Simplest correct encoder: walk the levels, emit alternating RLE runs.
+  const w = new ByteWriter();
+  let i = 0;
+  while (i < count) {
+    const v = defLevels[i];
+    let runLen = 1;
+    while (i + runLen < count && defLevels[i + runLen] === v) runLen++;
+    // Emit RLE run: (runLen << 1) | 0
+    w.writeVarint(runLen << 1);
+    w.writeU8(v);
+    i += runLen;
+  }
+  return w.finish();
+}
+
+// Build a V1 data page: [def levels (i32-prefixed RLE)] [values (PLAIN)]
+function buildDataPageBody(values: any, count: number, type: number, defLevels: Uint8Array | undefined): Uint8Array {
+  const w = new ByteWriter();
+  if (defLevels !== undefined) {
+    const enc = encodeDefLevelsRle(defLevels, count);
+    w.writeI32LE(enc.length);
+    w.writeBytes(enc);
+  }
+  const plain = encodePlainTyped(values, values.length, type);
+  w.writeBytes(plain);
+  return w.finish();
+}
+
+// ─── FileMetaData writer ──────────────────────────────────────────────────
+
+interface ColumnPlan {
+  name: string;
+  physicalType: number;
+  isOptional: boolean;
+  // Page bytes (already compressed if codec != UNCOMPRESSED).
+  compressedPage: Uint8Array;
+  uncompressedSize: number;
+  numValues: number;
+  numNonNull: number;
+}
+
+function writePageHeader(
+  pageType: number,
+  uncompressedSize: number,
+  compressedSize: number,
+  dataPageHeader: { numValues: number },
+): Uint8Array {
+  // Each Thrift field write returns the new lastFieldId. Order doesn't
+  // matter semantically but we go ascending for deterministic delta packing.
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 1: PageType
+  lf = tw.writeI32(lf, 1, pageType);
+  // 2: uncompressed_page_size
+  lf = tw.writeI32(lf, 2, uncompressedSize);
+  // 3: compressed_page_size
+  lf = tw.writeI32(lf, 3, compressedSize);
+  // 5: DataPageHeader struct
+  tw.writeFieldHeader(lf, 5, TC_STRUCT);
+  lf = 5;
+  {
+    const inner = new ThriftWriter();
+    let ilf = 0;
+    // 1: num_values
+    ilf = inner.writeI32(ilf, 1, dataPageHeader.numValues);
+    // 2: encoding (PLAIN = 0)
+    ilf = inner.writeI32(ilf, 2, PQ_ENC_PLAIN);
+    // 3: definition_level_encoding (RLE = 3)
+    ilf = inner.writeI32(ilf, 3, PQ_ENC_RLE);
+    // 4: repetition_level_encoding (RLE = 3)
+    ilf = inner.writeI32(ilf, 4, PQ_ENC_RLE);
+    inner.writeStop();
+    tw.out.writeBytes(inner.finish());
+  }
+  tw.writeStop();
+  return tw.finish();
+}
+
+function writeColumnMetaData(
+  plan: ColumnPlan,
+  codec: number,
+  compressedSize: number,
+  dataPageOffset: bigint,
+): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 1: type
+  lf = tw.writeI32(lf, 1, plan.physicalType);
+  // 2: encodings list
+  tw.writeFieldHeader(lf, 2, TC_LIST);
+  lf = 2;
+  tw.writeListHeader(TC_I32, 2);
+  tw.out.writeZigzagI32(PQ_ENC_PLAIN);
+  tw.out.writeZigzagI32(PQ_ENC_RLE);
+  // 3: path_in_schema list of strings
+  tw.writeFieldHeader(lf, 3, TC_LIST);
+  lf = 3;
+  tw.writeListHeader(TC_BINARY, 1);
+  const nameBytes = new TextEncoder().encode(plan.name);
+  tw.out.writeVarint(nameBytes.length);
+  tw.out.writeBytes(nameBytes);
+  // 4: codec
+  lf = tw.writeI32(lf, 4, codec);
+  // 5: num_values
+  lf = tw.writeI64(lf, 5, BigInt(plan.numValues));
+  // 6: total_uncompressed_size (page header bytes + data)
+  lf = tw.writeI64(lf, 6, BigInt(plan.uncompressedSize));
+  // 7: total_compressed_size
+  lf = tw.writeI64(lf, 7, BigInt(compressedSize));
+  // 9: data_page_offset
+  lf = tw.writeI64(lf, 9, dataPageOffset);
+  tw.writeStop();
+  return tw.finish();
+}
+
+function writeColumnChunk(plan: ColumnPlan, codec: number, compressedSize: number, dataPageOffset: bigint): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 2: file_offset
+  lf = tw.writeI64(lf, 2, dataPageOffset);
+  // 3: meta_data (struct)
+  tw.writeFieldHeader(lf, 3, TC_STRUCT);
+  lf = 3;
+  tw.out.writeBytes(writeColumnMetaData(plan, codec, compressedSize, dataPageOffset));
+  tw.writeStop();
+  return tw.finish();
+}
+
+function writeRowGroup(columnChunks: Uint8Array[], numRows: number, totalByteSize: bigint): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 1: columns list of struct
+  tw.writeFieldHeader(lf, 1, TC_LIST);
+  lf = 1;
+  tw.writeListHeader(TC_STRUCT, columnChunks.length);
+  for (const cc of columnChunks) {
+    tw.out.writeBytes(cc);
+  }
+  // 2: total_byte_size
+  lf = tw.writeI64(lf, 2, totalByteSize);
+  // 3: num_rows
+  lf = tw.writeI64(lf, 3, BigInt(numRows));
+  tw.writeStop();
+  return tw.finish();
+}
+
+function writeSchemaElement(
+  name: string,
+  physicalType: number | undefined,
+  numChildren: number,
+  repetitionType: number | undefined,
+): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  if (physicalType !== undefined) {
+    lf = tw.writeI32(lf, 1, physicalType);
+  }
+  if (repetitionType !== undefined) {
+    lf = tw.writeI32(lf, 3, repetitionType);
+  }
+  lf = tw.writeString(lf, 4, name);
+  if (numChildren > 0) {
+    lf = tw.writeI32(lf, 5, numChildren);
+  }
+  // 6: converted_type for utf8 strings.
+  if (physicalType === PQ_TYPE_BYTE_ARRAY) {
+    lf = tw.writeI32(lf, 6, PQ_CT_UTF8);
+  }
+  tw.writeStop();
+  return tw.finish();
+}
+
+function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: Uint8Array): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 1: version
+  lf = tw.writeI32(lf, 1, 1);
+  // 2: schema list of SchemaElement (root + leaves)
+  tw.writeFieldHeader(lf, 2, TC_LIST);
+  lf = 2;
+  tw.writeListHeader(TC_STRUCT, 1 + cols.length);
+  // Root group
+  tw.out.writeBytes(writeSchemaElement("root", undefined, cols.length, undefined));
+  for (const c of cols) {
+    tw.out.writeBytes(writeSchemaElement(c.name, c.physicalType, 0, c.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED));
+  }
+  // 3: num_rows
+  lf = tw.writeI64(lf, 3, BigInt(numRows));
+  // 4: row_groups list
+  tw.writeFieldHeader(lf, 4, TC_LIST);
+  lf = 4;
+  tw.writeListHeader(TC_STRUCT, 1);
+  tw.out.writeBytes(rowGroupBytes);
+  tw.writeStop();
+  return tw.finish();
+}
+
+// ─── Public writer entry point ────────────────────────────────────────────
+
+export function toParquet(
+  source: TableLike | RecordBatchLike,
+  opts?: { compression?: "uncompressed" | "snappy" | "gzip" },
+): Uint8Array {
+  const compression = opts?.compression ?? "snappy";
+  let codec = PQ_CODEC_UNCOMPRESSED;
+  if (compression === "snappy") codec = PQ_CODEC_SNAPPY;
+  else if (compression === "gzip") codec = PQ_CODEC_GZIP;
+  else if (compression !== "uncompressed") {
+    throw new RangeError(`bun:arrow.toParquet: unknown compression "${compression}"`);
+  }
+
+  // Materialize columns from the source. Concat batches into single
+  // typed arrays so we can write one row group.
+  const batches: RecordBatchLike[] = "batches" in source ? source.batches : [source];
+  const schema = source.schema;
+  const numRows = batches.reduce((sum, b) => sum + b.numRows, 0);
+
+  const out = new ByteWriter();
+  out.writeBytes(new Uint8Array([0x50, 0x41, 0x52, 0x31])); // PAR1
+
+  const columnChunks: Uint8Array[] = [];
+  const colPlans: ColumnPlan[] = [];
+
+  for (let ci = 0; ci < schema.fields.length; ci++) {
+    const field = schema.fields[ci];
+    const isOptional = field.nullable;
+    const physicalType = parquetPhysicalForKind(field.type.kind);
+
+    // Concat batches' values + validity for this column.
+    let mergedValues: any;
+    let mergedValidity: Uint8Array | undefined;
+    {
+      const sample = batches[0].columns[ci];
+      if (sample.values instanceof Int32Array) mergedValues = new Int32Array(numRows);
+      else if (sample.values instanceof BigInt64Array) mergedValues = new BigInt64Array(numRows);
+      else if (sample.values instanceof Float32Array) mergedValues = new Float32Array(numRows);
+      else if (sample.values instanceof Float64Array) mergedValues = new Float64Array(numRows);
+      else if (sample.values instanceof Uint8Array) mergedValues = new Uint8Array(numRows);
+      else mergedValues = new Array(numRows);
+      let off = 0;
+      for (const b of batches) {
+        const c = b.columns[ci];
+        if (mergedValues.length > 0 && c.values && c.values.length === b.numRows) {
+          if (Array.isArray(mergedValues)) {
+            for (let i = 0; i < b.numRows; i++) mergedValues[off + i] = c.values[i];
+          } else {
+            (mergedValues as any).set(c.values, off);
+          }
+        }
+        off += b.numRows;
+      }
+      if (isOptional) {
+        mergedValidity = new Uint8Array(Math.ceil(numRows / 8));
+        mergedValidity.fill(0xff);
+        let bitOff = 0;
+        for (const b of batches) {
+          const c = b.columns[ci];
+          if (c.validity) {
+            for (let i = 0; i < b.numRows; i++) {
+              const valid = (c.validity[i >> 3] >> (i & 7)) & 1;
+              const out = bitOff + i;
+              if (!valid) mergedValidity[out >> 3] &= ~(1 << (out & 7));
+            }
+          }
+          bitOff += b.numRows;
+        }
+      }
+    }
+
+    // Compute def levels (0/1 per row) and a packed values array (only non-nulls).
+    let defLevels: Uint8Array | undefined;
+    let nonNullValues: any;
+    let numNonNull: number;
+    if (isOptional && mergedValidity) {
+      defLevels = new Uint8Array(numRows);
+      let nn = 0;
+      for (let i = 0; i < numRows; i++) {
+        const v = (mergedValidity[i >> 3] >> (i & 7)) & 1;
+        defLevels[i] = v;
+        if (v) nn++;
+      }
+      numNonNull = nn;
+      // Pack non-null values into a fresh array.
+      if (mergedValues instanceof Int32Array) {
+        const out = new Int32Array(nn);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
+        nonNullValues = out;
+      } else if (mergedValues instanceof BigInt64Array) {
+        const out = new BigInt64Array(nn);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
+        nonNullValues = out;
+      } else if (mergedValues instanceof Float32Array) {
+        const out = new Float32Array(nn);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
+        nonNullValues = out;
+      } else if (mergedValues instanceof Float64Array) {
+        const out = new Float64Array(nn);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
+        nonNullValues = out;
+      } else if (mergedValues instanceof Uint8Array) {
+        const out = new Uint8Array(nn);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
+        nonNullValues = out;
+      } else {
+        const out: any[] = new Array(nn);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
+        nonNullValues = out;
+      }
+    } else {
+      numNonNull = numRows;
+      nonNullValues = mergedValues;
+      defLevels = undefined;
+    }
+
+    const pageBody = buildDataPageBody(nonNullValues, numRows, physicalType, defLevels);
+    const uncompressedSize = pageBody.length;
+    let compressedBody: Uint8Array;
+    if (codec === PQ_CODEC_UNCOMPRESSED) {
+      compressedBody = pageBody;
+    } else if (codec === PQ_CODEC_SNAPPY) {
+      compressedBody = snappyCompress(pageBody);
+    } else {
+      compressedBody = (Bun as any).gzipSync(pageBody) as Uint8Array;
+    }
+    const compressedSize = compressedBody.length;
+
+    const pageHeader = writePageHeader(PQ_PAGE_DATA_PAGE, uncompressedSize, compressedSize, {
+      numValues: numRows,
+    });
+    const pageStartOffset = BigInt(out.pos);
+    out.writeBytes(pageHeader);
+    out.writeBytes(compressedBody);
+
+    const plan: ColumnPlan = {
+      name: field.name,
+      physicalType,
+      isOptional,
+      compressedPage: compressedBody,
+      uncompressedSize: uncompressedSize + pageHeader.length,
+      numValues: numRows,
+      numNonNull,
+    };
+    colPlans.push(plan);
+    columnChunks.push(writeColumnChunk(plan, codec, compressedSize + pageHeader.length, pageStartOffset));
+  }
+
+  // Row group metadata uses the totals across columns.
+  const totalByteSize = colPlans.reduce((sum, p) => sum + BigInt(p.uncompressedSize), 0n);
+  const rowGroup = writeRowGroup(columnChunks, numRows, totalByteSize);
+
+  // FileMetaData footer.
+  const meta = writeFileMetaData(colPlans, numRows, rowGroup);
+  out.writeBytes(meta);
+  out.writeI32LE(meta.length);
+  out.writeBytes(new Uint8Array([0x50, 0x41, 0x52, 0x31])); // PAR1
+  return out.finish();
+}
+
+function parquetPhysicalForKind(kind: string): number {
+  switch (kind) {
+    case "bool":
+      return PQ_TYPE_BOOLEAN;
+    case "int32":
+      return PQ_TYPE_INT32;
+    case "int64":
+      return PQ_TYPE_INT64;
+    case "float32":
+      return PQ_TYPE_FLOAT;
+    case "float64":
+      return PQ_TYPE_DOUBLE;
+    case "utf8":
+      return PQ_TYPE_BYTE_ARRAY;
+  }
+  throw new Error(`bun:arrow.toParquet: type "${kind}" not supported (list / nested types pending)`);
+}

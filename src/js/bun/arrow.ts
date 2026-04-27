@@ -1345,6 +1345,16 @@ function fromParquet(bytes: Uint8Array): Table {
   return parquet.fromParquet(bytes) as Table;
 }
 
+function toParquet(
+  source: Table | RecordBatch,
+  opts?: { compression?: "uncompressed" | "snappy" | "gzip" },
+): Uint8Array {
+  if (!(source instanceof Table) && !(source instanceof RecordBatch)) {
+    throw new TypeError("bun:arrow.toParquet: source must be a Table or RecordBatch");
+  }
+  return parquet.toParquet(source, opts) as Uint8Array;
+}
+
 export default {
   // Types
   RecordBatch,
@@ -1374,8 +1384,9 @@ export default {
   cumsum,
   diff,
   concat,
-  // I/O — stubs, see error messages
+  // I/O
   fromIPC,
   toIPC,
   fromParquet,
+  toParquet,
 };
