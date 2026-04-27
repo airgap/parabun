@@ -85,10 +85,21 @@ console.log("\n[2] apache-arrow encode → Parabun decode");
 // Build the same logical batch on the apache-arrow side. We deliberately
 // let apache-arrow choose the encoding for the string column — its default
 // is Dictionary<Utf8>, which exercises our DictionaryBatch handling.
+//
+// JS Date objects → apache-arrow's DateMillisecond (Type.Date, DateUnit.MILLISECOND),
+// which our reader coerces to int64 (ms since epoch).
+const joinedDates = [
+  new Date("2024-01-01T00:00:00Z"),
+  new Date("2024-02-15T00:00:00Z"),
+  new Date("2024-04-01T00:00:00Z"),
+  new Date("2024-05-20T00:00:00Z"),
+  new Date("2024-06-30T00:00:00Z"),
+];
 const aaBuilt = new AATable({
   age: vectorFromArray([25, 30, 35, 40, 45], new Int32()),
   score: vectorFromArray([0.95, 0.82, 0.71, 0.58, 0.45], new Float64()),
   name: vectorFromArray(["alice", "bob", "carol", "dave", "eve"]),
+  joined: vectorFromArray(joinedDates),
 });
 
 const aaBytes = tableToIPC(aaBuilt, "stream");
@@ -107,20 +118,23 @@ let pass2 = true;
 const restoredAge = parabunRestored.column("age");
 const restoredScore = parabunRestored.column("score");
 const restoredName = parabunRestored.column("name");
+const restoredJoined = parabunRestored.column("joined");
+const expectedJoined = joinedDates.map(d => BigInt(d.getTime()));
 for (let i = 0; i < parabunRestored.numRows; i++) {
   const a = restoredAge.get(i);
   const s = restoredScore.get(i);
   const n = restoredName.get(i);
-  // apache-arrow's vector.get may return BigInt or Number depending on type.
+  const j = restoredJoined.get(i);
   const expA = ageVec.get(i);
   const expS = scoreVec.get(i);
   const expN = nameVec.get(i);
-  if (a !== expA || s !== expS || n !== expN) {
-    console.log(`  ✗ row ${i}: got (${a}, ${s}, ${n}), expected (${expA}, ${expS}, ${expN})`);
+  const expJ = expectedJoined[i];
+  if (a !== expA || s !== expS || n !== expN || j !== expJ) {
+    console.log(`  ✗ row ${i}: got (${a}, ${s}, ${n}, ${j}), expected (${expA}, ${expS}, ${expN}, ${expJ})`);
     pass2 = false;
   }
 }
-console.log(`  column-wise equality: ${pass2 ? "✓" : "✗"}`);
+console.log(`  column-wise equality (incl. Date64 → int64 ms): ${pass2 ? "✓" : "✗"}`);
 
 // ─── Result ──────────────────────────────────────────────────────────────
 

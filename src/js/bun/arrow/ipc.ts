@@ -80,7 +80,19 @@ const TYPE_INT = 2;
 const TYPE_FLOATINGPOINT = 3;
 const TYPE_BOOL = 6;
 const TYPE_UTF8 = 5;
-// other Arrow type IDs exist; we only emit / consume the four above.
+const TYPE_DATE = 8;
+const TYPE_TIME = 9;
+const TYPE_TIMESTAMP = 10;
+// We emit Int / FloatingPoint / Bool / Utf8 directly. We READ Date / Time /
+// Timestamp by coercing to int32 / int64 — the unit + (for Timestamp) the
+// timezone are surfaced as integers without unit metadata, so round-trip
+// re-emits them as plain int. Real applications that need typed dates can
+// wrap the resulting integer column with their own date library.
+
+// Date { unit:DateUnit }; DateUnit enum: DAY=0, MILLISECOND=1.
+const DATE_F_UNIT = 0;
+// Time { unit:TimeUnit, bitWidth:int=32 }
+const TIME_F_BITWIDTH = 1;
 
 const MESSAGE_HEADER_NONE = 0;
 const MESSAGE_HEADER_SCHEMA = 1;
@@ -841,6 +853,23 @@ function parseFieldType(fbr: FBR, fieldTablePos: number): ArrowKind {
       return "bool";
     case TYPE_UTF8:
       return "utf8";
+    case TYPE_DATE: {
+      // DateUnit: DAY=0 (32-bit days since epoch), MILLISECOND=1 (64-bit ms).
+      const unit = fbr.readI16(typeTablePos, DATE_F_UNIT, 1);
+      if (unit === 0) return "int32";
+      if (unit === 1) return "int64";
+      throw new Error(`bun:arrow.fromIPC: Date unit ${unit} not supported`);
+    }
+    case TYPE_TIMESTAMP:
+      // Always 64-bit regardless of TimeUnit; timezone metadata dropped.
+      return "int64";
+    case TYPE_TIME: {
+      // Time has its own bitWidth field (32 or 64).
+      const bw = fbr.readI32(typeTablePos, TIME_F_BITWIDTH, 32);
+      if (bw === 32) return "int32";
+      if (bw === 64) return "int64";
+      throw new Error(`bun:arrow.fromIPC: Time bitWidth ${bw} not supported`);
+    }
     default:
       throw new Error(`bun:arrow.fromIPC: type id ${typeId} not yet supported`);
   }
