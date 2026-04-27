@@ -705,6 +705,80 @@ function max(col: Column): number | bigint {
 }
 
 /**
+ * Row index of the minimum value in a numeric column. Skips null rows;
+ * NaN propagates (returns NaN — matches `bun:gpu.reduce("min")`'s NaN
+ * semantics, just with the index reported in the value's place). Empty
+ * or all-null columns throw — there's no meaningful argmin.
+ *
+ * Tie-break: first occurrence wins (lower index when values are equal).
+ */
+function argMin(col: Column): number {
+  requireNumeric(col, "argMin");
+  let bestIdx = -1;
+  if (col.type.kind === "int64") {
+    let bestV: bigint | null = null;
+    for (let i = 0; i < col.length; i++) {
+      const v = col.get(i) as bigint | null;
+      if (v == null) continue;
+      if (bestV === null || v < bestV) {
+        bestV = v;
+        bestIdx = i;
+      }
+    }
+  } else {
+    let bestV = Infinity;
+    for (let i = 0; i < col.length; i++) {
+      const v = col.get(i) as number | null;
+      if (v == null) continue;
+      if (Number.isNaN(v)) return NaN;
+      if (v < bestV) {
+        bestV = v;
+        bestIdx = i;
+      }
+    }
+  }
+  if (bestIdx < 0) {
+    throw new RangeError("bun:arrow.argMin: column is empty or all-null");
+  }
+  return bestIdx;
+}
+
+/**
+ * Row index of the maximum value. Same conventions as argMin (skip nulls,
+ * NaN propagates, first-occurrence tie-break, throws on empty/all-null).
+ */
+function argMax(col: Column): number {
+  requireNumeric(col, "argMax");
+  let bestIdx = -1;
+  if (col.type.kind === "int64") {
+    let bestV: bigint | null = null;
+    for (let i = 0; i < col.length; i++) {
+      const v = col.get(i) as bigint | null;
+      if (v == null) continue;
+      if (bestV === null || v > bestV) {
+        bestV = v;
+        bestIdx = i;
+      }
+    }
+  } else {
+    let bestV = -Infinity;
+    for (let i = 0; i < col.length; i++) {
+      const v = col.get(i) as number | null;
+      if (v == null) continue;
+      if (Number.isNaN(v)) return NaN;
+      if (v > bestV) {
+        bestV = v;
+        bestIdx = i;
+      }
+    }
+  }
+  if (bestIdx < 0) {
+    throw new RangeError("bun:arrow.argMax: column is empty or all-null");
+  }
+  return bestIdx;
+}
+
+/**
  * Count rows in a column or a whole record batch / table. By default counts
  * non-null rows; pass `{ all: true }` to count every row regardless of
  * nullity.
@@ -1073,6 +1147,8 @@ export default {
   mean,
   min,
   max,
+  argMin,
+  argMax,
   count,
   variance,
   stddev,
