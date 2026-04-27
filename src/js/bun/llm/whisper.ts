@@ -29,6 +29,20 @@
 // surface is small (~80 lines for both) and self-contained so it
 // doesn't drift from `bun/audio.ts`'s public mel API.
 
+// bun:gpu is a sibling top-level builtin; the bundler resolves it through
+// the relative file path. We use it to route both:
+//   - Decoder per-step matVecs through gpu.matVec (Q/K/V/O + MLP per
+//     layer + LM head). Weights HtoD'd once at load time.
+//   - Encoder one-shot matrix-matrix passes through gpu.matmul. The
+//     encoder dominates wall-clock for short audio (~25× the decoder
+//     cost on tiny.en) so it's the bigger win.
+//
+// Encoder weights are stored TRANSPOSED on the GPU side because the
+// model's storage layout is W[outDim, inDim] but gpu.matmul wants
+// B[inDim, outDim] for X @ W^T. The transpose is a one-shot cost at
+// load time.
+const gpu = require("../gpu.ts");
+
 interface BinModel {
   magic: number;
   hparams: WhisperHParams;
@@ -813,48 +827,61 @@ class WhisperTokenizer {
 
 // ─── Model ─────────────────────────────────────────────────────────────────
 
+// Encoder weight matrices are stored TRANSPOSED (B[inDim, outDim]) so
+// they slot into gpu.matmul without runtime transposition. Bias vectors
+// stay as plain Float32Array.
 interface EncoderBlock {
   attnLnW: Float32Array;
   attnLnB: Float32Array;
-  attnQW: Float32Array;
+  attnQWt: GpuMat;
   attnQB: Float32Array;
-  attnKW: Float32Array; // no bias on K in Whisper
-  attnVW: Float32Array;
+  attnKWt: GpuMat; // no bias on K in Whisper
+  attnVWt: GpuMat;
   attnVB: Float32Array;
-  attnOW: Float32Array;
+  attnOWt: GpuMat;
   attnOB: Float32Array;
   mlpLnW: Float32Array;
   mlpLnB: Float32Array;
-  mlp0W: Float32Array;
+  mlp0Wt: GpuMat;
   mlp0B: Float32Array;
-  mlp2W: Float32Array;
+  mlp2Wt: GpuMat;
   mlp2B: Float32Array;
 }
+
+// Decoder weight matrices may live on the GPU (wrapped in
+// `gpu.GpuFloat32Array`) so per-token decodeStep matVecs hit a
+// device-resident copy. The cross_attn K and V weights are special: they
+// project the encoder output once per audio in `prepareState`, where
+// the work is matrix-matrix and stays on CPU; we keep them as plain
+// Float32Array so the existing `matMul()` call works without unwrap.
+type GpuMat = Float32Array | { readonly __bunGpuHandle?: true; readonly view?: Float32Array };
 
 interface DecoderBlock {
   attnLnW: Float32Array;
   attnLnB: Float32Array;
-  attnQW: Float32Array;
+  attnQW: GpuMat;
   attnQB: Float32Array;
-  attnKW: Float32Array;
-  attnVW: Float32Array;
+  attnKW: GpuMat;
+  attnVW: GpuMat;
   attnVB: Float32Array;
-  attnOW: Float32Array;
+  attnOW: GpuMat;
   attnOB: Float32Array;
   crossLnW: Float32Array;
   crossLnB: Float32Array;
-  crossQW: Float32Array;
+  crossQW: GpuMat;
   crossQB: Float32Array;
-  crossKW: Float32Array;
-  crossVW: Float32Array;
+  // Cross K/V are used by prepareState's gpu.matmul (N=encT >> 1) and
+  // therefore stored transposed.
+  crossKWt: GpuMat;
+  crossVWt: GpuMat;
   crossVB: Float32Array;
-  crossOW: Float32Array;
+  crossOW: GpuMat;
   crossOB: Float32Array;
   mlpLnW: Float32Array;
   mlpLnB: Float32Array;
-  mlp0W: Float32Array;
+  mlp0W: GpuMat;
   mlp0B: Float32Array;
-  mlp2W: Float32Array;
+  mlp2W: GpuMat;
   mlp2B: Float32Array;
 }
 
@@ -868,7 +895,12 @@ interface WhisperWeights {
   encLnW: Float32Array;
   encLnB: Float32Array;
 
-  decTokenEmbed: Float32Array;
+  // Token embed is also the LM head (tied weights). It runs through gpu.matVec
+  // for the LM head pass — the biggest matmul in the model — but is also
+  // indexed directly during embed lookup, so we keep a host view alongside
+  // the device-resident copy.
+  decTokenEmbed: GpuMat;
+  decTokenEmbedHost: Float32Array;
   decPosEmbed: Float32Array;
   decBlocks: DecoderBlock[];
   decLnW: Float32Array;
@@ -996,54 +1028,6 @@ class WhisperModel {
   }
 
   /**
-   * Run the decoder one step: given the current token sequence and the
-   * encoder output, return the logits over the vocab for the next token.
-   * Naive O(N²) per call — no KV cache yet. Acceptable for tiny.en and
-   * short outputs; KV-cached path is a follow-up.
-   */
-  step(tokens: number[], encoderOut: Float32Array, encoderT: number): Float32Array {
-    const h = this.hparams;
-    const w = this.weights;
-    const dim = h.nTextState;
-    const nHead = h.nTextHead;
-    const headDim = dim / nHead;
-    const N = tokens.length;
-    if (N > h.nTextCtx) {
-      throw new Error(`bun:llm whisper: token sequence ${N} exceeds nTextCtx ${h.nTextCtx}`);
-    }
-
-    // Token + positional embeddings.
-    const x = new Float32Array(N * dim);
-    for (let i = 0; i < N; i++) {
-      const tok = tokens[i];
-      const tokBase = tok * dim;
-      const xBase = i * dim;
-      for (let j = 0; j < dim; j++) {
-        x[xBase + j] = w.decTokenEmbed[tokBase + j] + w.decPosEmbed[i * dim + j];
-      }
-    }
-
-    // N transformer decoder blocks.
-    for (const block of w.decBlocks) {
-      runDecoderBlock(x, N, dim, nHead, headDim, block, encoderOut, encoderT);
-    }
-
-    // Final LayerNorm.
-    layerNormInPlace(x, N, dim, w.decLnW, w.decLnB);
-
-    // LM head: logits = x @ token_embed^T (tied weights). Only need the last position.
-    const logits = new Float32Array(h.nVocab);
-    const lastBase = (N - 1) * dim;
-    for (let v = 0; v < h.nVocab; v++) {
-      let acc = 0;
-      const eBase = v * dim;
-      for (let j = 0; j < dim; j++) acc += x[lastBase + j] * w.decTokenEmbed[eBase + j];
-      logits[v] = acc;
-    }
-    return logits;
-  }
-
-  /**
    * Allocate a fresh decoder state for this model. Reuse a single state
    * across multiple transcribeMel calls within a process to avoid
    * re-allocating the K/V buffers.
@@ -1071,11 +1055,13 @@ class WhisperModel {
     }
     for (let i = 0; i < w.decBlocks.length; i++) {
       const block = w.decBlocks[i];
-      // K projection (no bias on K in Whisper).
-      matMul(encoderOut, block.crossKW, encT, dim, dim, state.crossK[i]);
-      // V projection.
-      matMul(encoderOut, block.crossVW, encT, dim, dim, state.crossV[i]);
-      addBias(state.crossV[i], encT, dim, block.crossVB);
+      // K projection (no bias on K in Whisper). gpu.matmul writes into a
+      // fresh array; we copy into the state's pre-allocated cache slot.
+      const K = gpuMatmul(encoderOut, block.crossKWt, encT, dim, dim);
+      state.crossK[i].set(K);
+      const V = gpuMatmul(encoderOut, block.crossVWt, encT, dim, dim);
+      addBias(V, encT, dim, block.crossVB);
+      state.crossV[i].set(V);
     }
     state.selfLen = 0;
   }
@@ -1099,12 +1085,16 @@ class WhisperModel {
       throw new Error(`bun:llm whisper: decode position ${pos} exceeds nTextCtx=${state.maxLen}`);
     }
 
-    // Token + positional embed for the single new token.
+    // Token + positional embed for the single new token. The token embed
+    // matrix is host-resident even when we wrap a GPU copy for the LM
+    // head — the per-row indexing here would otherwise need a DtoH per
+    // step.
     const x = new Float32Array(dim);
     const tokBase = token * dim;
     const posBase = pos * dim;
+    const tokE = w.decTokenEmbedHost;
     for (let j = 0; j < dim; j++) {
-      x[j] = w.decTokenEmbed[tokBase + j] + w.decPosEmbed[posBase + j];
+      x[j] = tokE[tokBase + j] + w.decPosEmbed[posBase + j];
     }
 
     for (let li = 0; li < w.decBlocks.length; li++) {
@@ -1114,35 +1104,27 @@ class WhisperModel {
       const xn = new Float32Array(dim);
       xn.set(x);
       layerNormInPlace(xn, 1, dim, block.attnLnW, block.attnLnB);
-      const Q = new Float32Array(dim);
-      matMul(xn, block.attnQW, 1, dim, dim, Q);
+      const Q = gpu.matVec(block.attnQW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Q, 1, dim, block.attnQB);
-      // Project new K/V row directly into the cache slot.
-      const Kdst = state.selfK[li];
-      const Vdst = state.selfV[li];
-      // Single-row matmul into a slice — temporary buffer + copy is the
-      // simplest path. Could be optimized to write Kdst+offset directly.
-      const Knew = new Float32Array(dim);
-      const Vnew = new Float32Array(dim);
-      matMul(xn, block.attnKW, 1, dim, dim, Knew);
-      matMul(xn, block.attnVW, 1, dim, dim, Vnew);
+      // Project new K/V rows. matVec returns a fresh Float32Array each
+      // call; we copy into the cache slot at offset pos * dim.
+      const Knew = gpu.matVec(block.attnKW as Float32Array, xn, dim, dim) as Float32Array;
+      const Vnew = gpu.matVec(block.attnVW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Vnew, 1, dim, block.attnVB);
-      Kdst.set(Knew, pos * dim);
-      Vdst.set(Vnew, pos * dim);
+      state.selfK[li].set(Knew, pos * dim);
+      state.selfV[li].set(Vnew, pos * dim);
 
       // Attention: Q [1, dim] against K[0..pos+1] / V[0..pos+1]. Causal
       // mask is implicit because we only see keys we've already written.
-      const attnOut = scaledDotProductAttention(Q, Kdst, Vdst, 1, pos + 1, nHead, headDim, false);
-      const proj1 = new Float32Array(dim);
-      matMul(attnOut, block.attnOW, 1, dim, dim, proj1);
+      const attnOut = scaledDotProductAttention(Q, state.selfK[li], state.selfV[li], 1, pos + 1, nHead, headDim, false);
+      const proj1 = gpu.matVec(block.attnOW as Float32Array, attnOut, dim, dim) as Float32Array;
       addBias(proj1, 1, dim, block.attnOB);
       for (let j = 0; j < dim; j++) x[j] += proj1[j];
 
       // ── Cross-attention with precomputed encoder K/V ──
       xn.set(x);
       layerNormInPlace(xn, 1, dim, block.crossLnW, block.crossLnB);
-      const Qc = new Float32Array(dim);
-      matMul(xn, block.crossQW, 1, dim, dim, Qc);
+      const Qc = gpu.matVec(block.crossQW as Float32Array, xn, dim, dim) as Float32Array;
       addBias(Qc, 1, dim, block.crossQB);
       const crossOut = scaledDotProductAttention(
         Qc,
@@ -1154,35 +1136,28 @@ class WhisperModel {
         headDim,
         false,
       );
-      const proj2 = new Float32Array(dim);
-      matMul(crossOut, block.crossOW, 1, dim, dim, proj2);
+      const proj2 = gpu.matVec(block.crossOW as Float32Array, crossOut, dim, dim) as Float32Array;
       addBias(proj2, 1, dim, block.crossOB);
       for (let j = 0; j < dim; j++) x[j] += proj2[j];
 
       // ── MLP ──
       xn.set(x);
       layerNormInPlace(xn, 1, dim, block.mlpLnW, block.mlpLnB);
-      const dFfn = block.mlp0W.length / dim;
-      const ffn1 = new Float32Array(dFfn);
-      matMul(xn, block.mlp0W, 1, dim, dFfn, ffn1);
+      const mlp0Len = (block.mlp0W as Float32Array).length ?? (block.mlp0W as { length: number }).length;
+      const dFfn = mlp0Len / dim;
+      const ffn1 = gpu.matVec(block.mlp0W as Float32Array, xn, dFfn, dim) as Float32Array;
       addBias(ffn1, 1, dFfn, block.mlp0B);
       geluInPlace(ffn1);
-      const ffn2 = new Float32Array(dim);
-      matMul(ffn1, block.mlp2W, 1, dFfn, dim, ffn2);
+      const ffn2 = gpu.matVec(block.mlp2W as Float32Array, ffn1, dim, dFfn) as Float32Array;
       addBias(ffn2, 1, dim, block.mlp2B);
       for (let j = 0; j < dim; j++) x[j] += ffn2[j];
     }
 
     layerNormInPlace(x, 1, dim, w.decLnW, w.decLnB);
 
-    // LM head.
-    const logits = new Float32Array(h.nVocab);
-    for (let v = 0; v < h.nVocab; v++) {
-      let acc = 0;
-      const eBase = v * dim;
-      for (let j = 0; j < dim; j++) acc += x[j] * w.decTokenEmbed[eBase + j];
-      logits[v] = acc;
-    }
+    // LM head — biggest matmul in the model. Routes through gpu.matVec
+    // since the weight is device-resident.
+    const logits = gpu.matVec(w.decTokenEmbed as Float32Array, x, h.nVocab, dim) as Float32Array;
 
     state.selfLen = pos + 1;
     return logits;
@@ -1307,23 +1282,48 @@ function mapWeights(bin: BinModel): WhisperWeights {
     return t.data;
   };
 
+  // Wrap a weight matrix for device-resident matVec dispatch. On backends
+  // where GpuFloat32Array is a no-op view (CPU, or CUDA below the
+  // calibrated win-size), the wrapper is essentially free; on CUDA above
+  // threshold, weight bytes are HtoD'd here once at load time and reused
+  // on every decodeStep.
+  const devOps = (gpu.getDevOps && gpu.getDevOps()) || null;
+  const toGpu = (arr: Float32Array): GpuMat => {
+    if (!devOps) return arr;
+    return new gpu.GpuFloat32Array(arr) as GpuMat;
+  };
+  // Transpose a [outDim, inDim] weight to [inDim, outDim] for gpu.matmul.
+  const transposeAndWrap = (arr: Float32Array, outDim: number, inDim: number): GpuMat => {
+    const t = new Float32Array(inDim * outDim);
+    for (let i = 0; i < inDim; i++) {
+      for (let j = 0; j < outDim; j++) {
+        t[i * outDim + j] = arr[j * inDim + i];
+      }
+    }
+    return toGpu(t);
+  };
+
   const encBlocks: EncoderBlock[] = [];
+  const dim = bin.hparams.nAudioState;
+  // Whisper's MLP expansion is 4× dim — same as standard transformer.
+  // Read it from the actual tensor for safety.
+  const dFfn = get(`encoder.blocks.0.mlp.0.weight`).length / dim;
   for (let i = 0; i < bin.hparams.nAudioLayer; i++) {
     encBlocks.push({
       attnLnW: get(`encoder.blocks.${i}.attn_ln.weight`),
       attnLnB: get(`encoder.blocks.${i}.attn_ln.bias`),
-      attnQW: get(`encoder.blocks.${i}.attn.query.weight`),
+      attnQWt: transposeAndWrap(get(`encoder.blocks.${i}.attn.query.weight`), dim, dim),
       attnQB: get(`encoder.blocks.${i}.attn.query.bias`),
-      attnKW: get(`encoder.blocks.${i}.attn.key.weight`),
-      attnVW: get(`encoder.blocks.${i}.attn.value.weight`),
+      attnKWt: transposeAndWrap(get(`encoder.blocks.${i}.attn.key.weight`), dim, dim),
+      attnVWt: transposeAndWrap(get(`encoder.blocks.${i}.attn.value.weight`), dim, dim),
       attnVB: get(`encoder.blocks.${i}.attn.value.bias`),
-      attnOW: get(`encoder.blocks.${i}.attn.out.weight`),
+      attnOWt: transposeAndWrap(get(`encoder.blocks.${i}.attn.out.weight`), dim, dim),
       attnOB: get(`encoder.blocks.${i}.attn.out.bias`),
       mlpLnW: get(`encoder.blocks.${i}.mlp_ln.weight`),
       mlpLnB: get(`encoder.blocks.${i}.mlp_ln.bias`),
-      mlp0W: get(`encoder.blocks.${i}.mlp.0.weight`),
+      mlp0Wt: transposeAndWrap(get(`encoder.blocks.${i}.mlp.0.weight`), dFfn, dim),
       mlp0B: get(`encoder.blocks.${i}.mlp.0.bias`),
-      mlp2W: get(`encoder.blocks.${i}.mlp.2.weight`),
+      mlp2Wt: transposeAndWrap(get(`encoder.blocks.${i}.mlp.2.weight`), dim, dFfn),
       mlp2B: get(`encoder.blocks.${i}.mlp.2.bias`),
     });
   }
@@ -1333,31 +1333,42 @@ function mapWeights(bin: BinModel): WhisperWeights {
     decBlocks.push({
       attnLnW: get(`decoder.blocks.${i}.attn_ln.weight`),
       attnLnB: get(`decoder.blocks.${i}.attn_ln.bias`),
-      attnQW: get(`decoder.blocks.${i}.attn.query.weight`),
+      attnQW: toGpu(get(`decoder.blocks.${i}.attn.query.weight`)),
       attnQB: get(`decoder.blocks.${i}.attn.query.bias`),
-      attnKW: get(`decoder.blocks.${i}.attn.key.weight`),
-      attnVW: get(`decoder.blocks.${i}.attn.value.weight`),
+      attnKW: toGpu(get(`decoder.blocks.${i}.attn.key.weight`)),
+      attnVW: toGpu(get(`decoder.blocks.${i}.attn.value.weight`)),
       attnVB: get(`decoder.blocks.${i}.attn.value.bias`),
-      attnOW: get(`decoder.blocks.${i}.attn.out.weight`),
+      attnOW: toGpu(get(`decoder.blocks.${i}.attn.out.weight`)),
       attnOB: get(`decoder.blocks.${i}.attn.out.bias`),
       crossLnW: get(`decoder.blocks.${i}.cross_attn_ln.weight`),
       crossLnB: get(`decoder.blocks.${i}.cross_attn_ln.bias`),
-      crossQW: get(`decoder.blocks.${i}.cross_attn.query.weight`),
+      crossQW: toGpu(get(`decoder.blocks.${i}.cross_attn.query.weight`)),
       crossQB: get(`decoder.blocks.${i}.cross_attn.query.bias`),
-      crossKW: get(`decoder.blocks.${i}.cross_attn.key.weight`),
-      crossVW: get(`decoder.blocks.${i}.cross_attn.value.weight`),
+      // K/V W are run through gpu.matmul in prepareState (N=encT>>1) so
+      // they're stored transposed for the same reason as encoder W matrices.
+      crossKWt: transposeAndWrap(
+        get(`decoder.blocks.${i}.cross_attn.key.weight`),
+        bin.hparams.nTextState,
+        bin.hparams.nTextState,
+      ),
+      crossVWt: transposeAndWrap(
+        get(`decoder.blocks.${i}.cross_attn.value.weight`),
+        bin.hparams.nTextState,
+        bin.hparams.nTextState,
+      ),
       crossVB: get(`decoder.blocks.${i}.cross_attn.value.bias`),
-      crossOW: get(`decoder.blocks.${i}.cross_attn.out.weight`),
+      crossOW: toGpu(get(`decoder.blocks.${i}.cross_attn.out.weight`)),
       crossOB: get(`decoder.blocks.${i}.cross_attn.out.bias`),
       mlpLnW: get(`decoder.blocks.${i}.mlp_ln.weight`),
       mlpLnB: get(`decoder.blocks.${i}.mlp_ln.bias`),
-      mlp0W: get(`decoder.blocks.${i}.mlp.0.weight`),
+      mlp0W: toGpu(get(`decoder.blocks.${i}.mlp.0.weight`)),
       mlp0B: get(`decoder.blocks.${i}.mlp.0.bias`),
-      mlp2W: get(`decoder.blocks.${i}.mlp.2.weight`),
+      mlp2W: toGpu(get(`decoder.blocks.${i}.mlp.2.weight`)),
       mlp2B: get(`decoder.blocks.${i}.mlp.2.bias`),
     });
   }
 
+  const tokenEmbedHost = get("decoder.token_embedding.weight");
   return {
     conv1W: get("encoder.conv1.weight"),
     conv1B: get("encoder.conv1.bias"),
@@ -1367,7 +1378,8 @@ function mapWeights(bin: BinModel): WhisperWeights {
     encBlocks,
     encLnW: get("encoder.ln_post.weight"),
     encLnB: get("encoder.ln_post.bias"),
-    decTokenEmbed: get("decoder.token_embedding.weight"),
+    decTokenEmbed: toGpu(tokenEmbedHost),
+    decTokenEmbedHost: tokenEmbedHost,
     decPosEmbed: get("decoder.positional_embedding"),
     decBlocks,
     decLnW: get("decoder.ln.weight"),
@@ -1376,6 +1388,12 @@ function mapWeights(bin: BinModel): WhisperWeights {
 }
 
 // ─── Transformer block runners ────────────────────────────────────────────
+
+// gpu.matmul shim with the same semantics as my CPU matMul (X @ W^T) but
+// expecting the W weight pre-transposed. Returns a fresh [N, outDim] array.
+function gpuMatmul(X: Float32Array, Wt: GpuMat, N: number, inDim: number, outDim: number): Float32Array {
+  return gpu.matmul(X, Wt as Float32Array, N, inDim, outDim) as Float32Array;
+}
 
 function runEncoderBlock(
   x: Float32Array,
@@ -1390,181 +1408,29 @@ function runEncoderBlock(
   xn.set(x);
   layerNormInPlace(xn, N, dim, b.attnLnW, b.attnLnB);
 
-  const attnOut = selfAttention(xn, N, dim, nHead, headDim, b.attnQW, b.attnQB, b.attnKW, null, b.attnVW, b.attnVB);
-  // Output projection.
-  const projOut = new Float32Array(N * dim);
-  matMul(attnOut, b.attnOW, N, dim, dim, projOut);
+  // Q/K/V projections via gpu.matmul (transposed weights).
+  const Q = gpuMatmul(xn, b.attnQWt, N, dim, dim);
+  addBias(Q, N, dim, b.attnQB);
+  const K = gpuMatmul(xn, b.attnKWt, N, dim, dim);
+  // No bias on K in Whisper.
+  const V = gpuMatmul(xn, b.attnVWt, N, dim, dim);
+  addBias(V, N, dim, b.attnVB);
+
+  const attnOut = scaledDotProductAttention(Q, K, V, N, N, nHead, headDim, false);
+  const projOut = gpuMatmul(attnOut, b.attnOWt, N, dim, dim);
   addBias(projOut, N, dim, b.attnOB);
-  // Residual: x += projOut
   for (let i = 0; i < x.length; i++) x[i] += projOut[i];
 
   // MLP with pre-LN.
   xn.set(x);
   layerNormInPlace(xn, N, dim, b.mlpLnW, b.mlpLnB);
-  const dFfn = b.mlp0W.length / dim; // weights stored [dFfn, dim]
-  const ffn1 = new Float32Array(N * dFfn);
-  matMul(xn, b.mlp0W, N, dim, dFfn, ffn1);
+  const dFfn = b.mlp0B.length;
+  const ffn1 = gpuMatmul(xn, b.mlp0Wt, N, dim, dFfn);
   addBias(ffn1, N, dFfn, b.mlp0B);
   geluInPlace(ffn1);
-  const ffn2 = new Float32Array(N * dim);
-  matMul(ffn1, b.mlp2W, N, dFfn, dim, ffn2);
+  const ffn2 = gpuMatmul(ffn1, b.mlp2Wt, N, dFfn, dim);
   addBias(ffn2, N, dim, b.mlp2B);
   for (let i = 0; i < x.length; i++) x[i] += ffn2[i];
-}
-
-function runDecoderBlock(
-  x: Float32Array,
-  N: number,
-  dim: number,
-  nHead: number,
-  headDim: number,
-  b: DecoderBlock,
-  encOut: Float32Array,
-  encT: number,
-): void {
-  // Causal self-attention with pre-LN.
-  const xn = new Float32Array(x.length);
-  xn.set(x);
-  layerNormInPlace(xn, N, dim, b.attnLnW, b.attnLnB);
-  const selfAttnOut = causalSelfAttention(
-    xn,
-    N,
-    dim,
-    nHead,
-    headDim,
-    b.attnQW,
-    b.attnQB,
-    b.attnKW,
-    null,
-    b.attnVW,
-    b.attnVB,
-  );
-  const proj1 = new Float32Array(N * dim);
-  matMul(selfAttnOut, b.attnOW, N, dim, dim, proj1);
-  addBias(proj1, N, dim, b.attnOB);
-  for (let i = 0; i < x.length; i++) x[i] += proj1[i];
-
-  // Cross-attention with pre-LN. Q from decoder, K/V from encoder output.
-  xn.set(x);
-  layerNormInPlace(xn, N, dim, b.crossLnW, b.crossLnB);
-  const crossAttnOut = crossAttention(
-    xn,
-    N,
-    dim,
-    nHead,
-    headDim,
-    encOut,
-    encT,
-    b.crossQW,
-    b.crossQB,
-    b.crossKW,
-    null,
-    b.crossVW,
-    b.crossVB,
-  );
-  const proj2 = new Float32Array(N * dim);
-  matMul(crossAttnOut, b.crossOW, N, dim, dim, proj2);
-  addBias(proj2, N, dim, b.crossOB);
-  for (let i = 0; i < x.length; i++) x[i] += proj2[i];
-
-  // MLP with pre-LN.
-  xn.set(x);
-  layerNormInPlace(xn, N, dim, b.mlpLnW, b.mlpLnB);
-  const dFfn = b.mlp0W.length / dim;
-  const ffn1 = new Float32Array(N * dFfn);
-  matMul(xn, b.mlp0W, N, dim, dFfn, ffn1);
-  addBias(ffn1, N, dFfn, b.mlp0B);
-  geluInPlace(ffn1);
-  const ffn2 = new Float32Array(N * dim);
-  matMul(ffn1, b.mlp2W, N, dFfn, dim, ffn2);
-  addBias(ffn2, N, dim, b.mlp2B);
-  for (let i = 0; i < x.length; i++) x[i] += ffn2[i];
-}
-
-// ─── Attention kernels ────────────────────────────────────────────────────
-// All three (encoder self-attn, decoder self-attn, cross-attn) share the
-// same Q/K/V projection + scaled-dot-product + output structure. The
-// differences are: (a) source of K/V (same as Q for self-attn, encoder
-// for cross-attn), (b) presence of causal mask (decoder self-attn only).
-
-function selfAttention(
-  x: Float32Array,
-  N: number,
-  dim: number,
-  nHead: number,
-  headDim: number,
-  WQ: Float32Array,
-  BQ: Float32Array,
-  WK: Float32Array,
-  BK: Float32Array | null,
-  WV: Float32Array,
-  BV: Float32Array,
-): Float32Array {
-  const Q = new Float32Array(N * dim);
-  const K = new Float32Array(N * dim);
-  const V = new Float32Array(N * dim);
-  matMul(x, WQ, N, dim, dim, Q);
-  addBias(Q, N, dim, BQ);
-  matMul(x, WK, N, dim, dim, K);
-  if (BK) addBias(K, N, dim, BK);
-  matMul(x, WV, N, dim, dim, V);
-  addBias(V, N, dim, BV);
-
-  return scaledDotProductAttention(Q, K, V, N, N, nHead, headDim, false);
-}
-
-function causalSelfAttention(
-  x: Float32Array,
-  N: number,
-  dim: number,
-  nHead: number,
-  headDim: number,
-  WQ: Float32Array,
-  BQ: Float32Array,
-  WK: Float32Array,
-  BK: Float32Array | null,
-  WV: Float32Array,
-  BV: Float32Array,
-): Float32Array {
-  const Q = new Float32Array(N * dim);
-  const K = new Float32Array(N * dim);
-  const V = new Float32Array(N * dim);
-  matMul(x, WQ, N, dim, dim, Q);
-  addBias(Q, N, dim, BQ);
-  matMul(x, WK, N, dim, dim, K);
-  if (BK) addBias(K, N, dim, BK);
-  matMul(x, WV, N, dim, dim, V);
-  addBias(V, N, dim, BV);
-
-  return scaledDotProductAttention(Q, K, V, N, N, nHead, headDim, true);
-}
-
-function crossAttention(
-  x: Float32Array,
-  N: number,
-  dim: number,
-  nHead: number,
-  headDim: number,
-  encOut: Float32Array,
-  encT: number,
-  WQ: Float32Array,
-  BQ: Float32Array,
-  WK: Float32Array,
-  BK: Float32Array | null,
-  WV: Float32Array,
-  BV: Float32Array,
-): Float32Array {
-  const Q = new Float32Array(N * dim);
-  const K = new Float32Array(encT * dim);
-  const V = new Float32Array(encT * dim);
-  matMul(x, WQ, N, dim, dim, Q);
-  addBias(Q, N, dim, BQ);
-  matMul(encOut, WK, encT, dim, dim, K);
-  if (BK) addBias(K, encT, dim, BK);
-  matMul(encOut, WV, encT, dim, dim, V);
-  addBias(V, encT, dim, BV);
-
-  return scaledDotProductAttention(Q, K, V, N, encT, nHead, headDim, false);
 }
 
 // Scaled dot-product attention with multiple heads.
