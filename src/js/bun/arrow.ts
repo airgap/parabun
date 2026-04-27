@@ -1028,26 +1028,31 @@ function gatherIndices(batch: RecordBatch, idx: number[]): RecordBatch {
   return new RecordBatch(batch.schema, cols, idx.length);
 }
 
-// ─── IPC reader / writer (stubs) ───────────────────────────────────────────
+// ─── IPC reader / writer ───────────────────────────────────────────────────
+// Streaming format only (continuation-prefixed Schema + RecordBatch
+// messages, no file footer, no dictionary batches). See `./arrow/ipc.ts`
+// for the FlatBuffers builder/reader and the Schema/RecordBatch encoders.
 
-const IPC_READ_NOT_IMPL =
-  "bun:arrow.fromIPC: Arrow IPC reader is pending — the schema metadata uses FlatBuffers, " +
-  "which needs to be vendored or hand-decoded before this lands. Tracked as the v2 ship.";
+const ipc = require("./arrow/ipc.ts");
+ipc.setArrowTypes({ Column, RecordBatch, Table });
 
-const IPC_WRITE_NOT_IMPL =
-  "bun:arrow.toIPC: Arrow IPC writer follows the reader (same FlatBuffers dependency). v2 ship.";
+function fromIPC(bytes: Uint8Array): Table {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("bun:arrow.fromIPC: bytes must be a Uint8Array");
+  }
+  return ipc.fromIPC(bytes) as Table;
+}
+
+function toIPC(source: Table | RecordBatch): Uint8Array {
+  if (!(source instanceof Table) && !(source instanceof RecordBatch)) {
+    throw new TypeError("bun:arrow.toIPC: source must be a Table or RecordBatch");
+  }
+  return ipc.toIPC(source) as Uint8Array;
+}
 
 const PARQUET_NOT_IMPL =
   "bun:arrow.fromParquet: Parquet support is post-IPC — separate format with its own thrift " +
-  "metadata + page-level encodings. v3 ship.";
-
-function fromIPC(_bytes: Uint8Array): Table {
-  throw new Error(IPC_READ_NOT_IMPL);
-}
-
-function toIPC(_table: Table | RecordBatch): Uint8Array {
-  throw new Error(IPC_WRITE_NOT_IMPL);
-}
+  "metadata + page-level encodings. Follow-up.";
 
 function fromParquet(_bytes: Uint8Array): Table {
   throw new Error(PARQUET_NOT_IMPL);
