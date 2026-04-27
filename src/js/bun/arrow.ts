@@ -1102,6 +1102,153 @@ function gatherIndices(batch: RecordBatch, idx: number[]): RecordBatch {
   return new RecordBatch(batch.schema, cols, idx.length);
 }
 
+// ─── sort / cumsum / diff ──────────────────────────────────────────────────
+
+type SortOptions = {
+  /** Sort descending instead of ascending. Default false. */
+  descending?: boolean;
+  /** Place null rows at the start instead of the end. Default false (nulls last). */
+  nullsFirst?: boolean;
+};
+
+/**
+ * Sort a RecordBatch by the values of one column. Returns a new RecordBatch
+ * with rows permuted; every column is gathered through the same index
+ * permutation so cross-column row alignment is preserved.
+ *
+ * Uses Array.prototype.sort with a comparator — V8/JSC's sort is TimSort,
+ * which is stable. Equal keys retain their original relative order, so
+ * sorting by one column and then another gives the expected lexicographic
+ * result.
+ *
+ *   const byScoreDesc = arrow.sort(batch, "score", { descending: true });
+ */
+function sort(batch: RecordBatch, columnName: string, opts: SortOptions = {}): RecordBatch {
+  const keyCol = batch.column(columnName);
+  const descending = opts.descending === true;
+  const nullsFirst = opts.nullsFirst === true;
+
+  const n = batch.numRows;
+  const idx = new Array(n);
+  for (let i = 0; i < n; i++) idx[i] = i;
+
+  // Comparator returns negative if a should come before b.
+  // Null handling is independent of the descending flag — nullsFirst always
+  // means "nulls at output[0..]" regardless of direction.
+  idx.sort((a: number, b: number) => {
+    const va = keyCol.get(a);
+    const vb = keyCol.get(b);
+    if (va === null && vb === null) return 0;
+    if (va === null) return nullsFirst ? -1 : 1;
+    if (vb === null) return nullsFirst ? 1 : -1;
+    let cmp: number;
+    if (typeof va === "bigint" && typeof vb === "bigint") {
+      cmp = va < vb ? -1 : va > vb ? 1 : 0;
+    } else if (typeof va === "string" && typeof vb === "string") {
+      cmp = va < vb ? -1 : va > vb ? 1 : 0;
+    } else if (typeof va === "boolean" && typeof vb === "boolean") {
+      cmp = va === vb ? 0 : va ? 1 : -1;
+    } else {
+      const na = va as number;
+      const nb = vb as number;
+      cmp = na < nb ? -1 : na > nb ? 1 : 0;
+    }
+    return descending ? -cmp : cmp;
+  });
+
+  return gatherIndices(batch, idx);
+}
+
+/**
+ * Inclusive prefix sum (running total) of a numeric column. Returns a new
+ * column of the same type, length, and nullity. Null rows preserve the
+ * running total of preceding non-null rows (i.e. they hold whatever the
+ * accumulator was when the null was encountered, but are still flagged as
+ * null in the validity bitmap).
+ *
+ * For Float64 / Float32 columns the accumulator is Kahan-compensated.
+ * int32 keeps a number accumulator; int64 uses bigint.
+ */
+function cumsum(col: Column): Column {
+  requireNumeric(col, "cumsum");
+  const n = col.length;
+  const validity = col.validity ? new Uint8Array(col.validity) : undefined;
+
+  if (col.type.kind === "int64") {
+    const out = new BigInt64Array(n);
+    let acc = 0n;
+    for (let i = 0; i < n; i++) {
+      const v = col.get(i) as bigint | null;
+      if (v != null) acc += v;
+      out[i] = acc;
+    }
+    return new Column({ kind: "int64" }, n, out, validity);
+  }
+
+  // Numeric: Kahan-compensated for f32/f64, plain for int32 (exact within
+  // safe-integer range).
+  const useKahan = col.type.kind === "float32" || col.type.kind === "float64";
+  const Out = col.type.kind === "int32" ? Int32Array : col.type.kind === "float32" ? Float32Array : Float64Array;
+  const out = new Out(n);
+  let acc = 0;
+  let c = 0;
+  for (let i = 0; i < n; i++) {
+    const v = col.get(i) as number | null;
+    if (v != null) {
+      if (useKahan) {
+        const y = v - c;
+        const t = acc + y;
+        c = t - acc - y;
+        acc = t;
+      } else {
+        acc += v;
+      }
+    }
+    out[i] = acc;
+  }
+  return new Column(col.type, n, out, validity);
+}
+
+/**
+ * First differences (out[i] = col[i] - col[i-1]). The first row is set to
+ * null in the output regardless of input nullity — there's no prior row to
+ * subtract from. Subsequent null rows propagate to null in the output.
+ */
+function diff(col: Column): Column {
+  requireNumeric(col, "diff");
+  const n = col.length;
+  // Always emit a validity bitmap — at minimum row 0 is null.
+  const validity = new Uint8Array(Math.ceil(n / 8));
+  const inputValid = col.validity;
+
+  if (col.type.kind === "int64") {
+    const out = new BigInt64Array(n);
+    for (let i = 1; i < n; i++) {
+      const a = col.get(i) as bigint | null;
+      const b = col.get(i - 1) as bigint | null;
+      if (a == null || b == null) continue;
+      out[i] = a - b;
+      validity[i >> 3] |= 1 << (i & 7);
+    }
+    return new Column({ kind: "int64" }, n, out, validity);
+  }
+
+  const Out = col.type.kind === "int32" ? Int32Array : col.type.kind === "float32" ? Float32Array : Float64Array;
+  const out = new Out(n);
+  for (let i = 1; i < n; i++) {
+    const a = col.get(i) as number | null;
+    const b = col.get(i - 1) as number | null;
+    if (a == null || b == null) continue;
+    out[i] = a - b;
+    validity[i >> 3] |= 1 << (i & 7);
+  }
+  // Avoid an unused-binding warning on inputValid; the per-row col.get()
+  // already consults the input validity bitmap, so this var only serves
+  // as a documented hook for future fast-path branching.
+  void inputValid;
+  return new Column(col.type, n, out, validity);
+}
+
 // ─── IPC reader / writer ───────────────────────────────────────────────────
 // Streaming format only (continuation-prefixed Schema + RecordBatch
 // messages, no file footer, no dictionary batches). See `./arrow/ipc.ts`
@@ -1157,6 +1304,9 @@ export default {
   distinct,
   filter,
   groupBy,
+  sort,
+  cumsum,
+  diff,
   concat,
   // I/O — stubs, see error messages
   fromIPC,
