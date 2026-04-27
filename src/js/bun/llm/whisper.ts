@@ -1783,7 +1783,7 @@ function runEncoderBlock(
   const V = gpuMatmul(xn, b.attnVWt, N, dim, dim);
   addBias(V, N, dim, b.attnVB);
 
-  const attnOut = gpuScaledDotProductAttention(Q, K, V, N, nHead, headDim);
+  const attnOut = gpu.sdpaSelf(Q, K, V, N, nHead, headDim) as Float32Array;
   const projOut = gpuMatmul(attnOut, b.attnOWt, N, dim, dim);
   addBias(projOut, N, dim, b.attnOB);
   for (let i = 0; i < x.length; i++) x[i] += projOut[i];

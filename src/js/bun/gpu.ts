@@ -235,6 +235,23 @@ interface Backend {
     out?: FArray,
   ): FArray;
   /**
+   * Multi-head scaled-dot-product self-attention. Q, K, V are
+   * [N, nHead*headDim] row-major; output has the same shape. Backends
+   * that implement this fuse the per-head Q@K^T → softmax → attn@V
+   * pipeline into one kernel launch — the alternative is N matmul
+   * launches plus a JS softmax loop, which dominates at small head
+   * dims.
+   */
+  sdpaSelf?(
+    Q: FArray | GpuHandle,
+    K: FArray | GpuHandle,
+    V: FArray | GpuHandle,
+    N: number,
+    nHead: number,
+    headDim: number,
+    out?: Float32Array,
+  ): Float32Array;
+  /**
    * 2D valid-mode convolution. `input` is iH×iW row-major Float32Array,
    * `kernel` is kH×kW row-major Float32Array. Output is (iH-kH+1)×(iW-kW+1)
    * row-major Float32Array. Backends MAY implement this; if a backend
@@ -930,6 +947,64 @@ function matmulBatched(
   return dst;
 }
 
+function sdpaSelf(
+  Q: FArray | GpuHandle | GpuFloat32Array,
+  K: FArray | GpuHandle | GpuFloat32Array,
+  V: FArray | GpuHandle | GpuFloat32Array,
+  N: number,
+  nHead: number,
+  headDim: number,
+  out?: Float32Array,
+): Float32Array {
+  if (!Number.isInteger(N) || N <= 0) throw new RangeError("sdpaSelf: N must be a positive integer");
+  if (!Number.isInteger(nHead) || nHead <= 0) throw new RangeError("sdpaSelf: nHead must be a positive integer");
+  if (!Number.isInteger(headDim) || headDim <= 0) {
+    throw new RangeError("sdpaSelf: headDim must be a positive integer");
+  }
+  const backend = resolveActive();
+  if (backend.sdpaSelf) {
+    return backend.sdpaSelf(unwrapGpuArg(Q), unwrapGpuArg(K), unwrapGpuArg(V), N, nHead, headDim, out);
+  }
+  // CPU fallback (matches the encoder's pre-fused JS scaled dot product).
+  const dim = nHead * headDim;
+  const Qh = unwrapGpuArg(Q) as Float32Array;
+  const Kh = unwrapGpuArg(K) as Float32Array;
+  const Vh = unwrapGpuArg(V) as Float32Array;
+  const dst = out ?? new Float32Array(N * dim);
+  const invSqrtHead = 1.0 / Math.sqrt(headDim);
+  for (let h = 0; h < nHead; h++) {
+    for (let i = 0; i < N; i++) {
+      const scores = new Float32Array(N);
+      const qBase = i * dim + h * headDim;
+      let max = -Infinity;
+      for (let j = 0; j < N; j++) {
+        const kBase = j * dim + h * headDim;
+        let sc = 0;
+        for (let d = 0; d < headDim; d++) sc += Qh[qBase + d] * Kh[kBase + d];
+        sc *= invSqrtHead;
+        scores[j] = sc;
+        if (sc > max) max = sc;
+      }
+      let sum = 0;
+      for (let j = 0; j < N; j++) {
+        const e = Math.exp(scores[j] - max);
+        scores[j] = e;
+        sum += e;
+      }
+      const inv = sum > 0 ? 1.0 / sum : 0;
+      const outBase = i * dim + h * headDim;
+      for (let d = 0; d < headDim; d++) dst[outBase + d] = 0;
+      for (let j = 0; j < N; j++) {
+        const wj = scores[j] * inv;
+        if (wj === 0) continue;
+        const vBase = j * dim + h * headDim;
+        for (let d = 0; d < headDim; d++) dst[outBase + d] += wj * Vh[vBase + d];
+      }
+    }
+  }
+  return dst;
+}
+
 function simdMap(fn: (x: number, i: number) => number, a: Float32Array): Float32Array;
 function simdMap(fn: (x: number, i: number) => number, a: Float64Array): Float64Array;
 function simdMap(fn: (x: number, i: number) => number, a: GpuHandle | GpuFloat32Array): FArray;
@@ -1371,6 +1446,7 @@ export default {
   matVec,
   matmul,
   matmulBatched,
+  sdpaSelf,
   conv2D,
   scan,
   reduce,

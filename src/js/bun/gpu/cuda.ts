@@ -2658,6 +2658,130 @@ function matmulBatched(
   return dst;
 }
 
+// Multi-head scaled-dot-product self-attention. Replaces the per-head
+// matmul-spam pattern (Q@K^T → softmax → attn@V × nHead) with a single
+// kernel launch. Q, K, V are [N, nHead*headDim] row-major. Output has
+// the same shape. Scale is multiplied into the dot product before the
+// softmax (typically 1/sqrt(headDim)).
+//
+// Falls back to a JS implementation when the dev-ops module isn't
+// available (CPU backend, or CUDA without NVRTC).
+function sdpaSelf(
+  Q: FArray | GpuHandle,
+  K: FArray | GpuHandle,
+  V: FArray | GpuHandle,
+  N: number,
+  nHead: number,
+  headDim: number,
+  out?: Float32Array,
+): Float32Array {
+  if (!Number.isInteger(N) || N <= 0) throw new RangeError("sdpaSelf: N must be a positive integer");
+  if (!Number.isInteger(nHead) || nHead <= 0) throw new RangeError("sdpaSelf: nHead must be a positive integer");
+  if (!Number.isInteger(headDim) || headDim <= 0 || headDim > 256) {
+    throw new RangeError("sdpaSelf: headDim must be in (0, 256]");
+  }
+  const dim = nHead * headDim;
+  const total = N * dim;
+
+  // CUDA path requires the dev-ops module compiled.
+  if (probeDevOps()) {
+    const s = cudaLib!.symbols;
+    const ptr = ffiPtr!;
+    const totalBytes = BigInt(total * 4);
+    const scale = 1.0 / Math.sqrt(headDim);
+
+    const wrap = (x: FArray | GpuHandle): { dev: bigint; owned: boolean } => {
+      if (isGpuHandle(x)) {
+        if (x.released) throw new Error("bun:gpu: sdpaSelf called on released handle");
+        if (x.buffer === 0n) throw new Error("bun:gpu cuda: sdpaSelf: handle has no device buffer");
+        return { dev: x.buffer, owned: false };
+      }
+      const buf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(buf), totalBytes) !== 0) throw new Error("cuMemAlloc(sdpa) failed");
+      if (s.cuMemcpyHtoD_v2(buf[0], ptr(x as Float32Array), totalBytes) !== 0) {
+        s.cuMemFree_v2(buf[0]);
+        throw new Error("cuMemcpyHtoD(sdpa) failed");
+      }
+      return { dev: buf[0], owned: true };
+    };
+
+    const wQ = wrap(Q);
+    let wK: { dev: bigint; owned: boolean } | null = null;
+    let wV: { dev: bigint; owned: boolean } | null = null;
+    let dOut: bigint = 0n;
+    try {
+      wK = wrap(K);
+      wV = wrap(V);
+      const outBuf = new BigUint64Array(1);
+      if (s.cuMemAlloc_v2(ptr(outBuf), totalBytes) !== 0) throw new Error("cuMemAlloc(out) failed");
+      dOut = outBuf[0];
+
+      // Use the launch wrapper. Build a minimal GpuScratch-shaped object —
+      // the launchWith helper just reads .buffer / device pointers.
+      const fakeScratch = (dev: bigint): GpuScratch => ({ buffer: dev }) as any;
+      launchSdpaSelfDev(
+        fakeScratch(wQ.dev),
+        fakeScratch(wK.dev),
+        fakeScratch(wV.dev),
+        fakeScratch(dOut),
+        N,
+        nHead,
+        headDim,
+        scale,
+      );
+      if (s.cuCtxSynchronize() !== 0) throw new Error("cuCtxSynchronize(sdpa) failed");
+
+      const dst = out ?? new Float32Array(total);
+      if (s.cuMemcpyDtoH_v2(ptr(dst), dOut, totalBytes) !== 0) throw new Error("cuMemcpyDtoH(sdpa) failed");
+      return dst;
+    } finally {
+      if (wQ.owned && wQ.dev !== 0n) s.cuMemFree_v2(wQ.dev);
+      if (wK?.owned && wK.dev !== 0n) s.cuMemFree_v2(wK.dev);
+      if (wV?.owned && wV.dev !== 0n) s.cuMemFree_v2(wV.dev);
+      if (dOut !== 0n) s.cuMemFree_v2(dOut);
+    }
+  }
+
+  // CPU fallback (JS scalar loop). Same algorithm as the encoder's
+  // existing scaledDotProductAttention before the CUDA path was wired.
+  const Qh = isGpuHandle(Q) ? (Q.view as Float32Array) : (Q as Float32Array);
+  const Kh = isGpuHandle(K) ? (K.view as Float32Array) : (K as Float32Array);
+  const Vh = isGpuHandle(V) ? (V.view as Float32Array) : (V as Float32Array);
+  const dst = out ?? new Float32Array(total);
+  const invSqrtHead = 1.0 / Math.sqrt(headDim);
+  for (let h = 0; h < nHead; h++) {
+    for (let i = 0; i < N; i++) {
+      const scores = new Float32Array(N);
+      const qBase = i * dim + h * headDim;
+      let max = -Infinity;
+      for (let j = 0; j < N; j++) {
+        const kBase = j * dim + h * headDim;
+        let sc = 0;
+        for (let d = 0; d < headDim; d++) sc += Qh[qBase + d] * Kh[kBase + d];
+        sc *= invSqrtHead;
+        scores[j] = sc;
+        if (sc > max) max = sc;
+      }
+      let sum = 0;
+      for (let j = 0; j < N; j++) {
+        const e = Math.exp(scores[j] - max);
+        scores[j] = e;
+        sum += e;
+      }
+      const inv = sum > 0 ? 1.0 / sum : 0;
+      const outBase = i * dim + h * headDim;
+      for (let d = 0; d < headDim; d++) dst[outBase + d] = 0;
+      for (let j = 0; j < N; j++) {
+        const wj = scores[j] * inv;
+        if (wj === 0) continue;
+        const vBase = j * dim + h * headDim;
+        for (let d = 0; d < headDim; d++) dst[outBase + d] += wj * Vh[vBase + d];
+      }
+    }
+  }
+  return dst;
+}
+
 // ─── Dynamic kernel compilation via NVRTC ─────────────────────────────────
 //
 // For non-affine pure numeric functions, translate JS → CUDA C → PTX via
@@ -4682,6 +4806,89 @@ extern "C" __global__ void argmax_grid_f32(
         partial_i[blockIdx.x] = si[0];
     }
 }
+
+// Encoder self-attention (fused multi-head scaled dot-product attention).
+// One block computes the attention output for one (head, query-row) pair.
+// Streams the softmax with running max + correction so attention scores
+// never need to be materialized — the [N, N] tile that the JS loop kept
+// in memory is gone.
+//
+// Layout: Q, K, V are [N, dim] row-major where dim = nHead * headDim.
+// Per-head data lives at offset (head * headDim) within each row, stride
+// dim between rows. out has the same layout.
+//
+// Grid: (nHead, N). Block: round(headDim, 32) threads, max 256.
+// Shared memory: sQ[256] + sOut[256] + sScore + warpRed[8]. headDim must
+// be ≤ 256 (covers Whisper's 64, BERT-large's 64, real LLM head dims).
+extern "C" __global__ void sdpa_self_f32(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ out,
+    unsigned int N,
+    unsigned int nHead,
+    unsigned int headDim,
+    float scale
+) {
+    __shared__ float sQ[256];
+    __shared__ float sOut[256];
+    __shared__ float sScore;
+    __shared__ float warpRed[8];
+
+    unsigned int head = blockIdx.x;
+    unsigned int qRow = blockIdx.y;
+    unsigned int tid = threadIdx.x;
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+    unsigned int bs = blockDim.x;
+    unsigned int nwarps = (bs + 31u) >> 5;
+    unsigned int dim = nHead * headDim;
+
+    // Cache q[qRow, head, :] in shared memory; zero output accumulator.
+    if (tid < headDim) {
+        sQ[tid] = Q[qRow * dim + head * headDim + tid];
+        sOut[tid] = 0.0f;
+    }
+    __syncthreads();
+
+    float runMax = -1.0e30f;  // F_NINF analog
+    float runSum = 0.0f;
+
+    for (unsigned int t = 0; t < N; t++) {
+        // Score = dot(sQ, K[t, head, :]) * scale.
+        float local = 0.0f;
+        if (tid < headDim) {
+            local = sQ[tid] * K[t * dim + head * headDim + tid];
+        }
+        for (int off = 16; off > 0; off >>= 1)
+            local += __shfl_xor_sync(0xffffffff, local, off);
+        if (lane == 0) warpRed[warp] = local;
+        __syncthreads();
+        if (warp == 0) {
+            local = (tid < nwarps) ? warpRed[tid] : 0.0f;
+            for (int off = 16; off > 0; off >>= 1)
+                local += __shfl_xor_sync(0xffffffff, local, off);
+            if (tid == 0) sScore = local * scale;
+        }
+        __syncthreads();
+
+        float score = sScore;
+        float newMax = fmaxf(runMax, score);
+        float correction = __expf(runMax - newMax);
+        float e = __expf(score - newMax);
+        runSum = runSum * correction + e;
+        runMax = newMax;
+
+        if (tid < headDim) {
+            float vv = V[t * dim + head * headDim + tid];
+            sOut[tid] = sOut[tid] * correction + e * vv;
+        }
+    }
+
+    if (tid < headDim) {
+        out[qRow * dim + head * headDim + tid] = sOut[tid] / runSum;
+    }
+}
 `;
 
 type DevOpsFns = {
@@ -4704,6 +4911,7 @@ type DevOpsFns = {
   embedLookupQ4K: bigint;
   embedLookupQ6K: bigint;
   flashAttn: bigint;
+  sdpaSelf: bigint;
   conv2D: bigint;
   gaussianBlurRGBAu8: bigint;
   gaussianBlurRGBAu8Tiled: bigint;
@@ -4805,6 +5013,7 @@ function probeDevOps(): boolean {
     "embedLookupQ4K",
     "embedLookupQ6K",
     "flashAttn",
+    "sdpaSelf",
     "conv2D",
     "gaussianBlurRGBAu8",
     "gaussianBlurRGBAu8Tiled",
@@ -4839,6 +5048,7 @@ function probeDevOps(): boolean {
     embedLookupQ4K: "embed_lookup_q4k_f32",
     embedLookupQ6K: "embed_lookup_q6k_f32",
     flashAttn: "flash_attn_f32",
+    sdpaSelf: "sdpa_self_f32",
     conv2D: "conv2d_f32",
     gaussianBlurRGBAu8: "gaussian_blur_rgba_u8",
     gaussianBlurRGBAu8Tiled: "gaussian_blur_rgba_u8_tiled",
@@ -5248,6 +5458,31 @@ function launchFlashAttnDev(
   launchWith(devOpsFns!.flashAttn, nHeads, 1, 1, block, 1, 1, s);
 }
 
+let slSdpaSelf: KernelSlots | null = null;
+function launchSdpaSelfDev(
+  q: GpuScratch,
+  k: GpuScratch,
+  v: GpuScratch,
+  out: GpuScratch,
+  N: number,
+  nHead: number,
+  headDim: number,
+  scale: number,
+): void {
+  const s = slSdpaSelf ?? (slSdpaSelf = makeSlots(["ptr", "ptr", "ptr", "ptr", "u32", "u32", "u32", "f32"]));
+  (s.views[0] as BigUint64Array)[0] = devPtr(q);
+  (s.views[1] as BigUint64Array)[0] = devPtr(k);
+  (s.views[2] as BigUint64Array)[0] = devPtr(v);
+  (s.views[3] as BigUint64Array)[0] = devPtr(out);
+  (s.views[4] as Uint32Array)[0] = N;
+  (s.views[5] as Uint32Array)[0] = nHead;
+  (s.views[6] as Uint32Array)[0] = headDim;
+  (s.views[7] as Float32Array)[0] = scale;
+  // Grid: (nHead, N). Block: headDim rounded to a warp multiple, max 256.
+  const block = Math.min(256, Math.max(32, ((headDim + 31) >> 5) << 5));
+  launchWith(devOpsFns!.sdpaSelf, nHead, N, 1, block, 1, 1, s);
+}
+
 let slArgmax: KernelSlots | null = null;
 function launchArgmaxDev(logits: GpuScratch, outIdx: GpuScratch, n: number): void {
   const s = slArgmax ?? (slArgmax = makeSlots(["ptr", "ptr", "u32"]));
@@ -5398,6 +5633,7 @@ export default {
   matVec,
   matmul,
   matmulBatched,
+  sdpaSelf,
   conv2D,
   imageBlurRGBA,
   reduce,
