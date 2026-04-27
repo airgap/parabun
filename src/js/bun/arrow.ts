@@ -1318,6 +1318,8 @@ function diff(col: Column): Column {
 
 const ipc = require("./arrow/ipc.ts");
 ipc.setArrowTypes({ Column, RecordBatch, Table });
+const parquet = require("./arrow/parquet.ts");
+parquet.setArrowTypes({ Column, RecordBatch, Table });
 
 function fromIPC(bytes: Uint8Array): Table {
   if (!(bytes instanceof Uint8Array)) {
@@ -1336,12 +1338,11 @@ function toIPC(source: Table | RecordBatch, format: "stream" | "file" = "stream"
   return ipc.toIPC(source, format) as Uint8Array;
 }
 
-const PARQUET_NOT_IMPL =
-  "bun:arrow.fromParquet: Parquet support is post-IPC — separate format with its own thrift " +
-  "metadata + page-level encodings. Follow-up.";
-
-function fromParquet(_bytes: Uint8Array): Table {
-  throw new Error(PARQUET_NOT_IMPL);
+function fromParquet(bytes: Uint8Array): Table {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("bun:arrow.fromParquet: bytes must be a Uint8Array");
+  }
+  return parquet.fromParquet(bytes) as Table;
 }
 
 export default {
