@@ -366,7 +366,7 @@ Parabun's positioning is to open typical JS performance bottlenecks via multithr
 
 - **Tier 0 — primitives** (shipped): `bun:simd`, `bun:gpu`, `bun:parallel`, `bun:arena`, `bun:pipeline`, `bun:signals`, `bun:rtp`. These are the building blocks that reach hardware directly.
 - **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`. Codecs, capture devices, on-device LLM inference — built on Tier 0.
-- **Tier 2 — applications** (`bun:vision` and `bun:speech` ship orchestration with engine stubs; `bun:arrow` not yet started): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `bun:llm` as `llm.serve()`.)
+- **Tier 2 — applications** (`bun:vision` and `bun:speech` ship orchestration with engine stubs; `bun:arrow` ships the in-memory model + computes, IPC pending): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `bun:llm` as `llm.serve()`.)
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
@@ -381,7 +381,7 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 | partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
 | partial     | `bun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
 | partial     | `bun:speech` (Tier 2) | VAD-gated utterance segmentation ships today (`speech.listen` over any audio chunk iterator). Whisper STT (`transcribe`) stubs pending encoder-decoder transformer support in `bun:llm`; Piper TTS (`speak`) stubs pending libpiper / ONNX vendor add. |
-| in progress | `bun:arrow` (Tier 2)  | Columnar (Parquet / Arrow IPC) with SIMD column ops. The "5 GB analytical query" pair to `bun:csv`. |
+| partial     | `bun:arrow` (Tier 2)  | In-memory columnar tables (`RecordBatch`, `Table`, `Column`), type inference from typed arrays, validity bitmaps, and computes (`sum` / `mean` / `min` / `max` / `count` / `filter`) ship today. Arrow IPC reader + writer pending a FlatBuffers decoder; Parquet pending after that. |
 | in progress | `bun:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
 | next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
 | planned     | `bun:image` AVIF      | AVIF decode + encode (libavif + AOM / dav1d vendor add). Rounds out the codec coverage matrix.        |
