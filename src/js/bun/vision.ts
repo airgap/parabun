@@ -40,6 +40,17 @@
 //   - `track()` — multi-object tracker (DeepSORT / ByteTrack). Builds on
 //      detect().
 
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of bun:signals's
+// class hierarchy. Same shape as audio.ts / camera.ts / speech.ts / llm.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 type RawPixelFormat = "yuyv" | "mjpg" | "nv12" | "rgb24";
@@ -154,10 +165,35 @@ async function* frames(stream: AsyncIterable<RawFrame>, opts: FramesOptions = {}
 }
 
 // ─── detectMotion() — frame-diff motion estimator ─────────────────────────
+//
+// Reactive surface (LYK-742/762): the returned iterator carries `detected`
+// and `score` signals so consumers can wire `effect(() => ...)` blocks
+// against motion state without iterating the full stream. Same pattern
+// as `speech.listen()` — the generator object is decorated via
+// Object.assign with the read-only signal accessors, the for-await-of
+// usage is unchanged.
+interface MotionStream extends AsyncIterableIterator<MotionFrame> {
+  /** True while smoothed motion score is above the configured sensitivity. */
+  readonly detected: Signal<boolean>;
+  /** Most recent smoothed motion score (fraction of changed luma pixels, [0, 1]). */
+  readonly score: Signal<number>;
+}
 
-async function* detectMotion(
+function detectMotion(stream: AsyncIterable<RgbaFrame>, opts: MotionOptions = {}): MotionStream {
+  const sigDetected = signalsMod.signal(false) as WritableSignal<boolean>;
+  const sigScore = signalsMod.signal(0) as WritableSignal<number>;
+  const gen = detectMotionGenerator(stream, opts, sigDetected, sigScore);
+  return Object.assign(gen, {
+    detected: sigDetected as Signal<boolean>,
+    score: sigScore as Signal<number>,
+  });
+}
+
+async function* detectMotionGenerator(
   stream: AsyncIterable<RgbaFrame>,
-  opts: MotionOptions = {},
+  opts: MotionOptions,
+  sigDetected: WritableSignal<boolean>,
+  sigScore: WritableSignal<number>,
 ): AsyncIterableIterator<MotionFrame> {
   const pixelThreshold = opts.pixelThreshold ?? 16;
   const sensitivity = opts.sensitivity ?? 0.02;
@@ -169,31 +205,60 @@ async function* detectMotion(
   let prevH = 0;
   let smoothed = 0;
   const pixelThresh = pixelThreshold;
+  // Rate-limit `score` signal updates to ~10 Hz so a 30 fps camera doesn't
+  // re-fire effects on every frame. `detected` updates only on transitions
+  // — those are rare enough to skip the throttle.
+  let lastScoreEmitMs = 0;
 
-  for await (const frame of stream) {
-    const lumaW = Math.max(1, Math.floor(frame.width / downsample));
-    const lumaH = Math.max(1, Math.floor(frame.height / downsample));
-    const luma = downsampledLuma(frame.rgba, frame.width, frame.height, lumaW, lumaH);
+  try {
+    for await (const frame of stream) {
+      const lumaW = Math.max(1, Math.floor(frame.width / downsample));
+      const lumaH = Math.max(1, Math.floor(frame.height / downsample));
+      const luma = downsampledLuma(frame.rgba, frame.width, frame.height, lumaW, lumaH);
 
-    let rawScore = 0;
-    if (prevLuma && prevW === lumaW && prevH === lumaH) {
-      let changed = 0;
-      for (let i = 0; i < luma.length; i++) {
-        const d = luma[i] - prevLuma[i];
-        if (d > pixelThresh || d < -pixelThresh) changed++;
+      let rawScore = 0;
+      if (prevLuma && prevW === lumaW && prevH === lumaH) {
+        let changed = 0;
+        for (let i = 0; i < luma.length; i++) {
+          const d = luma[i] - prevLuma[i];
+          if (d > pixelThresh || d < -pixelThresh) changed++;
+        }
+        rawScore = changed / luma.length;
       }
-      rawScore = changed / luma.length;
-    }
-    smoothed = smoothing * smoothed + (1 - smoothing) * rawScore;
-    prevLuma = luma;
-    prevW = lumaW;
-    prevH = lumaH;
+      smoothed = smoothing * smoothed + (1 - smoothing) * rawScore;
+      prevLuma = luma;
+      prevW = lumaW;
+      prevH = lumaH;
 
-    yield {
-      frame,
-      motionScore: smoothed,
-      moving: smoothed > sensitivity,
-    };
+      const moving = smoothed > sensitivity;
+
+      // Boolean transition — fire immediately. `detected` cares about edges,
+      // not every-frame flutter.
+      if (moving !== sigDetected.peek()) sigDetected.set(moving);
+
+      // Score is continuous — throttle to 10 Hz, but always emit the very
+      // first measurement so subscribers don't sit on the constructor's 0
+      // for an extra tick. Using performance.now() (not frame.timestampMs)
+      // keeps the throttle on a single wall-clock reference; frame
+      // timestamps can come from synthetic streams or kernel V4L2 epochs
+      // that don't share a clock.
+      const now = performance.now();
+      if (lastScoreEmitMs === 0 || now - lastScoreEmitMs >= 100) {
+        sigScore.set(smoothed);
+        lastScoreEmitMs = now;
+      }
+
+      yield {
+        frame,
+        motionScore: smoothed,
+        moving,
+      };
+    }
+  } finally {
+    // Stream ended (or consumer broke). Pin the signals to a clean
+    // inert state so an effect block doesn't keep showing stale motion.
+    if (sigDetected.peek()) sigDetected.set(false);
+    if (sigScore.peek() !== 0) sigScore.set(0);
   }
 }
 
