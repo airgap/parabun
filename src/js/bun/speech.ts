@@ -24,13 +24,19 @@
 // with bun:audio.capture, test streams, file readers, anything) and emits
 // one Utterance per detected speech burst, silence-bounded.
 //
-// What doesn't ship yet:
-//   - `transcribe()` — Whisper-class STT requires encoder-decoder transformer
-//      support in bun:llm (the existing Llama / Qwen2 path is decoder-only).
-//   - `speak()` — Piper TTS requires libpiper or ONNX runtime as a vendored
-//      dependency. Both surface as plug-in engines once those land.
-//
-// Both stubs are reachable today and throw with a clear roadmap pointer.
+// What's now wired:
+//   - `transcribe()` — Whisper-class STT via bun:llm.WhisperModel. Loads
+//      ggml-*.bin checkpoints, transcribes utterances per call.
+//   - `speak()` — Piper TTS via subprocess to a `piper` binary on PATH (or
+//      under opts.binPath). Voice models are .onnx + .json from
+//      https://github.com/rhasspy/piper/blob/master/VOICES.md or
+//      huggingface.co/rhasspy/piper-voices. Subprocess overhead is
+//      ~50-150ms per call (espeak-ng init + onnxruntime load); for
+//      real-time barge-in / streaming sentence-by-sentence TTS, the
+//      direct-FFI integration tracked under LYK-758 keeps the model
+//      loaded across calls and yields f32 frames per sentence at
+//      native speed. Same public API on both versions, so callers
+//      don't change when LYK-758 ships.
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -302,17 +308,34 @@ type TranscribeOptions = {
 };
 
 type SpeakOptions = {
-  /** Engine identifier. "piper" is the only planned target for v1. */
+  /** Engine identifier. "piper" is the only supported target. */
   engine: "piper";
-  /** Path to a Piper voice model on disk (.onnx + .json). */
+  /** Path to a Piper voice model on disk (.onnx; companion .json sits next to it). */
   model: string;
-  /** Output sample rate. Defaults to whatever the voice model produces. */
-  sampleRate?: number;
+  /**
+   * Path to the `piper` CLI binary. Defaults to `piper` (resolved via PATH).
+   * Set this if piper is installed somewhere unusual. The eventual FFI
+   * integration (LYK-758) won't use a binary path at all.
+   */
+  binPath?: string;
+  /**
+   * Per-call inter-sentence silence in milliseconds. Forwarded to piper's
+   * `--sentence-silence` (units there are seconds, we convert).
+   */
+  sentenceSilenceMs?: number;
 };
 
-const SPEAK_NOT_IMPL =
-  "bun:speech.speak: Piper TTS requires libpiper or ONNX runtime as a vendored dep — " +
-  "neither is wired yet. Tracked in the roadmap as bun:speech (Tier 2).";
+/**
+ * Result of `speak()`. `samples` is f32 mono PCM at the voice model's native
+ * sample rate (typically 22050 Hz for Piper voices). `sampleRate` is read
+ * from the WAV header that piper emits, so callers can route directly to
+ * `bun:audio` playback at the correct rate without reading the voice .json.
+ */
+type SpokenAudio = {
+  samples: Float32Array;
+  sampleRate: number;
+  channels: number;
+};
 
 // Cache loaded Whisper models by absolute path so repeated transcribe()
 // calls in the same process don't reload from disk.
@@ -343,8 +366,109 @@ async function transcribe(utterance: Utterance | { samples: Float32Array }, opts
   return model.transcribe(utterance.samples, { language });
 }
 
-async function speak(_text: string, _opts: SpeakOptions): Promise<Float32Array> {
-  throw new Error(SPEAK_NOT_IMPL);
+async function speak(text: string, opts: SpeakOptions): Promise<SpokenAudio> {
+  if (opts.engine !== "piper") {
+    throw new Error(`bun:speech.speak: unknown engine "${opts.engine}" — only "piper" is supported`);
+  }
+  if (!text || typeof text !== "string") {
+    throw new TypeError("bun:speech.speak: text must be a non-empty string");
+  }
+  if (!opts.model) {
+    throw new Error(
+      "bun:speech.speak: opts.model (path to a Piper voice .onnx) is required. " +
+        "Voices: https://github.com/rhasspy/piper/blob/master/VOICES.md",
+    );
+  }
+
+  const fs = require("node:fs");
+  const fsPromises = require("node:fs/promises");
+  const os = require("node:os");
+  const path = require("node:path");
+  // Builtin require returns the export shape directly, not the
+  // ESM-style { default: ... } wrapper — same pattern transcribe()
+  // uses for the whisper module above.
+  const audio = require("./audio.ts");
+
+  const modelPath = path.resolve(opts.model);
+  if (!fs.existsSync(modelPath)) {
+    throw new Error(`bun:speech.speak: voice model not found at "${modelPath}"`);
+  }
+
+  // Piper writes WAV when given --output_file; we route through a tmpfile
+  // so we don't have to manage piper's --output-raw header-less stream
+  // (which needs the voice .json's sample_rate to decode and adds error
+  // surface for malformed JSON). The tmp path is scoped to a per-call
+  // mkdtemp; cleanup happens unconditionally in finally.
+  const bin = opts.binPath ?? "piper";
+  const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "parabun-piper-"));
+  const tmpWav = path.join(tmpDir, "out.wav");
+
+  try {
+    const cmd: string[] = [bin, "--model", modelPath, "--output_file", tmpWav];
+    if (opts.sentenceSilenceMs !== undefined) {
+      cmd.push("--sentence-silence", (opts.sentenceSilenceMs / 1000).toFixed(3));
+    }
+
+    // NOTE: would prefer `await using proc = Bun.spawn(...)` here but
+    // JSC's BuiltinExecutables parser inside parabun's builtin modules
+    // rejects `using` / `await using` syntax (works fine in user code).
+    // Tracked as LYK-759. Manual cleanup with try/finally + .kill() is
+    // the workaround.
+    const proc = Bun.spawn({
+      cmd,
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    let exitCode: number;
+    let stderrText: string;
+    try {
+      proc.stdin.write(text);
+      await proc.stdin.end();
+      [exitCode, stderrText] = await Promise.all([proc.exited, proc.stderr.text()]);
+    } catch (err) {
+      try {
+        proc.kill();
+      } catch {}
+      throw err;
+    }
+    if (exitCode !== 0) {
+      throw new Error(
+        `bun:speech.speak: piper exited with code ${exitCode}.` +
+          (stderrText ? ` stderr: ${stderrText.trim()}` : "") +
+          ` (binary: ${bin})`,
+      );
+    }
+    if (!fs.existsSync(tmpWav)) {
+      throw new Error(`bun:speech.speak: piper completed but produced no output at ${tmpWav}`);
+    }
+
+    const wavBytes = new Uint8Array(await Bun.file(tmpWav).arrayBuffer());
+    const wav = audio.readWav(wavBytes);
+    return {
+      samples: wav.samples,
+      sampleRate: wav.sampleRate,
+      channels: wav.channels,
+    };
+  } catch (err) {
+    // ENOENT on spawn means piper isn't on PATH (or opts.binPath wrong).
+    // Bun.spawn surfaces this as the awaited proc rejecting; surface a
+    // clearer message than the raw libuv one.
+    if ((err as { code?: string }).code === "ENOENT") {
+      throw new Error(
+        `bun:speech.speak: piper binary not found ("${opts.binPath ?? "piper"}"). ` +
+          `Install from https://github.com/rhasspy/piper/releases or pass opts.binPath.`,
+      );
+    }
+    throw err;
+  } finally {
+    // mkdtemp + the wav file inside it. Best-effort cleanup; ignore
+    // ENOENT / EBUSY since we've already returned the audio data.
+    try {
+      await fsPromises.rm(tmpDir, { recursive: true, force: true });
+    } catch {}
+  }
 }
 
 export default {

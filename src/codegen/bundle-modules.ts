@@ -100,6 +100,11 @@ for (let i = 0; i < nativeStartIndex; i++) {
     // import { ... } from '...' -> `const { ... } = require('...')`
     const scannedImports = t.scan(input);
     for (const imp of scannedImports.imports) {
+      // `using` / `await using` declarations cause Bun.Transpiler.scan to
+      // emit a `null` entry — a parser bug independent of any actual
+      // import. Skip these entries; we only care about real imports
+      // (those have a `.kind`) for the ESM-in-builtin enforcement below.
+      if (!imp) continue;
       if (imp.kind === "import-statement") {
         var isBuiltin = true;
         try {
