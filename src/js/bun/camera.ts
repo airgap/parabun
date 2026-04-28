@@ -33,6 +33,16 @@
 // next genuinely new frame.
 
 const native = $cpp("parabun_camera.cpp", "createParabunCamera");
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of bun:signals's
+// class hierarchy. Same shape as audio.ts / llm.ts / speech.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -81,10 +91,38 @@ type Frame = {
   sequence: number;
 };
 
+type CameraFormat = {
+  width: number;
+  height: number;
+  pixelFormat: PixelFormat;
+};
+
 interface Camera extends AsyncDisposable {
   readonly width: number;
   readonly height: number;
   readonly format: PixelFormat;
+  /**
+   * True after the first frame has been emitted, back to false on close().
+   * Useful for "viewfinder is live" status indicators that don't want to
+   * wait for the first frame to confirm the device opened.
+   */
+  readonly active: Signal<boolean>;
+  /**
+   * Rolling-window frames-per-second estimate. Updates on every emitted
+   * frame; the value is the inverse of the average inter-frame interval
+   * over the last ~32 frames. Smoothed enough to drive a UI display
+   * without flickering, responsive enough to catch a real fps drop.
+   * Throttled to ~10 Hz to match mic.peakLevel / listen().noiseFloor.
+   */
+  readonly fps: Signal<number>;
+  /**
+   * Currently-negotiated capture format (`{ width, height, pixelFormat }`).
+   * Initialized at open time. The native side does not currently surface
+   * V4L2 format-change events, so this only changes if open() renegotiates;
+   * the signal is here for forward-compat with future format-on-the-fly
+   * support.
+   */
+  readonly cameraFormat: Signal<CameraFormat>;
   /** Capture frames until close() is called. */
   frames(): AsyncIterableIterator<Frame>;
   /** Capture exactly one frame and return it. */
@@ -114,18 +152,65 @@ async function formats(path: string): Promise<FormatDescriptor[]> {
   return native.queryFormats(path);
 }
 
+// Window size for the rolling fps estimator. 32 frames at 30 fps = ~1 sec
+// of memory; smooths a brief stutter without hiding a real fps drop.
+const FPS_WINDOW = 32;
+
 class CameraImpl implements Camera {
   #handle: bigint;
   width: number;
   height: number;
   format: PixelFormat;
 
+  // Reactive signals (LYK-761).
+  #active: WritableSignal<boolean>;
+  #fps: WritableSignal<number>;
+  #cameraFormat: WritableSignal<CameraFormat>;
+  // Ring of recent frame timestamps in ms — feeds the fps estimator.
+  #frameTs: number[] = [];
+  // Last wall-clock at which #fps was emitted; we throttle to ~10 Hz.
+  #lastFpsEmitMs: number = 0;
+
+  get active(): Signal<boolean> {
+    return this.#active;
+  }
+  get fps(): Signal<number> {
+    return this.#fps;
+  }
+  get cameraFormat(): Signal<CameraFormat> {
+    return this.#cameraFormat;
+  }
+
   constructor(handle: bigint, width: number, height: number, format: PixelFormat) {
     this.#handle = handle;
     this.width = width;
     this.height = height;
     this.format = format;
+    this.#active = signalsMod.signal(false);
+    this.#fps = signalsMod.signal(0);
+    this.#cameraFormat = signalsMod.signal<CameraFormat>({ width, height, pixelFormat: format });
     cameraRegistry.register(this, handle, this);
+  }
+
+  /** Bookkeeping after a frame arrives — updates active + fps signals. */
+  #onFrame(): void {
+    if (!this.#active.peek()) this.#active.set(true);
+    const now = performance.now();
+    this.#frameTs.push(now);
+    if (this.#frameTs.length > FPS_WINDOW) this.#frameTs.shift();
+    if (this.#frameTs.length >= 2) {
+      const span = this.#frameTs[this.#frameTs.length - 1] - this.#frameTs[0];
+      // span in ms; fps = (n-1) / (span/1000).
+      const fps = span > 0 ? ((this.#frameTs.length - 1) * 1000) / span : 0;
+      // Rate-limit signal updates to ~10 Hz (PLAN-module-signals open
+      // decision §"fps / peakLevel update rate"). Emit unconditionally on
+      // the very first measurement so subscribers don't wait a tick for
+      // a non-zero reading.
+      if (this.#lastFpsEmitMs === 0 || now - this.#lastFpsEmitMs >= 100) {
+        this.#fps.set(fps);
+        this.#lastFpsEmitMs = now;
+      }
+    }
   }
 
   async grab(): Promise<Frame> {
@@ -135,12 +220,16 @@ class CameraImpl implements Camera {
     // captureNext is synchronous + blocking on a select(); wrap in a
     // Promise so the JS event loop sees an await point. A worker-thread
     // backing follows once we have real pipeline workloads.
-    return native.captureNext(this.#handle, 5);
+    const frame = native.captureNext(this.#handle, 5) as Frame;
+    this.#onFrame();
+    return frame;
   }
 
   async *frames(): AsyncIterableIterator<Frame> {
     while (this.#handle !== 0n) {
-      yield native.captureNext(this.#handle, 5);
+      const frame = native.captureNext(this.#handle, 5) as Frame;
+      this.#onFrame();
+      yield frame;
     }
   }
 
@@ -151,6 +240,9 @@ class CameraImpl implements Camera {
       cameraRegistry.unregister(this);
       native.closeDevice(h);
     }
+    this.#active.set(false);
+    this.#fps.set(0);
+    this.#frameTs.length = 0;
   }
 
   [Symbol.asyncDispose](): Promise<void> {

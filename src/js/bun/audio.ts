@@ -1842,6 +1842,19 @@ interface PlaybackStream extends AsyncDisposable {
   readonly sampleRate: number;
   readonly channels: number;
   readonly device: string;
+  /**
+   * Current depth of the ALSA playback buffer in milliseconds. Updates when
+   * the underlying buffer changes — after `write()`, `drain()`, `stop()` —
+   * and on a low-frequency poll while audio is queued. Subscribe via
+   * `queuedMs.subscribe(cb)` for backpressure UIs (progress bar of how full
+   * the audio queue is) or read inside an `effect { ... }` for queue-aware
+   * scheduling decisions.
+   *
+   * Approximate, not exact — represents the *measurement* taken at the
+   * most recent ALSA-touching operation, plus the polled samples. The
+   * actual queue drains continuously regardless of when we sampled.
+   */
+  readonly queuedMs: Signal<number>;
   /** Write interleaved Float32 samples; resolves when bytes have drained into ALSA. */
   write(samples: Float32Array): Promise<void>;
   /** Block until everything written has been played out. */
@@ -1958,31 +1971,74 @@ class PlaybackStreamImpl implements PlaybackStream {
   sampleRate: number;
   channels: number;
   device: string;
+  #queuedMs: WritableSignal<number>;
+  #lastEmitMs: number = 0;
+  #pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  get queuedMs(): Signal<number> {
+    return this.#queuedMs;
+  }
 
   constructor(handle: bigint, device: string, sampleRate: number, channels: number) {
     this.#handle = handle;
     this.device = device;
     this.sampleRate = sampleRate;
     this.channels = channels;
+    this.#queuedMs = signals.signal(0);
+    // Low-frequency poll so the signal naturally trends to zero as the
+    // buffer drains between writes — without a 16 kHz mic-level update
+    // rate. 100 ms matches the convention used by mic.peakLevel /
+    // listen().noiseFloor (PLAN-module-signals "Open decisions").
+    this.#pollTimer = setInterval(() => this.#sampleQueued(), 100);
     pcmRegistry.register(this, handle, this);
+  }
+
+  #sampleQueued(): void {
+    if (this.#handle === 0n) return;
+    const frames = io.playbackQueuedFrames(this.#handle) as number;
+    const ms = (frames / this.sampleRate) * 1000;
+    // Skip the .set if the value hasn't changed appreciably (sub-ms) —
+    // saves subscribers a wakeup when the queue is steady.
+    const prev = this.#queuedMs.peek();
+    if (Math.abs(ms - prev) >= 1 || (ms === 0 && prev !== 0)) {
+      this.#queuedMs.set(ms);
+    }
   }
 
   async write(samples: Float32Array): Promise<void> {
     if (this.#handle === 0n) throw new Error("playback stream is closed");
     io.playbackWrite(this.#handle, samples);
+    // Resample queue depth right after a write — the backpressure-aware
+    // caller wants the post-write value, not the previous poll's stale
+    // reading.
+    this.#sampleQueued();
   }
 
   async drain(): Promise<void> {
-    if (this.#handle !== 0n) io.playbackDrain(this.#handle);
+    if (this.#handle !== 0n) {
+      io.playbackDrain(this.#handle);
+      // Buffer is empty after drain — cement the signal at 0 so any
+      // subscriber waiting on "queuedMs reached zero" doesn't have to wait
+      // up to 100 ms for the next poll tick.
+      this.#queuedMs.set(0);
+    }
   }
 
   async stop(): Promise<void> {
-    if (this.#handle !== 0n) io.playbackDrop(this.#handle);
+    if (this.#handle !== 0n) {
+      io.playbackDrop(this.#handle);
+      this.#queuedMs.set(0);
+    }
   }
 
   async close(): Promise<void> {
     const h = this.#handle;
     this.#handle = 0n;
+    if (this.#pollTimer) {
+      clearInterval(this.#pollTimer);
+      this.#pollTimer = null;
+    }
+    this.#queuedMs.set(0);
     if (h !== 0n) {
       pcmRegistry.unregister(this);
       io.closePcm(h);

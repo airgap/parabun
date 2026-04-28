@@ -60,6 +60,7 @@ struct PCM {
     unsigned int sampleRate = 0;
     unsigned int channels = 0;
     snd_pcm_uframes_t periodFrames = 0;
+    snd_pcm_uframes_t bufferFrames = 0;
     bool capture = false;
 
     ~PCM()
@@ -83,7 +84,8 @@ PCM* asPCM(JSValue v)
 // a borrowed error string. Caller throws — keeps the JSC throw path out
 // of this helper so it stays unit-testable.
 const char* configurePcm(snd_pcm_t* pcm, unsigned int& sampleRate, unsigned int channels,
-    snd_pcm_uframes_t& periodFrames, unsigned int bufferPeriods)
+    snd_pcm_uframes_t& periodFrames, unsigned int bufferPeriods,
+    snd_pcm_uframes_t* outBufferFrames = nullptr)
 {
     snd_pcm_hw_params_t* params;
     snd_pcm_hw_params_alloca(&params);
@@ -107,6 +109,10 @@ const char* configurePcm(snd_pcm_t* pcm, unsigned int& sampleRate, unsigned int 
         return "set_buffer_size_near";
 
     if (snd_pcm_hw_params(pcm, params) < 0) return "snd_pcm_hw_params";
+    // ALSA may have rounded our buffer-size request to the nearest hardware-
+    // compatible value. The caller needs the post-negotiation count to
+    // compute queuedFrames = bufferFrames - avail accurately.
+    if (outBufferFrames) *outBufferFrames = bufferFrames;
     return nullptr;
 }
 
@@ -240,7 +246,8 @@ static PCM* openPcm(JSGlobalObject* globalObject, ThrowScope& scope,
         return nullptr;
     }
 
-    const char* what = configurePcm(pcm, sampleRate, channels, periodFrames, bufferPeriods);
+    snd_pcm_uframes_t bufferFrames = 0;
+    const char* what = configurePcm(pcm, sampleRate, channels, periodFrames, bufferPeriods, &bufferFrames);
     if (what) {
         snd_pcm_close(pcm);
         throwTypeError(globalObject, scope,
@@ -259,6 +266,7 @@ static PCM* openPcm(JSGlobalObject* globalObject, ThrowScope& scope,
     p->sampleRate = sampleRate;
     p->channels = channels;
     p->periodFrames = periodFrames;
+    p->bufferFrames = bufferFrames;
     p->capture = (stream == SND_PCM_STREAM_CAPTURE);
     return p;
 }
@@ -478,6 +486,34 @@ JSC_DEFINE_HOST_FUNCTION(functionPlaybackDrain,
     return JSValue::encode(jsUndefined());
 }
 
+// ─── playbackQueuedFrames (LYK-746: spk.queuedMs signal source) ────────────
+// Returns the number of frames currently sitting in the ALSA buffer waiting
+// to be played. Computed as `bufferFrames - avail`, clamped to >= 0. Useful
+// for backpressure decisions ("can I write a 1024-frame chunk without
+// blocking?") and for the spk.queuedMs reactive signal.
+JSC_DEFINE_HOST_FUNCTION(functionPlaybackQueuedFrames,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+#if defined(__linux__)
+    auto* p = asPCM(callFrame->argument(0));
+    if (!p || !p->handle || p->capture) return JSValue::encode(jsNumber(0));
+    snd_pcm_sframes_t avail = snd_pcm_avail(p->handle);
+    if (avail < 0) {
+        // Underrun / xrun — bursting through these would be a perf bug, not
+        // a queue depth question. Report zero so callers don't spin.
+        return JSValue::encode(jsNumber(0));
+    }
+    snd_pcm_sframes_t queued = static_cast<snd_pcm_sframes_t>(p->bufferFrames) - avail;
+    if (queued < 0) queued = 0;
+    return JSValue::encode(jsNumber(static_cast<double>(queued)));
+#else
+    return JSValue::encode(jsNumber(0));
+#endif
+}
+
 // ─── playbackDrop (barge-in: discard pending audio) ────────────────────────
 // Unlike playbackDrain (waits for the buffer to play out), playbackDrop
 // throws away whatever is queued in ALSA's buffer immediately and re-prepares
@@ -543,6 +579,9 @@ JSC::JSObject* createParabunAudioIO(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "playbackDrop"_s), 1,
         functionPlaybackDrop, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "playbackQueuedFrames"_s), 1,
+        functionPlaybackQueuedFrames, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "closePcm"_s), 1,
         functionClosePcm, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
