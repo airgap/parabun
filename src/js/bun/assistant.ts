@@ -30,10 +30,17 @@
 //   - Reactive surface: state, lastTurn, history, interrupted signals
 //   - In-memory chat history (full transcript across turns this process)
 //
-// What v1 explicitly does NOT ship (deferred per build order):
-//   - Wake word, barge-in (steps 5)
-//   - Tools / MCP (step 3)
-//   - Persistent memory (step 4)
+// Now shipped (post-v1):
+//   - Persistent memory (step 4) — sqlite-backed, replays on construct.
+//   - Tools / MCP (step 3, LYK-733/734) — inline `{name,schema,run}` tools
+//     plus structural `MCPLike` connections flatten into bot.tools.
+//   - Barge-in (step 5 first half, LYK-735) — VAD rising edge during
+//     thinking/speaking aborts the chat token loop, drops the speaker
+//     buffer via spk.stop(), and stamps `turn.interrupted = true`.
+//
+// Still deferred:
+//   - Wake word (step 5 second half, LYK-739) — needs a low-power KWS
+//     primitive in bun:audio first.
 //   - RAG (step 6)
 //   - Scheduled prompts (step 7)
 //   - Vision / VLM (step 8)
@@ -70,7 +77,11 @@ type Turn = {
   toolCalls: { name: string; args: unknown; result: unknown }[];
   startedAtMs: number;
   endedAtMs: number;
-  /** True if barge-in cut the reply short. v1: always false. */
+  /**
+   * True if the turn was cut short by VAD-driven barge-in (LYK-735) — either
+   * during chat-token generation or during TTS playback. The recorded
+   * `assistant` field still reflects what the model produced before the cut.
+   */
   interrupted: boolean;
 };
 
@@ -311,6 +322,19 @@ class Assistant {
   /** Names of tool calls currently in-flight. */
   #toolsActive: WritableSignal<Set<string>>;
 
+  // ─── Barge-in (LYK-735) ───
+  /**
+   * The listen stream used by the active turns() loop. Shared with #speak()
+   * and #runTurn() so they can wire up VAD-driven barge-in. Null outside the
+   * voice loop (text-only ask() has no mic to barge with).
+   */
+  #activeListen: { active: Signal<boolean> } | null = null;
+  /**
+   * Set true the moment VAD fires while the assistant is speaking or thinking.
+   * Read by the chunked-TTS loop and the chat-token loop to bail early.
+   */
+  #abortRequested = false;
+
   #disposed = false;
 
   // Public read-only signal accessors.
@@ -373,6 +397,26 @@ class Assistant {
     const before = this.#tools.length;
     this.#tools = this.#tools.filter(t => t.name !== name);
     return this.#tools.length < before;
+  }
+
+  /**
+   * Programmatically interrupt the in-flight turn. Same effect as VAD-driven
+   * barge-in (LYK-735): the chat-token loop stops pulling, the chunked-TTS
+   * loop bails out, the speaker buffer is dropped, and `bot.interrupted`
+   * flips true. The current turn's `interrupted` field will be `true` when it
+   * settles. Wire to a UI cancel button or any custom barge-in source.
+   *
+   * Idempotent within a turn — repeated calls are no-ops until the next turn
+   * starts.
+   */
+  interrupt(): void {
+    if (this.#disposed) return;
+    if (this.#abortRequested) return;
+    this.#abortRequested = true;
+    this.#interrupted.set(true);
+    if (this.#spk && typeof this.#spk.stop === "function") {
+      this.#spk.stop().catch(() => {});
+    }
   }
 
   constructor(opts: AssistantOptions) {
@@ -465,6 +509,9 @@ class Assistant {
     }
     const sampleRate = this.#mic.sampleRate;
     const ls = speech.listen(this.#mic.frames(), { sampleRate });
+    // Share the listen stream so #runTurn / #speak can subscribe to vad.active
+    // for barge-in (LYK-735). Keeps the wiring out of the public surface.
+    this.#activeListen = ls;
     this.#state.set("listening");
     try {
       for await (const utt of ls) {
@@ -480,6 +527,7 @@ class Assistant {
         this.#state.set("listening");
       }
     } finally {
+      this.#activeListen = null;
       // listen() ended (mic closed) — go idle.
       this.#state.set("idle");
     }
@@ -526,6 +574,29 @@ class Assistant {
   async #runTurn(userText: string): Promise<Turn> {
     const startedAtMs = Date.now();
 
+    // New turn — clear any prior interruption flag so the public signal
+    // tracks "interrupted in the current turn" rather than "ever interrupted".
+    this.#abortRequested = false;
+    if (this.#interrupted.peek()) this.#interrupted.set(false);
+
+    // Wire VAD-driven barge-in: while a turn is in flight, a rising edge on
+    // listen()'s `active` signal flips #abortRequested. The chat-token loop
+    // and the chunked-TTS loop both poll this flag and bail out (LYK-735).
+    let bargeUnsub: (() => void) | null = null;
+    if (this.#activeListen) {
+      bargeUnsub = this.#activeListen.active.subscribe((on: boolean) => {
+        if (on && !this.#abortRequested) {
+          this.#abortRequested = true;
+          this.#interrupted.set(true);
+          // Best-effort: discard whatever's queued in ALSA so the user
+          // hears their own voice cut us off, not 800ms of stale TTS.
+          if (this.#spk && typeof this.#spk.stop === "function") {
+            this.#spk.stop().catch(() => {});
+          }
+        }
+      });
+    }
+
     const userMsg: Message = { role: "user", content: userText };
     this.#messages.push(userMsg);
     this.#history.set(this.#messages.slice());
@@ -533,12 +604,18 @@ class Assistant {
 
     let reply: string;
     let toolCalls: { name: string; args: unknown; result: unknown }[] = [];
-    if (this.#tools.length === 0) {
-      reply = await this.#llm.chatComplete(this.#messages, this.#chatOpts);
-    } else {
-      const result = await this.#runTurnWithTools();
-      reply = result.reply;
-      toolCalls = result.toolCalls;
+    let interrupted = false;
+    try {
+      if (this.#tools.length === 0) {
+        reply = await this.#chatWithBargeIn();
+      } else {
+        const result = await this.#runTurnWithTools();
+        reply = result.reply;
+        toolCalls = result.toolCalls;
+      }
+    } finally {
+      // No matter what threw, the flag tells us whether VAD fired.
+      interrupted = this.#abortRequested;
     }
 
     const assistantMsg: Message = { role: "assistant", content: reply };
@@ -546,11 +623,19 @@ class Assistant {
     this.#history.set(this.#messages.slice());
     this.#memory?.append(assistantMsg);
 
-    // TTS (if configured)
-    if (this.#ttsModel) {
+    // TTS (if configured). Skip if we already got interrupted — the user
+    // wants to talk, not hear our half-formed reply.
+    if (this.#ttsModel && !interrupted) {
       this.#state.set("speaking");
-      await this.#speak(reply);
+      try {
+        await this.#speak(reply);
+      } finally {
+        // #speak may have flipped the flag while playing.
+        if (this.#abortRequested) interrupted = true;
+      }
     }
+
+    if (bargeUnsub) bargeUnsub();
 
     const endedAtMs = Date.now();
     const turn: Turn = {
@@ -559,10 +644,26 @@ class Assistant {
       toolCalls,
       startedAtMs,
       endedAtMs,
-      interrupted: false,
+      interrupted,
     };
     this.#lastTurn.set(turn);
     return turn;
+  }
+
+  /**
+   * Run a plain chat call with cancellation support. We iterate the m.chat
+   * generator instead of awaiting chatComplete so #abortRequested can stop
+   * generation mid-stream — the partial text becomes the recorded reply.
+   * Models running on the device path don't expose a hard-cancel today, so
+   * we just stop pulling tokens; whatever is in flight finishes silently.
+   */
+  async #chatWithBargeIn(): Promise<string> {
+    let out = "";
+    for await (const chunk of this.#llm.chat(this.#messages, this.#chatOpts)) {
+      out += chunk;
+      if (this.#abortRequested) break;
+    }
+    return out;
   }
 
   /**
@@ -605,6 +706,13 @@ class Assistant {
     const toolCalls: { name: string; args: unknown; result: unknown }[] = [];
 
     for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
+      // Bail out of the tool loop if VAD fired since the last iteration.
+      // We don't try to interrupt a single chatComplete call — the
+      // schema-constrained generator returns intact and we exit on the
+      // boundary. Good enough: tool turns are short.
+      if (this.#abortRequested) {
+        return { reply: "", toolCalls };
+      }
       const raw = await this.#llm.chatComplete(working, { ...this.#chatOpts, schema });
       let parsed: { tool: string | null; argsJson?: string; reply: string };
       try {
@@ -726,7 +834,24 @@ class Assistant {
         channels: audioOut.channels,
       });
     }
-    await this.#spk.write(audioOut.samples);
+    // Chunk playback so VAD can cut us mid-utterance (LYK-735). 100 ms slices
+    // give the abort path a sub-quarter-second response time on the typical
+    // 22 kHz Piper output, and the kernel buffer (~80 ms) holds at most one
+    // slice past the abort point — drop() clears that.
+    const samplesPerSlice = Math.max(1, Math.floor((audioOut.sampleRate * 100) / 1000)) * audioOut.channels;
+    const total = audioOut.samples.length;
+    let off = 0;
+    while (off < total) {
+      if (this.#abortRequested) {
+        // VAD already fired; the subscriber called spk.stop(). Don't write
+        // any more — return so #runTurn can mark the turn interrupted.
+        return;
+      }
+      const end = Math.min(total, off + samplesPerSlice);
+      // subarray is a view; the native binding copies into ALSA so this is safe.
+      await this.#spk.write(audioOut.samples.subarray(off, end));
+      off = end;
+    }
   }
 
   /** Stop all loops and release devices. Idempotent. */

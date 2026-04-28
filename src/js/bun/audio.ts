@@ -1846,6 +1846,14 @@ interface PlaybackStream extends AsyncDisposable {
   write(samples: Float32Array): Promise<void>;
   /** Block until everything written has been played out. */
   drain(): Promise<void>;
+  /**
+   * Discard whatever is queued in the kernel buffer immediately and re-prepare
+   * the stream so subsequent `write()` calls work. Use for barge-in: the
+   * caller has detected the user starting to speak and wants to cut the
+   * current TTS short. In contrast to `drain()` (waits for the buffer to play
+   * out) and `close()` (releases the device), `stop()` is the cancel verb.
+   */
+  stop(): Promise<void>;
   /** Stop playback and release the device. Idempotent. */
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
@@ -1966,6 +1974,10 @@ class PlaybackStreamImpl implements PlaybackStream {
 
   async drain(): Promise<void> {
     if (this.#handle !== 0n) io.playbackDrain(this.#handle);
+  }
+
+  async stop(): Promise<void> {
+    if (this.#handle !== 0n) io.playbackDrop(this.#handle);
   }
 
   async close(): Promise<void> {

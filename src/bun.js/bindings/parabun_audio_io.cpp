@@ -478,6 +478,29 @@ JSC_DEFINE_HOST_FUNCTION(functionPlaybackDrain,
     return JSValue::encode(jsUndefined());
 }
 
+// ─── playbackDrop (barge-in: discard pending audio) ────────────────────────
+// Unlike playbackDrain (waits for the buffer to play out), playbackDrop
+// throws away whatever is queued in ALSA's buffer immediately and re-prepares
+// the stream so subsequent playbackWrite calls work. Used by `bot.speak()`
+// to cut TTS short the moment VAD detects user speech (LYK-735).
+JSC_DEFINE_HOST_FUNCTION(functionPlaybackDrop,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+#if defined(__linux__)
+    auto* p = asPCM(callFrame->argument(0));
+    if (p && p->handle && !p->capture) {
+        snd_pcm_drop(p->handle);
+        // After a drop the PCM is in SND_PCM_STATE_SETUP; prepare it so
+        // future playbackWrite() calls don't fail with -EBADFD.
+        snd_pcm_prepare(p->handle);
+    }
+#endif
+    return JSValue::encode(jsUndefined());
+}
+
 // ─── close (capture + playback) ────────────────────────────────────────────
 JSC_DEFINE_HOST_FUNCTION(functionClosePcm,
     (JSGlobalObject * globalObject, CallFrame* callFrame))
@@ -517,6 +540,9 @@ JSC::JSObject* createParabunAudioIO(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "playbackDrain"_s), 1,
         functionPlaybackDrain, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "playbackDrop"_s), 1,
+        functionPlaybackDrop, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "closePcm"_s), 1,
         functionClosePcm, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
