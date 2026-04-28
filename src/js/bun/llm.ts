@@ -24,6 +24,18 @@ const schemaModule = require("./llm/schema.ts");
 const bertModule = require("./llm/bert.ts");
 const serveModule = require("./llm/serve.ts");
 const whisperModule = require("./llm/whisper.ts");
+const signals = require("./signals.ts");
+const gpu = require("./gpu.ts");
+
+// Structural Signal types — keep llm.ts agnostic of bun:signals's class
+// hierarchy. See `/raid/parabun-site/PLAN-module-signals.md` for the
+// cross-module reactive surface plan.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
 type GenerateOptions = {
   maxTokens?: number;
@@ -198,6 +210,36 @@ class LLM {
   #disposed = false;
   #tokenBytes: Uint8Array[] | null = null;
   #specialIds: Set<number> | null = null;
+  // Reactive surface (PLAN-module-signals item 2). Tracks active
+  // generations + the active gpu backend. `bun:assistant` reads
+  // `m.busy` to dim its UI during generation.
+  #busyCount = 0;
+  #busy: WritableSignal<boolean>;
+  #device: WritableSignal<"cuda" | "metal" | "cpu">;
+
+  get busy(): Signal<boolean> {
+    return this.#busy;
+  }
+
+  get device(): Signal<"cuda" | "metal" | "cpu"> {
+    return this.#device;
+  }
+
+  /**
+   * Increment the busy refcount and flip `busy` to true. Decrement
+   * counterpart in `#endBusy`. The refcount lets concurrent ops (rare
+   * but legal — multiple parallel chat streams against the same model)
+   * stay "busy" until the last one finishes.
+   */
+  #beginBusy(): void {
+    this.#busyCount++;
+    if (this.#busyCount === 1) this.#busy.set(true);
+  }
+
+  #endBusy(): void {
+    this.#busyCount = Math.max(0, this.#busyCount - 1);
+    if (this.#busyCount === 0) this.#busy.set(false);
+  }
 
   constructor(
     model: InstanceType<typeof llama.LlamaModel>,
@@ -207,6 +249,8 @@ class LLM {
     this.model = model;
     this.tokenizer = tok;
     this.chatTemplate = chatTemplate;
+    this.#busy = signals.signal(false);
+    this.#device = signals.signal((gpu.describe().active as "cuda" | "metal" | "cpu") ?? "cpu");
     // Default stop set: the model's EOS, plus any extra terminators implied
     // by the chat template that aren't the EOS itself. Without this, Llama-3
     // generations that hit <|end_of_text|> (128001, distinct from <|eot_id|>)
@@ -327,6 +371,7 @@ class LLM {
   async #buildPrefix(ids: number[]): Promise<PrefixCache> {
     if (this.#disposed) throw new Error("bun:llm: LLM already disposed");
     if (ids.length === 0) throw new Error("bun:llm: cannot build prefix from empty token sequence");
+    this.#beginBusy();
     const kv = this.model.newKVCache();
     try {
       if (ids.length >= kv.maxContext()) {
@@ -340,6 +385,7 @@ class LLM {
       return new PrefixCache(ids.slice(), snap, logits!, this.model);
     } finally {
       kv.dispose();
+      this.#endBusy();
     }
   }
 
@@ -359,6 +405,7 @@ class LLM {
     if (ids.length === 0) throw new Error("bun:llm: cannot embed empty text");
 
     const dModel = this.model.cfg.dModel;
+    this.#beginBusy();
     const kv = this.model.newKVCache();
     try {
       if (ids.length > kv.maxContext()) {
@@ -387,6 +434,7 @@ class LLM {
       return out;
     } finally {
       kv.dispose();
+      this.#endBusy();
     }
   }
 
@@ -506,14 +554,26 @@ class LLM {
   async *#generateFromIds(promptIds: number[], opts?: GenerateOptions): AsyncGenerator<string, void, void> {
     if (this.#disposed) throw new Error("bun:llm: LLM already disposed");
 
-    // Route speculative decoding to its own loop — the structure
-    // (round-based propose/verify, target+draft KV bookkeeping) doesn't
-    // fit into the normal per-token loop cleanly.
-    if (opts?.draft) {
-      yield* this.#speculativeFromIds(promptIds, opts.draft, opts);
-      return;
+    // busy refcount for the reactive `m.busy` signal — covers every
+    // path through generate() / chat() / their *Complete shims since
+    // they all funnel through here. Speculative decoding (handled
+    // below) inherits the same boundary.
+    this.#beginBusy();
+    try {
+      // Route speculative decoding to its own loop — the structure
+      // (round-based propose/verify, target+draft KV bookkeeping) doesn't
+      // fit into the normal per-token loop cleanly.
+      if (opts?.draft) {
+        yield* this.#speculativeFromIds(promptIds, opts.draft, opts);
+        return;
+      }
+      yield* this.#generateFromIdsInner(promptIds, opts);
+    } finally {
+      this.#endBusy();
     }
+  }
 
+  async *#generateFromIdsInner(promptIds: number[], opts?: GenerateOptions): AsyncGenerator<string, void, void> {
     const maxTokens = opts?.maxTokens ?? 256;
     const stopTokens = opts?.stopTokens ?? this.#defaultStop;
     const stopSet = new Set(stopTokens);
