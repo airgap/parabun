@@ -26,7 +26,9 @@ Parabun closes those gaps inside one statically-linked binary:
 | [`bun:arena`](#buffer-pooling-bunarena) | Buffer pooling so worker boundaries don't cost a `Uint8Array` allocation per chunk |
 | [`bun:camera`](#camera-buncamera) / [`bun:audio`](#audio-codecs--dsp-bunaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
 | [`bun:image`](#image-codecs--filters-bunimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
-| [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
+| [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + Whisper STT + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
+| [`bun:speech`](#speech-bunspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `speak()` — voice in / voice out from one module. |
+| [`bun:assistant`](#voice-assistant-bunassistant) | Three-line voice assistant: mic + STT + LLM + TTS + speaker, fully local. Reactive `state` / `history` / `lastTurn` signals; sqlite-backed persistent memory. |
 
 If you've ever spawned a Python subprocess from your Node server because Node couldn't keep up — or written an N-API module because there was no other way to touch your camera / GPU / SIMD lanes — Parabun is the runtime that deletes the subprocess and the binding both.
 
@@ -53,6 +55,15 @@ import audio  from "bun:audio";
 await using cam = await camera.open("/dev/video0", { format: "mjpg", width: 1280, height: 720 });
 await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
 for await (const frame of cam.frames()) { /* ... */ }
+
+// Three-line voice assistant — local STT + LLM + TTS, no cloud round-trip
+import assistant from "bun:assistant";
+await using bot = await assistant.create({
+  llm: "/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+  stt: "/models/ggml-tiny.en.bin",
+  tts: "/models/en_US-lessac-medium.onnx",
+});
+await bot.run();
 ```
 
 Parabun is a drop-in replacement for Bun — your existing `.ts` / `.js` files run unchanged. The runtime modules above are the headline. Optional language extensions (`pure`, `..!`, `..&`, `..=`, `|>`, range literals, `signal`/`effect { }` blocks) live in `.pts` / `.pjs` files and desugar to standard JS at parse time; use them or ignore them, the modules don't depend on them.
@@ -84,6 +95,8 @@ for await (const piece of m.chat([
 - **Speculative decoding**: pass a smaller `draft` model and `speculativeK` to skip target forwards when the draft agrees, with exact Leviathan et al. accept-reject math.
 - **Prefix caching**: `LLM.prefix(sharedPreamble)` snapshots KV + logits once; subsequent `generate()` / `chat()` calls that start with the same tokens skip prefill entirely.
 - **Backends**: CUDA on Linux/Windows (via `bun:gpu`'s driver + NVRTC path), CPU fallback on any host. Metal kernels not yet wired.
+- **Speech recognition**: `llm.WhisperModel.load(path)` loads a `ggml-*.bin` Whisper checkpoint (tiny.en / base.en) and exposes `transcribe(samples)` / `transcribeMel(mel, T)`. Encoder-decoder forward pass shares the matVec / KV-cache machinery with the Llama path; CUDA on, CPU fallback otherwise. Decoder QKV is fused at load time. A reactive `m.busy` signal flips while a transcription is in flight.
+- **Reactive surface**: `m.busy` (writable, refcounted across nested calls) and `m.device` (`"cuda"` / `"metal"` / `"cpu"`) are exposed as signals — pair with `bun:signals` to drive UI without polling.
 
 Llama-3.2-1B-Instruct Q4_K_M on RTX 4070 Ti (release build, best-of-5):
 
@@ -290,6 +303,66 @@ for (const i16Frame of micFrames) {
 - **Layout**: `interleave` / `deinterleave` for planar ⇄ frame-major typed-array conversions, `i16ToF32` / `f32ToI16` for OS-audio ⇄ DSP-space PCM.
 - **OS audio I/O (Linux today)**: `audio.devices()` enumerates capture + playback devices via ALSA; `audio.capture({ device, sampleRate, channels })` returns a stream whose `.frames()` async-iterator yields `Float32Array` PCM chunks straight from `snd_pcm_readi`; `audio.play({ ... }).write(samples)` pushes PCM through `snd_pcm_writei`. Format on the wire is S16_LE; conversion to/from `Float32` happens in C++. CoreAudio + WASAPI backends mount on the same surface in follow-ups.
 
+### Speech (`bun:speech`)
+
+`bun:speech` is the voice-IO leg of the on-device AI stack — VAD-gated utterance segmentation, Whisper-based speech-to-text, and Piper text-to-speech. Composes `bun:audio`'s mic / DSP primitives with `bun:llm`'s Whisper runtime; no cloud round-trip, no Python sidecar.
+
+```ts
+import audio  from "bun:audio";
+import speech from "bun:speech";
+
+await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
+
+// VAD-gated segmenter — yields one Utterance per spoken phrase.
+const utterances = speech.listen(mic.frames(), { sampleRate: mic.sampleRate });
+
+for await (const utt of utterances) {
+  const text = await speech.transcribe(utt, {
+    engine: "whisper",
+    model: "/models/ggml-tiny.en.bin",
+  });
+  console.log("you said:", text);
+
+  const out = await speech.speak(`I heard: ${text}`, {
+    engine: "piper",
+    model: "/models/en_US-lessac-medium.onnx",
+  });
+  // out.samples is f32 mono PCM at out.sampleRate — pipe to audio.play()
+}
+```
+
+- **`listen(stream, { sampleRate })`** — async-iterator wrapper over any `Float32Array` chunk source. Tracks an adaptive noise floor, gates on energy + hangover, emits `{ samples, startMs, endMs }` per utterance. The returned stream exposes reactive signals: `active` (true while a phrase is in progress), `noiseFloor` (current dB estimate), and `lastUtterance` (most recent emitted phrase).
+- **`transcribe(utt, { engine: "whisper", model })`** — loads a Whisper `ggml-*.bin` via `bun:llm.WhisperModel` and runs the encoder-decoder forward pass. `tiny.en` (78 MB) is the recommended starting point; `base.en` decodes too but currently has a known regression we're tracking.
+- **`speak(text, { engine: "piper", model })`** — runs the Piper voice synthesizer (subprocess in v1; libpiper FFI in v2). Returns `{ samples, sampleRate, channels }` ready for `audio.play().write()`.
+
+`speech.listen` works as a standalone primitive — pass it any iterable of `Float32Array` (file-backed, network, synthetic) and it'll emit utterances.
+
+### Voice Assistant (`bun:assistant`)
+
+`bun:assistant` is a Tier 2 facade that composes `bun:audio` + `bun:speech` + `bun:llm` into a complete edge AI assistant. The 3-line case stays 3 lines; new fields unlock new capabilities.
+
+```ts
+import assistant from "bun:assistant";
+
+await using bot = await assistant.create({
+  llm: "/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+  stt: "/models/ggml-tiny.en.bin",
+  tts: "/models/en_US-lessac-medium.onnx",
+  system: "You are a concise voice assistant.",
+});
+
+await bot.run();   // for await (const _ of bot.turns()) {}
+```
+
+- **One module, full duplex**: mic capture → VAD → Whisper STT → LLM → Piper TTS → speaker. Fully local, no cloud.
+- **Async-iterator-shaped**: `bot.turns()` yields one `Turn` per user utterance + assistant reply round-trip. `bot.run()` is the drain. `bot.ask(text)` skips STT for text-only turns; `bot.say(text)` pushes a proactive utterance.
+- **Reactive surface**: `bot.state` (`"idle" | "listening" | "thinking" | "speaking"`), `bot.history` (the message array), `bot.lastTurn`, and `bot.interrupted` are all `bun:signals` Signals — wire them directly into a UI without polling.
+- **Persistent memory** (opt-in): pass `memory: "/path/to/memory.sqlite"` and conversation turns persist across process restarts. `bot.memory` is exposed for direct inspection; the underlying schema is a single `turns(role, content, ts)` table.
+- **Power users keep their seat**: `bot.llm` exposes the underlying `LLM` instance so anything reachable directly via `bun:llm` / `bun:speech` / `bun:audio` is reachable through `bot` too.
+- **Disposal is deterministic**: `await using` for the common path, explicit `bot.close()` for the rest. All composed resources (mic, speaker, models, sqlite) close in lockstep; idempotent.
+
+What v1 ships (per `PLAN-bun-assistant.md` build order): `assistant.create`, `bot.run` / `turns` / `ask` / `say`, the four signals, in-memory transcript, sqlite-backed persistent memory. Deferred follow-ups (tracked under LYK-760): tools / MCP, wake word + barge-in, RAG, scheduled prompts, and vision (VLM) turns.
+
 ### Streaming CSV (`bun:csv`)
 
 `bun:csv.parseCsv(source, opts?)` is an async-generator CSV parser with full RFC 4180 quoting / escapes, configurable delimiter and quote character, header-mode (yields `Record<string, value>` rows), and per-cell type inference (`number` / `boolean` / `null`). An opt-in `parallel: true` mode chunks the input across `bun:parallel`'s worker pool when the input is large enough and contains no quoted cells; otherwise it falls through to the serial state machine.
@@ -366,7 +439,7 @@ Parabun's positioning is to open typical JS performance bottlenecks via multithr
 
 - **Tier 0 — primitives** (shipped): `bun:simd`, `bun:gpu`, `bun:parallel`, `bun:arena`, `bun:pipeline`, `bun:signals`, `bun:rtp`. These are the building blocks that reach hardware directly.
 - **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`. Codecs, capture devices, on-device LLM inference — built on Tier 0.
-- **Tier 2 — applications** (`bun:vision` and `bun:speech` ship orchestration with engine stubs; `bun:arrow` ships the in-memory model + computes + IPC reader/writer, Parquet pending): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `bun:llm` as `llm.serve()`.)
+- **Tier 2 — applications** (`bun:speech` ships full STT + TTS, `bun:assistant` ships the edge voice-assistant facade, `bun:arrow` ships the in-memory model + computes + IPC reader/writer with Parquet pending; `bun:vision` ships orchestration with detector / OCR engines stubbed): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `bun:llm` as `llm.serve()`.)
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
@@ -380,7 +453,8 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 | shipped     | `bun:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
 | partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
 | partial     | `bun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
-| partial     | `bun:speech` (Tier 2) | VAD-gated utterance segmentation ships today (`speech.listen` over any audio chunk iterator). Whisper STT (`transcribe`) stubs pending encoder-decoder transformer support in `bun:llm`; Piper TTS (`speak`) stubs pending libpiper / ONNX vendor add. |
+| shipped     | `bun:speech` (Tier 2) | VAD-gated `listen()` (returns reactive utterance stream with `active` / `noiseFloor` / `lastUtterance` signals), Whisper `transcribe()` via `bun:llm.WhisperModel`, Piper `speak()` via subprocess (libpiper FFI v2 tracked under LYK-758). |
+| shipped     | `bun:assistant` (Tier 2) | Three-line voice-assistant facade composing `bun:audio` + `bun:speech` + `bun:llm`. `bot.run` / `turns` / `ask` / `say` + reactive `state` / `history` / `lastTurn` / `interrupted` signals + sqlite-backed persistent memory. Tool dispatch, wake word, barge-in, RAG, vision deferred to follow-ups. |
 | partial     | `bun:arrow` (Tier 2)  | In-memory columnar tables (`RecordBatch`, `Table`, `Column`), type inference from typed arrays, validity bitmaps, computes (`sum` / `mean` / `min` / `max` / `count` / `variance` / `stddev` / `quantile` / `median` / `distinct` / `filter` / `groupBy`), `fromRows` / `toRows` for the row ↔ columnar bridge, and Arrow IPC streaming format (`fromIPC` / `toIPC` with dictionary-batch decode — reads apache-arrow / pyarrow / arrow-rs / polars / duckdb output for the six supported logical types, both plain and Dictionary<Utf8>). Wire compat verified against apache-arrow 21.1.0 (see `bench/parabun-arrow-ipc-interop/`). Parquet pending. |
 | in progress | `bun:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
 | next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |

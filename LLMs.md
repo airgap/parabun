@@ -628,6 +628,31 @@ large enough (`winsForSize("simdMap", n, 4)`), `bun:pipeline`'s
 `simd.mulScalar`+`simd.addScalar`. Transparent fallback on hosts
 without a real GPU backend — same code path, CPU kernels at the end.
 
+### Tier 1 / Tier 2 modules
+
+The runtime ships a number of higher-level modules built on the
+primitives above. They aren't reproduced here — see the README for
+the user-facing surface, and `src/js/bun/*.ts` for the source:
+
+- **Tier 1** (codecs + capture + inference): `bun:image`,
+  `bun:audio` (codecs + DSP + ALSA capture/playback), `bun:camera`
+  (V4L2), `bun:csv`, `bun:llm` (GGUF Llama/Qwen2 + BERT embeddings +
+  Whisper STT, with `m.busy` / `m.device` reactive signals),
+  `bun:rtp`.
+- **Tier 2** (applications): `bun:speech` (`listen` / `transcribe` /
+  `speak`, with reactive `active` / `noiseFloor` / `lastUtterance`
+  signals), `bun:assistant` (the 3-line voice-assistant facade —
+  composes `bun:audio` + `bun:speech` + `bun:llm`, exposes `state` /
+  `history` / `lastTurn` / `interrupted` signals + sqlite-backed
+  persistent memory), `bun:vision` (motion detection ships, detector /
+  OCR engines stubbed), `bun:arrow` (in-memory tables + computes + IPC
+  streaming wire-compatible with apache-arrow 21.x).
+
+All of these are registered in `src/bun.js/HardcodedModule.zig`.
+Edits to `src/js/bun/*.ts` need a runtime cache clear
+(`rm -rf ~/.bun/install/cache/@t@/*.pile`) and a touch of
+`InternalModuleRegistry.cpp` so the bundler regenerates.
+
 ## Browser compilation
 
 Parse-time syntax (`pure`, `memo`, `|>`, `..=`, `..!`, `..&`, range, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `bun:arena`, `signal` / `effect` / `~>` import `bun:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
