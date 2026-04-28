@@ -42,10 +42,13 @@
 //     Implemented as VAD-gated whisper transcription + phrase match
 //     (`speech.wakeWord` is the standalone primitive); a follow-up will plug
 //     in a dedicated low-power KWS engine for battery-powered devices.
+//   - Scheduled prompts (step 7, LYK-737) — pass `schedule: [{cron, prompt}]`
+//     and the bot fires `bot.ask(prompt)` on each cron match. Resulting
+//     Turn carries `scheduled: true`. 5-field cron, local time. Skipped if
+//     the bot is mid-turn; next minute retries.
 //
 // Still deferred:
 //   - RAG (step 6)
-//   - Scheduled prompts (step 7)
 //   - Vision / VLM (step 8)
 
 const audio = require("./audio.ts");
@@ -86,6 +89,14 @@ type Turn = {
    * `assistant` field still reflects what the model produced before the cut.
    */
   interrupted: boolean;
+  /**
+   * True if this turn was fired by the `schedule` option (LYK-737) rather
+   * than a user utterance / explicit `bot.ask`. The `user` field carries the
+   * scheduled prompt text. Lets consumers filter the transcript ("show me
+   * everything _I_ said") and lets `lastTurn` subscribers route proactive
+   * turns differently (notification vs. inline log entry).
+   */
+  scheduled: boolean;
 };
 
 // ─── Tool dispatch (LYK-734) ───────────────────────────────────────────────
@@ -230,6 +241,24 @@ type AssistantOptions = {
    * `wakeWord: { phrase: "hey jetson" }`.
    */
   wakeWord?: string | WakeWordConfig;
+  /**
+   * Scheduled / proactive prompts (LYK-737). The bot fires `bot.ask(prompt)`
+   * on each cron match, in local time. Standard 5-field cron syntax:
+   * `"minute hour day-of-month month day-of-week"`. Supports `*`, exact
+   * values, ranges (`N-M`), lists (`N,M`), and step (`*` or `N-M` `/N`).
+   *
+   * The resulting Turn carries `scheduled: true` so consumers can filter.
+   * Skipped if the bot is mid-turn (state ≠ "idle"/"listening") — the next
+   * tick (≤ 60 s later) retries.
+   */
+  schedule?: ScheduledPrompt[];
+};
+
+type ScheduledPrompt = {
+  /** Cron expression, local time. e.g. `"0 8 * * *"` for 8 AM every day. */
+  cron: string;
+  /** Prompt text fed straight into `bot.ask()`. */
+  prompt: string;
 };
 
 type WakeWordConfig = {
@@ -319,6 +348,92 @@ class SqliteMemoryStore implements MemoryStore {
   }
 }
 
+// ─── Cron parser (LYK-737) ─────────────────────────────────────────────────
+//
+// Standard 5-field cron: `minute hour day-of-month month day-of-week`.
+// Each field is one of:
+//   *           any value
+//   N           exact value
+//   N-M         inclusive range
+//   N,M,P       list (mixes with ranges: `1,3,5-7`)
+//   */N         step (every Nth) starting from the field's min
+//   N-M/P       range with step
+//
+// Resolved into precomputed Sets per field so cronMatches is O(1) per check.
+
+type CronSpec = {
+  minute: Set<number>;
+  hour: Set<number>;
+  dom: Set<number>;
+  month: Set<number>;
+  dow: Set<number>;
+};
+
+const CRON_FIELD_RANGES = [
+  { min: 0, max: 59 }, // minute
+  { min: 0, max: 23 }, // hour
+  { min: 1, max: 31 }, // day-of-month
+  { min: 1, max: 12 }, // month
+  { min: 0, max: 6 }, // day-of-week (0 = Sunday)
+] as const;
+
+function parseCronField(part: string, idx: number): Set<number> {
+  const { min, max } = CRON_FIELD_RANGES[idx];
+  const out = new Set<number>();
+  for (const piece of part.split(",")) {
+    let rangeAndStep = piece;
+    let step = 1;
+    const slash = piece.indexOf("/");
+    if (slash >= 0) {
+      rangeAndStep = piece.slice(0, slash);
+      step = parseInt(piece.slice(slash + 1), 10);
+      if (!Number.isFinite(step) || step <= 0) {
+        throw new Error(`bun:assistant: invalid cron step "${piece}"`);
+      }
+    }
+    let lo: number, hi: number;
+    if (rangeAndStep === "*") {
+      lo = min;
+      hi = max;
+    } else if (rangeAndStep.indexOf("-") >= 0) {
+      const dash = rangeAndStep.indexOf("-");
+      lo = parseInt(rangeAndStep.slice(0, dash), 10);
+      hi = parseInt(rangeAndStep.slice(dash + 1), 10);
+    } else {
+      lo = hi = parseInt(rangeAndStep, 10);
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo < min || hi > max || lo > hi) {
+      throw new Error(`bun:assistant: cron field "${piece}" out of range [${min}, ${max}]`);
+    }
+    for (let v = lo; v <= hi; v += step) out.add(v);
+  }
+  return out;
+}
+
+function parseCron(expr: string): CronSpec {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    throw new Error(`bun:assistant: cron expression must have 5 fields (got ${parts.length}): "${expr}"`);
+  }
+  return {
+    minute: parseCronField(parts[0], 0),
+    hour: parseCronField(parts[1], 1),
+    dom: parseCronField(parts[2], 2),
+    month: parseCronField(parts[3], 3),
+    dow: parseCronField(parts[4], 4),
+  };
+}
+
+function cronMatches(spec: CronSpec, date: Date): boolean {
+  return (
+    spec.minute.has(date.getMinutes()) &&
+    spec.hour.has(date.getHours()) &&
+    spec.dom.has(date.getDate()) &&
+    spec.month.has(date.getMonth() + 1) &&
+    spec.dow.has(date.getDay())
+  );
+}
+
 // ─── Assistant ─────────────────────────────────────────────────────────────
 
 class Assistant {
@@ -365,6 +480,18 @@ class Assistant {
 
   // ─── Wake word (LYK-739) ───
   #wakeWord: WakeWordConfig | null = null;
+
+  // ─── Scheduled prompts (LYK-737) ───
+  /** Parsed cron specs paired with their prompt text + last-fired-minute key. */
+  #schedules: { spec: CronSpec; prompt: string; lastFiredKey: number }[] = [];
+  /** Aligns first tick to the next :00 second boundary. */
+  #scheduleAlignTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Per-minute tick interval after the alignment fires. */
+  #scheduleTimer: ReturnType<typeof setInterval> | null = null;
+  /** True while a scheduled turn is being awaited — guards against re-entry. */
+  #scheduleBusy = false;
+  /** Set true so #runTurn knows the next turn is proactive. */
+  #scheduledFlag = false;
 
   #disposed = false;
 
@@ -472,6 +599,17 @@ class Assistant {
       this.#wakeWord = typeof opts.wakeWord === "string" ? { phrase: opts.wakeWord } : opts.wakeWord;
     }
 
+    if (opts.schedule && opts.schedule.length > 0) {
+      for (const s of opts.schedule) {
+        if (typeof s.cron !== "string" || typeof s.prompt !== "string") {
+          throw new TypeError("bun:assistant: schedule entries must have string `cron` and `prompt` fields");
+        }
+        // parseCron throws on invalid syntax; let it propagate so the user
+        // gets the error at create() time, not silently inside a tick.
+        this.#schedules.push({ spec: parseCron(s.cron), prompt: s.prompt, lastFiredKey: -1 });
+      }
+    }
+
     if (opts.system) {
       this.#messages.push({ role: "system", content: opts.system });
       this.#history.set(this.#messages.slice());
@@ -517,7 +655,70 @@ class Assistant {
 
     // Optional: speaker — opened lazily on first speak() call so we know
     // the TTS-emitted sample rate to negotiate with ALSA.
+
+    // Optional: schedule timers (LYK-737). Align the first tick to the
+    // next :00 second of the next minute, then setInterval at 60 s. The
+    // alignment matters: a cron entry of `0 8 * * *` should fire as close
+    // to 08:00:00 as possible, not at whatever second create() finished.
+    if (bot.#schedules.length > 0) bot.#startScheduleTimers();
+
     return bot;
+  }
+
+  #startScheduleTimers(): void {
+    const tick = () => this.#scheduleTick().catch(() => undefined);
+    const now = new Date();
+    // ms to the start of the next minute. Subtract a small epsilon so a
+    // sub-millisecond drift doesn't push us into the wrong minute.
+    const msToNext = 60000 - (now.getSeconds() * 1000 + now.getMilliseconds());
+    this.#scheduleAlignTimer = setTimeout(() => {
+      this.#scheduleAlignTimer = null;
+      tick();
+      this.#scheduleTimer = setInterval(tick, 60000);
+    }, msToNext);
+  }
+
+  async #scheduleTick(): Promise<void> {
+    if (this.#disposed) return;
+    if (this.#scheduleBusy) return; // already running a scheduled turn
+    // Skip if the bot is mid-turn — a scheduled fire colliding with a live
+    // user turn would race on #messages. The next tick (≤60 s) retries.
+    const state = this.#state.peek();
+    if (state !== "idle" && state !== "listening") return;
+
+    const now = new Date();
+    // De-dup key: minute-of-epoch. A schedule that matches "*/15 * * * *"
+    // shouldn't fire twice within the same minute even if our timer drifts.
+    const minuteKey = Math.floor(now.getTime() / 60000);
+
+    const due: { entry: { spec: CronSpec; prompt: string; lastFiredKey: number }; prompt: string }[] = [];
+    for (const entry of this.#schedules) {
+      if (entry.lastFiredKey === minuteKey) continue;
+      if (cronMatches(entry.spec, now)) {
+        entry.lastFiredKey = minuteKey;
+        due.push({ entry, prompt: entry.prompt });
+      }
+    }
+    if (due.length === 0) return;
+
+    this.#scheduleBusy = true;
+    try {
+      for (const { prompt } of due) {
+        if (this.#disposed) break;
+        this.#scheduledFlag = true;
+        try {
+          await this.ask(prompt);
+        } catch {
+          // Surface as a console error in the future (PLAN-bun-assistant
+          // §"Errors should not be invisible") — for now drop the throw
+          // so a single failing schedule doesn't kill the timer.
+        } finally {
+          this.#scheduledFlag = false;
+        }
+      }
+    } finally {
+      this.#scheduleBusy = false;
+    }
   }
 
   /**
@@ -713,6 +914,7 @@ class Assistant {
       startedAtMs,
       endedAtMs,
       interrupted,
+      scheduled: this.#scheduledFlag,
     };
     this.#lastTurn.set(turn);
     return turn;
@@ -927,6 +1129,14 @@ class Assistant {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#state.set("idle");
+    if (this.#scheduleAlignTimer) {
+      clearTimeout(this.#scheduleAlignTimer);
+      this.#scheduleAlignTimer = null;
+    }
+    if (this.#scheduleTimer) {
+      clearInterval(this.#scheduleTimer);
+      this.#scheduleTimer = null;
+    }
     if (this.#mic) {
       try {
         await this.#mic.close();
@@ -965,4 +1175,8 @@ async function create(opts: AssistantOptions): Promise<Assistant> {
 export default {
   create,
   Assistant,
+  // Cron primitives (LYK-737) — exposed for tests and for callers wiring
+  // their own scheduler. The `schedule:` option uses these internally.
+  parseCron,
+  cronMatches,
 };
