@@ -258,7 +258,17 @@ for (const entrypoint of bundledEntryPoints) {
       })
       .replace(/return \$\nexport /, "return")
       .replace(/__intrinsic__/g, "@")
-      .replace(/__no_intrinsic__/g, "") + "\n";
+      .replace(/__no_intrinsic__/g, "")
+      // LYK-759: bun build's `__callDispose` runtime helper (emitted when
+      // a source file uses `using` / `await using`) calls Symbol.[async]
+      // Dispose via `it[1].call(it[2])`. JSC's BuiltinExecutables parser
+      // — older / more conservative than the main JS parser — rejects
+      // bare `.call` with `Unrecognized token 'call'`, the same restriction
+      // that forces builtin authors to write `.$call` instead. Bracket
+      // notation reads identically at runtime and the parser accepts it,
+      // so we do the rewrite once here and `using` keywords drop out of
+      // the failure mode entirely.
+      .replace(/it\[1\]\.call\(/g, 'it[1]["call"](') + "\n";
   captured = captured.replace(
     /function\s*\(.*?\)\s*{/,
     '$&"use strict";' +

@@ -1,3 +1,20 @@
+// LYK-759 PROBE: await using inside a builtin async function. The dispose
+// callback writes through a closure'd Set so we can observe it ran *after*
+// the async function returned (try/finally in async functions completes
+// before the resolve, but `disposed` from inside the function body would
+// be captured by the return value before finally fires — using a Set
+// reference outside the body sidesteps that).
+async function __lyk759Probe(events: string[]): Promise<void> {
+  events.push("body-start");
+  await using x = {
+    [Symbol.asyncDispose]: async () => {
+      events.push("disposed");
+    },
+  };
+  void x;
+  events.push("body-end");
+}
+
 // Hardcoded module "bun:speech"
 //
 // Tier 2 orchestration module — composes audio capture (bun:audio I/O) +
@@ -938,4 +955,6 @@ export default {
   closePiperSessions,
   wakeWord,
   matchWakePhrase,
+  // LYK-759 probe export — exercises await using inside a builtin module.
+  __lyk759Probe,
 };
