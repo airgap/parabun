@@ -28,6 +28,19 @@ const TWO_PI = 2 * Math.PI;
 const native = $cpp("parabun_audio_codecs.cpp", "createParabunAudioCodecs");
 const io = $cpp("parabun_audio_io.cpp", "createParabunAudioIO");
 
+// Sibling builtin — used to expose live state on CaptureStream as
+// Signals so consumers can subscribe / use in `effect { ... }`.
+// See `/raid/parabun-site/PLAN-module-signals.md` for the cross-module
+// reactive surface plan.
+const signals = require("./signals.ts");
+// Structural shape — keeps audio.ts honest about not poking at internals.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
+
 // FinalizationRegistry to back-stop forgotten close() calls. Holders that
 // drop without calling .close() leak their libopus state until GC; the
 // registry runs at GC time and frees anything still alive.
@@ -1805,6 +1818,19 @@ interface CaptureStream extends AsyncDisposable {
   readonly sampleRate: number;
   readonly channels: number;
   readonly device: string;
+  /**
+   * Per-frame RMS level, normalized to [0, 1]. Updates on every emitted
+   * frame; subscribe via `peakLevel.subscribe(cb)` for a VU meter, or
+   * read inside an `effect { ... }` for barge-in heuristics. Inert
+   * (no further updates) once the stream is closed.
+   */
+  readonly peakLevel: Signal<number>;
+  /**
+   * True once the first frame has been emitted, false again on close().
+   * Useful for "mic is live" status indicators that don't want to wait
+   * for the first sample to confirm the device opened.
+   */
+  readonly active: Signal<boolean>;
   /** Stream interleaved Float32 frames as an async iterator. */
   frames(opts?: { frameMs?: number }): AsyncIterableIterator<CaptureFrame>;
   /** Stop capturing and release the device. Idempotent. */
@@ -1850,6 +1876,20 @@ class CaptureStreamImpl implements CaptureStream {
   channels: number;
   device: string;
   #periodFrames: number;
+  #peakLevel: WritableSignal<number>;
+  #active: WritableSignal<boolean>;
+
+  // Read-only signal accessors. The internal #-prefixed fields are
+  // WritableSignal to allow `.set()` from frames()/close(); the public
+  // surface exposes them as `Signal<T>` so consumers can `.get()` and
+  // `.subscribe()` without being able to spoof a value.
+  get peakLevel(): Signal<number> {
+    return this.#peakLevel;
+  }
+
+  get active(): Signal<boolean> {
+    return this.#active;
+  }
 
   constructor(handle: bigint, device: string, sampleRate: number, channels: number, periodFrames: number) {
     this.#handle = handle;
@@ -1857,14 +1897,35 @@ class CaptureStreamImpl implements CaptureStream {
     this.sampleRate = sampleRate;
     this.channels = channels;
     this.#periodFrames = periodFrames;
+    this.#peakLevel = signals.signal(0);
+    this.#active = signals.signal(false);
     pcmRegistry.register(this, handle, this);
   }
 
   async *frames(opts?: { frameMs?: number }): AsyncIterableIterator<CaptureFrame> {
     const frames =
       opts?.frameMs != null ? Math.max(64, Math.round((this.sampleRate * opts.frameMs) / 1000)) : this.#periodFrames;
+    let firstFrame = true;
+    // Rate-limit peak updates to ~10 Hz so a 60 fps consumer effect
+    // doesn't run on every 20 ms frame at 16 kHz. See PLAN-module-signals
+    // §"Open decisions: fps / peakLevel update rate".
+    let lastEmitMs = 0;
     while (this.#handle !== 0n) {
       const r = io.captureRead(this.#handle, frames);
+      if (firstFrame) {
+        this.#active.set(true);
+        firstFrame = false;
+      }
+      const now = r.timestampMs;
+      if (now - lastEmitMs >= 100 || lastEmitMs === 0) {
+        // RMS, normalized: samples are already in [-1, 1].
+        let sumSq = 0;
+        const s = r.samples;
+        for (let i = 0; i < s.length; i++) sumSq += s[i] * s[i];
+        const rms = s.length > 0 ? Math.sqrt(sumSq / s.length) : 0;
+        this.#peakLevel.set(rms);
+        lastEmitMs = now;
+      }
       yield { samples: r.samples, timestampMs: r.timestampMs, overrun: r.overrun };
     }
   }
@@ -1875,6 +1936,7 @@ class CaptureStreamImpl implements CaptureStream {
     if (h !== 0n) {
       pcmRegistry.unregister(this);
       io.closePcm(h);
+      this.#active.set(false);
     }
   }
 
