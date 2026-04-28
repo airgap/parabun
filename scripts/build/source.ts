@@ -1054,6 +1054,25 @@ function emitNestedCmake(
     args.push(`-DCMAKE_OSX_SYSROOT=${cfg.osxSysroot}`);
   }
 
+  // Linux cross-compile: tell cmake the project is targeting a different
+  // arch than the host. Without this, cmake's find_package() walks the
+  // host's library paths and "finds" host-arch libs that fail to link
+  // (libpng's find_package(ZLIB) hits /usr/lib/x86_64-linux-gnu/libz.so
+  // when cross-compiling to aarch64). FIND_ROOT_PATH=/ + LIBRARY=ONLY
+  // restricts library/header lookup to the cross sysroot's tree, where
+  // crossbuild-essential-arm64 puts /usr/aarch64-linux-gnu/lib/.
+  if (cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64") {
+    args.push(`-DCMAKE_SYSTEM_NAME=Linux`);
+    args.push(`-DCMAKE_SYSTEM_PROCESSOR=aarch64`);
+    args.push(`-DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu`);
+    args.push(`-DCMAKE_CXX_COMPILER_TARGET=aarch64-linux-gnu`);
+    args.push(`-DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu`);
+    args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER`);
+    args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY`);
+    args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY`);
+    args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY`);
+  }
+
   // Generator + build type. BUILD_SHARED_LIBS=OFF by default — every dep
   // wants static, and many (boringssl, zlib, highway...) rely on this
   // being set globally rather than having their own MY_LIB_SHARED=OFF flag.
@@ -1104,6 +1123,17 @@ function emitNestedCmake(
 
   args.push(`-DCMAKE_C_FLAGS=${cflags}`);
   args.push(`-DCMAKE_CXX_FLAGS=${cxxflags}`);
+
+  // Cross-compile from x86_64 to aarch64-linux: deps with .S/.s assembly
+  // (boringssl's perlasm output) get the host arch unless we forward the
+  // target triple to the assembler too. cmake routes .S through the C
+  // compiler for preprocessing+assemble, so it picks up CMAKE_C_FLAGS;
+  // but if a project enables ASM as a separate language, only
+  // CMAKE_ASM_FLAGS reaches the assembly path. Forward our cross flags
+  // into both so the .o files come out as elf64-littleaarch64.
+  if (cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64") {
+    args.push(`-DCMAKE_ASM_FLAGS=--target=aarch64-linux-gnu --gcc-toolchain=/usr`);
+  }
 
   // Dep-specific -D args go LAST so a dep can override anything above
   // if it really needs to. (Rare — we don't expect deps to fight the
@@ -1263,6 +1293,15 @@ function emitCargo(n: Ninja, cfg: Config, name: string, spec: CargoBuild, input:
     const triple = spec.rustTarget ?? (cfg.arm64 ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc");
     const envKey = `CARGO_TARGET_${triple.toUpperCase().replace(/-/g, "_")}_LINKER`;
     env[envKey] = cfg.msvcLinker;
+  }
+
+  // Linux arm64 cross-compile from x86_64: cargo's default linker
+  // (rust-lld) doesn't know to link aarch64 against the cross sysroot.
+  // Point it at aarch64-linux-gnu-gcc, which Debian/Ubuntu ships via
+  // crossbuild-essential-arm64. Same env var pattern as Windows.
+  if (cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64" && spec.rustTarget) {
+    const envKey = `CARGO_TARGET_${spec.rustTarget.toUpperCase().replace(/-/g, "_")}_LINKER`;
+    env[envKey] = "aarch64-linux-gnu-gcc";
   }
 
   // ─── Emit build node ───

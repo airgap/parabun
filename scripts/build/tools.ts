@@ -425,13 +425,11 @@ export function resolveLlvmToolchain(
     ld = ""; // darwin: unused
   }
 
-  // strip: GNU strip on Linux (more features), llvm-strip elsewhere
-  let strip: string;
-  if (os === "linux") {
-    strip = findTool({ names: ["strip"], required: true, hint: "Install binutils for your distro" })?.path ?? "";
-  } else {
-    strip = findLlvmTool("llvm-strip", paths, os, { checkVersion: false, required: true })?.path ?? "";
-  }
+  // strip: always llvm-strip — same flag set as GNU strip for our needs
+  // (-R, --strip-all, --strip-debug, --discard-all are all supported), and
+  // unlike host GNU strip it can read the foreign-arch ELF a cross-compile
+  // produces. Switching to llvm-strip on Linux removes a special case.
+  const strip = findLlvmTool("llvm-strip", paths, os, { checkVersion: false, required: true })?.path ?? "";
 
   // dsymutil: darwin only
   let dsymutil: string | undefined;

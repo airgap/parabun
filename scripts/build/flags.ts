@@ -33,6 +33,11 @@ export interface Flag {
 //   -march/-mcpu/-mtune. Split out so deps that manage their own optimization
 //   and sanitizer flags (WebKit) can still inherit the target arch without
 //   the rest of globalFlags.
+//
+//   Includes cross-compile --target/--sysroot pairs when the host arch
+//   doesn't match the target arch (e.g. building linux-aarch64 from an
+//   x86_64 dev box). cmake nested deps inherit these via -DCMAKE_C_FLAGS /
+//   -DCMAKE_CXX_FLAGS, so their compiler-probe try_compile() succeeds.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const cpuTargetFlags: Flag[] = [
@@ -45,6 +50,15 @@ export const cpuTargetFlags: Flag[] = [
     flag: ["-march=armv8-a+crc", "-mtune=ampere1"],
     when: c => c.linux && c.arm64,
     desc: "ARM64 Linux: ARMv8-A base + CRC, tuned for Ampere (Graviton-like)",
+  },
+  {
+    // Cross-compile from x86_64 host to aarch64 Linux target. clang's
+    // driver picks linker, headers, and built-in lib paths from --target +
+    // --sysroot; lld inherits the same target. Without this clang would
+    // try to build for x86_64 and reject -march=armv8 as an unknown CPU.
+    flag: ["--target=aarch64-linux-gnu", "--gcc-toolchain=/usr"],
+    when: c => c.linux && c.arm64 && c.host.arch !== "aarch64",
+    desc: "Cross to aarch64-linux-gnu (clang target + gcc-toolchain for crt/libgcc)",
   },
   {
     flag: ["/clang:-march=armv8-a+crc", "/clang:-mtune=ampere1"],
@@ -593,6 +607,17 @@ export const defines: Flag[] = [
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const linkerFlags: Flag[] = [
+  // ─── Cross-compile target ───
+  // The clang driver routes link through lld; lld picks libdir / dynamic
+  // linker / start files from --target + --sysroot. cflags already carry
+  // these, but linker flags don't go through computeFlags's globalFlags
+  // path, so we duplicate them here.
+  {
+    flag: ["--target=aarch64-linux-gnu", "--gcc-toolchain=/usr"],
+    when: c => c.linux && c.arm64 && c.host.arch !== "aarch64",
+    desc: "Cross to aarch64-linux-gnu (link-time target + gcc-toolchain)",
+  },
+
   // ─── Sanitizers ───
   {
     flag: "-fsanitize=address",

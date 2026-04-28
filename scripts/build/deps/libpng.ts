@@ -4,6 +4,7 @@
  * libpng comes after zlib).
  */
 
+import { join } from "node:path";
 import type { Dependency } from "../source.ts";
 import { depBuildDir } from "../source.ts";
 
@@ -24,19 +25,35 @@ export const libpng: Dependency = {
   // sees them before invoking cmake.
   fetchDeps: ["zlib"],
 
-  build: () => ({
-    kind: "nested-cmake",
-    targets: ["png_static"],
-    args: {
-      PNG_STATIC: "ON",
-      PNG_SHARED: "OFF",
-      PNG_TESTS: "OFF",
-      PNG_TOOLS: "OFF",
-      PNG_FRAMEWORK: "OFF",
-      // Skip the optional command-line utilities (pngfix, pngimage, etc).
-      PNG_EXECUTABLES: "OFF",
-    },
-  }),
+  build: cfg => {
+    // Point find_package(ZLIB) at our vendored zlib build instead of the
+    // host's system zlib. Native x86_64 builds happen to work because
+    // /usr/lib/.../libz.so is present and architecturally compatible —
+    // cross-compile breaks the moment cmake's CMAKE_FIND_ROOT_PATH=ONLY
+    // restricts the lookup to the cross sysroot, where there's no zlib
+    // unless we install zlib1g-dev:arm64 (Ubuntu archive doesn't even
+    // serve that without ports.ubuntu.com gymnastics). Explicit paths
+    // are simpler: the build sequencer guarantees zlib's libz.a + headers
+    // exist by the time libpng configures (fetchDeps: ["zlib"]).
+    const zlibBuild = depBuildDir(cfg, "zlib");
+    const zlibLib = join(zlibBuild, `${cfg.libPrefix}z${cfg.libSuffix}`);
+    return {
+      kind: "nested-cmake",
+      targets: ["png_static"],
+      args: {
+        PNG_STATIC: "ON",
+        PNG_SHARED: "OFF",
+        PNG_TESTS: "OFF",
+        PNG_TOOLS: "OFF",
+        PNG_FRAMEWORK: "OFF",
+        // Skip the optional command-line utilities (pngfix, pngimage, etc).
+        PNG_EXECUTABLES: "OFF",
+        // Explicit zlib paths — see comment above.
+        ZLIB_LIBRARY: zlibLib,
+        ZLIB_INCLUDE_DIR: zlibBuild,
+      },
+    };
+  },
 
   // Static lib output names:
   //   Unix release: libpng16.a            → "png16"

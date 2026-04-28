@@ -79,11 +79,15 @@ function prebuiltUrl(cfg: Config): string {
 
 /**
  * Prebuilt extraction dir. Suffix in the key so switching debug ↔ release
- * doesn't reuse a wrong-ABI extraction.
+ * (or x86_64 ↔ aarch64 ↔ darwin) doesn't reuse a wrong-ABI extraction.
+ * The os/arch pair is critical — without it, a cross-compile from x86_64
+ * to aarch64 happily reuses the host's x86_64 cache and the link step
+ * fails with "incompatible with elf64-littleaarch64".
  */
 function prebuiltDestDir(cfg: Config): string {
   const version16 = cfg.webkitVersion.slice(0, 16);
-  return resolve(cfg.cacheDir, `webkit-${version16}${prebuiltSuffix(cfg)}`);
+  const target = `${cfg.os}-${cfg.arch}`;
+  return resolve(cfg.cacheDir, `webkit-${version16}-${target}${prebuiltSuffix(cfg)}`);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -44,6 +44,12 @@ export const lolhtml: Dependency = {
     if (cfg.windows && cfg.arm64) {
       spec.rustTarget = "aarch64-pc-windows-msvc";
     }
+    // arm64-linux from x64 host: same idea, set the GNU triple. rustup must
+    // have the target installed (`rustup target add aarch64-unknown-linux-gnu`).
+    // Native arm64 host doesn't need this — host IS target.
+    if (cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64") {
+      spec.rustTarget = "aarch64-unknown-linux-gnu";
+    }
 
     return spec;
   },
