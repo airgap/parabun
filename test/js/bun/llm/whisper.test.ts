@@ -86,16 +86,33 @@ describe("bun:llm WhisperModel", () => {
     expect(model.busy.get()).toBe(false);
   });
 
-  // base.en currently transcribes to "[static] [static]..." (LYK-748).
-  // Skip is intentional and tied to a bug ticket; flip to `.skipIf(!haveBase)`
-  // when LYK-748 lands so the regression net catches future re-breakage.
-  test.skip("base.en transcribes JFK clip — substring match (BLOCKED on LYK-748)", async () => {
+  // base.en used to transcribe to "[static] [static]..." (LYK-748). The bug
+  // was rooted in the device-resident KV cache + fused multi-head SDPA
+  // landing path — at nHead=8/headDim=64 the decoder logits came back
+  // degenerate (best non-masked logit ~-0.6 vs tiny.en's ~17). Subsequent
+  // SDPA + KV refactors fixed it; this test is the net that keeps it
+  // fixed. The failure mode also catches the older LYK-757 NaN cascade
+  // ("!!!!" repeating) on the same path.
+  test.skipIf(!haveBase)("base.en transcribes JFK clip — substring match (LYK-748)", async () => {
     const llm = (await import("bun:llm")).default;
     const model = await llm.WhisperModel.load(baseEn);
     const { mel, T } = await loadJfkMel();
     const text = model.transcribeMel(mel, T);
+
+    // Real transcription contains "fellow Americans".
     expect(text.toLowerCase()).toContain("fellow americans");
+
+    // Specific [static] regression — refuse a string that's mostly the
+    // [static] special token. The original failure dumped that token
+    // hundreds of times in a row.
+    const staticHits = text.match(/\[static\]/gi)?.length ?? 0;
+    expect(staticHits).toBeLessThan(3);
+
+    // LYK-757 NaN-cascade failure mode (every token resolves to id 0).
     const exclamRatio = (text.match(/!/g)?.length ?? 0) / Math.max(text.length, 1);
     expect(exclamRatio).toBeLessThan(0.1);
+
+    // Busy signal cleared post-call (LYK-766).
+    expect(model.busy.get()).toBe(false);
   });
 });

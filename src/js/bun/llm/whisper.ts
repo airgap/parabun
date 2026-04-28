@@ -1467,12 +1467,23 @@ class WhisperModel {
     }
 
     // Pad / trim to exactly nAudioCtx*2 = 3000 frames.
+    //
+    // The pad value matters: Whisper's normalization (whisperMel above and
+    // audio.melSpectrogram with mode: "whisper") rescales log-mel to roughly
+    // [-1, 1], with the silence floor pinned to **-1**, not zero. Padding
+    // with zero looks like mid-range energy to the encoder — the failure
+    // mode is base.en producing "[static] [static] ..." for the entire
+    // decode (LYK-748). The transcribe() wrapper sidesteps this by zero-
+    // padding the PCM and then computing the mel, which produces the
+    // correct -1 floor; callers passing a mel directly weren't getting
+    // the same treatment until this fix.
     const Tdesired = h.nAudioCtx * 2;
     let melPacked: Float32Array;
     if (T === Tdesired) {
       melPacked = mel;
     } else {
       melPacked = new Float32Array(h.nMels * Tdesired);
+      melPacked.fill(-1);
       const Tcopy = Math.min(T, Tdesired);
       for (let m = 0; m < h.nMels; m++) {
         for (let t = 0; t < Tcopy; t++) {
