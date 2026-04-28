@@ -1015,10 +1015,14 @@ function sdpaSelf(
     return backend.sdpaSelf(unwrapGpuArg(Q), unwrapGpuArg(K), unwrapGpuArg(V), N, nHead, headDim, out);
   }
   // CPU fallback (matches the encoder's pre-fused JS scaled dot product).
+  // See sdpaSingleQuery's fallback for the GpuFloat32Array → handle → view
+  // unwrap rationale.
   const dim = nHead * headDim;
-  const Qh = unwrapGpuArg(Q) as Float32Array;
-  const Kh = unwrapGpuArg(K) as Float32Array;
-  const Vh = unwrapGpuArg(V) as Float32Array;
+  const toView = (x: FArray | GpuHandle): Float32Array =>
+    isGpuHandle(x) ? (x.view as Float32Array) : (x as Float32Array);
+  const Qh = toView(unwrapGpuArg(Q));
+  const Kh = toView(unwrapGpuArg(K));
+  const Vh = toView(unwrapGpuArg(V));
   const dst = out ?? new Float32Array(N * dim);
   const invSqrtHead = 1.0 / Math.sqrt(headDim);
   for (let h = 0; h < nHead; h++) {
@@ -1073,10 +1077,17 @@ function sdpaSingleQuery(
     return backend.sdpaSingleQuery(unwrapGpuArg(Q), unwrapGpuArg(K), unwrapGpuArg(V), kvLen, nHead, headDim, out);
   }
   // CPU fallback (matches the streaming softmax kernel semantics).
+  // unwrapGpuArg returns the underlying GpuHandle for a GpuFloat32Array
+  // input — handles still expose `.view` as the host-side Float32Array,
+  // so step through both shapes here to land on a real typed array.
+  // Without this, indexing a GpuHandle as if it were a Float32Array
+  // returns undefined and NaN poisons the entire output.
   const dim = nHead * headDim;
-  const Qh = unwrapGpuArg(Q) as Float32Array;
-  const Kh = unwrapGpuArg(K) as Float32Array;
-  const Vh = unwrapGpuArg(V) as Float32Array;
+  const toView = (x: FArray | GpuHandle): Float32Array =>
+    isGpuHandle(x) ? (x.view as Float32Array) : (x as Float32Array);
+  const Qh = toView(unwrapGpuArg(Q));
+  const Kh = toView(unwrapGpuArg(K));
+  const Vh = toView(unwrapGpuArg(V));
   const dst = out ?? new Float32Array(dim);
   const invSqrtHead = 1.0 / Math.sqrt(headDim);
   for (let h = 0; h < nHead; h++) {
