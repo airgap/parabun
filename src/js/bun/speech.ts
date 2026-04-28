@@ -38,6 +38,8 @@
 //      native speed. Same public API on both versions, so callers
 //      don't change when LYK-758 ships.
 
+const signalsMod = require("./signals.ts");
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 type AudioChunk = {
@@ -111,11 +113,56 @@ type Utterance = {
  * stops when the input stream ends or the consumer breaks. Backpressure
  * propagates: if the consumer is slow, the input stream waits.
  */
-async function* listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): AsyncIterableIterator<Utterance> {
+// Reactive surface attached to the iterable returned by listen() — see
+// PLAN-module-signals item 3. The signals stay live for the lifetime of
+// the iterator (one per listen() call).
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
+
+interface ListenStream extends AsyncIterableIterator<Utterance> {
+  /** True while a speech burst is currently being collected. */
+  readonly active: Signal<boolean>;
+  /**
+   * Adaptive noise-floor estimate (RMS, samples in [-1, 1]). Updates per
+   * analysis frame as the sliding window of recent energies fills.
+   */
+  readonly noiseFloor: Signal<number>;
+  /**
+   * Most recent emitted Utterance, or null until the first one seals.
+   * Useful for an effect that triggers on every utterance boundary
+   * without consuming the iterator.
+   */
+  readonly lastUtterance: Signal<Utterance | null>;
+}
+
+function listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): ListenStream {
   const sampleRate = opts.sampleRate;
   if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
     throw new RangeError("bun:speech.listen: opts.sampleRate must be > 0");
   }
+  const sigActive = signalsMod.signal(false) as WritableSignal<boolean>;
+  const sigNoiseFloor = signalsMod.signal(0) as WritableSignal<number>;
+  const sigLastUtterance = signalsMod.signal<Utterance | null>(null) as WritableSignal<Utterance | null>;
+  const gen = listenGenerator(stream, opts, sigActive, sigNoiseFloor, sigLastUtterance);
+  return Object.assign(gen, {
+    active: sigActive as Signal<boolean>,
+    noiseFloor: sigNoiseFloor as Signal<number>,
+    lastUtterance: sigLastUtterance as Signal<Utterance | null>,
+  });
+}
+
+async function* listenGenerator(
+  stream: AsyncIterable<AudioChunk>,
+  opts: ListenOptions,
+  sigActive: WritableSignal<boolean>,
+  sigNoiseFloor: WritableSignal<number>,
+  sigLastUtterance: WritableSignal<Utterance | null>,
+): AsyncIterableIterator<Utterance> {
+  const sampleRate = opts.sampleRate;
   const channels = opts.channels ?? 1;
   const frameSize = opts.frameSize ?? 480;
   const ratio = opts.ratio ?? 3.0;
@@ -151,6 +198,10 @@ async function* listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): 
   let silenceRun = 0;
 
   let frameWallStart = performance.now();
+  // Rate-limit noise-floor signal updates to ~10 Hz (per PLAN-module-signals
+  // §"Open decisions: fps / peakLevel update rate") so a busy mic doesn't
+  // re-fire effects 50× per second.
+  let lastFloorEmitMs = 0;
   const sealUtterance = (noiseFloor: number): Utterance | null => {
     if (utteranceFrames.length < minUtteranceFrames) {
       utteranceFrames = [];
@@ -193,6 +244,12 @@ async function* listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): 
 
     const isSpeech = rms > noiseFloor * ratio;
 
+    // Rate-limited noiseFloor signal update.
+    if (frameStartMs - lastFloorEmitMs >= 100 || lastFloorEmitMs === 0) {
+      sigNoiseFloor.set(noiseFloor);
+      lastFloorEmitMs = frameStartMs;
+    }
+
     if (!inUtterance) {
       // Maintain the pre-roll ring of silent frames.
       preRoll.push(frame);
@@ -205,6 +262,7 @@ async function* listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): 
 
       if (isSpeech) {
         inUtterance = true;
+        sigActive.set(true);
         utteranceFrames = preRoll.slice(); // copy refs; frames themselves are independent buffers
         utteranceStartMs = preRollFirstFrameMs;
         silenceRun = 0;
@@ -223,8 +281,10 @@ async function* listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): 
     silenceRun++;
     if (silenceRun >= hangoverFrames) {
       inUtterance = false;
+      sigActive.set(false);
       const utt = sealUtterance(noiseFloor);
       silenceRun = 0;
+      if (utt) sigLastUtterance.set(utt);
       return utt;
     }
     return null;
@@ -292,7 +352,14 @@ async function* listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): 
     let m = recentEnergies[0];
     for (let i = 1; i < recentCount; i++) if (recentEnergies[i] < m) m = recentEnergies[i];
     const utt = sealUtterance(Math.max(m, 1e-6));
-    if (utt) yield utt;
+    sigActive.set(false);
+    if (utt) {
+      sigLastUtterance.set(utt);
+      yield utt;
+    }
+  } else {
+    // Stream ended cleanly; ensure active stays false.
+    sigActive.set(false);
   }
 }
 
