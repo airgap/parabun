@@ -61,6 +61,29 @@ describe("bun:llm WhisperModel", () => {
     // resolves to id 0 (`!`) — the output should not be mostly `!`.
     const exclamRatio = (text.match(/!/g)?.length ?? 0) / Math.max(text.length, 1);
     expect(exclamRatio).toBeLessThan(0.1);
+
+    // LYK-766: busy is false post-call.
+    expect(model.busy.get()).toBe(false);
+  });
+
+  test.skipIf(!haveTiny)("WhisperModel.busy signal — initial false, transitions during transcribe", async () => {
+    const llm = (await import("bun:llm")).default;
+    const model = await llm.WhisperModel.load(tinyEn);
+    const { mel, T } = await loadJfkMel();
+
+    expect(typeof model.busy.get).toBe("function");
+    expect(typeof model.busy.subscribe).toBe("function");
+    expect(model.busy.get()).toBe(false);
+
+    const trace: boolean[] = [];
+    const unsub = model.busy.subscribe((v: boolean) => trace.push(v));
+    model.transcribeMel(mel, T);
+    unsub();
+
+    // Subscribe delivers current value first, then the actual transitions.
+    expect(trace).toContain(true);
+    expect(trace[trace.length - 1]).toBe(false);
+    expect(model.busy.get()).toBe(false);
   });
 
   // base.en currently transcribes to "[static] [static]..." (LYK-748).

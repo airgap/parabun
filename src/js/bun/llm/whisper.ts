@@ -42,6 +42,14 @@
 // B[inDim, outDim] for X @ W^T. The transpose is a one-shot cost at
 // load time.
 const gpu = require("../gpu.ts");
+const signalsMod = require("../signals.ts");
+
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
 interface BinModel {
   magic: number;
@@ -1084,11 +1092,30 @@ class WhisperModel {
   hparams: WhisperHParams;
   weights: WhisperWeights;
   tokenizer: WhisperTokenizer;
+  // PLAN-module-signals item 2 row 4: `whisper.busy`. Refcount-backed
+  // for symmetry with `LLM.busy` — sibling commit `71e885ece9`.
+  #busyCount = 0;
+  #busy: WritableSignal<boolean>;
+
+  get busy(): Signal<boolean> {
+    return this.#busy;
+  }
+
+  #beginBusy(): void {
+    this.#busyCount++;
+    if (this.#busyCount === 1) this.#busy.set(true);
+  }
+
+  #endBusy(): void {
+    this.#busyCount = Math.max(0, this.#busyCount - 1);
+    if (this.#busyCount === 0) this.#busy.set(false);
+  }
 
   constructor(hparams: WhisperHParams, weights: WhisperWeights, tokenizer: WhisperTokenizer) {
     this.hparams = hparams;
     this.weights = weights;
     this.tokenizer = tokenizer;
+    this.#busy = signalsMod.signal(false);
   }
 
   static async load(path: string): Promise<WhisperModel> {
@@ -1418,6 +1445,19 @@ class WhisperModel {
     T: number,
     opts?: { maxTokens?: number; language?: string; beamSize?: number },
   ): string {
+    this.#beginBusy();
+    try {
+      return this.#transcribeMelInner(mel, T, opts);
+    } finally {
+      this.#endBusy();
+    }
+  }
+
+  #transcribeMelInner(
+    mel: Float32Array,
+    T: number,
+    opts?: { maxTokens?: number; language?: string; beamSize?: number },
+  ): string {
     const h = this.hparams;
     const maxTokens = opts?.maxTokens ?? 224;
     const language = opts?.language ?? "en";
@@ -1648,6 +1688,19 @@ class WhisperModel {
    * follow-up work.
    */
   transcribe(audio: Float32Array, opts?: { maxTokens?: number; language?: string }): string {
+    // Refcount-bracket the entire multi-chunk operation so `busy` reads
+    // as one continuous "true" across long-audio paths instead of
+    // flickering between chunks. Refcount nests cleanly with the
+    // transcribeMel #beginBusy that fires inside the inner pass.
+    this.#beginBusy();
+    try {
+      return this.#transcribeInner(audio, opts);
+    } finally {
+      this.#endBusy();
+    }
+  }
+
+  #transcribeInner(audio: Float32Array, opts?: { maxTokens?: number; language?: string }): string {
     const N_SAMPLES = 480000; // 30 s @ 16 kHz
     if (audio.length <= N_SAMPLES) {
       const pcm = new Float32Array(N_SAMPLES);
