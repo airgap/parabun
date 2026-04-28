@@ -332,8 +332,8 @@ for await (const utt of utterances) {
 ```
 
 - **`listen(stream, { sampleRate })`** — async-iterator wrapper over any `Float32Array` chunk source. Tracks an adaptive noise floor, gates on energy + hangover, emits `{ samples, startMs, endMs }` per utterance. The returned stream exposes reactive signals: `active` (true while a phrase is in progress), `noiseFloor` (current dB estimate), and `lastUtterance` (most recent emitted phrase).
-- **`transcribe(utt, { engine: "whisper", model })`** — loads a Whisper `ggml-*.bin` via `bun:llm.WhisperModel` and runs the encoder-decoder forward pass. `tiny.en` (78 MB) is the recommended starting point; `base.en` decodes too but currently has a known regression we're tracking.
-- **`speak(text, { engine: "piper", model })`** — runs the Piper voice synthesizer (subprocess in v1; libpiper FFI in v2). Returns `{ samples, sampleRate, channels }` ready for `audio.play().write()`.
+- **`transcribe(utt, { engine: "whisper", model })`** — loads a Whisper `ggml-*.bin` via `bun:llm.WhisperModel` and runs the encoder-decoder forward pass. Both `tiny.en` and `base.en` work cleanly.
+- **`speak(text, { engine: "piper", model })`** — runs the Piper voice synthesizer. The first call for a given voice loads the model into a long-running `piper --json-input` subprocess; subsequent calls reuse the same process via stdin / stdout (~30-50 ms inference per sentence on the lessac-low voice). Returns `{ samples, sampleRate, channels }` ready for `audio.play().write()`. `speech.closePiperSessions()` tears the cache down explicitly. Direct libpiper FFI is the long-term v2.
 
 `speech.listen` works as a standalone primitive — pass it any iterable of `Float32Array` (file-backed, network, synthetic) and it'll emit utterances.
 

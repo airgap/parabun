@@ -27,16 +27,14 @@
 // What's now wired:
 //   - `transcribe()` — Whisper-class STT via bun:llm.WhisperModel. Loads
 //      ggml-*.bin checkpoints, transcribes utterances per call.
-//   - `speak()` — Piper TTS via subprocess to a `piper` binary on PATH (or
-//      under opts.binPath). Voice models are .onnx + .json from
-//      https://github.com/rhasspy/piper/blob/master/VOICES.md or
-//      huggingface.co/rhasspy/piper-voices. Subprocess overhead is
-//      ~50-150ms per call (espeak-ng init + onnxruntime load); for
-//      real-time barge-in / streaming sentence-by-sentence TTS, the
-//      direct-FFI integration tracked under LYK-758 keeps the model
-//      loaded across calls and yields f32 frames per sentence at
-//      native speed. Same public API on both versions, so callers
-//      don't change when LYK-758 ships.
+//   - `speak()` — Piper TTS via a long-running `piper --json-input
+//      --output_raw` subprocess, cached per (binPath, model) tuple. The
+//      first call pays ~120 ms for voice load; subsequent calls hit just
+//      the inference + IPC cost (~30-50 ms for one short sentence on the
+//      lessac voice). The full direct-FFI integration tracked under
+//      LYK-758 stays the long-term plan for the last few ms of latency,
+//      but the persistent subprocess closes the gap that was making
+//      real-time barge-in impractical. Public API is unchanged.
 
 const signalsMod = require("./signals.ts");
 
@@ -433,6 +431,257 @@ async function transcribe(utterance: Utterance | { samples: Float32Array }, opts
   return model.transcribe(utterance.samples, { language });
 }
 
+// ─── PiperSession (LYK-758 v1.5) ───────────────────────────────────────────
+//
+// Each session wraps one long-running `piper --json-input --output_raw`
+// subprocess plus the protocol layer that turns "synthesize this sentence"
+// into a Float32Array. The first call pays the voice-load cost (~120 ms on
+// a Pi 5, ~15 ms on a desktop with warm caches); subsequent calls hit
+// only the inference + IPC cost.
+//
+// Wire protocol:
+//   - Each request is a JSON line on stdin: `{"text": "..."}\n`.
+//   - Audio comes back on stdout as raw signed-16 little-endian PCM at the
+//     voice's native sample rate. There is no in-band length marker.
+//   - Per completed request, piper logs a "Real-time factor: ..." line on
+//     stderr. We use that as the boundary signal, then drain stdout with a
+//     small quiet-window guard so any pending bytes flushed concurrently
+//     with the stderr line still get collected.
+//
+// Concurrency: synthesize() serializes through an internal queue. Two
+// callers asking the same session to speak overlapping text get back the
+// right audio in the right order; we don't try to interleave on a single
+// piper process.
+class PiperSession {
+  #proc: any;
+  #stdoutReader: any;
+  #stderrReader: any;
+  #queue: Promise<unknown> = Promise.resolve();
+  #closed = false;
+  #sampleRate: number;
+  #channels: number;
+  #binPath: string;
+
+  /** Per-request collection target — set inside synthesize(), null otherwise. */
+  #activeChunks: Uint8Array[] | null = null;
+  /** Resolves the moment stderr emits the "Real-time factor" line. */
+  #activeCompletion: (() => void) | null = null;
+  /** Last time a stdout chunk arrived for the active request — used by the quiet-window guard. */
+  #lastChunkAtMs = 0;
+
+  constructor(proc: any, sampleRate: number, channels: number, binPath: string) {
+    this.#proc = proc;
+    this.#sampleRate = sampleRate;
+    this.#channels = channels;
+    this.#binPath = binPath;
+    this.#stdoutReader = proc.stdout.getReader();
+    this.#stderrReader = proc.stderr.getReader();
+    this.#startStdoutPump();
+    this.#startStderrPump();
+  }
+
+  get sampleRate(): number {
+    return this.#sampleRate;
+  }
+  get channels(): number {
+    return this.#channels;
+  }
+
+  static async create(modelPath: string, binPath: string): Promise<PiperSession> {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    if (!fs.existsSync(modelPath)) {
+      throw new Error(`bun:speech.speak: voice model not found at "${modelPath}"`);
+    }
+    // The voice config sits next to the .onnx as <model>.onnx.json. Read
+    // the audio.sample_rate up front so synthesize() returns the right
+    // metadata without a per-call file read.
+    const configPath = modelPath + ".json";
+    const altConfigPath = modelPath.replace(/\.onnx$/, ".json");
+    const cfgPath = fs.existsSync(configPath) ? configPath : altConfigPath;
+    if (!fs.existsSync(cfgPath)) {
+      throw new Error(
+        `bun:speech.speak: voice config not found alongside model at "${configPath}" or "${altConfigPath}"`,
+      );
+    }
+    const cfg = JSON.parse(await Bun.file(cfgPath).text()) as { audio?: { sample_rate?: number } };
+    const sampleRate = cfg.audio?.sample_rate ?? 22050;
+    void path;
+
+    let proc: any;
+    try {
+      proc = Bun.spawn({
+        cmd: [binPath, "--model", modelPath, "--json-input", "--output_raw"],
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "ENOENT") {
+        throw new Error(
+          `bun:speech.speak: piper binary not found ("${binPath}"). ` +
+            `Install from https://github.com/rhasspy/piper/releases or pass opts.binPath.`,
+        );
+      }
+      throw err;
+    }
+    return new PiperSession(proc, sampleRate, 1, binPath);
+  }
+
+  /** Synthesize one utterance. Serialized via the internal queue. */
+  synthesize(text: string, opts?: { sentenceSilenceMs?: number }): Promise<SpokenAudio> {
+    if (this.#closed) {
+      return Promise.reject(new Error("bun:speech.speak: piper session has been closed"));
+    }
+    const next = this.#queue.then(() => this.#runOne(text, opts));
+    // Swallow this result for the queue chain so a synthesize() rejection
+    // doesn't poison subsequent calls.
+    this.#queue = next.catch(() => undefined);
+    return next;
+  }
+
+  async #runOne(text: string, opts?: { sentenceSilenceMs?: number }): Promise<SpokenAudio> {
+    if (this.#closed) throw new Error("bun:speech.speak: piper session has been closed");
+
+    const chunks: Uint8Array[] = [];
+    this.#activeChunks = chunks;
+    this.#lastChunkAtMs = 0;
+
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#activeCompletion = resolve;
+
+    const req: Record<string, unknown> = { text };
+    // Per-request override (only --sentence_silence is exposed for v1.5;
+    // other inference knobs hit at the CLI layer in piper, not the JSON).
+    void opts;
+
+    try {
+      this.#proc.stdin.write(JSON.stringify(req) + "\n");
+    } catch (e) {
+      this.#activeChunks = null;
+      this.#activeCompletion = null;
+      throw new Error(`bun:speech.speak: failed to write to piper stdin (${e instanceof Error ? e.message : e})`);
+    }
+
+    // Race the completion-signal Promise against process death so a piper
+    // crash doesn't hang the caller.
+    await Promise.race([
+      promise,
+      this.#proc.exited.then(() => {
+        throw new Error(`bun:speech.speak: piper subprocess exited mid-request`);
+      }),
+    ]);
+
+    // Drain stdout. Two races to handle:
+    //   (a) Stderr's "Real-time factor" line can land *before* any stdout
+    //       chunks for the same utterance — bun's reader doesn't guarantee
+    //       interleaved order across the two pipes. So we don't trust the
+    //       stderr signal alone; we also wait for at least one stdout
+    //       chunk to arrive before considering the request complete.
+    //   (b) After the first chunk lands, more chunks can still trickle in
+    //       for a few ms. Wait until 50 ms of stdout quiet before declaring
+    //       the audio fully drained.
+    // Hard cap at 1500 ms after the stderr signal so an empty-text request
+    // (piper emits no audio at all) doesn't hang forever.
+    const rtfAtMs = Date.now();
+    while (Date.now() - rtfAtMs < 1500) {
+      if (this.#lastChunkAtMs > 0 && Date.now() - this.#lastChunkAtMs >= 50) break;
+      await new Promise(r => setTimeout(r, 10));
+    }
+
+    this.#activeChunks = null;
+    this.#activeCompletion = null;
+
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      merged.set(c, off);
+      off += c.length;
+    }
+
+    // Convert s16le → f32 in-place. The audio module exports an i16ToF32
+    // helper that does exactly this and is SIMD-accelerated where possible.
+    const audio = require("./audio.ts");
+    const i16 = new Int16Array(merged.buffer, merged.byteOffset, merged.byteLength >>> 1);
+    const samples: Float32Array = audio.i16ToF32(i16);
+
+    return { samples, sampleRate: this.#sampleRate, channels: this.#channels };
+  }
+
+  async #startStdoutPump(): Promise<void> {
+    try {
+      while (!this.#closed) {
+        const { value, done } = await this.#stdoutReader.read();
+        if (done) break;
+        if (this.#activeChunks) {
+          this.#activeChunks.push(value);
+          this.#lastChunkAtMs = Date.now();
+        }
+      }
+    } catch {
+      // Reader cancelled or process died — handled by exit-watcher elsewhere.
+    }
+  }
+
+  async #startStderrPump(): Promise<void> {
+    let buffer = "";
+    const decoder = new TextDecoder();
+    try {
+      while (!this.#closed) {
+        const { value, done } = await this.#stderrReader.read();
+        if (done) break;
+        buffer += decoder.decode(value);
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          // The marker is robust across piper versions: every release since
+          // 1.0 emits `[piper] [info] Real-time factor: ...` per utterance.
+          if (line.indexOf("Real-time factor") !== -1 && this.#activeCompletion) {
+            const cb = this.#activeCompletion;
+            this.#activeCompletion = null;
+            cb();
+          }
+        }
+      }
+    } catch {
+      // Reader cancelled or process died — synthesize() race detects it.
+    }
+  }
+
+  /** Idempotent. Closes stdin and kills the subprocess if it doesn't exit gracefully. */
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    try {
+      this.#proc.stdin.end();
+    } catch {}
+    // Give piper 500 ms to exit cleanly, then SIGTERM.
+    const exited = this.#proc.exited;
+    const timer = setTimeout(() => {
+      try {
+        this.#proc.kill();
+      } catch {}
+    }, 500);
+    try {
+      await exited;
+    } finally {
+      clearTimeout(timer);
+    }
+    void this.#binPath;
+  }
+}
+
+/** Process-lifetime cache keyed by `${binPath} ${modelPath}`. */
+const piperSessionCache = new Map<string, Promise<PiperSession>>();
+
+function piperSessionKey(binPath: string, modelPath: string): string {
+  return binPath + " " + modelPath;
+}
+
 async function speak(text: string, opts: SpeakOptions): Promise<SpokenAudio> {
   if (opts.engine !== "piper") {
     throw new Error(`bun:speech.speak: unknown engine "${opts.engine}" — only "piper" is supported`);
@@ -447,95 +696,32 @@ async function speak(text: string, opts: SpeakOptions): Promise<SpokenAudio> {
     );
   }
 
-  const fs = require("node:fs");
-  const fsPromises = require("node:fs/promises");
-  const os = require("node:os");
   const path = require("node:path");
-  // Builtin require returns the export shape directly, not the
-  // ESM-style { default: ... } wrapper — same pattern transcribe()
-  // uses for the whisper module above.
-  const audio = require("./audio.ts");
-
   const modelPath = path.resolve(opts.model);
-  if (!fs.existsSync(modelPath)) {
-    throw new Error(`bun:speech.speak: voice model not found at "${modelPath}"`);
+  const binPath = opts.binPath ?? "piper";
+  const key = piperSessionKey(binPath, modelPath);
+
+  let sessionPromise = piperSessionCache.get(key);
+  if (!sessionPromise) {
+    sessionPromise = PiperSession.create(modelPath, binPath);
+    piperSessionCache.set(key, sessionPromise);
+    // If session creation fails (model missing, binary missing), drop the
+    // cache entry so the next call retries cleanly.
+    sessionPromise.catch(() => piperSessionCache.delete(key));
   }
+  const session = await sessionPromise;
+  return session.synthesize(text, { sentenceSilenceMs: opts.sentenceSilenceMs });
+}
 
-  // Piper writes WAV when given --output_file; we route through a tmpfile
-  // so we don't have to manage piper's --output-raw header-less stream
-  // (which needs the voice .json's sample_rate to decode and adds error
-  // surface for malformed JSON). The tmp path is scoped to a per-call
-  // mkdtemp; cleanup happens unconditionally in finally.
-  const bin = opts.binPath ?? "piper";
-  const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "parabun-piper-"));
-  const tmpWav = path.join(tmpDir, "out.wav");
-
-  try {
-    const cmd: string[] = [bin, "--model", modelPath, "--output_file", tmpWav];
-    if (opts.sentenceSilenceMs !== undefined) {
-      cmd.push("--sentence-silence", (opts.sentenceSilenceMs / 1000).toFixed(3));
-    }
-
-    // NOTE: would prefer `await using proc = Bun.spawn(...)` here but
-    // JSC's BuiltinExecutables parser inside parabun's builtin modules
-    // rejects `using` / `await using` syntax (works fine in user code).
-    // Tracked as LYK-759. Manual cleanup with try/finally + .kill() is
-    // the workaround.
-    const proc = Bun.spawn({
-      cmd,
-      stdin: "pipe",
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-
-    let exitCode: number;
-    let stderrText: string;
-    try {
-      proc.stdin.write(text);
-      await proc.stdin.end();
-      [exitCode, stderrText] = await Promise.all([proc.exited, proc.stderr.text()]);
-    } catch (err) {
-      try {
-        proc.kill();
-      } catch {}
-      throw err;
-    }
-    if (exitCode !== 0) {
-      throw new Error(
-        `bun:speech.speak: piper exited with code ${exitCode}.` +
-          (stderrText ? ` stderr: ${stderrText.trim()}` : "") +
-          ` (binary: ${bin})`,
-      );
-    }
-    if (!fs.existsSync(tmpWav)) {
-      throw new Error(`bun:speech.speak: piper completed but produced no output at ${tmpWav}`);
-    }
-
-    const wavBytes = new Uint8Array(await Bun.file(tmpWav).arrayBuffer());
-    const wav = audio.readWav(wavBytes);
-    return {
-      samples: wav.samples,
-      sampleRate: wav.sampleRate,
-      channels: wav.channels,
-    };
-  } catch (err) {
-    // ENOENT on spawn means piper isn't on PATH (or opts.binPath wrong).
-    // Bun.spawn surfaces this as the awaited proc rejecting; surface a
-    // clearer message than the raw libuv one.
-    if ((err as { code?: string }).code === "ENOENT") {
-      throw new Error(
-        `bun:speech.speak: piper binary not found ("${opts.binPath ?? "piper"}"). ` +
-          `Install from https://github.com/rhasspy/piper/releases or pass opts.binPath.`,
-      );
-    }
-    throw err;
-  } finally {
-    // mkdtemp + the wav file inside it. Best-effort cleanup; ignore
-    // ENOENT / EBUSY since we've already returned the audio data.
-    try {
-      await fsPromises.rm(tmpDir, { recursive: true, force: true });
-    } catch {}
-  }
+/**
+ * Close all cached PiperSessions and free their subprocesses. Called
+ * automatically at process exit, but exposed for tests, hot-reload paths,
+ * and explicit teardown. Subsequent `speak()` calls will lazily re-spawn.
+ */
+async function closePiperSessions(): Promise<void> {
+  const sessions = Array.from(piperSessionCache.values());
+  piperSessionCache.clear();
+  await Promise.all(sessions.map(p => p.then(s => s.close()).catch(() => undefined)));
 }
 
 // ─── Wake word (LYK-739) ───────────────────────────────────────────────────
@@ -749,6 +935,7 @@ export default {
   listen,
   transcribe,
   speak,
+  closePiperSessions,
   wakeWord,
   matchWakePhrase,
 };

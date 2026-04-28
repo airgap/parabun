@@ -64,4 +64,43 @@ describe("bun:speech.speak (Piper subprocess)", () => {
       /voice model not found/,
     );
   });
+
+  // Persistent-session coverage (LYK-758 v1.5). The cached subprocess
+  // means N sequential calls share one piper instance — no fork +
+  // ORT init per call. We exercise the path; the perf benefit is
+  // bench-validated separately (timing assertions are too flaky on
+  // debug builds + asan to land in CI).
+  test.skipIf(!have)("sequential calls succeed against a cached session", async () => {
+    const speech = (await import("bun:speech")).default;
+    await speech.closePiperSessions();
+
+    const r1 = await speech.speak("First sentence.", { engine: "piper", model: voiceModel, binPath: piperBin });
+    const r2 = await speech.speak("Second sentence.", { engine: "piper", model: voiceModel, binPath: piperBin });
+    const r3 = await speech.speak("Third sentence.", { engine: "piper", model: voiceModel, binPath: piperBin });
+
+    expect(r1.samples.length).toBeGreaterThan(0);
+    expect(r2.samples.length).toBeGreaterThan(0);
+    expect(r3.samples.length).toBeGreaterThan(0);
+    // Sanity: the cached metadata is consistent across calls.
+    expect(r1.sampleRate).toBe(r2.sampleRate);
+    expect(r2.sampleRate).toBe(r3.sampleRate);
+    expect(r1.channels).toBe(1);
+
+    await speech.closePiperSessions();
+  });
+
+  test.skipIf(!have)("closePiperSessions kills the subprocess; subsequent speak respawns cleanly", async () => {
+    const speech = (await import("bun:speech")).default;
+    const r1 = await speech.speak("First.", { engine: "piper", model: voiceModel, binPath: piperBin });
+    expect(r1.samples.length).toBeGreaterThan(0);
+
+    await speech.closePiperSessions();
+
+    // After close, the cache is empty — a fresh call should spawn a new
+    // session without errors and return audio.
+    const r2 = await speech.speak("Second.", { engine: "piper", model: voiceModel, binPath: piperBin });
+    expect(r2.samples.length).toBeGreaterThan(0);
+
+    await speech.closePiperSessions();
+  });
 });
