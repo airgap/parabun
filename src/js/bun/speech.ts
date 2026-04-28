@@ -538,8 +538,217 @@ async function speak(text: string, opts: SpeakOptions): Promise<SpokenAudio> {
   }
 }
 
+// ─── Wake word (LYK-739) ───────────────────────────────────────────────────
+
+type WakeMatchStrategy = "contains" | "exact" | "fuzzy";
+
+type WakeOptions = {
+  /** Audio source — typically `mic.frames()`, but anything yielding samples works. */
+  source: AsyncIterable<AudioChunk>;
+  /**
+   * Whisper model to use for transcription. Either a path to a ggml-*.bin
+   * checkpoint (loaded once and cached by path) or a pre-loaded handle from
+   * `bun:llm.WhisperModel.load`.
+   */
+  whisper: string | { transcribe(audio: Float32Array, o?: { language?: string }): string };
+  /** One or more wake phrases. Matched case-insensitively. */
+  phrase: string | string[];
+  /**
+   * Match strategy. Default "contains".
+   *   - "contains" → `transcription.includes(phrase)` (case-insensitive)
+   *   - "exact"    → trimmed transcription equals phrase
+   *   - "fuzzy"    → Levenshtein distance ≤ `maxEdits`
+   */
+  match?: WakeMatchStrategy;
+  /** Max edit distance for "fuzzy" matching. Default 2. */
+  maxEdits?: number;
+  /** Audio sample rate. Default 16000. */
+  sampleRate?: number;
+  /** ListenOptions forwarded to `listen()`. */
+  listenOpts?: Omit<ListenOptions, "sampleRate">;
+  /** Whisper language hint. Default "en". */
+  language?: string;
+};
+
+type WakeTrigger = {
+  /** The matched phrase (one of opts.phrase, normalized to lowercase). */
+  phrase: string;
+  /** Full transcription of the wake utterance — may carry trailing command words. */
+  transcription: string;
+  /** Match confidence in [0, 1]. 1.0 for "contains"/"exact"; for "fuzzy" it's `1 - edits/maxEdits`. */
+  confidence: number;
+  /** The originating utterance — pass it to STT or replay it as needed. */
+  utterance: Utterance;
+};
+
+interface WakeStream extends AsyncIterableIterator<WakeTrigger> {
+  /** True while a candidate utterance is being scored. */
+  readonly active: Signal<boolean>;
+  /** Most recent emitted trigger, or null until one fires. */
+  readonly lastTrigger: Signal<WakeTrigger | null>;
+}
+
+/**
+ * Lightweight Levenshtein distance for fuzzy phrase matching. Implementation
+ * is deliberately allocation-light and small — wake-phrase candidates are
+ * short, so we stay well under any threshold where a dynamic-programming
+ * pile-of-matrices approach would be worth it.
+ */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  // Two-row rolling DP. Always work with the shorter string on the inner loop.
+  if (a.length > b.length) {
+    const t = a;
+    a = b;
+    b = t;
+  }
+  const prev = new Int32Array(a.length + 1);
+  const cur = new Int32Array(a.length + 1);
+  for (let i = 0; i <= a.length; i++) prev[i] = i;
+  for (let j = 1; j <= b.length; j++) {
+    cur[0] = j;
+    for (let i = 1; i <= a.length; i++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      cur[i] = Math.min(cur[i - 1] + 1, prev[i] + 1, prev[i - 1] + cost);
+    }
+    prev.set(cur);
+  }
+  return prev[a.length];
+}
+
+/**
+ * Match a transcription against one or more wake phrases. Public so
+ * `bun:assistant` (and any user wiring their own gate) can reuse the same
+ * normalization without re-implementing it. Returns null on no match.
+ */
+function matchWakePhrase(
+  text: string,
+  phrases: string | string[],
+  strategy: WakeMatchStrategy = "contains",
+  maxEdits = 2,
+): { phrase: string; confidence: number } | null {
+  if (!text || typeof text !== "string") return null;
+  const norm = text
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!norm) return null;
+  const list = (Array.isArray(phrases) ? phrases : [phrases]).map(p => p.toLowerCase().trim()).filter(Boolean);
+  if (list.length === 0) return null;
+
+  for (const p of list) {
+    if (strategy === "contains") {
+      if (norm.includes(p)) return { phrase: p, confidence: 1 };
+    } else if (strategy === "exact") {
+      if (norm === p) return { phrase: p, confidence: 1 };
+    } else if (strategy === "fuzzy") {
+      // Try the whole-string distance first.
+      const whole = levenshtein(norm, p);
+      if (whole <= maxEdits) {
+        return { phrase: p, confidence: maxEdits === 0 ? 1 : Math.max(0, 1 - whole / maxEdits) };
+      }
+      // Then sliding-window: Whisper sometimes drops/adds tokens around the
+      // wake phrase. Walk fixed-length windows roughly the size of the phrase.
+      const tokens = norm.split(" ");
+      const phraseLen = p.length;
+      for (let i = 0; i < tokens.length; i++) {
+        // Build a window of consecutive tokens whose total length brackets phraseLen.
+        for (let j = i + 1; j <= tokens.length; j++) {
+          const window = tokens.slice(i, j).join(" ");
+          if (Math.abs(window.length - phraseLen) > maxEdits + 2) {
+            if (window.length > phraseLen + maxEdits + 2) break;
+            continue;
+          }
+          const d = levenshtein(window, p);
+          if (d <= maxEdits) {
+            return { phrase: p, confidence: maxEdits === 0 ? 1 : Math.max(0, 1 - d / maxEdits) };
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Compose a wake-word stream over an audio source. Internally pipes the
+ * source through `listen()` for VAD-bounded utterances, transcribes each
+ * with Whisper, and emits a `WakeTrigger` whenever the transcription
+ * matches one of the configured phrases.
+ *
+ * Why whisper-backed and not a dedicated low-power KWS:
+ *   - Reuses the model the assistant already loads for STT.
+ *   - Works for *any* phrase the user picks — no per-keyword model.
+ *   - Honest about its CPU cost: we run whisper only on VAD-detected speech
+ *     bursts, so an idle mic is free; whisper fires once per utterance.
+ *
+ * For genuine always-on sub-watt KWS (e.g. on battery devices), a future
+ * follow-up will plug in openWakeWord / Porcupine via a separate engine
+ * argument; the surface here is engine-agnostic enough to absorb that.
+ */
+function wakeWord(opts: WakeOptions): WakeStream {
+  const sampleRate = opts.sampleRate ?? 16000;
+  const sigActive = signalsMod.signal(false) as WritableSignal<boolean>;
+  const sigLastTrigger = signalsMod.signal<WakeTrigger | null>(null) as WritableSignal<WakeTrigger | null>;
+  const gen = wakeWordGenerator(opts, sampleRate, sigActive, sigLastTrigger);
+  return Object.assign(gen, {
+    active: sigActive as Signal<boolean>,
+    lastTrigger: sigLastTrigger as Signal<WakeTrigger | null>,
+  });
+}
+
+async function* wakeWordGenerator(
+  opts: WakeOptions,
+  sampleRate: number,
+  sigActive: WritableSignal<boolean>,
+  sigLastTrigger: WritableSignal<WakeTrigger | null>,
+): AsyncIterableIterator<WakeTrigger> {
+  // Resolve whisper handle — accept either a path (load + cache) or a model.
+  let whisperHandle: { transcribe(audio: Float32Array, o?: { language?: string }): string };
+  if (typeof opts.whisper === "string") {
+    const resolvedPath = require("node:path").resolve(opts.whisper);
+    let modelPromise = whisperCache.get(resolvedPath);
+    if (!modelPromise) {
+      const whisperMod = require("./llm/whisper.ts");
+      modelPromise = whisperMod.WhisperModel.load(resolvedPath);
+      whisperCache.set(resolvedPath, modelPromise);
+    }
+    whisperHandle = (await modelPromise) as typeof whisperHandle;
+  } else {
+    whisperHandle = opts.whisper;
+  }
+
+  const strategy = opts.match ?? "contains";
+  const maxEdits = opts.maxEdits ?? 2;
+  const language = opts.language ?? "en";
+
+  const ls = listen(opts.source, { ...opts.listenOpts, sampleRate });
+  for await (const utt of ls) {
+    sigActive.set(true);
+    const text = whisperHandle.transcribe(utt.samples, { language });
+    sigActive.set(false);
+    const matched = matchWakePhrase(text, opts.phrase, strategy, maxEdits);
+    if (matched) {
+      const trigger: WakeTrigger = {
+        phrase: matched.phrase,
+        transcription: text,
+        confidence: matched.confidence,
+        utterance: utt,
+      };
+      sigLastTrigger.set(trigger);
+      yield trigger;
+    }
+  }
+  sigActive.set(false);
+}
+
 export default {
   listen,
   transcribe,
   speak,
+  wakeWord,
+  matchWakePhrase,
 };

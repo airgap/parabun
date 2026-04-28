@@ -37,10 +37,13 @@
 //   - Barge-in (step 5 first half, LYK-735) — VAD rising edge during
 //     thinking/speaking aborts the chat token loop, drops the speaker
 //     buffer via spk.stop(), and stamps `turn.interrupted = true`.
+//   - Wake word (step 5 second half, LYK-739) — pass `wakeWord: "hey jetson"`
+//     and the voice loop ignores utterances that don't carry the phrase.
+//     Implemented as VAD-gated whisper transcription + phrase match
+//     (`speech.wakeWord` is the standalone primitive); a follow-up will plug
+//     in a dedicated low-power KWS engine for battery-powered devices.
 //
 // Still deferred:
-//   - Wake word (step 5 second half, LYK-739) — needs a low-power KWS
-//     primitive in bun:audio first.
 //   - RAG (step 6)
 //   - Scheduled prompts (step 7)
 //   - Vision / VLM (step 8)
@@ -218,6 +221,31 @@ type AssistantOptions = {
    * a final reply (or `MAX_TOOL_ITERATIONS` is hit).
    */
   tools?: AssistantTool[];
+  /**
+   * Wake-word gate (LYK-739). When set, the voice loop ignores utterances
+   * until one matches one of the configured phrases. After a turn finishes
+   * the gate re-arms — the bot listens for the next wake.
+   *
+   * String shorthand: `wakeWord: "hey jetson"` is equivalent to
+   * `wakeWord: { phrase: "hey jetson" }`.
+   */
+  wakeWord?: string | WakeWordConfig;
+};
+
+type WakeWordConfig = {
+  /** One or more phrases. Matched case-insensitively, default substring. */
+  phrase: string | string[];
+  /** "contains" (default), "exact", or "fuzzy" Levenshtein with `maxEdits`. */
+  match?: "contains" | "exact" | "fuzzy";
+  /** Max edit distance for "fuzzy". Default 2. */
+  maxEdits?: number;
+  /**
+   * If true, the wake utterance is ALSO fed to the LLM as the first turn.
+   * Some users say "hey jetson, what's the time" in one breath; some pause.
+   * Default false: the wake utterance is consumed by the gate, the next
+   * utterance becomes the first turn.
+   */
+  feedThrough?: boolean;
 };
 
 // ─── Memory store ──────────────────────────────────────────────────────────
@@ -335,6 +363,9 @@ class Assistant {
    */
   #abortRequested = false;
 
+  // ─── Wake word (LYK-739) ───
+  #wakeWord: WakeWordConfig | null = null;
+
   #disposed = false;
 
   // Public read-only signal accessors.
@@ -437,6 +468,10 @@ class Assistant {
       }
     }
 
+    if (opts.wakeWord !== undefined) {
+      this.#wakeWord = typeof opts.wakeWord === "string" ? { phrase: opts.wakeWord } : opts.wakeWord;
+    }
+
     if (opts.system) {
       this.#messages.push({ role: "system", content: opts.system });
       this.#history.set(this.#messages.slice());
@@ -513,6 +548,12 @@ class Assistant {
     // for barge-in (LYK-735). Keeps the wiring out of the public surface.
     this.#activeListen = ls;
     this.#state.set("listening");
+    // Wake-word gate (LYK-739). When configured, the bot stays in "listening"
+    // and ignores transcribed utterances that don't carry the wake phrase.
+    // After a turn finishes, the gate re-arms — so each turn starts with a
+    // fresh wake. This matches user expectation on shared spaces (TVs,
+    // kitchen displays) where every command is prefixed.
+    let awake = this.#wakeWord == null;
     try {
       for await (const utt of ls) {
         // STT
@@ -522,8 +563,35 @@ class Assistant {
           this.#state.set("listening");
           continue;
         }
-        const turn = await this.#runTurn(text);
+
+        let turnText = text;
+        if (!awake && this.#wakeWord) {
+          const matched = speech.matchWakePhrase(
+            text,
+            this.#wakeWord.phrase,
+            this.#wakeWord.match ?? "contains",
+            this.#wakeWord.maxEdits ?? 2,
+          );
+          if (!matched) {
+            // Not the wake phrase — fall back to listening without yielding.
+            this.#state.set("listening");
+            continue;
+          }
+          awake = true;
+          if (!this.#wakeWord.feedThrough) {
+            // Consume the wake utterance; wait for the next one as the turn.
+            this.#state.set("listening");
+            continue;
+          }
+          // feedThrough mode: keep the full transcription (including the
+          // wake phrase) as the turn's user input. The model sees the wake
+          // word too, which is fine — it's just extra context.
+        }
+
+        const turn = await this.#runTurn(turnText);
         yield turn;
+        // Re-arm the wake gate for the next turn.
+        if (this.#wakeWord) awake = false;
         this.#state.set("listening");
       }
     } finally {
