@@ -101,7 +101,87 @@ type AssistantOptions = {
     topK?: number;
     topP?: number;
   };
+  /**
+   * Persist conversation history to a sqlite database. Pass a path
+   * string for default schema, or an options object to override.
+   * On create, existing turns are loaded back into history.
+   *
+   * v1 stores raw turns only — auto-summarization (when context
+   * approaches kvCacheSize) is tracked under LYK-760 step 4 follow-up.
+   */
+  memory?: string | { path: string };
 };
+
+// ─── Memory store ──────────────────────────────────────────────────────────
+
+interface MemoryStore {
+  /** Read all persisted turns, oldest first. */
+  load(): Message[];
+  /** Append a single turn. Synchronous — sqlite is fast enough. */
+  append(msg: Message): void;
+  /** Total turn count (excluding the system prompt, which isn't persisted). */
+  count(): number;
+  /** Reset the store. Useful in tests. */
+  clear(): void;
+  /** Release the underlying handle. Idempotent. */
+  close(): void;
+}
+
+class SqliteMemoryStore implements MemoryStore {
+  #db: any;
+  #disposed = false;
+
+  constructor(path: string) {
+    // Builtins can't use the "bun:sqlite" literal — bun:sqlite isn't in
+    // the internal module list. Require the source file directly; it
+    // exports the same shape the public module does.
+    const { Database } = require("./sqlite.ts");
+    this.#db = new Database(path);
+    // Schema is the simplest stable shape; auto-summarization layer
+    // adds a `summaries` table on top in a follow-up.
+    this.#db.exec(
+      `CREATE TABLE IF NOT EXISTS turns (` +
+        `id INTEGER PRIMARY KEY AUTOINCREMENT, ` +
+        `role TEXT NOT NULL, ` +
+        `content TEXT NOT NULL, ` +
+        `ts INTEGER NOT NULL` +
+        `)`,
+    );
+  }
+
+  load(): Message[] {
+    if (this.#disposed) throw new Error("bun:assistant: memory store disposed");
+    const rows = this.#db.query("SELECT role, content FROM turns ORDER BY id ASC").all() as Array<{
+      role: "user" | "assistant" | "system";
+      content: string;
+    }>;
+    return rows.map(r => ({ role: r.role, content: r.content }));
+  }
+
+  append(msg: Message): void {
+    if (this.#disposed) throw new Error("bun:assistant: memory store disposed");
+    this.#db.run("INSERT INTO turns (role, content, ts) VALUES (?, ?, ?)", [msg.role, msg.content, Date.now()]);
+  }
+
+  count(): number {
+    if (this.#disposed) return 0;
+    const row = this.#db.query("SELECT COUNT(*) AS n FROM turns").get() as { n: number };
+    return row.n;
+  }
+
+  clear(): void {
+    if (this.#disposed) return;
+    this.#db.exec("DELETE FROM turns");
+  }
+
+  close(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    try {
+      this.#db.close();
+    } catch {}
+  }
+}
 
 // ─── Assistant ─────────────────────────────────────────────────────────────
 
@@ -126,6 +206,9 @@ class Assistant {
   // ─── Mutable history (mirrors #history.value) ───
   #messages: Message[] = [];
 
+  // ─── Persistent memory (sqlite) ───
+  #memory: MemoryStore | null = null;
+
   #disposed = false;
 
   // Public read-only signal accessors.
@@ -147,6 +230,14 @@ class Assistant {
     return this.#llm;
   }
 
+  /**
+   * Persistent memory store. Null when no `memory` option was passed.
+   * Exposed so callers can query/clear/inspect outside the bot loop.
+   */
+  get memory(): MemoryStore | null {
+    return this.#memory;
+  }
+
   constructor(opts: AssistantOptions) {
     this.#state = signalsMod.signal("idle");
     this.#lastTurn = signalsMod.signal<Turn | null>(null);
@@ -160,6 +251,18 @@ class Assistant {
 
     if (opts.system) {
       this.#messages.push({ role: "system", content: opts.system });
+      this.#history.set(this.#messages.slice());
+    }
+
+    if (opts.memory !== undefined) {
+      const memPath = typeof opts.memory === "string" ? opts.memory : opts.memory.path;
+      this.#memory = new SqliteMemoryStore(memPath);
+      // Replay persisted turns into the in-process history. System
+      // prompt stays in slot 0 from the constructor; persisted user/
+      // assistant turns get appended in chronological order.
+      for (const m of this.#memory.load()) {
+        this.#messages.push(m);
+      }
       this.#history.set(this.#messages.slice());
     }
   }
@@ -279,13 +382,17 @@ class Assistant {
   async #runTurn(userText: string): Promise<Turn> {
     const startedAtMs = Date.now();
 
-    this.#messages.push({ role: "user", content: userText });
+    const userMsg: Message = { role: "user", content: userText };
+    this.#messages.push(userMsg);
     this.#history.set(this.#messages.slice());
+    this.#memory?.append(userMsg);
 
     // LLM
     const reply = await this.#llm.chatComplete(this.#messages, this.#chatOpts);
-    this.#messages.push({ role: "assistant", content: reply });
+    const assistantMsg: Message = { role: "assistant", content: reply };
+    this.#messages.push(assistantMsg);
     this.#history.set(this.#messages.slice());
+    this.#memory?.append(assistantMsg);
 
     // TTS (if configured)
     if (this.#ttsModel) {
@@ -347,6 +454,12 @@ class Assistant {
         this.#llm.dispose();
       } catch {}
       this.#llm = null;
+    }
+    if (this.#memory) {
+      try {
+        this.#memory.close();
+      } catch {}
+      this.#memory = null;
     }
   }
 
