@@ -1,17 +1,23 @@
-// Parabun CI — builds release binaries for Linux x64, macOS arm64 and
-// Windows x64 in parallel, optionally publishing all three as one tagged
-// GitHub Release. Mirrors /raid/lyku/jenkins/Jenkinsfile.desktop's
+// Parabun CI — builds release binaries for Linux x64, Linux aarch64,
+// macOS arm64 and Windows x64 in parallel, optionally publishing all four
+// as one tagged GitHub Release. Mirrors /raid/lyku/jenkins/Jenkinsfile.desktop's
 // parallel-per-platform shape.
 //
 // Per-platform details:
-//   - Linux:   builds in a container from jenkins/Dockerfile.ci-linux
-//              on any agent with the `linux` label (Built-In Node works).
-//   - macOS:   rsyncs source to the `mac-mini` SSH alias and invokes
-//              jenkins/build-macos.sh there. The SSH alias is defined in
-//              the Jenkins controller's ~/.ssh/config (mounted read-only
-//              into the ubuntu:24.04 dispatcher container).
-//   - Windows: runs natively on the `windows` agent (windows-strix).
-//              See jenkins/setup-windows-agent.md for prereqs.
+//   - Linux x64:    builds in a container from jenkins/Dockerfile.ci-linux
+//                   on any agent with the `linux` label (Built-In Node works).
+//   - Linux arm64:  rsyncs source to the `parabun-jetson` SSH alias and
+//                   invokes jenkins/build-linux-arm64.sh natively. Cross-
+//                   compile from x86_64 is staged behind LYK-756 part 3
+//                   (glibc-2.35 sysroot); until that ships, native build
+//                   on the Jetson is the only path that produces binaries
+//                   that run on Pi 5 / Jetson L4T.
+//   - macOS:        rsyncs source to the `mac-mini` SSH alias and invokes
+//                   jenkins/build-macos.sh there. The SSH alias is defined
+//                   in the Jenkins controller's ~/.ssh/config (mounted
+//                   read-only into the ubuntu:24.04 dispatcher container).
+//   - Windows:      runs natively on the `windows` agent (windows-strix).
+//                   See jenkins/setup-windows-agent.md for prereqs.
 //
 // Publishing uses the pre-existing `github-pat` credential (scoped to
 // airgap/*, so no parabun-specific token needed). The release tag is
@@ -38,9 +44,10 @@ pipeline {
     }
 
     parameters {
-        booleanParam(name: 'BUILD_LINUX',   defaultValue: true,  description: 'Build Linux x64')
-        booleanParam(name: 'BUILD_MACOS',   defaultValue: true,  description: 'Build macOS arm64 (requires mac-mini agent)')
-        booleanParam(name: 'BUILD_WINDOWS', defaultValue: false, description: 'Build Windows x64 (requires windows agent)')
+        booleanParam(name: 'BUILD_LINUX',         defaultValue: true,  description: 'Build Linux x64')
+        booleanParam(name: 'BUILD_LINUX_ARM64',   defaultValue: false, description: 'Build Linux aarch64 (requires parabun-jetson SSH alias)')
+        booleanParam(name: 'BUILD_MACOS',         defaultValue: true,  description: 'Build macOS arm64 (requires mac-mini agent)')
+        booleanParam(name: 'BUILD_WINDOWS',       defaultValue: false, description: 'Build Windows x64 (requires windows agent)')
         booleanParam(name: 'BUILD_VSIX',    defaultValue: true,  description: 'Package the VS Code extension (.vsix)')
         booleanParam(name: 'RUN_TESTS',     defaultValue: true,  description: 'Run parabun test suite on macOS after build')
         string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
@@ -94,6 +101,70 @@ pipeline {
                     post {
                         success {
                             archiveArtifacts artifacts: 'artifacts/parabun-linux-x64', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('Linux aarch64') {
+                    when {
+                        beforeAgent true
+                        expression { params.BUILD_LINUX_ARM64 }
+                    }
+                    // Dispatched from the Jenkins controller (built-in node)
+                    // — the Jetson agent is reached over SSH, not as a
+                    // first-class Jenkins agent. Same shape as the macOS
+                    // stage to keep the cross-platform pattern symmetric:
+                    // rsync source out, build there, rsync binary back.
+                    agent { label 'built-in' }
+                    environment {
+                        // Stable remote workspace under the agent user's
+                        // $HOME on the Jetson. Single tree so vendor/
+                        // (~700 MB of platform deps) and build/ (incremental
+                        // cache) survive across runs. rsync --exclude
+                        // preserves both.
+                        REMOTE_WS = 'jenkins/workspace/parabun'
+                        // SSH alias for the arm64 build agent. Configured
+                        // in the controller's ~/.ssh/config; the user
+                        // points this at whichever board they want to
+                        // build on (Jetson Orin Nano: ~30-60 min;
+                        // Pi 5: ~2 hr).
+                        REMOTE_HOST = 'parabun-jetson'
+                    }
+                    steps {
+                        checkout scm
+                        script {
+                            env.FULL_SHA  = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        }
+                        sh '''
+                            rsync -az --delete \
+                                --exclude='.git' \
+                                --exclude='node_modules' \
+                                --exclude='/build' \
+                                --exclude='/vendor' \
+                                --exclude='/target' \
+                                --exclude='.claude' \
+                                ./ ${REMOTE_HOST}:${REMOTE_WS}/
+                        '''
+                        // The remote has no .git (rsync excludes it), so
+                        // scripts/build/config.ts::getGitRevision() would
+                        // fall back to "unknown", breaking BunProcess.cpp.
+                        // Forward FULL_SHA as GIT_SHA env instead — same
+                        // pattern the macOS stage uses.
+                        sh '''
+                            ssh ${REMOTE_HOST} "cd ${REMOTE_WS} && chmod +x jenkins/build-linux-arm64.sh && GIT_SHA=${FULL_SHA} ./jenkins/build-linux-arm64.sh"
+                        '''
+                        sh '''
+                            mkdir -p artifacts
+                            rsync -az \
+                                ${REMOTE_HOST}:${REMOTE_WS}/build/release/bun \
+                                artifacts/parabun-linux-aarch64
+                        '''
+                        stash name: 'linux-arm64-bin', includes: 'artifacts/parabun-linux-aarch64'
+                    }
+                    post {
+                        success {
+                            archiveArtifacts artifacts: 'artifacts/parabun-linux-aarch64', allowEmptyArchive: true
                         }
                     }
                 }
@@ -266,10 +337,11 @@ pipeline {
                     env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
                 }
                 script {
-                    if (params.BUILD_LINUX)   { unstash 'linux-bin' }
-                    if (params.BUILD_MACOS)   { unstash 'macos-bin' }
-                    if (params.BUILD_WINDOWS) { unstash 'windows-bin' }
-                    if (params.BUILD_VSIX)    { unstash 'vsix-bin' }
+                    if (params.BUILD_LINUX)       { unstash 'linux-bin' }
+                    if (params.BUILD_LINUX_ARM64) { unstash 'linux-arm64-bin' }
+                    if (params.BUILD_MACOS)       { unstash 'macos-bin' }
+                    if (params.BUILD_WINDOWS)     { unstash 'windows-bin' }
+                    if (params.BUILD_VSIX)        { unstash 'vsix-bin' }
                 }
                 // github-pat is a "Username with password" credential; gh
                 // honors GH_TOKEN from the environment.
