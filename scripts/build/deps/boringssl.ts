@@ -17,11 +17,18 @@ export const boringssl: Dependency = {
     commit: BORINGSSL_COMMIT,
   }),
 
-  build: () => ({
+  build: cfg => ({
     kind: "nested-cmake",
     // No explicit targets — defaults to lib names (crypto, ssl, decrepit).
     // BoringSSL's cmake targets match its output library names.
     args: {},
+    // BoringSSL builds with -Werror -Wdeprecated-declarations. clang-21
+    // flags get_temporary_buffer inside jammy's libstdc++-12 headers as
+    // deprecated; gcc-12 itself silences this for its own STL. The
+    // diagnostic only fires on the cross path because native x86_64
+    // builds use noble's newer libstdc++-14 headers where the dep is
+    // already removed. Suppress for cross only.
+    extraCxxFlags: cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64" ? ["-Wno-deprecated-declarations"] : undefined,
   }),
 
   provides: () => ({

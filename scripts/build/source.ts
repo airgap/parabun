@@ -1066,7 +1066,7 @@ function emitNestedCmake(
     args.push(`-DCMAKE_SYSTEM_PROCESSOR=aarch64`);
     args.push(`-DCMAKE_C_COMPILER_TARGET=aarch64-linux-gnu`);
     args.push(`-DCMAKE_CXX_COMPILER_TARGET=aarch64-linux-gnu`);
-    args.push(`-DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu`);
+    args.push(`-DCMAKE_FIND_ROOT_PATH=/raid/parabun/.cache/jammy-arm64-sysroot/root`);
     args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER`);
     args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY`);
     args.push(`-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY`);
@@ -1132,7 +1132,9 @@ function emitNestedCmake(
   // CMAKE_ASM_FLAGS reaches the assembly path. Forward our cross flags
   // into both so the .o files come out as elf64-littleaarch64.
   if (cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64") {
-    args.push(`-DCMAKE_ASM_FLAGS=--target=aarch64-linux-gnu --gcc-toolchain=/usr`);
+    args.push(
+      `-DCMAKE_ASM_FLAGS=--target=aarch64-linux-gnu --sysroot=/raid/parabun/.cache/jammy-arm64-sysroot/root --gcc-install-dir=/raid/parabun/.cache/jammy-arm64-sysroot/root/usr/lib/gcc/aarch64-linux-gnu/12`,
+    );
   }
 
   // Dep-specific -D args go LAST so a dep can override anything above
@@ -1279,10 +1281,12 @@ function emitCargo(n: Ninja, cfg: Config, name: string, spec: CargoBuild, input:
   if (cfg.cargoHome !== undefined) env.CARGO_HOME = cfg.cargoHome;
   if (cfg.rustupHome !== undefined) env.RUSTUP_HOME = cfg.rustupHome;
 
-  if (spec.rustflags && spec.rustflags.length > 0) {
-    // The \x1f encoding is deliberate — see cargo's docs on CARGO_ENCODED_RUSTFLAGS.
-    env.CARGO_ENCODED_RUSTFLAGS = spec.rustflags.join("\x1f");
-  }
+  // Build the full rustflags list. Per cargo docs, when
+  // CARGO_ENCODED_RUSTFLAGS is set, ALL other rustflag sources
+  // (RUSTFLAGS, target.<triple>.rustflags, CARGO_TARGET_<triple>_RUSTFLAGS)
+  // are ignored — so we can't rely on the per-target var to add cross
+  // link flags below; everything has to land in this one env var.
+  const rustflags: string[] = [...(spec.rustflags ?? [])];
 
   // Windows: pin the linker to MSVC's link.exe. Without this, if Git Bash
   // is in PATH, its /usr/bin/link (GNU hard-link tool) shadows the real
@@ -1295,13 +1299,31 @@ function emitCargo(n: Ninja, cfg: Config, name: string, spec: CargoBuild, input:
     env[envKey] = cfg.msvcLinker;
   }
 
-  // Linux arm64 cross-compile from x86_64: cargo's default linker
-  // (rust-lld) doesn't know to link aarch64 against the cross sysroot.
-  // Point it at aarch64-linux-gnu-gcc, which Debian/Ubuntu ships via
-  // crossbuild-essential-arm64. Same env var pattern as Windows.
+  // Linux arm64 cross-compile from x86_64: drive the link through clang
+  // with our --target / --sysroot flags so cargo's link step uses the
+  // staged jammy sysroot (glibc 2.35) instead of the host's noble
+  // toolchain (glibc 2.39). Without -fuse-ld=lld, clang would invoke
+  // /usr/bin/ld (host x86_64 binutils), which can't handle aarch64
+  // objects (EM: 183 mismatch).
   if (cfg.linux && cfg.arm64 && cfg.host.arch !== "aarch64" && spec.rustTarget) {
-    const envKey = `CARGO_TARGET_${spec.rustTarget.toUpperCase().replace(/-/g, "_")}_LINKER`;
-    env[envKey] = "aarch64-linux-gnu-gcc";
+    const triple = spec.rustTarget.toUpperCase().replace(/-/g, "_");
+    env[`CARGO_TARGET_${triple}_LINKER`] = cfg.cc;
+    rustflags.push(
+      "-C",
+      "link-arg=-fuse-ld=lld",
+      "-C",
+      "link-arg=--target=aarch64-linux-gnu",
+      "-C",
+      "link-arg=--sysroot=/raid/parabun/.cache/jammy-arm64-sysroot/root",
+      "-C",
+      "link-arg=--gcc-install-dir=/raid/parabun/.cache/jammy-arm64-sysroot/root/usr/lib/gcc/aarch64-linux-gnu/12",
+    );
+  }
+
+  if (rustflags.length > 0) {
+    // \x1f separator is cargo's deliberate encoding — see
+    // CARGO_ENCODED_RUSTFLAGS docs.
+    env.CARGO_ENCODED_RUSTFLAGS = rustflags.join("\x1f");
   }
 
   // ─── Emit build node ───

@@ -37,10 +37,16 @@ export const libjpegTurbo: Dependency = {
   // Output lib name varies — Unix produces `libjpeg.a`, Windows produces
   // `jpeg-static.lib` (cmake adds the `-static` suffix on win32 to
   // distinguish from the import lib for the DLL build, which we don't ship).
-  // jpeglib.h / jmorecfg.h / jerror.h are at the source root; jconfig.h is
-  // generated into the build dir by cmake configure.
+  //
+  // libjpeg-turbo 3.x moved jpeglib.h / jmorecfg.h / jerror.h into `src/`.
+  // The `.` entry is kept for legacy reasons; native x86_64 builds happened
+  // to compile because they picked up the host's `/usr/include/jpeglib.h`
+  // when libjpeg-turbo-dev was installed system-wide. Cross-compile to
+  // aarch64 uses the staged jammy sysroot which lacks libjpeg headers, so
+  // the missing `src/` entry was breaking the build.
+  // jconfig.h is generated into the build dir by cmake configure.
   provides: cfg => ({
     libs: [cfg.windows ? "jpeg-static" : "jpeg"],
-    includes: [".", depBuildDir(cfg, "libjpeg-turbo")],
+    includes: ["src", ".", depBuildDir(cfg, "libjpeg-turbo")],
   }),
 };

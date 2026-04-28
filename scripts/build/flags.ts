@@ -56,9 +56,16 @@ export const cpuTargetFlags: Flag[] = [
     // driver picks linker, headers, and built-in lib paths from --target +
     // --sysroot; lld inherits the same target. Without this clang would
     // try to build for x86_64 and reject -march=armv8 as an unknown CPU.
-    flag: ["--target=aarch64-linux-gnu", "--gcc-toolchain=/usr"],
+    flag: [
+      "--target=aarch64-linux-gnu",
+      "--sysroot=/raid/parabun/.cache/jammy-arm64-sysroot/root",
+      // gcc lib path under the staged jammy sysroot — clang can't auto-detect
+      // it because we're not pointing at the host's /usr/lib/gcc-cross/...
+      // The 12 directory comes from libgcc-12-dev:arm64.
+      "--gcc-install-dir=/raid/parabun/.cache/jammy-arm64-sysroot/root/usr/lib/gcc/aarch64-linux-gnu/12",
+    ],
     when: c => c.linux && c.arm64 && c.host.arch !== "aarch64",
-    desc: "Cross to aarch64-linux-gnu (clang target + gcc-toolchain for crt/libgcc)",
+    desc: "Cross to aarch64-linux-gnu (jammy sysroot — glibc 2.35 baseline)",
   },
   {
     flag: ["/clang:-march=armv8-a+crc", "/clang:-mtune=ampere1"],
@@ -93,6 +100,19 @@ export const globalFlags: Flag[] = [
     flag: c => [`-mmacosx-version-min=${c.osxDeploymentTarget!}`, "-isysroot", c.osxSysroot!],
     when: c => c.darwin && c.osxDeploymentTarget !== undefined && c.osxSysroot !== undefined,
     desc: "macOS deployment target + SDK (sets LC_BUILD_VERSION minos)",
+  },
+  {
+    // gcc-12's libstdc++ marks several C++17-removed APIs (get_temporary_buffer,
+    // random_shuffle, etc.) with `[[deprecated]]`, and stable_sort instantiates
+    // _Temporary_buffer which transitively triggers the diagnostic. clang-21's
+    // -Wdeprecated-declarations is strict enough that any TU that includes
+    // <algorithm> fails under -Werror. Native x86_64 builds use noble's
+    // libstdc++-14 headers where the deprecated impls are gone, so the
+    // diagnostic only fires on the cross path. Suppress globally for the
+    // cross-target.
+    flag: "-Wno-deprecated-declarations",
+    when: c => c.linux && c.arm64 && c.host.arch !== "aarch64",
+    desc: "Cross to jammy libstdc++-12: silence C++17 deprecations",
   },
 
   // ─── MSVC runtime (Windows) ───
@@ -613,9 +633,13 @@ export const linkerFlags: Flag[] = [
   // these, but linker flags don't go through computeFlags's globalFlags
   // path, so we duplicate them here.
   {
-    flag: ["--target=aarch64-linux-gnu", "--gcc-toolchain=/usr"],
+    flag: [
+      "--target=aarch64-linux-gnu",
+      "--sysroot=/raid/parabun/.cache/jammy-arm64-sysroot/root",
+      "--gcc-install-dir=/raid/parabun/.cache/jammy-arm64-sysroot/root/usr/lib/gcc/aarch64-linux-gnu/12",
+    ],
     when: c => c.linux && c.arm64 && c.host.arch !== "aarch64",
-    desc: "Cross to aarch64-linux-gnu (link-time target + gcc-toolchain)",
+    desc: "Cross to aarch64-linux-gnu (link-time target + jammy sysroot)",
   },
 
   // ─── Sanitizers ───
