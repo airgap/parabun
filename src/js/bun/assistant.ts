@@ -46,9 +46,14 @@
 //     and the bot fires `bot.ask(prompt)` on each cron match. Resulting
 //     Turn carries `scheduled: true`. 5-field cron, local time. Skipped if
 //     the bot is mid-turn; next minute retries.
+//   - RAG (step 6, LYK-738) — pass `knowledge: { dir, encoder, topK? }` and
+//     the bot indexes the directory at create() time, retrieves topK chunks
+//     per user message, and injects them as a synthetic system message into
+//     the LLM working copy (canonical history is untouched). Re-indexes on
+//     fs.watch events. `bot.knowledge.search(text, n)` and `.reindex()`
+//     exposed for direct use.
 //
 // Still deferred:
-//   - RAG (step 6)
 //   - Vision / VLM (step 8)
 
 const audio = require("./audio.ts");
@@ -252,6 +257,17 @@ type AssistantOptions = {
    * tick (≤ 60 s later) retries.
    */
   schedule?: ScheduledPrompt[];
+  /**
+   * RAG over a local doc directory (LYK-738). Indexes the directory at
+   * create() time, then per user message retrieves topK chunks and prepends
+   * them as a synthetic "Relevant context" system message inside the LLM
+   * working copy — without persisting to canonical history or memory.
+   *
+   * `encoder` is either a path to a sentence-embedding GGUF (BGE / E5 /
+   * MiniLM-class) or a pre-loaded `bun:llm.Encoder` instance. Re-indexes on
+   * filesystem change via `fs.watch` (debounced).
+   */
+  knowledge?: KnowledgeOptions;
 };
 
 type ScheduledPrompt = {
@@ -259,6 +275,55 @@ type ScheduledPrompt = {
   cron: string;
   /** Prompt text fed straight into `bot.ask()`. */
   prompt: string;
+};
+
+type KnowledgeOptions = {
+  /** Root directory to index. Walked recursively. */
+  dir: string;
+  /**
+   * Sentence-embedding GGUF path, or a pre-loaded encoder instance with an
+   * `embed(text, opts) -> Float32Array` method. The synchronous embed shape
+   * (matching `bun:llm.Encoder`) is what we expect.
+   */
+  encoder: string | { embed(text: string, opts?: { pool?: string; normalize?: boolean }): Float32Array };
+  /** How many chunks to retrieve per query. Default 4. */
+  topK?: number;
+  /** Approximate target chunk size in characters. Default 800. */
+  chunkSize?: number;
+  /** Number of characters of overlap between consecutive long-paragraph chunks. Default 100. */
+  chunkOverlap?: number;
+  /**
+   * File extensions to read. Default `[".md", ".markdown", ".txt", ".mdx"]`.
+   * Other extensions are skipped silently — vendor folders / build outputs
+   * shouldn't be eaten by the indexer.
+   */
+  extensions?: string[];
+  /**
+   * Skip files larger than this (bytes). Default 1 MB. Keeps a stray binary
+   * or a giant log from clobbering the in-memory matrix.
+   */
+  maxFileBytes?: number;
+  /**
+   * Watch the directory for changes and re-index automatically. Default
+   * true. Set false when the dir is short-lived (tests, ephemeral fixtures)
+   * — the watcher thread can race on freed inotify state during teardown.
+   * Manual `bot.knowledge.reindex()` still works regardless.
+   */
+  watch?: boolean;
+};
+
+type KnowledgeChunk = {
+  /** Absolute file path the chunk came from. */
+  path: string;
+  /** Character offset into the file. Useful for "open this file at line X" UIs. */
+  offset: number;
+  /** The chunk text itself (already trimmed). */
+  text: string;
+};
+
+type KnowledgeHit = KnowledgeChunk & {
+  /** Cosine similarity in [-1, 1]; for normalized vectors, [0, 1] for typical text. */
+  score: number;
 };
 
 type WakeWordConfig = {
@@ -434,6 +499,324 @@ function cronMatches(spec: CronSpec, date: Date): boolean {
   );
 }
 
+// ─── KnowledgeStore (RAG, LYK-738) ─────────────────────────────────────────
+//
+// Pure-JS implementation. The storage is one contiguous Float32Array of
+// row-normalized embeddings — at 384-dim BGE-small with 8000 chunks that's
+// only 12 MB of RAM. Cosine search is a dot product per row, vectorized as
+// far as a fmadd JIT will take us; on a Pi 5 this serves a query in a few
+// ms for low-thousands of chunks.
+//
+// The chunker walks the dir, splits by paragraph (double newline), and
+// further splits long paragraphs by character count with a configurable
+// overlap. Tokenization isn't free in JS, so we use char count as the
+// budget — encoders truncate at maxContext anyway.
+
+const KNOWLEDGE_DEFAULT_EXTENSIONS = [".md", ".markdown", ".txt", ".mdx"];
+
+/**
+ * Chunk a single string into roughly-sized pieces split on paragraph
+ * boundaries. Long paragraphs are broken into overlapping windows so we
+ * don't drop information at chunk boundaries.
+ *
+ * Pure function — exported for tests + power users wiring custom indexers.
+ */
+function chunkText(
+  text: string,
+  opts?: { chunkSize?: number; chunkOverlap?: number },
+): { offset: number; text: string }[] {
+  const chunkSize = Math.max(64, opts?.chunkSize ?? 800);
+  const overlap = Math.max(0, Math.min(chunkSize - 32, opts?.chunkOverlap ?? 100));
+  const out: { offset: number; text: string }[] = [];
+
+  // Normalize line endings, then split on blank-line boundaries — preserves
+  // the byte offset of each paragraph by tracking position as we walk.
+  const norm = text.replace(/\r\n?/g, "\n");
+  const re = /\n[ \t]*\n+/g;
+  let para = 0;
+  let m: RegExpExecArray | null;
+  const paras: { offset: number; text: string }[] = [];
+  while ((m = re.exec(norm))) {
+    const piece = norm.slice(para, m.index).trim();
+    if (piece) paras.push({ offset: para, text: piece });
+    para = m.index + m[0].length;
+  }
+  const tail = norm.slice(para).trim();
+  if (tail) paras.push({ offset: para, text: tail });
+
+  for (const p of paras) {
+    if (p.text.length <= chunkSize) {
+      out.push(p);
+      continue;
+    }
+    // Long paragraph — split into overlapping windows. Step = chunkSize -
+    // overlap, so each window covers fresh ground except for the overlap
+    // at its leading edge.
+    const step = chunkSize - overlap;
+    for (let s = 0; s < p.text.length; s += step) {
+      const slice = p.text.slice(s, s + chunkSize);
+      if (slice.trim().length === 0) continue;
+      out.push({ offset: p.offset + s, text: slice });
+      if (s + chunkSize >= p.text.length) break;
+    }
+  }
+  return out;
+}
+
+class KnowledgeStore {
+  #encoder: { embed(text: string, opts?: any): Float32Array };
+  #ownsEncoder: boolean;
+  #dir: string;
+  #topK: number;
+  #chunkSize: number;
+  #chunkOverlap: number;
+  #extensions: string[];
+  #maxFileBytes: number;
+
+  // Indexed state — populated by reindex().
+  #chunks: KnowledgeChunk[] = [];
+  #vectors: Float32Array = new Float32Array(0);
+  #dim: number = 0;
+
+  // Re-index plumbing.
+  #watcher: any | null = null;
+  #reindexTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Single-flight guard so concurrent fs events coalesce into one rebuild. */
+  #reindexInFlight: Promise<void> | null = null;
+  #disposed = false;
+
+  /** Number of indexed chunks. */
+  get count(): number {
+    return this.#chunks.length;
+  }
+
+  /** Embedding dimension (set after the first reindex). */
+  get dim(): number {
+    return this.#dim;
+  }
+
+  /** Root directory being indexed. */
+  get dir(): string {
+    return this.#dir;
+  }
+
+  constructor(
+    encoder: { embed(text: string, opts?: any): Float32Array },
+    ownsEncoder: boolean,
+    opts: KnowledgeOptions,
+  ) {
+    const path = require("node:path");
+    this.#encoder = encoder;
+    this.#ownsEncoder = ownsEncoder;
+    this.#dir = path.resolve(opts.dir);
+    this.#topK = Math.max(1, opts.topK ?? 4);
+    this.#chunkSize = Math.max(64, opts.chunkSize ?? 800);
+    this.#chunkOverlap = Math.max(0, opts.chunkOverlap ?? 100);
+    this.#extensions = (opts.extensions ?? KNOWLEDGE_DEFAULT_EXTENSIONS).map(e =>
+      e.startsWith(".") ? e.toLowerCase() : "." + e.toLowerCase(),
+    );
+    this.#maxFileBytes = opts.maxFileBytes ?? 1024 * 1024;
+  }
+
+  static async create(opts: KnowledgeOptions): Promise<KnowledgeStore> {
+    const fs = require("node:fs");
+    if (typeof opts.dir !== "string" || !opts.dir) {
+      throw new TypeError("bun:assistant.knowledge: opts.dir is required");
+    }
+    if (!fs.existsSync(opts.dir)) {
+      throw new Error(`bun:assistant.knowledge: directory not found at "${opts.dir}"`);
+    }
+    let encoder: { embed(text: string, opts?: any): Float32Array };
+    let owns = false;
+    if (typeof opts.encoder === "string") {
+      encoder = await llmMod.Encoder.load(opts.encoder);
+      owns = true;
+    } else if (opts.encoder && typeof (opts.encoder as any).embed === "function") {
+      encoder = opts.encoder as any;
+    } else {
+      throw new TypeError("bun:assistant.knowledge: opts.encoder must be a path or an Encoder-like object");
+    }
+    const store = new KnowledgeStore(encoder, owns, opts);
+    await store.reindex();
+    // Watcher is opt-out — defaults to on, but ephemeral / test directories
+    // should pass watch: false to avoid the inotify-thread race that fires
+    // when the dir disappears mid-test.
+    if (opts.watch !== false) store.#startWatcher();
+    return store;
+  }
+
+  /** Walk the directory, chunk, embed, replace the index in one pass. */
+  async reindex(): Promise<void> {
+    if (this.#disposed) throw new Error("bun:assistant.knowledge: store disposed");
+    // Serialize concurrent reindex calls — fs.watch can fire fast.
+    if (this.#reindexInFlight) return this.#reindexInFlight;
+    const run = (async () => {
+      const newChunks = this.#walkAndChunk(this.#dir);
+      if (newChunks.length === 0) {
+        this.#chunks = [];
+        this.#vectors = new Float32Array(0);
+        return;
+      }
+      // Embed the first chunk to learn the dimension; allocate the matrix
+      // once we know it.
+      const first = this.#encoder.embed(newChunks[0].text, { pool: "mean", normalize: true });
+      const dim = first.length;
+      const matrix = new Float32Array(newChunks.length * dim);
+      matrix.set(first, 0);
+      for (let i = 1; i < newChunks.length; i++) {
+        const v = this.#encoder.embed(newChunks[i].text, { pool: "mean", normalize: true });
+        if (v.length !== dim) {
+          throw new Error(
+            `bun:assistant.knowledge: encoder produced inconsistent dims (${dim} vs ${v.length}) at chunk ${i}`,
+          );
+        }
+        matrix.set(v, i * dim);
+      }
+      this.#chunks = newChunks;
+      this.#vectors = matrix;
+      this.#dim = dim;
+    })();
+    this.#reindexInFlight = run;
+    try {
+      await run;
+    } finally {
+      this.#reindexInFlight = null;
+    }
+  }
+
+  /**
+   * Cosine search against the index. Returns the top-N hits in descending
+   * score order. Embeds the query text with the same encoder + pool +
+   * normalization as the corpus.
+   */
+  search(text: string, n?: number): KnowledgeHit[] {
+    if (this.#disposed) throw new Error("bun:assistant.knowledge: store disposed");
+    if (this.#chunks.length === 0 || this.#dim === 0) return [];
+    const k = Math.max(1, Math.min(this.#chunks.length, n ?? this.#topK));
+    const q = this.#encoder.embed(text, { pool: "mean", normalize: true });
+    if (q.length !== this.#dim) {
+      throw new Error(`bun:assistant.knowledge: query dim ${q.length} doesn't match index dim ${this.#dim}`);
+    }
+    const dim = this.#dim;
+    const n_chunks = this.#chunks.length;
+    const m = this.#vectors;
+    // Compute all scores; keep top-k via a simple linear scan with insertion.
+    // For low-thousands of chunks this beats a heap on real wall-clock time.
+    const topIdx = new Int32Array(k);
+    const topScore = new Float32Array(k);
+    topScore.fill(-Infinity);
+    for (let i = 0; i < n_chunks; i++) {
+      let dot = 0;
+      const off = i * dim;
+      for (let j = 0; j < dim; j++) dot += m[off + j] * q[j];
+      // Insertion into the sorted top-k tail.
+      if (dot > topScore[k - 1]) {
+        let pos = k - 1;
+        while (pos > 0 && topScore[pos - 1] < dot) {
+          topScore[pos] = topScore[pos - 1];
+          topIdx[pos] = topIdx[pos - 1];
+          pos--;
+        }
+        topScore[pos] = dot;
+        topIdx[pos] = i;
+      }
+    }
+    const hits: KnowledgeHit[] = [];
+    for (let i = 0; i < k; i++) {
+      if (topScore[i] === -Infinity) break;
+      const c = this.#chunks[topIdx[i]];
+      hits.push({ path: c.path, offset: c.offset, text: c.text, score: topScore[i] });
+    }
+    return hits;
+  }
+
+  /** Idempotent. Releases the watcher + (if owned) the encoder. */
+  async close(): Promise<void> {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    if (this.#reindexTimer) {
+      clearTimeout(this.#reindexTimer);
+      this.#reindexTimer = null;
+    }
+    if (this.#watcher) {
+      try {
+        this.#watcher.close();
+      } catch {}
+      this.#watcher = null;
+    }
+    if (this.#ownsEncoder && this.#encoder && typeof (this.#encoder as any).dispose === "function") {
+      try {
+        (this.#encoder as any).dispose();
+      } catch {}
+    }
+  }
+
+  // ─── Internals ───
+
+  #walkAndChunk(root: string): KnowledgeChunk[] {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const out: KnowledgeChunk[] = [];
+    const walk = (dir: string): void => {
+      let entries: any[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        // Skip dotdirs like .git, .obsidian — never indexed.
+        if (ent.name.startsWith(".")) continue;
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!ent.isFile()) continue;
+        const ext = path.extname(ent.name).toLowerCase();
+        if (this.#extensions.indexOf(ext) === -1) continue;
+        let stat: any;
+        try {
+          stat = fs.statSync(full);
+        } catch {
+          continue;
+        }
+        if (stat.size > this.#maxFileBytes) continue;
+        let body: string;
+        try {
+          body = fs.readFileSync(full, "utf8");
+        } catch {
+          continue;
+        }
+        for (const c of chunkText(body, { chunkSize: this.#chunkSize, chunkOverlap: this.#chunkOverlap })) {
+          out.push({ path: full, offset: c.offset, text: c.text });
+        }
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  #startWatcher(): void {
+    const fs = require("node:fs");
+    try {
+      this.#watcher = fs.watch(this.#dir, { recursive: true }, () => {
+        // Debounce: editors often emit a flurry of events when saving.
+        // Coalesce into one reindex 250 ms after the last event.
+        if (this.#disposed) return;
+        if (this.#reindexTimer) clearTimeout(this.#reindexTimer);
+        this.#reindexTimer = setTimeout(() => {
+          this.#reindexTimer = null;
+          this.reindex().catch(() => undefined);
+        }, 250);
+      });
+    } catch {
+      // Some platforms (older macOS, some Linux containers) don't support
+      // recursive watch. Fall back to manual `bot.knowledge.reindex()`.
+    }
+  }
+}
+
 // ─── Assistant ─────────────────────────────────────────────────────────────
 
 class Assistant {
@@ -493,6 +876,11 @@ class Assistant {
   /** Set true so #runTurn knows the next turn is proactive. */
   #scheduledFlag = false;
 
+  // ─── Knowledge / RAG (LYK-738) ───
+  #knowledge: KnowledgeStore | null = null;
+  /** Default top-K when retrieving for a turn. Cached from opts at create. */
+  #knowledgeTopK = 4;
+
   #disposed = false;
 
   // Public read-only signal accessors.
@@ -520,6 +908,15 @@ class Assistant {
    */
   get memory(): MemoryStore | null {
     return this.#memory;
+  }
+
+  /**
+   * RAG store. Null when no `knowledge` option was passed. Exposed so
+   * callers can `.search()` directly, force `.reindex()` after their own
+   * doc updates, or read `.count` / `.dim` for observability.
+   */
+  get knowledge(): KnowledgeStore | null {
+    return this.#knowledge;
   }
 
   /**
@@ -655,6 +1052,16 @@ class Assistant {
 
     // Optional: speaker — opened lazily on first speak() call so we know
     // the TTS-emitted sample rate to negotiate with ALSA.
+
+    // Optional: knowledge / RAG (LYK-738). Index synchronously at create
+    // time so the first turn doesn't pay the indexing cost. Encoder load
+    // + corpus walk + embed pass blocks here on the user's wall clock —
+    // for a few thousand chunks that's a couple hundred ms on a desktop,
+    // a couple seconds on a Pi. Watcher fires from inside reindex().
+    if (opts.knowledge) {
+      bot.#knowledge = await KnowledgeStore.create(opts.knowledge);
+      bot.#knowledgeTopK = Math.max(1, opts.knowledge.topK ?? 4);
+    }
 
     // Optional: schedule timers (LYK-737). Align the first tick to the
     // next :00 second of the next minute, then setInterval at 60 s. The
@@ -871,14 +1278,22 @@ class Assistant {
     this.#history.set(this.#messages.slice());
     this.#memory?.append(userMsg);
 
+    // RAG retrieval (LYK-738). If a knowledge store is configured, run a
+    // search against the user's text and build a working copy of #messages
+    // with the retrieved chunks injected as a synthetic system message.
+    // The synthetic context lives only for this turn — it doesn't go into
+    // canonical history, doesn't persist to memory, and doesn't bias the
+    // next turn's retrieval.
+    const workingMessages = this.#buildWorkingMessages(userText);
+
     let reply: string;
     let toolCalls: { name: string; args: unknown; result: unknown }[] = [];
     let interrupted = false;
     try {
       if (this.#tools.length === 0) {
-        reply = await this.#chatWithBargeIn();
+        reply = await this.#chatWithBargeIn(workingMessages);
       } else {
-        const result = await this.#runTurnWithTools();
+        const result = await this.#runTurnWithTools(workingMessages);
         reply = result.reply;
         toolCalls = result.toolCalls;
       }
@@ -921,15 +1336,68 @@ class Assistant {
   }
 
   /**
+   * Build the messages list to pass to the LLM for the current turn,
+   * injecting RAG-retrieved context if a knowledge store is configured.
+   * Returns `this.#messages` as-is when no knowledge is wired (zero-cost
+   * fast path).
+   *
+   * The injected context is a synthetic system message inserted right
+   * after the original system prompt (if any), before the user/assistant
+   * turn history. Format mimics conventional RAG prompts: numbered list
+   * of chunks, each tagged with its source path. The LLM sees this as
+   * authoritative reference material.
+   */
+  #buildWorkingMessages(userText: string): Message[] {
+    if (!this.#knowledge || this.#knowledge.count === 0) return this.#messages;
+    let hits: KnowledgeHit[];
+    try {
+      hits = this.#knowledge.search(userText, this.#knowledgeTopK);
+    } catch {
+      // A search failure (e.g., encoder dim mismatch after a hot-reload)
+      // should not kill the turn — fall back to the bare message list.
+      return this.#messages;
+    }
+    if (hits.length === 0) return this.#messages;
+
+    const lines: string[] = ["Relevant context from your notes:", ""];
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i];
+      lines.push(`[${i + 1}] (${h.path})`);
+      lines.push(h.text);
+      lines.push("");
+    }
+    lines.push(
+      "Use the context above when it's relevant to the user's request. " +
+        "Cite the bracketed number when you reference a specific item; " +
+        "if nothing above is relevant, ignore it.",
+    );
+    const ragMsg: Message = { role: "system", content: lines.join("\n") };
+
+    // Insert after the canonical system prompt (slot 0) if there is one,
+    // otherwise at slot 0. Keeps system-level instructions at the head.
+    const out: Message[] = [];
+    let inserted = false;
+    for (const m of this.#messages) {
+      out.push(m);
+      if (!inserted && m.role === "system") {
+        out.push(ragMsg);
+        inserted = true;
+      }
+    }
+    if (!inserted) out.unshift(ragMsg);
+    return out;
+  }
+
+  /**
    * Run a plain chat call with cancellation support. We iterate the m.chat
    * generator instead of awaiting chatComplete so #abortRequested can stop
    * generation mid-stream — the partial text becomes the recorded reply.
    * Models running on the device path don't expose a hard-cancel today, so
    * we just stop pulling tokens; whatever is in flight finishes silently.
    */
-  async #chatWithBargeIn(): Promise<string> {
+  async #chatWithBargeIn(messages: Message[]): Promise<string> {
     let out = "";
-    for await (const chunk of this.#llm.chat(this.#messages, this.#chatOpts)) {
+    for await (const chunk of this.#llm.chat(messages, this.#chatOpts)) {
       out += chunk;
       if (this.#abortRequested) break;
     }
@@ -945,7 +1413,9 @@ class Assistant {
    * within the working copy — the canonical history (#messages) only
    * gets the user→assistant pair.
    */
-  async #runTurnWithTools(): Promise<{ reply: string; toolCalls: { name: string; args: unknown; result: unknown }[] }> {
+  async #runTurnWithTools(
+    sourceMessages: Message[],
+  ): Promise<{ reply: string; toolCalls: { name: string; args: unknown; result: unknown }[] }> {
     const toolNames = this.#tools.map(t => t.name);
     // `argsJson` is a string the model fills with a JSON-encoded args
     // object — an arbitrary `{ type: "object" }` schema would compile to
@@ -964,13 +1434,20 @@ class Assistant {
     };
 
     // Working copy of history with a tool-aware system prompt prepended.
-    // The original system prompt (if any) stays as-is at index 0; the
-    // tool-aware prompt is appended to it (or used standalone).
-    const baseSystem = this.#messages.find(m => m.role === "system")?.content;
+    // The base system prompt (the FIRST system message) is folded into the
+    // toolPrompt and skipped. Any other system messages — e.g., retrieved
+    // context injected by the RAG layer (LYK-738) — pass through so the
+    // model sees the tool prompt + retrieved context + user/assistant turns.
+    const baseSystem = sourceMessages.find(m => m.role === "system")?.content;
     const toolPrompt = this.#renderToolPrompt(baseSystem);
     const working: Message[] = [{ role: "system", content: toolPrompt }];
-    for (const m of this.#messages) {
-      if (m.role !== "system") working.push(m);
+    let baseSystemSeen = false;
+    for (const m of sourceMessages) {
+      if (m.role === "system" && !baseSystemSeen && m.content === baseSystem) {
+        baseSystemSeen = true;
+        continue;
+      }
+      working.push(m);
     }
 
     const toolCalls: { name: string; args: unknown; result: unknown }[] = [];
@@ -1161,6 +1638,12 @@ class Assistant {
       } catch {}
       this.#memory = null;
     }
+    if (this.#knowledge) {
+      try {
+        await this.#knowledge.close();
+      } catch {}
+      this.#knowledge = null;
+    }
   }
 
   [Symbol.asyncDispose](): Promise<void> {
@@ -1179,4 +1662,10 @@ export default {
   // their own scheduler. The `schedule:` option uses these internally.
   parseCron,
   cronMatches,
+  // RAG primitives (LYK-738) — exposed for tests and standalone use
+  // (search a doc dir without spinning up an assistant). The `knowledge:`
+  // option uses KnowledgeStore internally; chunkText is pure and a useful
+  // building block for users wiring their own indexers.
+  chunkText,
+  KnowledgeStore,
 };
