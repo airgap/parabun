@@ -1,0 +1,34 @@
+// Three-line voice assistant — bun:assistant.
+//
+//   ASSISTANT_LLM=/path/to/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+//   ASSISTANT_STT=/path/to/ggml-tiny.en.bin \
+//   ASSISTANT_TTS=/path/to/en_US-lessac-medium.onnx \
+//     bun run build:release demos/assistant-3line.pts
+//
+// `assistant.create` takes a model trio + an optional system prompt and
+// hands back a `bot`. `bot.run()` opens the mic + speaker and loops:
+// VAD → STT → LLM → TTS → speaker. Press Ctrl-C to stop.
+
+import assistant from "bun:assistant";
+import { existsSync } from "node:fs";
+
+const llm = process.env.ASSISTANT_LLM;
+const stt = process.env.ASSISTANT_STT;
+const tts = process.env.ASSISTANT_TTS;
+
+for (const [name, path] of Object.entries({ ASSISTANT_LLM: llm, ASSISTANT_STT: stt, ASSISTANT_TTS: tts })) {
+  if (!path || !existsSync(path)) {
+    console.error(`set ${name}=<path> — missing or doesn't exist`);
+    process.exit(1);
+  }
+}
+
+await using bot = await assistant.create({
+  llm: llm!,
+  stt: stt!,
+  tts: tts!,
+  system: "You are a concise voice assistant. Answer in one or two sentences.",
+});
+
+console.log("assistant ready — start talking. Ctrl-C to stop.");
+await bot.run();

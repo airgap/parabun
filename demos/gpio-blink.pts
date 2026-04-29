@@ -1,0 +1,63 @@
+// Blink an LED + react to a button — bun:gpio.
+//
+//   bun run build:release demos/gpio-blink.pts [--seconds N]
+//
+// Wire BCM 17 → LED (with current-limiting resistor), BCM 27 → button to
+// ground. The button line uses a pull-up bias and "falling" edge events
+// so the press registers the moment the line drops to 0.
+//
+// Without --seconds the demo blinks forever and stops on the first
+// button press. With --seconds N it blinks for N seconds then exits
+// cleanly (useful for headless automated runs).
+//
+// Set GPIO_CHIP=/dev/gpiochipN if you're not on a Pi 5; default is
+// auto-detect (RP1 on Pi 5, chip 0 elsewhere).
+
+import gpio from "bun:gpio";
+
+const args = process.argv.slice(2);
+const secondsIdx = args.indexOf("--seconds");
+const seconds = secondsIdx >= 0 ? Number(args[secondsIdx + 1]) : null;
+
+const chips = gpio.chips();
+const rp1 = chips.find(c => c.label === "pinctrl-rp1");
+const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
+if (!chipPath) {
+  console.error("no /dev/gpiochip* found — bun:gpio is Linux-only.");
+  process.exit(1);
+}
+
+await using chip = gpio.open(chipPath);
+console.log(`opened ${chip.path} (${chip.label}, ${chip.lines} lines)`);
+
+await using led = chip.line(17, { mode: "out", initial: 0 });
+
+let stop = false;
+const blinker = (async () => {
+  while (!stop) {
+    led.toggle();
+    await Bun.sleep(500);
+  }
+})();
+
+if (seconds !== null && Number.isFinite(seconds)) {
+  console.log(`blinking LED on BCM17 for ${seconds}s — non-interactive mode.`);
+  await Bun.sleep(seconds * 1000);
+} else {
+  await using button = chip.line(27, {
+    mode: "in",
+    pull: "up",
+    edge: "falling",
+    debounceMs: 5,
+  });
+  console.log("blinking LED on BCM17 — press button on BCM27 to stop.");
+  for await (const e of button.edges()) {
+    console.log(`press at ${e.timestampNs}ns (kind=${e.kind}, value=${e.value})`);
+    break;
+  }
+}
+
+stop = true;
+await blinker;
+led.write(0);
+console.log("done.");

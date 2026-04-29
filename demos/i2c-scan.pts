@@ -1,0 +1,42 @@
+// List every i2c bus + scan it for ack'ing devices — bun:i2c.
+//
+//   bun run build:release demos/i2c-scan.pts
+//
+// Mirrors the shape of `i2cdetect -l && i2cdetect -y N` for every bus,
+// in TypeScript.
+
+import i2c from "bun:i2c";
+
+const buses = i2c.buses();
+if (buses.length === 0) {
+  console.error("no /dev/i2c-* — bun:i2c is Linux-only and needs i2c-dev loaded.");
+  process.exit(1);
+}
+
+console.log(`found ${buses.length} bus${buses.length === 1 ? "" : "es"}:\n`);
+for (const b of buses) {
+  console.log(`  ${b.path.padEnd(18)} ${b.name}`);
+}
+console.log();
+
+for (const info of buses) {
+  let bus;
+  try {
+    bus = i2c.open(info.path);
+  } catch (e) {
+    console.log(`${info.path.padEnd(18)} skipped — ${(e as Error).message}\n`);
+    continue;
+  }
+  try {
+    console.log(`scanning ${bus.path} (${bus.capabilities.length} caps)`);
+    const present = await bus.scan();
+    if (present.length === 0) {
+      console.log("  no devices ack'd\n");
+      continue;
+    }
+    const hex = present.map(a => "0x" + a.toString(16).padStart(2, "0")).join(" ");
+    console.log(`  ${present.length} device${present.length === 1 ? "" : "s"}: ${hex}\n`);
+  } finally {
+    bus.close();
+  }
+}
