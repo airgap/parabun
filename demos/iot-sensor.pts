@@ -1,0 +1,43 @@
+// Periodic sensor → derived state → reactive log.
+//
+//   bun run build:release demos/iot-sensor.pts
+//
+// Shows the canonical "poll a sensor, react to threshold crossings"
+// shape:
+//
+//   1. `signals.fromInterval(fn, periodMs)` calls fn periodically and
+//      drives a Signal with the latest value. Same shape used for
+//      i2c.smbus.readWord / readByte — replace the simulated reading
+//      with the real device call and the rest is unchanged.
+//   2. `derived(() => …)` builds a read-only signal from one or more
+//      inputs (here: the temperature crossing 30°C).
+//   3. `effect { … }` runs the reaction. It tracks every signal read
+//      inside, so adding another input — `humidity`, a button, a door
+//      switch — is one more line in the body.
+
+import signals from "bun:signals";
+
+// Simulated 0.2 s sensor sweep. In a real deployment this would be
+// e.g. `sensor.smbus.readWord(0xFA)` against a BME280 over i2c.
+let pulse = 0;
+const sensor = signals.fromInterval(() => {
+  pulse = (pulse + 1) % 16;
+  return 22 + pulse * 1.2; // °C, sweep 22–40
+}, 200);
+
+// Derived state — auto-recomputes whenever sensor.signal updates.
+const isHot = signals.derived(() => (sensor.signal.get() ?? 0) > 30);
+
+// Reaction — same effect handles both branches and the formatted log.
+effect {
+  const t = sensor.signal.get();
+  const hot = isHot.get();
+  if (t !== undefined) {
+    console.log(`${hot ? "[HOT] " : "[ok ] "} ${t.toFixed(1)}C`);
+  }
+}
+
+console.log("simulated sensor — 16 readings over ~3.2s\n");
+await Bun.sleep(3300);
+sensor.dispose();
+console.log("\ndone.");
