@@ -330,4 +330,57 @@ function pump<T, V = T>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn?:
   return startPump<T, V>(iterable, sig, mapFn);
 }
 
-export default { signal, derived, effect, batch, untrack, fromAsync, pump, Signal: ReadableSignal };
+/**
+ * Drive a signal from a periodic call. `fn` runs immediately once, then
+ * every `periodMs` thereafter; the returned `signal` holds the latest
+ * resolved value (`undefined` until the first call settles). `fn` can
+ * be sync or async; thrown errors are swallowed (the signal keeps its
+ * previous value).
+ *
+ * The internal timer `.unref()`s itself, so a bare `fromInterval(...)`
+ * call doesn't pin the event loop on its own — pair it with an
+ * `effect { ... }` block or another keep-alive when you want the
+ * process to stay running on its account.
+ *
+ * Common shape for periodic sensor reads:
+ *
+ *   const temp = signals.fromInterval(
+ *     () => sensor.smbus.readWord(0xFA),
+ *     500,
+ *   );
+ *   effect { console.log("temp:", temp.signal.get()); }
+ */
+function fromInterval<T>(fn: () => T | Promise<T>, periodMs: number): DriverHandle<T | undefined> {
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  if (typeof periodMs !== "number" || !Number.isFinite(periodMs) || periodMs < 1) {
+    throw new RangeError("bun:signals.fromInterval: periodMs must be a positive finite number");
+  }
+  const sig = new StateSignal<T | undefined>(undefined);
+  let stopped = false;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const v = await fn();
+      if (!stopped) sig.set(v);
+    } catch {
+      // Swallow; signal keeps its previous value. Failed reads shouldn't
+      // bubble up and crash the process; if the caller wants to react to
+      // errors they can wrap fn() themselves.
+    }
+  };
+  const id = setInterval(tick, periodMs);
+  id?.unref?.();
+  // Run immediately so the first value lands without waiting periodMs.
+  tick();
+  return {
+    signal: sig,
+    dispose: () => {
+      stopped = true;
+      clearInterval(id);
+    },
+  };
+}
+
+export default { signal, derived, effect, batch, untrack, fromAsync, fromInterval, pump, Signal: ReadableSignal };
