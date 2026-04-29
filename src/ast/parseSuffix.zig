@@ -1080,6 +1080,109 @@ pub fn ParseSuffix(
             return .next;
         }
 
+        // Parabun: `A -> fn` reactive function-call binding — desugars to
+        //   require("bun:signals").effect(() => { fn(A); })
+        //
+        // Complement to `~>`: where `~>` writes `A.get()` into an assignable
+        // sink, `->` calls a function/method with `A.get()`. Reads naturally:
+        // "this expression flows into this writer." Replaces the
+        // `effect { someFn(template) }` boilerplate that's otherwise the
+        // dominant shape for "render reactive value, push to sink."
+        //
+        //   `mic ${a}` -> process.stdout.write
+        //   →  effect(() => { process.stdout.write(`mic ${a.get()}`); })
+        //
+        // Same level (.assign), same disposer return shape, same optional
+        // `when COND` guard support as `~>`. RHS must be callable shape:
+        // identifier, dot access, or index access. Bare-call expressions
+        // (`fn()`) are rejected — call the operator with the function value
+        // itself, not an applied call.
+        fn t_minus_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            if (level.gte(.assign)) {
+                return .done;
+            }
+
+            const op_loc = p.lexer.loc();
+            try p.lexer.next();
+            const body_loc = p.lexer.loc();
+
+            const rhs = try p.parseExpr(.assign);
+
+            switch (rhs.data) {
+                .e_identifier, .e_dot, .e_index => {},
+                else => {
+                    try p.log.addError(
+                        p.source,
+                        rhs.loc,
+                        "`->` requires a callable target on the right (identifier or property access; not a call expression)",
+                    );
+                    return .done;
+                },
+            }
+
+            // Optional `when COND` guard — same shape as `~>`.
+            var guard: ?Expr = null;
+            if (p.lexer.isContextualKeyword("when") and !p.lexer.has_newline_before) {
+                try p.lexer.next();
+                guard = try p.parseExpr(.assign);
+            }
+
+            // Build the call expression: rhs(left)
+            const call_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            call_args[0] = left.*;
+            const call = p.newExpr(E.Call{
+                .target = rhs,
+                .args = ExprNodeList.fromOwnedSlice(call_args),
+                .close_paren_loc = body_loc,
+            }, body_loc);
+
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            const call_stmt = p.s(S.SExpr{ .value = call }, body_loc);
+            if (guard) |guard_expr| {
+                body_stmts[0] = p.s(S.If{
+                    .test_ = guard_expr,
+                    .yes = call_stmt,
+                    .no = null,
+                }, body_loc);
+            } else {
+                body_stmts[0] = call_stmt;
+            }
+
+            // Same arrow-scope dance as `~>` so the visit pass pops cleanly.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, op_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, op_loc);
+
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, op_loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, op_loc),
+                .args = ExprNodeList.fromOwnedSlice(require_args),
+            }, op_loc);
+            const effect_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "effect",
+                .name_loc = op_loc,
+            }, op_loc);
+            const effect_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            effect_args[0] = arrow;
+            left.* = p.newExpr(E.Call{
+                .target = effect_dot,
+                .args = ExprNodeList.fromOwnedSlice(effect_args),
+                .close_paren_loc = p.lexer.loc(),
+            }, left.loc);
+            return .next;
+        }
+
         fn isUnderscorePlaceholder(p: *P, expr: Expr) bool {
             if (expr.data != .e_identifier) return false;
             const name = p.loadNameFromRef(expr.data.e_identifier.ref);
@@ -1343,6 +1446,7 @@ pub fn ParseSuffix(
                     .t_dot_dot_ampersand,
                     .t_bar_greater_than,
                     .t_tilde_greater_than,
+                    .t_minus_greater_than,
                     .t_equals,
                     .t_equals_equals,
                     .t_equals_equals_equals,

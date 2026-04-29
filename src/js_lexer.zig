@@ -1451,6 +1451,18 @@ fn NewLexer_(
                                 lexer.token = T.t_minus_minus;
                             },
 
+                            '>' => {
+                                if (comptime is_json) {
+                                    return lexer.addUnsupportedSyntaxError("Operators are not allowed in JSON");
+                                }
+                                // Parabun: `->` reactive binding for function/method
+                                // sinks. `A -> fn` desugars to
+                                //   require("bun:signals").effect(() => { fn(A); })
+                                // Complement to `~>` (assignment sink).
+                                lexer.step();
+                                lexer.token = T.t_minus_greater_than;
+                            },
+
                             else => {
                                 lexer.token = T.t_minus;
                             },

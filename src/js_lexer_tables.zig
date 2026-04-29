@@ -40,7 +40,8 @@ pub const T = enum(u8) {
     t_dot_dot_exclamation, // ..!
     t_dot_dot_ampersand, // ..&
     t_bar_greater_than, // |>
-    t_tilde_greater_than, // ~> (Parabun: reactive binding)
+    t_tilde_greater_than, // ~> (Parabun: reactive binding — assignment sink)
+    t_minus_greater_than, // -> (Parabun: reactive binding — function/call sink)
     t_equals_equals,
     t_equals_equals_equals,
     t_equals_greater_than,
@@ -298,6 +299,7 @@ pub const tokenToString = brk: {
     const TDotDotAmpersand = "\"..&\"".*;
     const TBarGreaterThan = "\"|>\"".*;
     const TTildeGreaterThan = "\"~>\"".*;
+    const TMinusGreaterThan = "\"->\"".*;
     const TEqualsEquals = "\"==\"".*;
     const TEqualsEqualsEquals = "\"===\"".*;
     const TEqualsGreaterThan = "\"=>\"".*;
@@ -429,6 +431,7 @@ pub const tokenToString = brk: {
     tokenEnums.set(T.t_dot_dot_ampersand, &TDotDotAmpersand);
     tokenEnums.set(T.t_bar_greater_than, &TBarGreaterThan);
     tokenEnums.set(T.t_tilde_greater_than, &TTildeGreaterThan);
+    tokenEnums.set(T.t_minus_greater_than, &TMinusGreaterThan);
     tokenEnums.set(T.t_equals_equals, &TEqualsEquals);
     tokenEnums.set(T.t_equals_equals_equals, &TEqualsEqualsEquals);
     tokenEnums.set(T.t_equals_greater_than, &TEqualsGreaterThan);
