@@ -111,6 +111,12 @@ interface LineBank extends AsyncDisposable {
   /** Chip-relative offsets, in the order they were requested. */
   readonly offsets: readonly number[];
   /**
+   * Read-only signal of the most recent atomic-read snapshot. Same
+   * "bit i = offsets[i]" packing as read() / write(). Updates on read()
+   * and on each pollHz tick (input banks only).
+   */
+  readonly value: Signal<bigint>;
+  /**
    * Atomic read of all lines. Returns a 64-bit bitmask: bit i is the
    * value of `offsets[i]` (NOT the chip-relative offset — bit 0 = first
    * requested line, etc.). Throws on closed.
@@ -281,30 +287,55 @@ class LineBankImpl implements LineBank {
   #mode: LineMode;
   #closed = false;
   #allMask: bigint;
+  #value: WritableSignal<bigint>;
+  #pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(fd: bigint, offsets: number[], mode: LineMode) {
+  constructor(fd: bigint, offsets: number[], mode: LineMode, initial: bigint, pollHz: number = 0) {
     this.#fd = fd;
     this.offsets = offsets;
     this.#mode = mode;
     this.#allMask = offsets.length === 64 ? ~0n : (1n << BigInt(offsets.length)) - 1n;
+    this.#value = signalsMod.signal(mode === "out" ? initial : 0n);
     lineRegistry.register(this, fd, this);
+    if (mode === "in" && pollHz > 0) {
+      const periodMs = Math.max(1, Math.round(1000 / pollHz));
+      this.#pollTimer = setInterval(() => {
+        if (this.#closed) return;
+        try {
+          this.read();
+        } catch {}
+      }, periodMs);
+      this.#pollTimer?.unref?.();
+    }
+  }
+
+  get value(): Signal<bigint> {
+    return this.#value;
   }
 
   read(): bigint {
     if (this.#closed) throw new Error("bun:gpio: bank is closed");
-    return native.readLines(this.#fd, this.offsets.length) as bigint;
+    const v = native.readLines(this.#fd, this.offsets.length) as bigint;
+    if (v !== this.#value.peek()) this.#value.set(v);
+    return v;
   }
 
   write(values: bigint, mask?: bigint): void {
     if (this.#closed) throw new Error("bun:gpio: bank is closed");
     if (this.#mode !== "out") throw new Error("bun:gpio: write() requires output lines");
     const m = mask ?? this.#allMask;
+    const next = BigInt(values) & m;
     native.writeLines(this.#fd, BigInt(values), BigInt(m));
+    if (next !== this.#value.peek()) this.#value.set(next);
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    if (this.#pollTimer !== null) {
+      clearInterval(this.#pollTimer);
+      this.#pollTimer = null;
+    }
     const fd = this.#fd;
     this.#fd = 0n;
     if (fd !== 0n) {
@@ -391,6 +422,7 @@ class ChipImpl implements Chip {
     }
     const debounceMs = Math.max(0, Math.floor(opts.debounceMs ?? 0));
     const initialMask = opts.initial !== undefined ? BigInt(opts.initial) : 0n;
+    const pollHz = Math.max(0, Math.floor(opts.pollHz ?? 0));
     const offsetsU32 = new Uint32Array(offsets);
 
     const fd = native.requestLines(
@@ -402,7 +434,7 @@ class ChipImpl implements Chip {
       debounceMs,
       initialMask,
     ) as bigint;
-    return new LineBankImpl(fd, offsets.slice(), mode);
+    return new LineBankImpl(fd, offsets.slice(), mode, initialMask, pollHz);
   }
 
   close(): void {
