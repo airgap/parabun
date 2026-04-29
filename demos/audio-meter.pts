@@ -1,14 +1,13 @@
-// Live mic peak meter — bun:audio capture + bun:signals.
+// Live mic peak meter — bun:audio capture + parabun `effect { }` block.
 //
 //   bun run build:release demos/audio-meter.pts
 //
 // Opens the default ALSA / CoreAudio / WASAPI input, reads frames in the
-// background, and uses an `effect { … }` over `mic.peakLevel` to redraw
-// a one-line VU bar at ~10 Hz (the signal is rate-limited that low at
-// the source). Stops with Ctrl-C.
+// background, and uses an `effect { … }` block over `mic.peakLevel` to
+// redraw a one-line VU bar. The signal is rate-limited to ~10 Hz at the
+// source, so this is the redraw rate too. Stops with Ctrl-C.
 
 import audio from "bun:audio";
-import signals from "bun:signals";
 
 await using mic = await audio.capture({
   device: "default",
@@ -21,17 +20,16 @@ console.log("peak meter — Ctrl-C to stop\n");
 
 // 30-cell ASCII VU bar. effect re-runs on every peakLevel.set() inside
 // the audio module, so the redraw is push-driven; no setInterval needed.
-const dispose = signals.effect(() => {
+// `effect { … }` is parabun sugar for `signals.effect(() => { … })`.
+effect {
   const peak = mic.peakLevel.get();
   const bars = Math.min(30, Math.round(peak * 30));
-  const line = "█".repeat(bars).padEnd(30, "·");
+  const line = "#".repeat(bars).padEnd(30, ".");
   process.stdout.write(`\r[${line}] ${peak.toFixed(3)}`);
-});
+}
 
 // Drain frames so the capture loop keeps producing peakLevel updates.
 for await (const _frame of mic.frames()) {
   // The frame data isn't needed for the meter — peakLevel updates as
   // each frame is processed inside bun:audio.
 }
-
-dispose();

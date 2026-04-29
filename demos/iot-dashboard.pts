@@ -1,0 +1,61 @@
+// IoT dashboard — derived signals + `effect { }` + `~>` reactive binding.
+//
+//   bun run build:release demos/iot-dashboard.pts
+//
+// Pure simulation, no hardware. Reads "sensor" values into bare parabun
+// signals (`signal name = …`), composes derived state with normal JS
+// expressions (the parser auto-promotes any expression that reads a
+// signal to a `derived()`), and reacts via `effect { … }`. Shows the
+// shape that real bun:gpio / bun:i2c sensor signals would slot into.
+
+// Inputs — simulated sensor values updated by the loop at the bottom.
+signal temperature = 22;     // °C
+signal humidity = 45;         // %
+signal door = "closed";       // "closed" | "open"
+
+// Derived state — anything whose RHS reads a signal becomes read-only
+// `derived()` automatically.
+signal isHot = temperature > 30;
+signal isHumid = humidity > 80;
+signal alarm = isHot || isHumid || door === "open";
+
+// Pretend display panel — a sink the dashboard writes into.
+const display = { line: "" };
+
+// Reactive log every time any input or derived value changes.
+effect {
+  const t = temperature.get();
+  const h = humidity.get();
+  const d = door.get();
+  const a = alarm.get();
+  console.log(`${a ? "[ALARM]" : "[ ok  ]"}  t=${t.toFixed(1)}C  h=${h.toFixed(0)}%  door=${d}`);
+}
+
+// `~>` binds the alarm signal into display.line. Parses to:
+//   effect(() => { display.line = alarm.get() ? "...alert..." : "...calm..."; })
+// so the binding tracks alarm's derived deps automatically. The `when`
+// guard means we only update the panel while the door is open (only
+// then is the alarm physically reachable in this scenario).
+alarm ~> display.line when door === "open";
+
+// Simulated sensor sweep.
+const reads: Array<{ temp?: number; hum?: number; door?: "closed" | "open" }> = [
+  { temp: 24 },
+  { temp: 28 },
+  { hum: 70 },
+  { temp: 32 },          // crosses isHot threshold
+  { door: "open" },      // alarm flips, ~> fires display update
+  { hum: 85 },           // both hot AND humid
+  { temp: 26 },          // cools down — alarm still set (door open)
+  { door: "closed" },    // closes door — alarm clears
+  { hum: 50 },
+];
+
+for (const r of reads) {
+  if (r.temp !== undefined) temperature = r.temp;
+  if (r.hum !== undefined) humidity = r.hum;
+  if (r.door !== undefined) door = r.door;
+  await Bun.sleep(150);
+}
+
+console.log(`\nfinal display.line: ${display.line}`);

@@ -1,0 +1,55 @@
+// Reactive button → LED — the simplest IoT shape in parabun.
+//
+//   bun run build:release demos/iot-button-led.pts [--seconds N]
+//
+// Wire BCM 27 → button to ground (pull-up), BCM 17 → LED. The whole
+// control loop is one `effect { … }` block: when `button.value`
+// changes, the effect re-runs and writes the LED. Adding a sensor or a
+// second LED is one more line of effect — every signal read inside the
+// block is tracked automatically.
+//
+// `setInterval(...20ms)` polls `button.read()` to drive the value signal
+// at 50 Hz. We poll instead of using `edges()` because the kernel-event
+// path currently runs on the JS thread and would block here; once
+// edges() moves off-thread, the same demo can switch to it without
+// changing the effect.
+
+import gpio from "bun:gpio";
+
+const args = process.argv.slice(2);
+const sIdx = args.indexOf("--seconds");
+const seconds = sIdx >= 0 ? Number(args[sIdx + 1]) : null;
+
+const chips = gpio.chips();
+const rp1 = chips.find(c => c.label === "pinctrl-rp1");
+const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
+if (!chipPath) {
+  console.error("no /dev/gpiochip* found — bun:gpio is Linux-only.");
+  process.exit(1);
+}
+
+await using chip = gpio.open(chipPath);
+await using button = chip.line(27, { mode: "in", pull: "up", debounceMs: 5 });
+await using led = chip.line(17, { mode: "out", initial: 0 });
+
+// Drive the button signal at 50 Hz.
+const poller = setInterval(() => button.read(), 20);
+
+// The whole control loop. Pull-up means released = 1, pressed = 0.
+effect {
+  const pressed = button.value.get() === 0;
+  led.write(pressed ? 1 : 0);
+}
+
+console.log("button BCM27 → LED BCM17. Press the button to light the LED.");
+if (seconds !== null && Number.isFinite(seconds)) {
+  console.log(`(non-interactive: stopping in ${seconds}s)`);
+  await Bun.sleep(seconds * 1000);
+} else {
+  console.log("Ctrl-C to stop.");
+  await new Promise(() => {});
+}
+
+clearInterval(poller);
+led.write(0);
+console.log("done.");
