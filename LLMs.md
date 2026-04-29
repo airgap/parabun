@@ -156,6 +156,26 @@ When `B` is a signal, the existing signal-assignment sugar rewrites `B = A` to `
 
 The expression evaluates to the disposer returned by `effect()`, so users can capture it (`const stop = ...`) or ignore it (fire-and-forget at statement scope).
 
+`A ~> B [when COND]` adds an `if (COND)` guard around the assignment inside the effect body. Reads of signals inside `COND` are tracked too, so the guard re-evaluates whenever its own deps change.
+
+### `->` (reactive call-binding operator)
+
+Desugars `A -> fn` to `require("bun:signals").effect(() => { fn(A); })` — the call-sink complement to `~>`. When `A` reads signals, any change re-runs the body and re-calls `fn` with the latest value. Same precedence as `~>` (assign level), same disposer return shape, same optional `when COND` guard.
+
+```
+signal a = 1;
+a -> log;                                    // log(a) on every change
+a -> obj.write;                              // method sink
+`a=${a}` -> process.stdout.write;            // template + signal → write
+a |> Math.abs -> log;                        // pipeline composes with ->
+const stop = a -> log;                       // capture disposer
+a -> log when enabled;                       // guarded: only call when enabled is truthy
+```
+
+The RHS must be a callable target — an identifier, property access (`obj.method`), or index (`arr[i]`). Bare call expressions (`a -> f()`), literals, and arrow functions are rejected at parse time with `requires a callable target on the right (identifier, property access, or indexed function)`. Bind an arrow to a `const` first if you need one as the sink.
+
+When `A` reads signals, the bare-read sugar rewrites each to `.get()` inside the effect body so they enroll as tracked deps; `fn` is invoked with the resulting value as a single positional argument.
+
 ### `defer`
 
 Schedules an expression to run when the enclosing block exits — on normal fall-through, early return, or a thrown exception. Multiple defers dispose in LIFO order (reverse of declaration).
