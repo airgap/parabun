@@ -686,7 +686,7 @@ export default defineConfig({ resolve: { alias: bunAliases } });
 Module fidelity:
 
 - **`bun:arena`** — no-op (browsers don't expose GC control; inline body is semantically correct).
-- **`bun:signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`.
+- **`bun:signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`, plus `fromAsync(asyncIterable)` and `fromInterval(fn, periodMs)` — the latter the canonical "periodic source → reactive signal" helper for IoT sensor reads.
 - **`bun:wrap`** — full implementation of `__parabunMemo` (with `.forget` / `.clear` / `.bypass`), `__parabunDefer0`, `__parabunAsyncDefer0`, `__parabunRange`, `__parabunRangeInclusive`.
 - **`bun:parallel`** — sequential fallback. `pmap` / `preduce` run on the main thread; Web-Worker-backed implementation is future work.
 - **`bun:simd`** — scalar JS loops. Correct output; ~5–20× slower than v128 on large TypedArrays. WebAssembly SIMD swap-in is future work.
