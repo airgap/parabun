@@ -62,4 +62,37 @@ describe("bun:gpio API surface", () => {
       chip.close();
     }
   });
+
+  test.skipIf(!haveGpio)("chip.bank(offsets, opts) validates input shape", async () => {
+    let chip: any;
+    try {
+      chip = gpio.open("/dev/gpiochip0");
+    } catch {
+      return;
+    }
+    try {
+      // Empty array.
+      expect(() => chip.bank([], { mode: "out" })).toThrow(RangeError);
+      // > 64 entries.
+      expect(() =>
+        chip.bank(
+          Array.from({ length: 65 }, (_, i) => i),
+          { mode: "out" },
+        ),
+      ).toThrow(RangeError);
+      // Non-array.
+      expect(() => chip.bank("nope" as any, { mode: "out" })).toThrow(RangeError);
+      // Non-integer entry.
+      expect(() => chip.bank([0.5], { mode: "out" })).toThrow(RangeError);
+      // Out-of-range offset.
+      expect(() => chip.bank([chip.lines], { mode: "out" })).toThrow(RangeError);
+      expect(() => chip.bank([-1], { mode: "out" })).toThrow(RangeError);
+      // Bad mode / pull / edge.
+      expect(() => chip.bank([0], { mode: "wat" } as any)).toThrow(TypeError);
+      expect(() => chip.bank([0], { mode: "in", pull: "wat" } as any)).toThrow(TypeError);
+      expect(() => chip.bank([0], { mode: "in", edge: "wat" } as any)).toThrow(TypeError);
+    } finally {
+      chip.close();
+    }
+  });
 });
