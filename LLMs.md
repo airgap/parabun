@@ -638,15 +638,24 @@ the user-facing surface, and `src/js/bun/*.ts` for the source:
   `bun:audio` (codecs + DSP + ALSA capture/playback), `bun:camera`
   (V4L2), `bun:csv`, `bun:llm` (GGUF Llama/Qwen2 + BERT embeddings +
   Whisper STT, with `m.busy` / `m.device` reactive signals),
-  `bun:rtp`.
+  `bun:rtp` (with `JitterBuffer.pendingSignal` / `lossCountSignal` /
+  `lossRateSignal`), `bun:mcp` (Model Context Protocol client —
+  stdio + WebSocket transports).
 - **Tier 2** (applications): `bun:speech` (`listen` / `transcribe` /
-  `speak`, with reactive `active` / `noiseFloor` / `lastUtterance`
-  signals), `bun:assistant` (the 3-line voice-assistant facade —
-  composes `bun:audio` + `bun:speech` + `bun:llm`, exposes `state` /
-  `history` / `lastTurn` / `interrupted` signals + sqlite-backed
-  persistent memory), `bun:vision` (motion detection ships, detector /
-  OCR engines stubbed), `bun:arrow` (in-memory tables + computes + IPC
-  streaming wire-compatible with apache-arrow 21.x).
+  `speak` / `wakeWord` / `matchWakePhrase`, with reactive `active` /
+  `noiseFloor` / `lastUtterance` signals on listen and `active` /
+  `lastTrigger` on wakeWord; `speak` is backed by a long-running
+  per-voice piper subprocess cached for the process lifetime),
+  `bun:assistant` (the 3-line voice-assistant facade — composes
+  `bun:audio` + `bun:speech` + `bun:llm` / `bun:mcp`, ships
+  sqlite-backed persistent memory, tool dispatch (inline + MCP),
+  VAD-driven barge-in + `bot.interrupt()`, wake-word gate, cron-driven
+  scheduled prompts, and RAG over a local doc directory; exposes
+  `state` / `history` / `lastTurn` / `interrupted` / `toolsActive`
+  signals), `bun:vision` (motion detection ships with `detected` /
+  `score` signals on the returned iterator; detector / OCR engines
+  stubbed), `bun:arrow` (in-memory tables + computes + IPC streaming
+  wire-compatible with apache-arrow 21.x).
 
 All of these are registered in `src/bun.js/HardcodedModule.zig`.
 Edits to `src/js/bun/*.ts` need a runtime cache clear

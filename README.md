@@ -27,8 +27,9 @@ Parabun closes those gaps inside one statically-linked binary:
 | [`bun:camera`](#camera-buncamera) / [`bun:audio`](#audio-codecs--dsp-bunaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
 | [`bun:image`](#image-codecs--filters-bunimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
 | [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + Whisper STT + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
-| [`bun:speech`](#speech-bunspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `speak()` — voice in / voice out from one module. |
-| [`bun:assistant`](#voice-assistant-bunassistant) | Three-line voice assistant: mic + STT + LLM + TTS + speaker, fully local. Reactive `state` / `history` / `lastTurn` signals; sqlite-backed persistent memory. |
+| [`bun:speech`](#speech-bunspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `speak()`, whisper-backed `wakeWord()` — voice in / voice out / hands-free trigger from one module. |
+| [`bun:mcp`](https://parabun.script.dev/docs/mcp/) | Model Context Protocol client — stdio + WebSocket transports. Composes structurally with `bun:assistant`'s `tools:` option. |
+| [`bun:assistant`](#voice-assistant-bunassistant) | Three-line voice assistant: mic + STT + LLM + TTS + speaker, fully local. Tool dispatch (inline + MCP), barge-in, wake word, scheduled prompts, RAG, sqlite-backed persistent memory, reactive signals. |
 
 If you've ever spawned a Python subprocess from your Node server because Node couldn't keep up — or written an N-API module because there was no other way to touch your camera / GPU / SIMD lanes — Parabun is the runtime that deletes the subprocess and the binding both.
 
@@ -365,7 +366,7 @@ await bot.run();   // for await (const _ of bot.turns()) {}
 - **Power users keep their seat**: `bot.llm` exposes the underlying `LLM` instance so anything reachable directly via `bun:llm` / `bun:speech` / `bun:audio` is reachable through `bot` too.
 - **Disposal is deterministic**: `await using` for the common path, explicit `bot.close()` for the rest. All composed resources (mic, speaker, models, sqlite) close in lockstep; idempotent.
 
-What v1 ships (per `PLAN-bun-assistant.md` build order): `assistant.create`, `bot.run` / `turns` / `ask` / `say`, the four signals, in-memory transcript, sqlite-backed persistent memory, tool dispatch + MCP, barge-in, wake word, and scheduled prompts. Deferred follow-ups (tracked under LYK-760): RAG and vision (VLM) turns.
+What v1 ships (per `PLAN-bun-assistant.md` build order): `assistant.create`, `bot.run` / `turns` / `ask` / `say` / `interrupt`, the five signals (`state` / `history` / `lastTurn` / `interrupted` / `toolsActive`), in-memory transcript, sqlite-backed persistent memory, tool dispatch + MCP, barge-in, wake word, scheduled prompts, and RAG. Deferred follow-up (tracked under LYK-760): vision (VLM) turns.
 
 ### Streaming CSV (`bun:csv`)
 
@@ -458,7 +459,7 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 | partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
 | partial     | `bun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
 | shipped     | `bun:speech` (Tier 2) | VAD-gated `listen()` (returns reactive utterance stream with `active` / `noiseFloor` / `lastUtterance` signals), Whisper `transcribe()` via `bun:llm.WhisperModel`, Piper `speak()` via subprocess (libpiper FFI v2 tracked under LYK-758). |
-| shipped     | `bun:assistant` (Tier 2) | Three-line voice-assistant facade composing `bun:audio` + `bun:speech` + `bun:llm`. `bot.run` / `turns` / `ask` / `say` + reactive `state` / `history` / `lastTurn` / `interrupted` signals + sqlite-backed persistent memory + tool dispatch (inline + MCP) + VAD-driven barge-in (`bot.interrupt()`) + wake word (`wakeWord: "hey jetson"`) + scheduled prompts (`schedule: [{ cron, prompt }]`). RAG, vision deferred to follow-ups. |
+| shipped     | `bun:assistant` (Tier 2) | Three-line voice-assistant facade composing `bun:audio` + `bun:speech` + `bun:llm` + `bun:mcp`. `bot.run` / `turns` / `ask` / `say` + reactive `state` / `history` / `lastTurn` / `interrupted` / `toolsActive` signals + sqlite-backed persistent memory + tool dispatch (inline + MCP) + VAD-driven barge-in (`bot.interrupt()`) + wake word (`wakeWord: "hey jetson"`) + scheduled prompts (`schedule: [{ cron, prompt }]`) + RAG (`knowledge: { dir, encoder, topK }`). VLM turns deferred to follow-up. |
 | partial     | `bun:arrow` (Tier 2)  | In-memory columnar tables (`RecordBatch`, `Table`, `Column`), type inference from typed arrays, validity bitmaps, computes (`sum` / `mean` / `min` / `max` / `count` / `variance` / `stddev` / `quantile` / `median` / `distinct` / `filter` / `groupBy`), `fromRows` / `toRows` for the row ↔ columnar bridge, and Arrow IPC streaming format (`fromIPC` / `toIPC` with dictionary-batch decode — reads apache-arrow / pyarrow / arrow-rs / polars / duckdb output for the six supported logical types, both plain and Dictionary<Utf8>). Wire compat verified against apache-arrow 21.1.0 (see `bench/parabun-arrow-ipc-interop/`). Parquet pending. |
 | in progress | `bun:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
 | next        | `bun:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
@@ -717,6 +718,8 @@ count = 10;                     // count=10 x2=20
 - **Method allow-list**: `.get`, `.set`, `.peek`, `.subscribe`, `.update` stay as real `Signal` methods. Every other `NAME.foo` rewrites as `NAME.get().foo`, so `.trim()` on a string signal, `.length` on an array signal, etc. all do what you'd expect.
 - **Pragma opt-out**: `// @parabun-strict-signals` at the top of a file disables auto-derive — every `signal` decl becomes a plain `signal(RHS)` regardless of what `RHS` references. Use it when you want the snapshot semantics.
 - **`signal` / `effect` as plain identifiers are unaffected** — the keyword path only triggers when `signal` is immediately followed by an identifier, or `effect` by `{`.
+- **`A ~> B` reactive binding** — desugars to `effect(() => { B = A; })` so `B` stays in step with `A` and any signals `A` reads from. RHS must be assignable (identifier, dot, index). Captures the disposer if you want it: `const stop = src ~> dst;`.
+- **`A ~> B when C` conditional bind** — adds a guard. Desugars to `effect(() => { if (C) B = A; })`. `C` is read inside the effect so signal reads in the predicate are tracked too — flipping a signal-typed `C` re-fires the effect, the body re-evaluates the guard, and only assigns when the guard passes. `when` is contextual; bare uses elsewhere stay normal identifiers.
 
 ### Throw Expressions
 
@@ -743,6 +746,8 @@ Regular `throw E;` statements are unaffected. ASI rules still apply — a newlin
 | `arena { ... }` | statement-level | `require("bun:arena").scope(() => { ... })` |
 | `effect { ... }` | statement-level | `require("bun:signals").effect(() => { ... })` |
 | `signal x = v` | statement-level | `const x = require("bun:signals").signal(v)` (or `.derived(() => v)`) |
+| `A ~> B` | assignment | `require("bun:signals").effect(() => { B = A; })` |
+| `A ~> B when C` | assignment | `require("bun:signals").effect(() => { if (C) B = A; })` |
 | `throw E` | assignment (prefix) | `(() => { throw E; })()` |
 
 Operators bind tighter-to-looser in the order listed, so `data |> transform ..! handler ..& cleanup` parses as `transform(data).catch(handler).finally(cleanup)`.
