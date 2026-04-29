@@ -256,4 +256,78 @@ function untrack<R>(fn: () => R): R {
   }
 }
 
-export default { signal, derived, effect, batch, untrack, Signal: ReadableSignal };
+// ─── Iterator → Signal helpers ─────────────────────────────────────────────
+//
+// Common pattern: an async iterable produces values over time and we want
+// the most recent one available as a Signal so effects / derived can react
+// without writing the same `(async () => for await ...)` IIFE every time.
+//
+// `fromAsync(it, mapFn?, init?)` creates a fresh signal driven by the
+// iterable. `pump(it, sig, mapFn?)` connects an iterable to an existing
+// signal — useful when the signal pre-exists or you switch sources at
+// runtime. Both return a disposer that breaks the loop via the iterator's
+// `return()` method (which fires any finally block in a generator).
+
+interface DriverHandle<T> {
+  signal: ReadableSignal<T>;
+  dispose: () => void;
+}
+
+function startPump<T, V>(
+  iterable: AsyncIterable<T>,
+  sig: StateSignal<V>,
+  mapFn: ((v: T) => V) | undefined,
+): () => void {
+  let stopped = false;
+  let iter: AsyncIterator<T> | null = null;
+  (async () => {
+    try {
+      iter = iterable[Symbol.asyncIterator]();
+      while (!stopped) {
+        const r = await iter.next();
+        if (r.done) break;
+        sig.set(mapFn ? mapFn(r.value) : (r.value as unknown as V));
+      }
+    } catch {
+      // Iterator threw / cancelled — caller already has the values it got.
+    }
+  })();
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    try {
+      iter?.return?.(undefined);
+    } catch {}
+  };
+}
+
+function fromAsync<T>(iterable: AsyncIterable<T>): DriverHandle<T | undefined>;
+function fromAsync<T, V>(iterable: AsyncIterable<T>, mapFn: (v: T) => V, init?: V): DriverHandle<V | undefined>;
+function fromAsync<T, V = T>(iterable: AsyncIterable<T>, mapFn?: (v: T) => V, init?: V): DriverHandle<V | undefined> {
+  if (iterable == null || typeof (iterable as any)[Symbol.asyncIterator] !== "function") {
+    throw new TypeError("bun:signals.fromAsync: first argument must be an async iterable");
+  }
+  if (mapFn !== undefined && !$isCallable(mapFn)) {
+    throw $ERR_INVALID_ARG_TYPE("mapFn", "function", mapFn);
+  }
+  const sig = new StateSignal<V | undefined>(init);
+  const dispose = startPump<T, V | undefined>(iterable, sig, mapFn as any);
+  return { signal: sig, dispose };
+}
+
+function pump<T>(iterable: AsyncIterable<T>, sig: StateSignal<T>): () => void;
+function pump<T, V>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn: (v: T) => V): () => void;
+function pump<T, V = T>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn?: (v: T) => V): () => void {
+  if (iterable == null || typeof (iterable as any)[Symbol.asyncIterator] !== "function") {
+    throw new TypeError("bun:signals.pump: first argument must be an async iterable");
+  }
+  if (!(sig instanceof StateSignal)) {
+    throw new TypeError("bun:signals.pump: second argument must be a writable signal (from `signal()`)");
+  }
+  if (mapFn !== undefined && !$isCallable(mapFn)) {
+    throw $ERR_INVALID_ARG_TYPE("mapFn", "function", mapFn);
+  }
+  return startPump<T, V>(iterable, sig, mapFn);
+}
+
+export default { signal, derived, effect, batch, untrack, fromAsync, pump, Signal: ReadableSignal };
