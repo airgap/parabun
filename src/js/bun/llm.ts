@@ -341,6 +341,20 @@ class LLM {
     return out;
   }
 
+  // Single-shot JSON-tool convenience: run chat() with a schema, drain the
+  // stream, parse the result, return it as a typed object. The grammar
+  // layer guarantees the output conforms to `schema` so JSON.parse is safe;
+  // a thrown JSON.parse here means the schema didn't fully cover the
+  // sampled distribution, which is a bug in the caller's schema.
+  async chatJSON<T = unknown>(messages: ChatMessage[], opts: GenerateOptions): Promise<T> {
+    if (!opts || (opts.schema === undefined && opts.grammar === undefined)) {
+      throw new TypeError("bun:llm.chatJSON: opts.schema or opts.grammar is required");
+    }
+    let out = "";
+    for await (const chunk of this.chat(messages, opts)) out += chunk;
+    return JSON.parse(out) as T;
+  }
+
   // Build a reusable KV prefix from a plaintext prompt. Tokenizes (with
   // BOS), runs prefill once, snapshots the KV and the last-position
   // logits, and returns a handle. Pass the handle as `opts.prefix` on a

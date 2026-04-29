@@ -772,6 +772,34 @@ async function speak(text: string, opts: SpeakOptions): Promise<SpokenAudio> {
 }
 
 /**
+ * Speak `text` straight to the speaker — speak() + audio.play() + write()
+ * collapsed into one call, with a process-wide lazy-cached PlaybackStream
+ * keyed on (sampleRate, channels). Drops the boilerplate `spk ??= await
+ * audio.play(...); await spk.write(out.samples)` pattern.
+ *
+ *   await speech.say("hello, world", { engine: "piper", model: "..." });
+ *
+ * Backed by the same PiperSession cache as `speak()`, so no extra
+ * subprocesses are spawned. Returns when the audio is queued (not when
+ * it finishes playing); use `audio.play(...)` directly + `spk.drain()`
+ * if you need flush semantics.
+ */
+const sayPlaybackCache = new Map<string, Promise<{ write(samples: Float32Array): Promise<void> }>>();
+async function say(text: string, opts: SpeakOptions): Promise<void> {
+  const out = await speak(text, opts);
+  const audioModule = require("./audio.ts");
+  const key = `${out.sampleRate}:${out.channels}`;
+  let pending = sayPlaybackCache.get(key);
+  if (!pending) {
+    pending = audioModule.default.play({ sampleRate: out.sampleRate, channels: out.channels });
+    sayPlaybackCache.set(key, pending);
+    pending.catch(() => sayPlaybackCache.delete(key));
+  }
+  const spk = await pending;
+  await spk.write(out.samples);
+}
+
+/**
  * Close all cached PiperSessions and free their subprocesses. Called
  * automatically at process exit, but exposed for tests, hot-reload paths,
  * and explicit teardown. Subsequent `speak()` calls will lazily re-spawn.
@@ -1000,6 +1028,7 @@ export default {
   listen,
   transcribe,
   speak,
+  say,
   closePiperSessions,
   wakeWord,
   matchWakePhrase,
