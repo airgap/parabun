@@ -642,7 +642,9 @@ the user-facing surface, and `src/js/bun/*.ts` for the source:
   Bun's fs.watch on `/dev` recurses into permission-restricted
   entries), `bun:csv`, `bun:llm` (GGUF Llama/Qwen2 + BERT
   embeddings + Whisper STT, with `m.busy` / `m.device` reactive
-  signals), `bun:rtp` (with `JitterBuffer.pendingSignal` /
+  signals; `m.chatJSON([...], { schema })` is the single-shot
+  grammar-constrained convenience that drains and parses
+  for tool dispatch), `bun:rtp` (with `JitterBuffer.pendingSignal` /
   `lossCountSignal` / `lossRateSignal`), `bun:mcp` (Model Context
   Protocol client — stdio + WebSocket transports), `bun:gpio` /
   `bun:i2c` / `bun:spi` (userspace peripheral access on Linux SBCs
@@ -650,10 +652,13 @@ the user-facing surface, and `src/js/bun/*.ts` for the source:
   across Pi 4/5, Jetson, any Linux SBC; `bun:gpio` exposes both
   single-line `chip.line(...)` and atomic multi-line `chip.bank(...)`).
 - **Tier 2** (applications): `bun:speech` (`listen` / `transcribe` /
-  `speak` / `wakeWord` / `matchWakePhrase`, with reactive `active` /
-  `noiseFloor` / `lastUtterance` signals on listen and `active` /
-  `lastTrigger` on wakeWord; `speak` is backed by a long-running
-  per-voice piper subprocess cached for the process lifetime),
+  `say` / `speak` / `wakeWord` / `matchWakePhrase`, with reactive
+  `active` / `noiseFloor` / `lastUtterance` signals on listen and
+  `active` / `lastTrigger` on wakeWord; `say(text, { model })` is the
+  headline TTS form — synth + play to speaker in one call, with a
+  process-wide PlaybackStream cache; `speak()` returns raw PCM for
+  callers that need it. Backed by a long-running per-voice piper
+  subprocess cached for the process lifetime),
   `bun:assistant` (the 3-line voice-assistant facade — composes
   `bun:audio` + `bun:speech` + `bun:llm` / `bun:mcp`, ships
   sqlite-backed persistent memory, tool dispatch (inline + MCP),

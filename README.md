@@ -28,7 +28,7 @@ Parabun closes those gaps inside one statically-linked binary:
 | `bun:gpio` / `bun:i2c` / `bun:spi` | Userspace peripheral access on Linux SBCs — character-device wrappers (uAPI v2 GPIO, i2c-dev, spidev). Same surface across Pi 4/5, Jetson, NUC + breakout. |
 | [`bun:image`](#image-codecs--filters-bunimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
 | [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + Whisper STT + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
-| [`bun:speech`](#speech-bunspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `speak()`, whisper-backed `wakeWord()` — voice in / voice out / hands-free trigger from one module. |
+| [`bun:speech`](#speech-bunspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `say()` (mic → speaker in one call) and `speak()` (returns raw PCM), whisper-backed `wakeWord()` — voice in / voice out / hands-free trigger from one module. |
 | [`bun:mcp`](https://parabun.script.dev/docs/mcp/) | Model Context Protocol client — stdio + WebSocket transports. Composes structurally with `bun:assistant`'s `tools:` option. |
 | [`bun:assistant`](#voice-assistant-bunassistant) | Three-line voice assistant: mic + STT + LLM + TTS + speaker, fully local. Tool dispatch (inline + MCP), barge-in, wake word, scheduled prompts, RAG, sqlite-backed persistent memory, reactive signals. |
 
