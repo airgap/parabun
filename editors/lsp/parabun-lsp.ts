@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -99,6 +99,7 @@ function transformLine(line: string): string {
   line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
   line = transformRbind(line);
+  line = transformCallBind(line);
   line = transformPipeline(line);
   return line;
 }
@@ -110,6 +111,15 @@ function transformLine(line: string): string {
 // for symbol lookup, and we avoid rewriting A/B positions in a regex pass.
 function transformRbind(line: string): string {
   return line.replace(/~>/g, "= ");
+}
+
+// `A -> fn` → `A , fn` (column-preserving: both `->` and `, ` are 2 chars).
+// TS sees a comma expression between two references — enough for identifier
+// resolution, hover, and go-to-def on both sides. Negative lookbehind keeps
+// `-->` (post-decrement followed by `>`), `=>` (arrow), and `<-` from
+// matching.
+function transformCallBind(line: string): string {
+  return line.replace(/(?<![\-=<])->/g, ", ");
 }
 
 // `signal NAME = RHS` → `let    NAME = RHS`. The `signal` keyword is replaced
@@ -1518,6 +1528,27 @@ function getParabunHover(content: string, line: number, character: number): stri
       "count ~> elem.innerHTML;           // UI mirrors count",
       "count |> Math.abs ~> obj.absValue; // composes with |>",
       "const stop = count ~> other;       // capture disposer",
+      "```",
+    ].join("\n");
+  }
+  if (/(?<![\-=<])->/.test(around)) {
+    return [
+      "### `->` — reactive call-binding operator",
+      "",
+      "`A -> fn` creates a reactive call-binding: whenever the signals read",
+      "by `A` change, `fn` is re-invoked with `A`'s new value. `fn` must be",
+      "a callable target — an identifier, property access, or indexed",
+      "function.",
+      "",
+      "Desugars to `require('bun:signals').effect(() => { fn(A); })` — the",
+      "call-sink complement to `~>`. Same precedence, same disposer return,",
+      "same optional `when COND` guard.",
+      "",
+      "```typescript",
+      "signal count = 0;",
+      "count -> log;                      // log(count) on every change",
+      "`v=${count}` -> process.stdout.write; // template + signal sink",
+      "count -> log when enabled;         // guarded call",
       "```",
     ].join("\n");
   }

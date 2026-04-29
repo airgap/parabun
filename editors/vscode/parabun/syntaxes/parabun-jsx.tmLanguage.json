@@ -93,6 +93,10 @@
         {
           "name": "keyword.operator.rbind.parabun",
           "match": "~>"
+        },
+        {
+          "name": "keyword.operator.callbind.parabun",
+          "match": "(?<![\\-=<])->"
         }
       ]
     }
