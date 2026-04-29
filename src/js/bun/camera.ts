@@ -141,9 +141,58 @@ const cameraRegistry = new FinalizationRegistry<bigint>(handle => {
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
-async function devices(): Promise<DeviceInfo[]> {
-  return native.enumerateDevices();
-}
+// Callable signal: `camera.devices()` returns a Promise<DeviceInfo[]> for
+// the existing one-shot pattern; `camera.devices.subscribe(cb)` / `.get()`
+// / `.peek()` give a hotplug-aware reactive view. Watcher is lazy — a pure
+// call never starts an inotify watch; the first signal-API call does.
+// PLAN-module-signals item 6.
+type DevicesSignal = {
+  (): Promise<DeviceInfo[]>;
+  get(): DeviceInfo[];
+  peek(): DeviceInfo[];
+  subscribe(cb: (v: DeviceInfo[]) => void): () => void;
+};
+
+const devices: DevicesSignal = (() => {
+  let sig: WritableSignal<DeviceInfo[]> | null = null;
+  let pendingFlush = false;
+  function ensureWatch(): WritableSignal<DeviceInfo[]> {
+    if (sig) return sig;
+    sig = signalsMod.signal(native.enumerateDevices() as DeviceInfo[]);
+    // Poll /dev for video* changes. We can't fs.watch("/dev", ...) cleanly:
+    // Bun's path-watcher recurses into every entry and bombs on
+    // /dev/hidraw*, /dev/ttyUSB*, etc., where the daemon owner can't open
+    // them. Polling is deterministic and the latency (~2s) is well below
+    // the timescale users care about for plug-in events. unref() so the
+    // poller doesn't pin the event loop.
+    const interval = setInterval(() => {
+      if (pendingFlush) return;
+      pendingFlush = true;
+      queueMicrotask(() => {
+        pendingFlush = false;
+        try {
+          const next = native.enumerateDevices() as DeviceInfo[];
+          // Cheap shape compare — paths are stable identifiers, lengths
+          // shift on plug/unplug. The signal also dedups by Object.is, but
+          // skipping the .set() keeps the dependency graph quieter.
+          const prev = sig!.peek();
+          if (prev.length !== next.length || !prev.every((d, i) => d.path === next[i]?.path)) {
+            sig!.set(next);
+          }
+        } catch {}
+      });
+    }, 2000);
+    interval?.unref?.();
+    return sig;
+  }
+  const fn = function devices(): Promise<DeviceInfo[]> {
+    return Promise.resolve(sig ? sig.peek() : (native.enumerateDevices() as DeviceInfo[]));
+  } as DevicesSignal;
+  fn.get = () => ensureWatch().get();
+  fn.peek = () => ensureWatch().peek();
+  fn.subscribe = (cb: (v: DeviceInfo[]) => void) => ensureWatch().subscribe(cb);
+  return fn;
+})();
 
 async function formats(path: string): Promise<FormatDescriptor[]> {
   if (typeof path !== "string") {

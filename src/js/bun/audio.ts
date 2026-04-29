@@ -1887,9 +1887,64 @@ function periodFromMs(periodMs: number, sampleRate: number): number {
   return p;
 }
 
-async function listDevices(): Promise<DeviceList> {
-  return io.listDevices();
-}
+// Callable signal: `audio.devices()` returns a Promise<DeviceList> for the
+// existing one-shot pattern; `audio.devices.subscribe(cb)` / `.get()` /
+// `.peek()` give a hotplug-aware reactive view. The watcher is lazy — a
+// pure call (`audio.devices()`) never starts an inotify watch; the first
+// signal-API call does. PLAN-module-signals item 6.
+type DevicesSignal = {
+  (): Promise<DeviceList>;
+  get(): DeviceList;
+  peek(): DeviceList;
+  subscribe(cb: (v: DeviceList) => void): () => void;
+};
+
+const listDevices: DevicesSignal = (() => {
+  let sig: WritableSignal<DeviceList> | null = null;
+  let pendingFlush = false;
+  function ensureWatch(): WritableSignal<DeviceList> {
+    if (sig) return sig;
+    sig = signals.signal(io.listDevices() as DeviceList);
+    // Linux: /dev/snd/ lists cards (cardN/, controlCN, pcmCNDp/c). Any
+    // add/remove fires here, so we re-enumerate. node:fs.watch is inotify
+    // under the hood on Linux. macOS / Windows native paths land alongside
+    // CoreAudio / WASAPI in a follow-up.
+    try {
+      const fs = require("node:fs");
+      const watcher = fs.watch("/dev/snd", () => {
+        if (pendingFlush) return;
+        pendingFlush = true;
+        // Coalesce burst — one udev plug fires several fs events.
+        queueMicrotask(() => {
+          pendingFlush = false;
+          try {
+            sig!.set(io.listDevices() as DeviceList);
+          } catch {}
+        });
+      });
+      // Permission-denied or transient inotify errors are non-fatal —
+      // swallow them rather than letting them crash the process.
+      watcher.on?.("error", () => {});
+      // Don't pin the event loop on a module-level watcher — same shape
+      // as Node timers' .unref(). A subscriber alone shouldn't hold the
+      // process open; explicit `await using` on a stream / `bot.run()`
+      // already keeps it alive when needed.
+      watcher.unref?.();
+    } catch {
+      // /dev/snd may not exist (Darwin/Windows, or container without ALSA).
+      // Signal stays at the initial snapshot — `audio.devices()` keeps
+      // working, just no hotplug events.
+    }
+    return sig;
+  }
+  const fn = function devices(): Promise<DeviceList> {
+    return Promise.resolve(sig ? sig.peek() : (io.listDevices() as DeviceList));
+  } as DevicesSignal;
+  fn.get = () => ensureWatch().get();
+  fn.peek = () => ensureWatch().peek();
+  fn.subscribe = (cb: (v: DeviceList) => void) => ensureWatch().subscribe(cb);
+  return fn;
+})();
 
 class CaptureStreamImpl implements CaptureStream {
   #handle: bigint;
