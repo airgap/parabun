@@ -28,6 +28,7 @@
 #include <JavaScriptCore/JSBigInt.h>
 #include <JavaScriptCore/JSCInlines.h>
 #include <JavaScriptCore/JSObject.h>
+#include <JavaScriptCore/JSTypedArrays.h>
 #include <JavaScriptCore/ObjectConstructor.h>
 
 #include "ZigGlobalObject.h"
@@ -408,6 +409,191 @@ JSC_DEFINE_HOST_FUNCTION(functionReadEvent,
 #endif
 }
 
+// ─── requestLines ──────────────────────────────────────────────────────────
+// Multi-line bulk request — same shape as requestLine but with an array
+// of offsets. Returns a single line fd that controls all `n` lines
+// atomically. Read/write at the kernel level use a 64-bit bitmask, so
+// `n` is capped at GPIO_V2_LINES_MAX (64).
+//
+// Args:
+//   chipFd      BigInt
+//   offsetsTA   Uint32Array — [n] line offsets on the chip
+//   mode        number  — 0 = in, 1 = out
+//   pull        number
+//   edge        number  — outputs ignore this; inputs apply to every line
+//   debounceMs  number  — inputs only
+//   initialMask BigInt  — bit i = initial value of line i (outputs only)
+JSC_DEFINE_HOST_FUNCTION(functionRequestLines,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+#if !defined(__linux__)
+    throwTypeError(globalObject, scope, "bun:gpio not yet implemented on this platform"_s);
+    return {};
+#else
+    if (callFrame->argumentCount() < 7) {
+        throwTypeError(globalObject, scope,
+            "requestLines(chipFd, offsetsU32, mode, pull, edge, debounceMs, initialMask) requires 7 arguments"_s);
+        return {};
+    }
+    JSValue chipFdVal = callFrame->argument(0);
+    if (!chipFdVal.isBigInt()) {
+        throwTypeError(globalObject, scope, "requestLines: chipFd must be a BigInt"_s);
+        return {};
+    }
+    int chipFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(chipFdVal.asCell())));
+    if (chipFd < 0) {
+        throwTypeError(globalObject, scope, "requestLines: invalid chipFd"_s);
+        return {};
+    }
+    JSC::JSUint32Array* offsetsArr = JSC::jsDynamicCast<JSC::JSUint32Array*>(callFrame->argument(1));
+    if (!offsetsArr) {
+        throwTypeError(globalObject, scope, "requestLines: offsets must be a Uint32Array"_s);
+        return {};
+    }
+    size_t n = offsetsArr->length();
+    if (n == 0 || n > GPIO_V2_LINES_MAX) {
+        throwTypeError(globalObject, scope,
+            makeString("requestLines: n must be 1.."_s, static_cast<unsigned>(GPIO_V2_LINES_MAX)));
+        return {};
+    }
+    unsigned int mode = callFrame->argument(2).toUInt32(globalObject);
+    RETURN_IF_EXCEPTION(scope, {});
+    unsigned int pull = callFrame->argument(3).toUInt32(globalObject);
+    RETURN_IF_EXCEPTION(scope, {});
+    unsigned int edge = callFrame->argument(4).toUInt32(globalObject);
+    RETURN_IF_EXCEPTION(scope, {});
+    uint32_t debounceMs = callFrame->argument(5).toUInt32(globalObject);
+    RETURN_IF_EXCEPTION(scope, {});
+    JSValue initialMaskVal = callFrame->argument(6);
+    if (!initialMaskVal.isBigInt()) {
+        throwTypeError(globalObject, scope, "requestLines: initialMask must be a BigInt"_s);
+        return {};
+    }
+    uint64_t initialMask = static_cast<uint64_t>(
+        JSBigInt::toBigInt64(jsCast<JSBigInt*>(initialMaskVal.asCell())));
+
+    struct gpio_v2_line_request req;
+    std::memset(&req, 0, sizeof(req));
+    req.num_lines = static_cast<__u32>(n);
+    const uint32_t* offsetsData = static_cast<const uint32_t*>(offsetsArr->vector());
+    for (size_t i = 0; i < n; i++) req.offsets[i] = offsetsData[i];
+    std::strncpy(req.consumer, "parabun", sizeof(req.consumer) - 1);
+
+    uint64_t flags = 0;
+    if (mode == 1) flags |= GPIO_V2_LINE_FLAG_OUTPUT;
+    else flags |= GPIO_V2_LINE_FLAG_INPUT;
+    if (pull == 1) flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
+    else if (pull == 2) flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN;
+    else if (pull == 0 && mode == 0) flags |= GPIO_V2_LINE_FLAG_BIAS_DISABLED;
+    if (edge == 1) flags |= GPIO_V2_LINE_FLAG_EDGE_RISING;
+    else if (edge == 2) flags |= GPIO_V2_LINE_FLAG_EDGE_FALLING;
+    else if (edge == 3) flags |= (GPIO_V2_LINE_FLAG_EDGE_RISING | GPIO_V2_LINE_FLAG_EDGE_FALLING);
+    req.config.flags = flags;
+
+    // The "all lines" mask is the low n bits set.
+    const uint64_t allMask = (n == 64) ? ~0ULL : ((1ULL << n) - 1ULL);
+    if (mode == 1) {
+        req.config.attrs[0].mask = allMask;
+        req.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+        req.config.attrs[0].attr.values = initialMask & allMask;
+        req.config.num_attrs = 1;
+    }
+    if (mode == 0 && debounceMs > 0) {
+        unsigned int slot = req.config.num_attrs;
+        if (slot >= GPIO_V2_LINE_NUM_ATTRS_MAX) slot = GPIO_V2_LINE_NUM_ATTRS_MAX - 1;
+        req.config.attrs[slot].mask = allMask;
+        req.config.attrs[slot].attr.id = GPIO_V2_LINE_ATTR_ID_DEBOUNCE;
+        req.config.attrs[slot].attr.debounce_period_us = debounceMs * 1000;
+        req.config.num_attrs = slot + 1;
+    }
+
+    if (xioctl(chipFd, GPIO_V2_GET_LINE_IOCTL, &req) < 0) {
+        throwErrno(globalObject, scope, "requestLines: GPIO_V2_GET_LINE_IOCTL");
+        return {};
+    }
+    return JSValue::encode(JSBigInt::createFrom(globalObject, static_cast<int64_t>(req.fd)));
+#endif
+}
+
+// ─── readLines / writeLines ────────────────────────────────────────────────
+JSC_DEFINE_HOST_FUNCTION(functionReadLines,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+#if !defined(__linux__)
+    throwTypeError(globalObject, scope, "bun:gpio not yet implemented on this platform"_s);
+    return {};
+#else
+    JSValue lineFdVal = callFrame->argument(0);
+    if (!lineFdVal.isBigInt()) {
+        throwTypeError(globalObject, scope, "readLines: lineFd must be a BigInt"_s);
+        return {};
+    }
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    uint32_t n = callFrame->argument(1).toUInt32(globalObject);
+    RETURN_IF_EXCEPTION(scope, {});
+    if (n == 0 || n > GPIO_V2_LINES_MAX) {
+        throwTypeError(globalObject, scope, "readLines: n must be 1..64"_s);
+        return {};
+    }
+
+    struct gpio_v2_line_values vals;
+    std::memset(&vals, 0, sizeof(vals));
+    vals.mask = (n == 64) ? ~0ULL : ((1ULL << n) - 1ULL);
+    if (xioctl(lineFd, GPIO_V2_LINE_GET_VALUES_IOCTL, &vals) < 0) {
+        throwErrno(globalObject, scope, "readLines: GPIO_V2_LINE_GET_VALUES_IOCTL");
+        return {};
+    }
+    return JSValue::encode(JSBigInt::createFrom(globalObject, static_cast<int64_t>(vals.bits & vals.mask)));
+#endif
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionWriteLines,
+    (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto& vm = JSC::getVM(globalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+#if !defined(__linux__)
+    throwTypeError(globalObject, scope, "bun:gpio not yet implemented on this platform"_s);
+    return {};
+#else
+    if (callFrame->argumentCount() < 3) {
+        throwTypeError(globalObject, scope, "writeLines(lineFd, valuesBigInt, maskBigInt) requires 3 arguments"_s);
+        return {};
+    }
+    JSValue lineFdVal = callFrame->argument(0);
+    if (!lineFdVal.isBigInt()) {
+        throwTypeError(globalObject, scope, "writeLines: lineFd must be a BigInt"_s);
+        return {};
+    }
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    JSValue valuesVal = callFrame->argument(1);
+    JSValue maskVal = callFrame->argument(2);
+    if (!valuesVal.isBigInt() || !maskVal.isBigInt()) {
+        throwTypeError(globalObject, scope, "writeLines: values and mask must be BigInts"_s);
+        return {};
+    }
+    uint64_t values = static_cast<uint64_t>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(valuesVal.asCell())));
+    uint64_t mask = static_cast<uint64_t>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(maskVal.asCell())));
+
+    struct gpio_v2_line_values vals;
+    std::memset(&vals, 0, sizeof(vals));
+    vals.mask = mask;
+    vals.bits = values & mask;
+    if (xioctl(lineFd, GPIO_V2_LINE_SET_VALUES_IOCTL, &vals) < 0) {
+        throwErrno(globalObject, scope, "writeLines: GPIO_V2_LINE_SET_VALUES_IOCTL");
+        return {};
+    }
+    return JSValue::encode(jsUndefined());
+#endif
+}
+
 // ─── closeChip / closeLine ─────────────────────────────────────────────────
 // Both just call ::close on the fd. Separate names so the JS layer can
 // distinguish chip vs line lifecycle.
@@ -474,6 +660,15 @@ JSC::JSObject* createParabunGpio(JSC::JSGlobalObject* globalObject)
     object->putDirectNativeFunction(vm, globalObject,
         JSC::Identifier::fromString(vm, "readEvent"_s), 1,
         functionReadEvent, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "requestLines"_s), 7,
+        functionRequestLines, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "readLines"_s), 2,
+        functionReadLines, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
+    object->putDirectNativeFunction(vm, globalObject,
+        JSC::Identifier::fromString(vm, "writeLines"_s), 3,
+        functionWriteLines, ImplementationVisibility::Public, JSC::NoIntrinsic, 0);
     return object;
 }
 

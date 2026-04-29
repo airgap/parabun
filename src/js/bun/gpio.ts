@@ -96,12 +96,43 @@ interface Line extends AsyncDisposable {
   close(): void;
 }
 
+interface LineBank extends AsyncDisposable {
+  /** Chip-relative offsets, in the order they were requested. */
+  readonly offsets: readonly number[];
+  /**
+   * Atomic read of all lines. Returns a 64-bit bitmask: bit i is the
+   * value of `offsets[i]` (NOT the chip-relative offset — bit 0 = first
+   * requested line, etc.). Throws on closed.
+   */
+  read(): bigint;
+  /**
+   * Atomic write of all lines. `values` is a 64-bit bitmask in the same
+   * "bit i = offsets[i]" packing as `read()`. The kernel sets all `n`
+   * lines in one ioctl, so multi-pin transitions are simultaneous.
+   * Optional `mask` (defaults to all-1s of width `offsets.length`) lets
+   * the caller skip writing some bits.
+   */
+  write(values: bigint, mask?: bigint): void;
+  /** Release the bank. Idempotent. */
+  close(): void;
+}
+
 interface Chip extends AsyncDisposable {
   readonly path: string;
   readonly label: string;
   readonly lines: number;
   /** Acquire a single line on this chip. */
   line(offset: number, opts: LineOptions): Line;
+  /**
+   * Acquire several lines in one request. Up to 64 lines per call (kernel
+   * uAPI v2 cap). All lines share `mode` / `pull` / `edge` / `debounceMs`;
+   * for outputs, `initial` accepts a bitmask in the same bit-i = offsets[i]
+   * packing as `LineBank.write` so all lines hit the bus at the same value
+   * the kernel applied.
+   *
+   * Named `bank` because `lines` is already the chip's line count.
+   */
+  bank(offsets: number[], opts: Omit<LineOptions, "initial"> & { initial?: bigint | number }): LineBank;
   /** Release the chip handle. Lines acquired through this chip stay open until they're individually closed. */
   close(): void;
 }
@@ -212,6 +243,50 @@ class LineImpl implements Line {
   }
 }
 
+class LineBankImpl implements LineBank {
+  #fd: bigint;
+  readonly offsets: readonly number[];
+  #mode: LineMode;
+  #closed = false;
+  #allMask: bigint;
+
+  constructor(fd: bigint, offsets: number[], mode: LineMode) {
+    this.#fd = fd;
+    this.offsets = offsets;
+    this.#mode = mode;
+    this.#allMask = offsets.length === 64 ? ~0n : (1n << BigInt(offsets.length)) - 1n;
+    lineRegistry.register(this, fd, this);
+  }
+
+  read(): bigint {
+    if (this.#closed) throw new Error("bun:gpio: bank is closed");
+    return native.readLines(this.#fd, this.offsets.length) as bigint;
+  }
+
+  write(values: bigint, mask?: bigint): void {
+    if (this.#closed) throw new Error("bun:gpio: bank is closed");
+    if (this.#mode !== "out") throw new Error("bun:gpio: write() requires output lines");
+    const m = mask ?? this.#allMask;
+    native.writeLines(this.#fd, BigInt(values), BigInt(m));
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    const fd = this.#fd;
+    this.#fd = 0n;
+    if (fd !== 0n) {
+      lineRegistry.unregister(this);
+      native.closeLine(fd);
+    }
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    this.close();
+    return Promise.resolve();
+  }
+}
+
 class ChipImpl implements Chip {
   #fd: bigint;
   readonly path: string;
@@ -257,6 +332,44 @@ class ChipImpl implements Chip {
       initial,
     ) as bigint;
     return new LineImpl(lineFd, offset, mode, initial);
+  }
+
+  bank(offsets: number[], opts: Omit<LineOptions, "initial"> & { initial?: bigint | number }): LineBank {
+    if (this.#closed) throw new Error("bun:gpio: chip is closed");
+    if (!Array.isArray(offsets) || offsets.length === 0 || offsets.length > 64) {
+      throw new RangeError("bun:gpio: bank offsets must be an array of 1..64 entries");
+    }
+    for (const o of offsets) {
+      if (typeof o !== "number" || !Number.isInteger(o) || o < 0 || o >= this.lines) {
+        throw new RangeError(`bun:gpio: every offset must be an integer in [0, ${this.lines}), got ${o}`);
+      }
+    }
+    const mode = opts.mode;
+    if (mode !== "in" && mode !== "out") {
+      throw new TypeError('bun:gpio: line mode must be "in" or "out"');
+    }
+    const pull = opts.pull ?? "off";
+    if (PULL_CODES[pull] === undefined) {
+      throw new TypeError(`bun:gpio: pull must be "up" / "down" / "off", got "${pull}"`);
+    }
+    const edge = opts.edge ?? "none";
+    if (EDGE_CODES[edge] === undefined) {
+      throw new TypeError(`bun:gpio: edge must be "rising" / "falling" / "both" / "none", got "${edge}"`);
+    }
+    const debounceMs = Math.max(0, Math.floor(opts.debounceMs ?? 0));
+    const initialMask = opts.initial !== undefined ? BigInt(opts.initial) : 0n;
+    const offsetsU32 = new Uint32Array(offsets);
+
+    const fd = native.requestLines(
+      this.#fd,
+      offsetsU32,
+      MODE_CODES[mode],
+      PULL_CODES[pull],
+      EDGE_CODES[edge],
+      debounceMs,
+      initialMask,
+    ) as bigint;
+    return new LineBankImpl(fd, offsets.slice(), mode);
   }
 
   close(): void {
