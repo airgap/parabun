@@ -243,17 +243,65 @@ type JitterBufferOptions = {
   maxLag?: number;
 };
 
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of bun:signals's
+// class hierarchy. Same shape as audio.ts / camera.ts / vision.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
+
 class JitterBuffer {
   readonly maxLag: number;
   #buf = new Map<number, ParsedPacket>();
   #expected: number | null = null;
   #lossCount = 0;
+  #deliveredCount = 0;
+
+  // Reactive surface (LYK-744 v1). Only the signals that map to state
+  // this primitive actually tracks. `connected` and `jitterMs` from the
+  // PLAN-module-signals row need a future Session abstraction (RTP /
+  // RTCP correlation, source-arrival timestamp differencing) — neither
+  // exists in bun:rtp v1. When a Session class lands, those signals
+  // join the surface there, not here.
+  #pendingSig: WritableSignal<number>;
+  #lossCountSig: WritableSignal<number>;
+  #lossRateSig: WritableSignal<number>;
+
+  /** Number of packets buffered, awaiting the next-expected slot to fill. */
+  get pendingSignal(): Signal<number> {
+    return this.#pendingSig;
+  }
+  /** Cumulative count of packets declared lost since construction. */
+  get lossCountSignal(): Signal<number> {
+    return this.#lossCountSig;
+  }
+  /**
+   * Fraction of expected packets that were declared lost over the buffer's
+   * lifetime — `lossCount / (lossCount + delivered)`. Updates on every
+   * delivered or lost transition. 0 until the first packet is observed.
+   */
+  get lossRateSignal(): Signal<number> {
+    return this.#lossRateSig;
+  }
 
   constructor(opts: JitterBufferOptions = {}) {
     this.maxLag = opts.maxLag ?? 5;
     if (this.maxLag < 1) {
       throw new RangeError("bun:rtp JitterBuffer: maxLag must be >= 1");
     }
+    this.#pendingSig = signalsMod.signal(0);
+    this.#lossCountSig = signalsMod.signal(0);
+    this.#lossRateSig = signalsMod.signal(0);
+  }
+
+  #recomputeLossRate(): void {
+    const total = this.#lossCount + this.#deliveredCount;
+    const rate = total > 0 ? this.#lossCount / total : 0;
+    if (rate !== this.#lossRateSig.peek()) this.#lossRateSig.set(rate);
   }
 
   /**
@@ -267,7 +315,9 @@ class JitterBuffer {
       // Late: arrived after the consumer has already moved past this slot.
       return;
     }
+    const beforeSize = this.#buf.size;
     this.#buf.set(packet.sequence, packet);
+    if (this.#buf.size !== beforeSize) this.#pendingSig.set(this.#buf.size);
   }
 
   /**
@@ -283,6 +333,9 @@ class JitterBuffer {
     if (direct !== undefined) {
       this.#buf.delete(expected);
       this.#expected = (expected + 1) & 0xffff;
+      this.#deliveredCount++;
+      this.#pendingSig.set(this.#buf.size);
+      this.#recomputeLossRate();
       return direct;
     }
 
@@ -304,6 +357,8 @@ class JitterBuffer {
     // Use buffer fill (count of buffered packets) as the lag proxy.
     if (this.#buf.size > this.maxLag) {
       this.#lossCount++;
+      this.#lossCountSig.set(this.#lossCount);
+      this.#recomputeLossRate();
       // Skip the missing slot — advance expected to the smallest one we
       // have. Re-enter pop so subsequent contiguous-buffered packets
       // drain in one batch.
