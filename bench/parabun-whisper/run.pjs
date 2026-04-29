@@ -9,12 +9,22 @@ import llm from "bun:llm";
 import audio from "bun:audio";
 import gpu from "bun:gpu";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// Try $WHISPER_CACHE first, then ~/.cache/whisper, then the dev box's /raid path.
+const CACHE_CANDIDATES = [
+  process.env.WHISPER_CACHE,
+  join(homedir(), ".cache/whisper"),
+  "/raid/parabun/.cache/whisper",
+].filter(Boolean);
+const CACHE = CACHE_CANDIDATES.find(p => existsSync(join(p, "jfk.wav"))) ?? CACHE_CANDIDATES[0];
 
 const FIXTURES = [
-  { name: "tiny.en", path: "/raid/parabun/.cache/whisper/ggml-tiny.en.bin" },
-  { name: "base.en", path: "/raid/parabun/.cache/whisper/ggml-base.en.bin" },
+  { name: "tiny.en", path: join(CACHE, "ggml-tiny.en.bin") },
+  { name: "base.en", path: join(CACHE, "ggml-base.en.bin") },
 ];
-const WAV_PATH = "/raid/parabun/.cache/whisper/jfk.wav";
+const WAV_PATH = join(CACHE, "jfk.wav");
 
 const desc = gpu.describe();
 console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}`);
