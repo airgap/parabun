@@ -1,0 +1,58 @@
+// Batch-resize a directory of images via bun:image + bun:parallel.
+//
+//   bun run build:release demos/image-batch-resize.ts <inDir> <outDir> <maxEdge>
+//
+// Walks `inDir` for *.jpg / *.png / *.webp, decodes each, resizes the
+// long edge to `maxEdge` (preserving aspect), encodes back as JPEG at
+// quality 85. Runs across N worker threads via `parallel.pmap`.
+
+import parallel from "bun:parallel";
+import { Glob } from "bun";
+import { mkdirSync } from "node:fs";
+import { basename, extname, join } from "node:path";
+
+const [_, __, inDir, outDir, maxEdgeStr] = process.argv;
+if (!inDir || !outDir || !maxEdgeStr) {
+  console.error("usage: parabun demos/image-batch-resize.ts <inDir> <outDir> <maxEdge>");
+  process.exit(1);
+}
+const maxEdge = Number(maxEdgeStr);
+mkdirSync(outDir, { recursive: true });
+
+const files: string[] = [];
+const glob = new Glob("*.{jpg,jpeg,png,webp,JPG,JPEG,PNG,WEBP}");
+for (const name of glob.scanSync({ cwd: inDir })) {
+  files.push(name);
+}
+console.log(`resizing ${files.length} images → ${maxEdge}px max edge\n`);
+
+// pmap workers don't share the parent's import scope — pass everything
+// the worker needs (path, max edge) inside each item.
+type Job = { name: string; inPath: string; outPath: string; maxEdge: number };
+const jobs: Job[] = files.map(name => ({
+  name,
+  inPath: join(inDir, name),
+  outPath: join(outDir, basename(name, extname(name)) + ".jpg"),
+  maxEdge,
+}));
+
+const t0 = Bun.nanoseconds();
+const results = await parallel.pmap(async (job: Job) => {
+  const image = (await import("bun:image")).default;
+  const bytes = new Uint8Array(await Bun.file(job.inPath).arrayBuffer());
+  const decoded = await image.decode(bytes);
+  const longEdge = Math.max(decoded.width, decoded.height);
+  const scale = longEdge > job.maxEdge ? job.maxEdge / longEdge : 1;
+  const w = Math.round(decoded.width * scale);
+  const h = Math.round(decoded.height * scale);
+  const resized = await image.resize(decoded, { width: w, height: h, method: "lanczos" });
+  const encoded = await image.encode(resized, { format: "jpeg", quality: 85 });
+  await Bun.write(job.outPath, encoded);
+  return { name: job.name, w, h };
+}, jobs);
+const dtMs = (Bun.nanoseconds() - t0) / 1e6;
+
+for (const r of results) {
+  console.log(`  ${r.name}  →  ${r.w}×${r.h}`);
+}
+console.log(`\n${results.length} images in ${dtMs.toFixed(0)} ms (${(results.length / (dtMs / 1000)).toFixed(1)} img/s)`);

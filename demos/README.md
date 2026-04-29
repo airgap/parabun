@@ -1,29 +1,35 @@
 # demos/
 
-Real-world parabun examples. Each one is a single `.pts` file that compiles + runs against the parabun runtime.
+Real-world examples. Each demo ships in **two equivalent forms** — pick whichever you prefer:
+
+- `<demo>.pts` — uses parabun's syntax sugar (`effect { }`, `signal X = …`, `~>`, `\|>`, `..=`, `pure function`). Shorter.
+- `<demo>.ts` — plain TypeScript with the desugared runtime calls (`signals.effect(() => …)`, `signals.signal(…)`, etc.). Identical behavior.
+
+Not everyone wants to leave TypeScript and that's 100% ok — every demo runs with whichever extension you pick.
 
 | Demo | What | Hardware / fixtures |
 |---|---|---|
-| [`iot-button-led.pts`](iot-button-led.pts) | Reactive button → LED — `chip.line({ pollHz: 50 })` drives `button.value`, one `effect { }` block does the whole control loop | Linux SBC + GPIO. |
-| [`iot-bank-mirror.pts`](iot-bank-mirror.pts) | 4-button bank → 4-LED bank via `chip.bank({ pollHz: 50 })` and one `effect { }` over `buttons.value: Signal<bigint>` | Linux SBC + GPIO. |
-| [`iot-http-state.pts`](iot-http-state.pts) | Live GPIO state over HTTP — `/state` (JSON), `/events` (SSE), `POST /led/0\|1\|auto` for override. One `effect { }` block writes the LED AND broadcasts to SSE clients | Linux SBC + GPIO + HTTP. |
-| [`iot-sensor.pts`](iot-sensor.pts) | Periodic sensor read → derived threshold → reactive log via `signals.fromInterval` + `derived` + `effect`. Same shape as a real i2c sensor with `sensor.smbus.readWord(...)` | None — simulated sensor. |
-| [`iot-dashboard.pts`](iot-dashboard.pts) | Simulated IoT control panel — `signal` declarations, auto-derived state, `effect { }`, `~> ... when ...` reactive binding | None — pure simulation. |
-| [`gpio-blink.pts`](gpio-blink.pts) | Imperative LED blink + button-press exit using `for await (e of button.edges())` | Linux SBC + GPIO. `--seconds N` runs non-interactively. |
-| [`i2c-scan.pts`](i2c-scan.pts) | List every i2c bus + scan for ack'ing devices | Linux + `i2c-dev`. Skips buses the user doesn't have permission for. |
-| [`csv-pipeline.pts`](csv-pipeline.pts) | Parse a CSV, summarise the first numeric column with pure functions threaded by `\|>` | None — pass any CSV path. |
-| [`image-batch-resize.pts`](image-batch-resize.pts) | Decode → resize → encode a directory of images via `parallel.pmap` worker pool | None — pass `<inDir> <outDir> <maxEdge>`. |
-| [`audio-meter.pts`](audio-meter.pts) | Live mic peak meter (`mic.peakLevel` signal + parabun `effect { }` block) | ALSA / CoreAudio / WASAPI input. |
-| [`llm-chat.pts`](llm-chat.pts) | Stream tokens from a GGUF Llama checkpoint, report tokens-per-second | `LLM_FIXTURE=<path>.gguf`. |
-| [`whisper-transcribe.pts`](whisper-transcribe.pts) | Transcribe a WAV via `bun:speech` (Whisper backend) | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
-| [`assistant-3line.pts`](assistant-3line.pts) | Three-line voice assistant (mic → STT → LLM → TTS → speaker) | LLM gguf + Whisper bin + Piper onnx. |
+| `iot-button-led` ([.pts](iot-button-led.pts) / [.ts](iot-button-led.ts)) | Reactive button → LED — `chip.line({ pollHz: 50 })` drives `button.value`, one `effect` block does the whole control loop | Linux SBC + GPIO. |
+| `iot-bank-mirror` ([.pts](iot-bank-mirror.pts) / [.ts](iot-bank-mirror.ts)) | 4-button bank → 4-LED bank via `chip.bank({ pollHz: 50 })` and one `effect` over `buttons.value: Signal<bigint>` | Linux SBC + GPIO. |
+| `iot-http-state` ([.pts](iot-http-state.pts) / [.ts](iot-http-state.ts)) | Live GPIO state over HTTP — `/state` (JSON), `/events` (SSE), `POST /led/0\|1\|auto` for override. One `effect` writes the LED AND broadcasts to SSE clients | Linux SBC + GPIO + HTTP. |
+| `iot-sensor` ([.pts](iot-sensor.pts) / [.ts](iot-sensor.ts)) | Periodic sensor read → derived threshold → reactive log via `signals.fromInterval` + `derived` + `effect`. Same shape as a real i2c sensor with `sensor.smbus.readWord(...)` | None — simulated sensor. |
+| `iot-dashboard` ([.pts](iot-dashboard.pts) / [.ts](iot-dashboard.ts)) | Simulated IoT control panel — `signal` declarations, auto-derived state, `effect`, `~> ... when ...` reactive binding (or `signals.effect(...)` writing into a property in TypeScript form) | None — pure simulation. |
+| `gpio-blink` ([.pts](gpio-blink.pts) / [.ts](gpio-blink.ts)) | Imperative LED blink + button-press exit using `for await (e of button.edges())` | Linux SBC + GPIO. `--seconds N` runs non-interactively. |
+| `i2c-scan` ([.pts](i2c-scan.pts) / [.ts](i2c-scan.ts)) | List every i2c bus + scan for ack'ing devices | Linux + `i2c-dev`. Skips buses the user doesn't have permission for. |
+| `csv-pipeline` ([.pts](csv-pipeline.pts) / [.ts](csv-pipeline.ts)) | Parse a CSV, summarise the first numeric column. `.pts` threads the helpers with `\|>`; `.ts` calls them directly | None — pass any CSV path. |
+| `image-batch-resize` ([.pts](image-batch-resize.pts) / [.ts](image-batch-resize.ts)) | Decode → resize → encode a directory of images via `parallel.pmap` worker pool | None — pass `<inDir> <outDir> <maxEdge>`. |
+| `audio-meter` ([.pts](audio-meter.pts) / [.ts](audio-meter.ts)) | Live mic peak meter — `effect` over `mic.peakLevel` | ALSA / CoreAudio / WASAPI input. |
+| `llm-chat` ([.pts](llm-chat.pts) / [.ts](llm-chat.ts)) | Stream tokens from a GGUF Llama checkpoint, report tokens-per-second | `LLM_FIXTURE=<path>.gguf`. |
+| `whisper-transcribe` ([.pts](whisper-transcribe.pts) / [.ts](whisper-transcribe.ts)) | Transcribe a WAV via `bun:speech` (Whisper backend). `.pts` uses `..=`; `.ts` uses `await` | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
+| `assistant-3line` ([.pts](assistant-3line.pts) / [.ts](assistant-3line.ts)) | Voice assistant with tools dispatch (mic → STT → LLM → TTS → speaker) | LLM gguf + Whisper bin + Piper onnx. |
+
+Four of the demos (`gpio-blink`, `i2c-scan`, `llm-chat`, `image-batch-resize`) use no parabun-specific sugar at all, so the `.pts` and `.ts` files are byte-identical apart from the extension — the dual listing is just so you can pick either one without breaking convention.
 
 ## Running
 
-All demos require a built parabun runtime:
-
 ```sh
-bun run build:release demos/<demo>.pts [args]
+bun run build:release demos/<demo>.pts [args]   # parabun form
+bun run build:release demos/<demo>.ts  [args]   # TypeScript form
 ```
 
 For development:
