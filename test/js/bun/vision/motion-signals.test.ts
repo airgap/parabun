@@ -134,4 +134,54 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
     expect(transitions).toContain(true);
     expect(transitions[transitions.length - 1]).toBe(false);
   });
+
+  test(".run() drains in the background; signals update without iterating", async () => {
+    const vision = (await import("bun:vision")).default;
+    const m = vision.detectMotion(synthFrames([20, 20, 200, 200, 20, 20]), {
+      sensitivity: 0.05,
+      smoothing: 0.5,
+    });
+    const transitions: boolean[] = [];
+    const unsub = m.detected.subscribe((v: boolean) => transitions.push(v));
+
+    // No for-await — the .run() is supposed to drive the loop for us.
+    const stop = m.run();
+    // Wait for the synthetic stream to finish (6 frames × 110 ms + slack).
+    await new Promise(r => setTimeout(r, 800));
+    stop();
+    unsub();
+
+    // We saw the rising edge on motion, then back to false from the
+    // finally block when the stream ended.
+    expect(transitions).toContain(true);
+    expect(transitions[transitions.length - 1]).toBe(false);
+  });
+
+  test(".run() is idempotent — second call returns the same disposer", async () => {
+    const vision = (await import("bun:vision")).default;
+    const m = vision.detectMotion(synthFrames([10, 10]));
+    const stopA = m.run();
+    const stopB = m.run();
+    expect(stopA).toBe(stopB);
+    stopA();
+  });
+
+  test(".run() disposer fires the generator's finally — signals reset", async () => {
+    const vision = (await import("bun:vision")).default;
+    // Long-ish stream so the dispose has work to interrupt.
+    const m = vision.detectMotion(synthFrames([20, 200, 20, 200, 20, 200, 20]));
+
+    const stop = m.run();
+    // Let a couple of frames land so the signals have non-inert values.
+    await new Promise(r => setTimeout(r, 250));
+    stop();
+
+    // gen.return() requests termination at the next yield, so already-
+    // in-flight frames may still complete. The contract is that the
+    // finally block eventually runs and resets the signals to inert.
+    // 500 ms is generous against a 110 ms frame spacing.
+    await new Promise(r => setTimeout(r, 500));
+    expect(m.detected.get()).toBe(false);
+    expect(m.score.get()).toBe(0);
+  });
 });

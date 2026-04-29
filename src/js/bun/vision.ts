@@ -177,15 +177,51 @@ interface MotionStream extends AsyncIterableIterator<MotionFrame> {
   readonly detected: Signal<boolean>;
   /** Most recent smoothed motion score (fraction of changed luma pixels, [0, 1]). */
   readonly score: Signal<number>;
+  /**
+   * Drain the iterator in the background so the `detected` / `score`
+   * signals auto-fill without a hand-rolled `for await` IIFE. Returns a
+   * disposer that breaks the loop. Idempotent — calling `.run()` twice
+   * returns the same disposer.
+   *
+   * Use when you only want the reactive view; if you also want each
+   * `MotionFrame` value, iterate explicitly instead.
+   */
+  run(): () => void;
 }
 
 function detectMotion(stream: AsyncIterable<RgbaFrame>, opts: MotionOptions = {}): MotionStream {
   const sigDetected = signalsMod.signal(false) as WritableSignal<boolean>;
   const sigScore = signalsMod.signal(0) as WritableSignal<number>;
   const gen = detectMotionGenerator(stream, opts, sigDetected, sigScore);
+  let runDisposer: (() => void) | null = null;
+  const run = () => {
+    if (runDisposer) return runDisposer;
+    let stopped = false;
+    (async () => {
+      try {
+        for await (const _ of gen) {
+          if (stopped) break;
+          void _;
+        }
+      } catch {
+        // Iterator threw / cancelled — signals' finally block already ran.
+      }
+    })();
+    runDisposer = () => {
+      if (stopped) return;
+      stopped = true;
+      // Calling .return() on the generator triggers its finally block,
+      // which resets the signals to inert state.
+      try {
+        gen.return?.(undefined);
+      } catch {}
+    };
+    return runDisposer;
+  };
   return Object.assign(gen, {
     detected: sigDetected as Signal<boolean>,
     score: sigScore as Signal<number>,
+    run,
   });
 }
 

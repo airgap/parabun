@@ -152,6 +152,46 @@ interface ListenStream extends AsyncIterableIterator<Utterance> {
    * without consuming the iterator.
    */
   readonly lastUtterance: Signal<Utterance | null>;
+  /**
+   * Drain the iterator in the background so the `active` / `noiseFloor` /
+   * `lastUtterance` signals auto-fill without a hand-rolled `for await`
+   * IIFE. Returns a disposer; idempotent. Use when you only want the
+   * reactive view; if you also want each `Utterance`, iterate explicitly.
+   */
+  run(): () => void;
+}
+
+/**
+ * Attach a `.run()` method to an iterator+signals object. Drains the
+ * iterator in the background; returns a disposer that breaks the loop via
+ * `gen.return()` (which fires the generator's finally block, resetting
+ * signals to inert state). Idempotent — repeat `.run()` calls return the
+ * same disposer.
+ */
+function attachRun<T extends AsyncIterator<unknown>>(gen: T): () => () => void {
+  let runDisposer: (() => void) | null = null;
+  return () => {
+    if (runDisposer) return runDisposer;
+    let stopped = false;
+    (async () => {
+      try {
+        while (!stopped) {
+          const r = await gen.next();
+          if (r.done) break;
+        }
+      } catch {
+        // Iterator threw / cancelled — generator's finally already ran.
+      }
+    })();
+    runDisposer = () => {
+      if (stopped) return;
+      stopped = true;
+      try {
+        gen.return?.(undefined as any);
+      } catch {}
+    };
+    return runDisposer;
+  };
 }
 
 function listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): ListenStream {
@@ -167,6 +207,7 @@ function listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): ListenS
     active: sigActive as Signal<boolean>,
     noiseFloor: sigNoiseFloor as Signal<number>,
     lastUtterance: sigLastUtterance as Signal<Utterance | null>,
+    run: attachRun(gen),
   });
 }
 
@@ -789,6 +830,12 @@ interface WakeStream extends AsyncIterableIterator<WakeTrigger> {
   readonly active: Signal<boolean>;
   /** Most recent emitted trigger, or null until one fires. */
   readonly lastTrigger: Signal<WakeTrigger | null>;
+  /**
+   * Drain the iterator in the background so the `active` / `lastTrigger`
+   * signals auto-fill without a hand-rolled `for await` IIFE. Returns a
+   * disposer; idempotent. Use when you only want the reactive view.
+   */
+  run(): () => void;
 }
 
 /**
@@ -900,6 +947,7 @@ function wakeWord(opts: WakeOptions): WakeStream {
   return Object.assign(gen, {
     active: sigActive as Signal<boolean>,
     lastTrigger: sigLastTrigger as Signal<WakeTrigger | null>,
+    run: attachRun(gen),
   });
 }
 
