@@ -25,6 +25,7 @@ Parabun closes those gaps inside one statically-linked binary:
 | [`bun:pipeline`](#pipeline-fusion-bunpipeline) | Typed-array pipeline fusion that promotes to GPU when inputs are large enough |
 | [`bun:arena`](#buffer-pooling-bunarena) | Buffer pooling so worker boundaries don't cost a `Uint8Array` allocation per chunk |
 | [`bun:camera`](#camera-buncamera) / [`bun:audio`](#audio-codecs--dsp-bunaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
+| `bun:gpio` / `bun:i2c` / `bun:spi` | Userspace peripheral access on Linux SBCs — character-device wrappers (uAPI v2 GPIO, i2c-dev, spidev). Same surface across Pi 4/5, Jetson, NUC + breakout. |
 | [`bun:image`](#image-codecs--filters-bunimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
 | [`bun:llm`](#llm-inference-bunllm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + Whisper STT + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
 | [`bun:speech`](#speech-bunspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `speak()`, whisper-backed `wakeWord()` — voice in / voice out / hands-free trigger from one module. |
@@ -443,7 +444,7 @@ See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfo
 Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU + direct hardware. Modules stack in three tiers:
 
 - **Tier 0 — primitives** (shipped): `bun:simd`, `bun:gpu`, `bun:parallel`, `bun:arena`, `bun:pipeline`, `bun:signals`, `bun:rtp`. These are the building blocks that reach hardware directly.
-- **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`. Codecs, capture devices, on-device LLM inference — built on Tier 0.
+- **Tier 1 — composed** (shipped, plus `bun:video` in progress): `bun:image`, `bun:audio`, `bun:camera`, `bun:csv`, `bun:llm`, `bun:gpio`, `bun:i2c`, `bun:spi`. Codecs, capture devices, on-device LLM inference, and userspace peripheral access for SBCs — built on Tier 0.
 - **Tier 2 — applications** (`bun:speech` ships full STT + TTS, `bun:assistant` ships the edge voice-assistant facade, `bun:arrow` ships the in-memory model + computes + IPC reader/writer with Parquet pending; `bun:vision` ships orchestration with detector / OCR engines stubbed): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `bun:llm` as `llm.serve()`.)
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
@@ -456,6 +457,9 @@ Each module ships behind a compile-time feature flag. The CLI configurator at [p
 | shipped     | OS audio I/O          | Live ALSA capture + playback on `bun:audio` (`devices()` / `capture()` / `play()`). Float32 PCM streams; CoreAudio + WASAPI follow. |
 | shipped     | `bun:csv`             | Streaming RFC 4180 parser with header / inference / quote handling. `parallel: true` is "off-the-main-thread" — see the inline disclaimer above. |
 | shipped     | `bun:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
+| shipped     | `bun:gpio`            | Linux GPIO uAPI v2 — `chips()` / `open()` with single-line `read()` / `write()` / `toggle()` / `edges()` async iterator + reactive `value` signal. Same surface across RPi 4, RPi 5 (pinctrl-rp1), Jetson, any Linux SBC. |
+| shipped     | `bun:i2c`             | Linux i2c-dev — `buses()` / `open()`, `bus.scan()`, `device(addr).write()` / `read()` / `transact()` (combined I2C_RDWR), full SMBus shortcuts (`smbus.readByte` / `readWord` / `writeByte` / `writeWord` / `readBlock` / `writeBlock`). |
+| shipped     | `bun:spi`             | Linux spidev — `devices()` / `open()` with mode/bitsPerWord/speedHz, full-duplex `transfer()` + half-duplex `read()` / `write()` + multi-segment `transactSegments()` with CS held across segments. |
 | partial     | `bun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
 | partial     | `bun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
 | shipped     | `bun:speech` (Tier 2) | VAD-gated `listen()` (returns reactive utterance stream with `active` / `noiseFloor` / `lastUtterance` signals), Whisper `transcribe()` via `bun:llm.WhisperModel`, Piper `speak()` via subprocess (libpiper FFI v2 tracked under LYK-758). |

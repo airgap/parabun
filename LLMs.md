@@ -634,13 +634,16 @@ The runtime ships a number of higher-level modules built on the
 primitives above. They aren't reproduced here — see the README for
 the user-facing surface, and `src/js/bun/*.ts` for the source:
 
-- **Tier 1** (codecs + capture + inference): `bun:image`,
-  `bun:audio` (codecs + DSP + ALSA capture/playback), `bun:camera`
-  (V4L2), `bun:csv`, `bun:llm` (GGUF Llama/Qwen2 + BERT embeddings +
-  Whisper STT, with `m.busy` / `m.device` reactive signals),
-  `bun:rtp` (with `JitterBuffer.pendingSignal` / `lossCountSignal` /
-  `lossRateSignal`), `bun:mcp` (Model Context Protocol client —
-  stdio + WebSocket transports).
+- **Tier 1** (codecs + capture + inference + peripheral I/O):
+  `bun:image`, `bun:audio` (codecs + DSP + ALSA capture/playback),
+  `bun:camera` (V4L2), `bun:csv`, `bun:llm` (GGUF Llama/Qwen2 + BERT
+  embeddings + Whisper STT, with `m.busy` / `m.device` reactive
+  signals), `bun:rtp` (with `JitterBuffer.pendingSignal` /
+  `lossCountSignal` / `lossRateSignal`), `bun:mcp` (Model Context
+  Protocol client — stdio + WebSocket transports), `bun:gpio` /
+  `bun:i2c` / `bun:spi` (userspace peripheral access on Linux SBCs
+  via `/dev/gpiochipN`, `/dev/i2c-N`, `/dev/spidevN.M` — same surface
+  across Pi 4/5, Jetson, any Linux SBC).
 - **Tier 2** (applications): `bun:speech` (`listen` / `transcribe` /
   `speak` / `wakeWord` / `matchWakePhrase`, with reactive `active` /
   `noiseFloor` / `lastUtterance` signals on listen and `active` /
