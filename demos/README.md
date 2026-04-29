@@ -6,6 +6,7 @@ Real-world parabun examples. Each one is a single `.pts` file that compiles + ru
 |---|---|---|
 | [`iot-button-led.pts`](iot-button-led.pts) | Reactive button → LED — `chip.line({ pollHz: 50 })` drives `button.value`, one `effect { }` block does the whole control loop | Linux SBC + GPIO. |
 | [`iot-bank-mirror.pts`](iot-bank-mirror.pts) | 4-button bank → 4-LED bank via `chip.bank({ pollHz: 50 })` and one `effect { }` over `buttons.value: Signal<bigint>` | Linux SBC + GPIO. |
+| [`iot-http-state.pts`](iot-http-state.pts) | Live GPIO state over HTTP — `/state` (JSON), `/events` (SSE), `POST /led/0\|1\|auto` for override. One `effect { }` block writes the LED AND broadcasts to SSE clients | Linux SBC + GPIO + HTTP. |
 | [`iot-sensor.pts`](iot-sensor.pts) | Periodic sensor read → derived threshold → reactive log via `signals.fromInterval` + `derived` + `effect`. Same shape as a real i2c sensor with `sensor.smbus.readWord(...)` | None — simulated sensor. |
 | [`iot-dashboard.pts`](iot-dashboard.pts) | Simulated IoT control panel — `signal` declarations, auto-derived state, `effect { }`, `~> ... when ...` reactive binding | None — pure simulation. |
 | [`gpio-blink.pts`](gpio-blink.pts) | Imperative LED blink + button-press exit using `for await (e of button.edges())` | Linux SBC + GPIO. `--seconds N` runs non-interactively. |
@@ -37,6 +38,7 @@ bun bd run demos/<demo>.pts [args]
 |---|---|---|
 | `iot-button-led` | Pi 5 | ✅ chip.line({pollHz:50}) drives button.value, one effect { } block writes LED. 2 s non-interactive run. |
 | `iot-bank-mirror` | Pi 5 | ✅ chip.bank({pollHz:50}) drives 4-bit Signal<bigint>; effect mirrors buttons → LEDs in one bitwise expression. |
+| `iot-http-state` | Pi 5 | ✅ Bun.serve + parabun signals; GET /state, POST /led/{0,1,auto}, override flow validated. SIGINT stops cleanly. |
 | `iot-sensor` | dev box | ✅ fromInterval drives signal at 5 Hz, derived recomputes isHot, effect logs threshold crossings. |
 | `iot-dashboard` | dev box | ✅ derived signals + effect + ~> binding fire as expected through a 9-step sensor sweep. |
 | `csv-pipeline` | dev box | ✅ summarises numeric columns end-to-end |
