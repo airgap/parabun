@@ -4,6 +4,17 @@
 // must be pure (no closures, no `this`, no impure globals). We ship it to the
 // worker by calling `.toString()`, which is only sound because the function
 // is pure by contract.
+
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of bun:signals's
+// class hierarchy. Same shape as audio.ts / camera.ts / vision.ts / rtp.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 //
 // Pool lifecycle:
 //   The pool is lazy and persistent — workers are spawned on the first
@@ -767,6 +778,21 @@ interface PendingCall {
   reject: (e: Error) => void;
 }
 
+/**
+ * Reactive surface on the persistent worker pool (LYK-741/764). Three
+ * Signal-shaped fields update synchronously at every state-mutation site
+ * (init, run-dispatch, drainQueue, message return, dispose). Useful for a
+ * monitoring dashboard that wants to show pool utilization without polling.
+ */
+interface PoolSignals {
+  /** Number of workers in the pool that have completed init successfully. */
+  workersCount: { get(): number; peek(): number; subscribe(cb: (v: number) => void): () => void };
+  /** Number of run-requests waiting on an idle worker. */
+  queued: { get(): number; peek(): number; subscribe(cb: (v: number) => void): () => void };
+  /** Number of run-requests currently executing on workers. */
+  inflight: { get(): number; peek(): number; subscribe(cb: (v: number) => void): () => void };
+}
+
 interface Pool {
   /** Run an exported function on an idle worker. Resolves with the function's return value. */
   run<T = unknown>(fnName: string, ...args: unknown[]): Promise<T>;
@@ -821,6 +847,8 @@ interface Pool {
   dispose(): void;
   /** Number of workers in the pool. */
   readonly size: number;
+  /** Reactive diagnostic signals (LYK-741/764). */
+  readonly signals: PoolSignals;
   /** AsyncDisposable so callers can `await using p = pool(...)`. */
   [Symbol.asyncDispose](): Promise<void>;
 }
@@ -855,6 +883,20 @@ function pool(opts: { size?: number; module: string }): Pool {
   let disposed = false;
   let initFailureMessage: string | null = null;
 
+  // Reactive diagnostic signals (LYK-741/764). Updated synchronously at
+  // every state-mutation site below: makeWorker init-response, run dispatch,
+  // drainQueue dispatch, message return, dispose.
+  const sigWorkersCount: WritableSignal<number> = signalsMod.signal(0);
+  const sigQueued: WritableSignal<number> = signalsMod.signal(0);
+  const sigInflight: WritableSignal<number> = signalsMod.signal(0);
+  function syncPoolSignals(): void {
+    let ready = 0;
+    for (const e of workers) if (e.initOk === true) ready++;
+    if (sigWorkersCount.peek() !== ready) sigWorkersCount.set(ready);
+    if (sigQueued.peek() !== queue.length) sigQueued.set(queue.length);
+    if (sigInflight.peek() !== pending.size) sigInflight.set(pending.size);
+  }
+
   function makeWorker(): PoolWorkerEntry {
     const w = new Worker(blobUrl);
     if (typeof w.unref === "function") w.unref();
@@ -883,6 +925,7 @@ function pool(opts: { size?: number; module: string }): Pool {
           drainQueue();
         }
         if (typeof w.unref === "function") w.unref();
+        syncPoolSignals();
         return;
       }
       // Run-call response.
@@ -892,6 +935,7 @@ function pool(opts: { size?: number; module: string }): Pool {
       if (entry) entry.busy = false;
       if (typeof w.unref === "function") w.unref();
       drainQueue();
+      syncPoolSignals();
       if (ok) p.resolve(result);
       else p.reject(new Error(err || "pool worker failed"));
     };
@@ -924,16 +968,19 @@ function pool(opts: { size?: number; module: string }): Pool {
   const queue: QueuedCall[] = [];
 
   function drainQueue(): void {
+    let mutated = false;
     while (queue.length > 0) {
       const idle = workers.find(e => e.initOk === true && !e.busy);
-      if (!idle) return;
+      if (!idle) break;
       const call = queue.shift()!;
       idle.busy = true;
       const id = nextId++;
       pending.set(id, { resolve: call.resolve, reject: call.reject });
       if (typeof idle.w.ref === "function") idle.w.ref();
       idle.w.postMessage({ id, type: "run", fnName: call.fnName, args: call.args });
+      mutated = true;
     }
+    if (mutated) syncPoolSignals();
   }
 
   function run<T>(fnName: string, ...args: unknown[]): Promise<T> {
@@ -957,6 +1004,7 @@ function pool(opts: { size?: number; module: string }): Pool {
       } else {
         queue.push({ fnName, args, resolve: resolve as (v: unknown) => void, reject });
       }
+      syncPoolSignals();
     });
   }
 
@@ -974,6 +1022,7 @@ function pool(opts: { size?: number; module: string }): Pool {
     for (const c of queue) c.reject(new Error("bun:parallel pool: disposed"));
     queue.length = 0;
     URL.revokeObjectURL(blobUrl);
+    syncPoolSignals();
   }
 
   // Chunk-based fan-out helpers. Each chunk crosses the worker boundary
@@ -1067,6 +1116,11 @@ function pool(opts: { size?: number; module: string }): Pool {
     dispose,
     get size() {
       return workers.length;
+    },
+    signals: {
+      workersCount: sigWorkersCount as Signal<number>,
+      queued: sigQueued as Signal<number>,
+      inflight: sigInflight as Signal<number>,
     },
     [Symbol.asyncDispose]: async () => {
       dispose();

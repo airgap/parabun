@@ -29,6 +29,16 @@
 const simd = require("./simd.ts");
 const cudaBackend = require("./gpu/cuda.ts");
 const metalBackend = require("./gpu/metal.ts");
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of bun:signals's
+// class hierarchy. Same shape as audio.ts / camera.ts / vision.ts / rtp.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
 type FArray = Float32Array | Float64Array;
 
@@ -867,12 +877,15 @@ function hasBackend(name: BackendName): boolean {
 function setBackend(choice: BackendChoice): BackendName {
   if (choice === "auto") {
     active = null;
-    return activeBackend();
+    const resolved = activeBackend();
+    notifyBackendChanged();
+    return resolved;
   }
   const b = backends[choice];
   if (!b) throw new RangeError(`bun:gpu: unknown backend ${JSON.stringify(choice)}`);
   if (!b.probe()) throw new Error(`bun:gpu: backend ${choice} is not available on this host`);
   active = b;
+  notifyBackendChanged();
   return choice;
 }
 
@@ -1533,6 +1546,70 @@ function describe(): {
   };
 }
 
+// ─── Reactive surface (LYK-741 / LYK-764) ───────────────────────────────────
+//
+// `activeBackendSignal` flips when `setBackend` runs (or when lazy probing
+// settles a backend on first use). `availableSignal` is essentially static
+// at process scope — backends don't hot-plug — but a Signal-shaped surface
+// lets monitoring effects compose with the live `activeBackend`.
+//
+// Eager init at first read: we don't probe at module import time so a
+// CUDA-less host doesn't pay the dlopen cost just for loading bun:gpu.
+//
+// `gpu.devices` and per-device `gpu.memUsed` from the plan need a dedicated
+// device-enumeration native binding (cuDeviceGetCount + cuDeviceGetName +
+// cuMemGetInfo on CUDA, MTLCopyAllDevices on Metal). Skipped here; would
+// land alongside a future `gpu.devices()` listing function that matches the
+// existing `audio.devices()` / `camera.devices()` shape.
+
+let _activeBackendSig: WritableSignal<BackendName> | null = null;
+let _availableSig: WritableSignal<BackendName[]> | null = null;
+
+function ensureGpuSignals(): void {
+  if (_activeBackendSig === null) {
+    _activeBackendSig = signalsMod.signal(activeBackend());
+    const desc = describe();
+    _availableSig = signalsMod.signal(desc.available.slice());
+  }
+}
+
+function notifyBackendChanged(): void {
+  if (_activeBackendSig !== null) {
+    const name = activeBackend();
+    if (_activeBackendSig.peek() !== name) _activeBackendSig.set(name);
+  }
+}
+
+const activeBackendSignalProxy: Signal<BackendName> = {
+  get(): BackendName {
+    ensureGpuSignals();
+    return _activeBackendSig!.get();
+  },
+  peek(): BackendName {
+    ensureGpuSignals();
+    return _activeBackendSig!.peek();
+  },
+  subscribe(cb: (v: BackendName) => void): () => void {
+    ensureGpuSignals();
+    return _activeBackendSig!.subscribe(cb);
+  },
+};
+
+const availableSignalProxy: Signal<BackendName[]> = {
+  get(): BackendName[] {
+    ensureGpuSignals();
+    return _availableSig!.get();
+  },
+  peek(): BackendName[] {
+    ensureGpuSignals();
+    return _availableSig!.peek();
+  },
+  subscribe(cb: (v: BackendName[]) => void): () => void {
+    ensureGpuSignals();
+    return _availableSig!.subscribe(cb);
+  },
+};
+
 // Escape hatch to the active backend's device-resident kernel surface
 // (bun:llm forward-pass path). Returns null unless the active backend is
 // CUDA _and_ NVRTC is available to compile the device-ops module. See
@@ -1589,6 +1666,10 @@ export default {
   calibrate,
   dispose,
   describe,
+  // Reactive diagnostic surface (LYK-741/764). Lazy-init on first read so
+  // a CUDA-less host doesn't pay probing cost just for loading bun:gpu.
+  activeBackendSignal: activeBackendSignalProxy,
+  availableSignal: availableSignalProxy,
   getDevOps,
   _getPartialDevOps,
 };
