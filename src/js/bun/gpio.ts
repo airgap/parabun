@@ -67,6 +67,17 @@ type LineOptions = {
    * idle. Set to "rising" / "falling" / "both" to populate `line.edges()`.
    */
   edge?: LineEdge;
+  /**
+   * For inputs: drive the `value` signal in the background by polling
+   * `read()` at this many Hz. Lets `effect { line.value.get() }` react
+   * to hardware changes without the caller wiring up its own
+   * `setInterval`. Default 0 = no auto-polling. The poller `.unref()`s
+   * itself so it doesn't pin the event loop on its own; close() stops
+   * it. Once `line.edges()` moves off the JS main thread (LYK-786),
+   * this becomes optional — `edge: "..."` will drive the signal on its
+   * own at hardware-event latency.
+   */
+  pollHz?: number;
   /** For outputs: starting value, 0 or 1. Default 0. */
   initial?: 0 | 1;
 };
@@ -167,8 +178,9 @@ class LineImpl implements Line {
   #mode: LineMode;
   #closed = false;
   #value: WritableSignal<0 | 1>;
+  #pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(fd: bigint, offset: number, mode: LineMode, initial: 0 | 1) {
+  constructor(fd: bigint, offset: number, mode: LineMode, initial: 0 | 1, pollHz: number = 0) {
     this.#fd = fd;
     this.offset = offset;
     this.#mode = mode;
@@ -178,6 +190,22 @@ class LineImpl implements Line {
     // call will populate the signal accurately.
     this.#value = signalsMod.signal(mode === "out" ? initial : 0);
     lineRegistry.register(this, fd, this);
+    if (mode === "in" && pollHz > 0) {
+      // Auto-poll the input line at `pollHz` to drive the value signal so
+      // `effect { line.value.get() }` reactively re-runs without the caller
+      // wiring up its own setInterval. unref so we don't pin the loop on
+      // our own; close() clears the timer.
+      const periodMs = Math.max(1, Math.round(1000 / pollHz));
+      this.#pollTimer = setInterval(() => {
+        if (this.#closed) return;
+        try {
+          this.read();
+        } catch {
+          // Read after close races — swallow.
+        }
+      }, periodMs);
+      this.#pollTimer?.unref?.();
+    }
   }
 
   get value(): Signal<0 | 1> {
@@ -229,6 +257,10 @@ class LineImpl implements Line {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    if (this.#pollTimer !== null) {
+      clearInterval(this.#pollTimer);
+      this.#pollTimer = null;
+    }
     const fd = this.#fd;
     this.#fd = 0n;
     if (fd !== 0n) {
@@ -321,6 +353,7 @@ class ChipImpl implements Chip {
     }
     const debounceMs = Math.max(0, Math.floor(opts.debounceMs ?? 0));
     const initial: 0 | 1 = opts.initial === 1 ? 1 : 0;
+    const pollHz = Math.max(0, Math.floor(opts.pollHz ?? 0));
 
     const lineFd = native.requestLine(
       this.#fd,
@@ -331,7 +364,7 @@ class ChipImpl implements Chip {
       debounceMs,
       initial,
     ) as bigint;
-    return new LineImpl(lineFd, offset, mode, initial);
+    return new LineImpl(lineFd, offset, mode, initial, pollHz);
   }
 
   bank(offsets: number[], opts: Omit<LineOptions, "initial"> & { initial?: bigint | number }): LineBank {

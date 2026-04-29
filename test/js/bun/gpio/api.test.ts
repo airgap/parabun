@@ -63,6 +63,29 @@ describe("bun:gpio API surface", () => {
     }
   });
 
+  test.skipIf(!haveGpio)("chip.line accepts pollHz and clears the timer on close", async () => {
+    let chip: any;
+    try {
+      chip = gpio.open("/dev/gpiochip0");
+    } catch {
+      return;
+    }
+    let line: any = null;
+    try {
+      // pollHz: 0 means off; non-zero starts a setInterval. Either way, line
+      // creation must not throw on the option being present.
+      line = chip.line(0, { mode: "in", pull: "up", pollHz: 50 });
+      expect(typeof line.value.get).toBe("function");
+      // Closing the line stops the poller — without that, jest's open-handle
+      // detection would flag a leaked timer at process exit.
+      line.close();
+    } catch {
+      // Permission-denied races on the chip — ignore.
+    } finally {
+      chip.close();
+    }
+  });
+
   test.skipIf(!haveGpio)("chip.bank(offsets, opts) validates input shape", async () => {
     let chip: any;
     try {

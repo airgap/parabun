@@ -8,11 +8,11 @@
 // second LED is one more line of effect — every signal read inside the
 // block is tracked automatically.
 //
-// `setInterval(...20ms)` polls `button.read()` to drive the value signal
-// at 50 Hz. We poll instead of using `edges()` because the kernel-event
-// path currently runs on the JS thread and would block here; once
-// edges() moves off-thread, the same demo can switch to it without
-// changing the effect.
+// `pollHz: 50` tells `bun:gpio` to drive `button.value` at 50 Hz in the
+// background — no manual `setInterval`, no separate read loop. (Once
+// `line.edges()` moves off the JS main thread (LYK-786), `edge: "..."`
+// will drive the signal at hardware-event latency and pollHz becomes
+// optional.)
 
 import gpio from "bun:gpio";
 
@@ -29,11 +29,8 @@ if (!chipPath) {
 }
 
 await using chip = gpio.open(chipPath);
-await using button = chip.line(27, { mode: "in", pull: "up", debounceMs: 5 });
+await using button = chip.line(27, { mode: "in", pull: "up", debounceMs: 5, pollHz: 50 });
 await using led = chip.line(17, { mode: "out", initial: 0 });
-
-// Drive the button signal at 50 Hz.
-const poller = setInterval(() => button.read(), 20);
 
 // The whole control loop. Pull-up means released = 1, pressed = 0.
 effect {
@@ -50,6 +47,5 @@ if (seconds !== null && Number.isFinite(seconds)) {
   await new Promise(() => {});
 }
 
-clearInterval(poller);
 led.write(0);
 console.log("done.");
