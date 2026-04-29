@@ -2,8 +2,9 @@
 //
 //   bun run build:release demos/iot-bank-mirror.ts [--seconds N]
 //
-// Same demo as iot-bank-mirror.pts; `effect { ... }` becomes
-// `signals.effect(() => { ... })`. Identical behavior.
+// Same demo as iot-bank-mirror.pts; the parabun `A -> fn` reactive
+// call-binding becomes `signals.effect(() => fn(A))` here. Identical
+// behavior.
 //
 // Wire BCM 22, 23, 24, 25 → buttons-to-ground (pull-up). Wire
 // BCM 5, 6, 12, 13 → LEDs. Each press lights the matching LED.
@@ -27,10 +28,7 @@ await using chip = gpio.open(chipPath);
 await using buttons = chip.bank([22, 23, 24, 25], { mode: "in", pull: "up", debounceMs: 5, pollHz: 50 });
 await using leds = chip.bank([5, 6, 12, 13], { mode: "out", initial: 0n });
 
-signals.effect(() => {
-  const pressed = ~buttons.value.get() & 0xfn;
-  leds.write(pressed);
-});
+signals.effect(() => leds.write(~buttons.value.get() & 0xfn));
 
 console.log("4-button bank → 4-LED bank. Press any combo; LEDs follow.");
 if (seconds !== null && Number.isFinite(seconds)) {

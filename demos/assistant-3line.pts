@@ -10,7 +10,7 @@
 // and loops: VAD → STT → LLM (grammar-constrained tool selection) →
 // TTS → speaker. The reactive `bot.state` signal cycles through
 // "idle" | "listening" | "thinking" | "speaking" — pipe it to a
-// status line via `effect { ... }`. Ctrl-C to stop.
+// status line via the `->` reactive call-binding operator. Ctrl-C to stop.
 
 import assistant from "bun:assistant";
 import { existsSync } from "node:fs";
@@ -40,9 +40,7 @@ await using bot = await assistant.create({
   },
 });
 
-// Live status line — same one effect block redraws it on every state change.
-effect {
-  process.stdout.write(`\r[${bot.state.get().padEnd(10)}]`);
-}
+// Live status line — `->` re-calls process.stdout.write whenever bot.state changes.
+`\r[${bot.state.get().padEnd(10)}]` -> process.stdout.write;
 
 await bot.run();

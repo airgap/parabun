@@ -9,8 +9,8 @@ Not everyone wants to leave TypeScript and that's 100% ok — every demo runs wi
 
 | Demo | What | Hardware / fixtures |
 |---|---|---|
-| `iot-button-led` ([.pts](iot-button-led.pts) / [.ts](iot-button-led.ts)) | Reactive button → LED — `chip.line({ pollHz: 50 })` drives `button.value`, one `effect` block does the whole control loop | Linux SBC + GPIO. |
-| `iot-bank-mirror` ([.pts](iot-bank-mirror.pts) / [.ts](iot-bank-mirror.ts)) | 4-button bank → 4-LED bank via `chip.bank({ pollHz: 50 })` and one `effect` over `buttons.value: Signal<bigint>` | Linux SBC + GPIO. |
+| `iot-button-led` ([.pts](iot-button-led.pts) / [.ts](iot-button-led.ts)) | Reactive button → LED — `chip.line({ pollHz: 50 })` drives `button.value`, one `-> led.write` call-binding handles the whole control loop | Linux SBC + GPIO. |
+| `iot-bank-mirror` ([.pts](iot-bank-mirror.pts) / [.ts](iot-bank-mirror.ts)) | 4-button bank → 4-LED bank via `chip.bank({ pollHz: 50 })` and one `-> leds.write` call-binding over `buttons.value: Signal<bigint>` | Linux SBC + GPIO. |
 | `iot-http-state` ([.pts](iot-http-state.pts) / [.ts](iot-http-state.ts)) | Live GPIO state over HTTP — `/state` (JSON), `/events` (SSE), `POST /led/0\|1\|auto` for override. One `effect` writes the LED AND broadcasts to SSE clients | Linux SBC + GPIO + HTTP. |
 | `iot-sensor` ([.pts](iot-sensor.pts) / [.ts](iot-sensor.ts)) | Periodic sensor read → derived threshold → reactive log via `signals.fromInterval` + `derived` + `effect`. Same shape as a real i2c sensor with `sensor.smbus.readWord(...)` | None — simulated sensor. |
 | `iot-dashboard` ([.pts](iot-dashboard.pts) / [.ts](iot-dashboard.ts)) | Simulated IoT control panel — `signal` declarations, auto-derived state, `effect`, `~> ... when ...` reactive binding (or `signals.effect(...)` writing into a property in TypeScript form) | None — pure simulation. |
@@ -42,8 +42,8 @@ bun bd run demos/<demo>.pts [args]
 
 | Demo | Target | Status |
 |---|---|---|
-| `iot-button-led` | Pi 5 | ✅ chip.line({pollHz:50}) drives button.value, one effect { } block writes LED. 2 s non-interactive run. |
-| `iot-bank-mirror` | Pi 5 | ✅ chip.bank({pollHz:50}) drives 4-bit Signal<bigint>; effect mirrors buttons → LEDs in one bitwise expression. |
+| `iot-button-led` | Pi 5 | ✅ chip.line({pollHz:50}) drives button.value, one `-> led.write` call-binding writes LED. 2 s non-interactive run. |
+| `iot-bank-mirror` | Pi 5 | ✅ chip.bank({pollHz:50}) drives 4-bit Signal<bigint>; one `-> leds.write` call-binding mirrors buttons → LEDs in a single bitwise expression. |
 | `iot-http-state` | Pi 5 | ✅ Bun.serve + parabun signals; GET /state, POST /led/{0,1,auto}, override flow validated. SIGINT stops cleanly. |
 | `iot-sensor` | dev box | ✅ fromInterval drives signal at 5 Hz, derived recomputes isHot, effect logs threshold crossings. |
 | `iot-dashboard` | dev box | ✅ derived signals + effect + ~> binding fire as expected through a 9-step sensor sweep. |
@@ -60,8 +60,9 @@ bun bd run demos/<demo>.pts [args]
 ## Parabun syntax used
 
 - `signal NAME = …` — reactive cell. RHS that reads another signal auto-promotes to a derived. (`iot-dashboard.pts`)
-- `effect { … }` — block sugar for `signals.effect(() => …)`. Tracks every signal it reads. (`iot-button-led.pts`, `iot-dashboard.pts`, `audio-meter.pts`)
-- `A ~> B [when C]` — reactive binding. Re-evaluates `A` and writes into `B` whenever the deps change; optional `when` guard. (`iot-dashboard.pts`)
+- `effect { … }` — block sugar for `signals.effect(() => …)`. Tracks every signal it reads. (`iot-http-state.pts`, `iot-dashboard.pts`, `audio-meter.pts`)
+- `A ~> B [when C]` — reactive **assignment** binding. Re-evaluates `A` and writes into `B` whenever the deps change; optional `when` guard. (`iot-dashboard.pts`)
+- `A -> fn [when C]` — reactive **call** binding. Re-evaluates `A` and re-calls `fn(A)` whenever the deps change. Same precedence and `when` shape as `~>`. (`iot-button-led.pts`, `iot-bank-mirror.pts`, `assistant-3line.pts`)
 - `pure function …` — parse-time purity check (`csv-pipeline.pts`)
 - `|>` pipeline — `csv-pipeline.pts`
 - `..=` await-in-declaration — `whisper-transcribe.pts`

@@ -3,10 +3,10 @@
 //   bun run build:release demos/iot-button-led.pts [--seconds N]
 //
 // Wire BCM 27 → button to ground (pull-up), BCM 17 → LED. The whole
-// control loop is one `effect { … }` block: when `button.value`
-// changes, the effect re-runs and writes the LED. Adding a sensor or a
-// second LED is one more line of effect — every signal read inside the
-// block is tracked automatically.
+// control loop is one reactive call-binding: when `button.value`
+// changes, `led.write` is re-called with the new value. The `->`
+// operator desugars to `effect(() => led.write(...))` — every signal
+// read on the LHS is tracked automatically.
 //
 // `pollHz: 50` tells `bun:gpio` to drive `button.value` at 50 Hz in the
 // background — no manual `setInterval`, no separate read loop. (Once
@@ -32,11 +32,9 @@ await using chip = gpio.open(chipPath);
 await using button = chip.line(27, { mode: "in", pull: "up", debounceMs: 5, pollHz: 50 });
 await using led = chip.line(17, { mode: "out", initial: 0 });
 
-// The whole control loop. Pull-up means released = 1, pressed = 0.
-effect {
-  const pressed = button.value.get() === 0;
-  led.write(pressed ? 1 : 0);
-}
+// The whole control loop. Pull-up: button reads 0 when pressed, 1 when
+// released; `->` mirrors that inverted into the LED on every change.
+(button.value.get() === 0 ? 1 : 0) -> led.write;
 
 console.log("button BCM27 → LED BCM17. Press the button to light the LED.");
 if (seconds !== null && Number.isFinite(seconds)) {

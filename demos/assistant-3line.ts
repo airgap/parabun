@@ -5,8 +5,9 @@
 //   ASSISTANT_TTS=/path/to/en_US-lessac-medium.onnx \
 //     bun run build:release demos/assistant-3line.ts
 //
-// Same demo as assistant-3line.pts; `effect { ... }` becomes
-// `signals.effect(() => { ... })`. Identical behavior.
+// Same demo as assistant-3line.pts; the parabun `A -> fn` reactive
+// call-binding becomes `signals.effect(() => fn(A))` here. Identical
+// behavior.
 
 import assistant from "bun:assistant";
 import signals from "bun:signals";
@@ -39,8 +40,6 @@ await using bot = await assistant.create({
   },
 });
 
-signals.effect(() => {
-  process.stdout.write(`\r[${bot.state.get().padEnd(10)}]`);
-});
+signals.effect(() => process.stdout.write(`\r[${bot.state.get().padEnd(10)}]`));
 
 await bot.run();

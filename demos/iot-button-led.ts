@@ -2,9 +2,9 @@
 //
 //   bun run build:release demos/iot-button-led.ts [--seconds N]
 //
-// Same demo as iot-button-led.pts; the only difference is `effect { ... }`
-// (Parabun sugar) becomes `signals.effect(() => { ... })` (the underlying
-// runtime call). Identical behavior.
+// Same demo as iot-button-led.pts; the parabun `A -> fn` reactive
+// call-binding becomes `signals.effect(() => fn(A))` here. Identical
+// behavior.
 //
 // Wire BCM 27 → button to ground (pull-up), BCM 17 → LED. The whole
 // control loop is one `effect()` callback: when `button.value`
@@ -30,10 +30,7 @@ await using chip = gpio.open(chipPath);
 await using button = chip.line(27, { mode: "in", pull: "up", debounceMs: 5, pollHz: 50 });
 await using led = chip.line(17, { mode: "out", initial: 0 });
 
-signals.effect(() => {
-  const pressed = button.value.get() === 0;
-  led.write(pressed ? 1 : 0);
-});
+signals.effect(() => led.write(button.value.get() === 0 ? 1 : 0));
 
 console.log("button BCM27 → LED BCM17. Press the button to light the LED.");
 if (seconds !== null && Number.isFinite(seconds)) {
