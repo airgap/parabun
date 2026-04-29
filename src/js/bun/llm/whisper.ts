@@ -361,6 +361,189 @@ function dequantizeQ5_0(src: Uint8Array, nBlocks: number, dst: Float32Array): vo
   }
 }
 
+// ─── Quantized matVec (CPU, dequant-on-the-fly) ────────────────────────────
+// Compute logits[r] = Σ_c W[r, c] * vec[c] without materializing the
+// dequantized weight matrix. Saves the 60-90% RAM that fp32 dequant
+// would cost — the headline win on Pi 5 / Jetson where memory bandwidth
+// dominates the decoder hot path. Rows × cols layout matches GGML
+// (row-major, blocks contiguous within a row).
+//
+// LYK-755 — first cut. CPU-only; GPU path mirrors via per-format dequant
+// kernels in a follow-up.
+
+/**
+ * Quantized weight wrapper. The byte layout matches GGML's block format
+ * for the named ftype; matVecQuant + dequantizeQuant both consume this
+ * directly.
+ */
+type QuantTensor = {
+  /** GGML tensor type id: 2=Q4_0, 6=Q5_0, 7=Q5_1, 8=Q8_0. */
+  ftype: number;
+  /** Raw block bytes in GGML row-major layout. */
+  data: Uint8Array;
+  /** Number of [nCols/32] blocks per row. */
+  blocksPerRow: number;
+  /** Element count per row (== blocksPerRow * 32). */
+  cols: number;
+  /** Row count of the matrix this represents. */
+  rows: number;
+};
+
+/**
+ * y[r] = Σ_c W[r, c] * vec[c]  for a Q8_0-packed W. Block layout:
+ *   [fp16 d][32 × i8]   34 bytes / 32 vals
+ */
+function matVecQ8_0(w: QuantTensor, vec: Float32Array, dst: Float32Array): void {
+  const blockBytes = 34;
+  const QK = 32;
+  const data = w.data;
+  for (let r = 0; r < w.rows; r++) {
+    let off = r * w.blocksPerRow * blockBytes;
+    let acc = 0;
+    for (let b = 0; b < w.blocksPerRow; b++) {
+      const d = readF16(data, off);
+      let inner = 0;
+      const qBase = off + 2;
+      const vecBase = b * QK;
+      for (let j = 0; j < QK; j++) {
+        const v = (data[qBase + j] << 24) >> 24;
+        inner += v * vec[vecBase + j];
+      }
+      acc += d * inner;
+      off += blockBytes;
+    }
+    dst[r] = acc;
+  }
+}
+
+/**
+ * Q4_0: [fp16 d][16 × byte (low/high nibble = elem j / j+16, zero-bias 8)]
+ */
+function matVecQ4_0(w: QuantTensor, vec: Float32Array, dst: Float32Array): void {
+  const blockBytes = 18;
+  const QK = 32;
+  const data = w.data;
+  for (let r = 0; r < w.rows; r++) {
+    let off = r * w.blocksPerRow * blockBytes;
+    let acc = 0;
+    for (let b = 0; b < w.blocksPerRow; b++) {
+      const d = readF16(data, off);
+      const qBase = off + 2;
+      const vecBase = b * QK;
+      let inner = 0;
+      for (let j = 0; j < 16; j++) {
+        const byte = data[qBase + j];
+        const x0 = (byte & 0x0f) - 8;
+        const x1 = (byte >> 4) - 8;
+        inner += x0 * vec[vecBase + j] + x1 * vec[vecBase + 16 + j];
+      }
+      acc += d * inner;
+      off += blockBytes;
+    }
+    dst[r] = acc;
+  }
+}
+
+/**
+ * Q5_0: [fp16 d][u32 hi-bits][16 × byte lo-nibble]   22 bytes / 32 vals
+ * Each elem combines low nibble + 1 hi-bit, zero-bias 16.
+ */
+function matVecQ5_0(w: QuantTensor, vec: Float32Array, dst: Float32Array): void {
+  const blockBytes = 22;
+  const QK = 32;
+  const data = w.data;
+  for (let r = 0; r < w.rows; r++) {
+    let off = r * w.blocksPerRow * blockBytes;
+    let acc = 0;
+    for (let b = 0; b < w.blocksPerRow; b++) {
+      const d = readF16(data, off);
+      const qhBase = off + 2;
+      const qh = data[qhBase] | (data[qhBase + 1] << 8) | (data[qhBase + 2] << 16) | (data[qhBase + 3] << 24);
+      const qBase = off + 6;
+      const vecBase = b * QK;
+      let inner = 0;
+      for (let j = 0; j < 16; j++) {
+        const byte = data[qBase + j];
+        const xh0 = ((qh >>> j) & 1) << 4;
+        const xh1 = ((qh >>> (j + 16)) & 1) << 4;
+        const x0 = ((byte & 0x0f) | xh0) - 16;
+        const x1 = ((byte >> 4) | xh1) - 16;
+        inner += x0 * vec[vecBase + j] + x1 * vec[vecBase + 16 + j];
+      }
+      acc += d * inner;
+      off += blockBytes;
+    }
+    dst[r] = acc;
+  }
+}
+
+/**
+ * Q5_1: [fp16 d][fp16 m][u32 hi-bits][16 × byte lo-nibble]   24 bytes / 32 vals
+ * Element value is (lo-nibble | hi-bit<<4); dequantized as d*val + m.
+ * matVec form: Σ d*val*v + Σ m*v = d * Σ val*v  +  m * Σ v
+ */
+function matVecQ5_1(w: QuantTensor, vec: Float32Array, dst: Float32Array): void {
+  const blockBytes = 24;
+  const QK = 32;
+  const data = w.data;
+  for (let r = 0; r < w.rows; r++) {
+    let off = r * w.blocksPerRow * blockBytes;
+    let acc = 0;
+    for (let b = 0; b < w.blocksPerRow; b++) {
+      const d = readF16(data, off);
+      const m = readF16(data, off + 2);
+      const qhBase = off + 4;
+      const qh = data[qhBase] | (data[qhBase + 1] << 8) | (data[qhBase + 2] << 16) | (data[qhBase + 3] << 24);
+      const qBase = off + 8;
+      const vecBase = b * QK;
+      let valSum = 0;
+      let vecSum = 0;
+      for (let j = 0; j < 16; j++) {
+        const byte = data[qBase + j];
+        const xh0 = ((qh >>> j) & 1) << 4;
+        const xh1 = ((qh >>> (j + 16)) & 1) << 4;
+        const x0 = (byte & 0x0f) | xh0;
+        const x1 = (byte >> 4) | xh1;
+        const v0 = vec[vecBase + j];
+        const v1 = vec[vecBase + 16 + j];
+        valSum += x0 * v0 + x1 * v1;
+        vecSum += v0 + v1;
+      }
+      acc += d * valSum + m * vecSum;
+      off += blockBytes;
+    }
+    dst[r] = acc;
+  }
+}
+
+/**
+ * Dispatch matVec by ftype. Allocates an output Float32Array. `vec.length`
+ * must equal `w.cols`.
+ */
+function quantMatVec(w: QuantTensor, vec: Float32Array): Float32Array {
+  if (vec.length !== w.cols) {
+    throw new Error(`bun:llm whisper: quantMatVec dim mismatch — vec ${vec.length} vs cols ${w.cols}`);
+  }
+  const dst = new Float32Array(w.rows);
+  switch (w.ftype) {
+    case 2:
+      matVecQ4_0(w, vec, dst);
+      break;
+    case 6:
+      matVecQ5_0(w, vec, dst);
+      break;
+    case 7:
+      matVecQ5_1(w, vec, dst);
+      break;
+    case 8:
+      matVecQ8_0(w, vec, dst);
+      break;
+    default:
+      throw new Error(`bun:llm whisper: quantMatVec ftype=${w.ftype} not supported`);
+  }
+  return dst;
+}
+
 function dequantizeQ5_1(src: Uint8Array, nBlocks: number, dst: Float32Array): void {
   let off = 0;
   let dstIdx = 0;
@@ -2067,4 +2250,17 @@ function gpuScaledDotProductAttention(
   return out;
 }
 
-export { WhisperModel, WhisperTokenizer, readBinModel };
+export {
+  WhisperModel,
+  WhisperTokenizer,
+  readBinModel,
+  // Exposed for the matVec-correctness test suite (LYK-755). The
+  // quantization helpers operate on raw GGML block bytes and are
+  // independently useful for callers dequantizing v1 .bin / .gguf files.
+  quantMatVec,
+  matVecQ4_0,
+  matVecQ5_0,
+  matVecQ5_1,
+  matVecQ8_0,
+};
+export type { QuantTensor };

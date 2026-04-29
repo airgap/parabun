@@ -909,4 +909,11 @@ export default {
   // a CUDA path follows once this matures past tiny.en.
   WhisperModel: whisperModule.WhisperModel,
   WhisperTokenizer: whisperModule.WhisperTokenizer,
+  // Quantized matVec helpers (LYK-755). Operate directly on GGML v1
+  // block bytes — Q4_0 / Q5_0 / Q5_1 / Q8_0 — so callers can compute
+  // weighted dot-products without first materializing a fp32 weight
+  // matrix. Useful for embedded targets where RAM is the binding
+  // constraint. The whisper module uses these internally; exposed here
+  // so users with their own quant-aware paths can reuse them.
+  quantMatVec: whisperModule.quantMatVec,
 };
