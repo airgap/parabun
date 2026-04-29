@@ -162,4 +162,102 @@ describe("Parabun: ~> reactive binding", () => {
       expect(exitCode).toBe(0);
     });
   });
+
+  // LYK-767: conditional reactive bind. `A ~> B when C` only assigns when
+  // C evaluates truthy; otherwise the effect re-runs but the body skips
+  // the assignment.
+  describe("when-clause desugar (LYK-767)", () => {
+    it("emits an if(C) wrapper around the assignment", () => {
+      const out = transform(`signal a = 1; signal cond = true; const obj = { v: 0 }; a ~> obj.v when cond;`);
+      expect(out).toContain(`require("bun:signals").effect(() =>`);
+      // The guard reads the signal too — the desugar must call .get() on it
+      // (signal-bound identifier rewriting handles that for free).
+      expect(out).toContain(`if (cond.get())`);
+      expect(out).toContain(`obj.v = a.get()`);
+    });
+
+    it("guard can be a plain boolean expression", () => {
+      const out = transform(`signal a = 1; const obj = { v: 0 }; let toggle = true; a ~> obj.v when toggle;`);
+      expect(out).toContain(`if (toggle)`);
+      expect(out).toContain(`obj.v = a.get()`);
+    });
+
+    it("guard can be a complex expression", () => {
+      const out = transform(`signal x = 1; signal y = 5; const obj = { v: 0 }; x ~> obj.v when y > 3;`);
+      expect(out).toContain(`if (y.get() > 3)`);
+    });
+
+    it("when clause composes with pipeline", () => {
+      const out = transform(
+        `signal n = -3; signal cond = true; const obj = { abs: 0 }; n |> Math.abs ~> obj.abs when cond;`,
+      );
+      expect(out).toContain(`obj.abs = Math.abs(n.get())`);
+      expect(out).toContain(`if (cond.get())`);
+    });
+
+    it("`when` outside a ~> still parses as an identifier", () => {
+      const out = transform(`const when = 5; const x = when + 1;`);
+      expect(out).toContain("when + 1");
+    });
+  });
+
+  describe("when-clause runtime (LYK-767)", () => {
+    it("guard true: assignment fires; guard false: blocked", async () => {
+      const { stdout, exitCode } = await runFixture(
+        "rbind-when-basic",
+        `
+          signal n = 0;
+          signal allow = true;
+          const obj = { v: -1 };
+          n ~> obj.v when allow;
+          console.log(obj.v);   // initial fire (guard=true) → 0
+          allow = false;
+          n = 5;                // guard now false → no update
+          console.log(obj.v);   // still 0
+          allow = true;         // re-enable → effect re-runs, picks up 5
+          console.log(obj.v);   // 5
+          n = 10;               // guard true → update
+          console.log(obj.v);   // 10
+        `,
+      );
+      expect(stdout).toBe("0\n0\n5\n10");
+      expect(exitCode).toBe(0);
+    });
+
+    it("plain-boolean guard: only initial value", async () => {
+      const { stdout, exitCode } = await runFixture(
+        "rbind-when-bool",
+        `
+          signal n = 0;
+          const obj = { v: -1 };
+          const enable = false;
+          n ~> obj.v when enable;
+          console.log(obj.v);   // initial fire blocked → -1
+          n = 7;
+          console.log(obj.v);   // still -1
+        `,
+      );
+      expect(stdout).toBe("-1\n-1");
+      expect(exitCode).toBe(0);
+    });
+
+    it("disposer still works with when clause", async () => {
+      const { stdout, exitCode } = await runFixture(
+        "rbind-when-dispose",
+        `
+          signal n = 0;
+          signal allow = true;
+          const obj = { v: -1 };
+          const stop = n ~> obj.v when allow;
+          n = 5;
+          console.log(obj.v);   // 5
+          stop();
+          n = 99;
+          console.log(obj.v);   // still 5
+        `,
+      );
+      expect(stdout).toBe("5\n5");
+      expect(exitCode).toBe(0);
+    });
+  });
 });

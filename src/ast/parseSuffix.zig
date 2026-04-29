@@ -981,6 +981,12 @@ pub fn ParseSuffix(
         // literal, arrow — is rejected with a parse error. Binds weakest of the
         // suffix operators (at `.assign` level), so `a |> f ~> sink` parses as
         // `(a |> f) ~> sink`.
+        //
+        // Conditional bind (LYK-767): `A ~> B when C` adds a guard. The desugar
+        // becomes `require("bun:signals").effect(() => { if (C) B = A; })`.
+        // C is read inside the effect so signal reads in the predicate are
+        // tracked too — flipping C re-fires the effect, the body re-evaluates
+        // the guard, and only assigns when the guard passes.
         fn t_tilde_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
             if (level.gte(.assign)) {
                 return .done;
@@ -1004,13 +1010,36 @@ pub fn ParseSuffix(
                 },
             }
 
+            // Optional `when COND` guard (LYK-767). `when` is a contextual
+            // keyword — it parses as a normal identifier elsewhere. Only
+            // recognized immediately after the RHS of a `~>` chain.
+            var guard: ?Expr = null;
+            if (p.lexer.isContextualKeyword("when") and !p.lexer.has_newline_before) {
+                try p.lexer.next();
+                guard = try p.parseExpr(.assign);
+            }
+
             const assign = p.newExpr(E.Binary{
                 .op = .bin_assign,
                 .left = rhs,
                 .right = left.*,
             }, body_loc);
             const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
-            body_stmts[0] = p.s(S.SExpr{ .value = assign }, body_loc);
+            const assign_stmt = p.s(S.SExpr{ .value = assign }, body_loc);
+            if (guard) |guard_expr| {
+                // `if (guard) <single-stmt>`. We deliberately don't wrap the
+                // assignment in an S.Block — the visit pass would expect a
+                // matching block scope, and the suffix-parser path doesn't
+                // own a stmt-level block scope here. Single-stmt yes is
+                // semantically identical to a block in JS for this case.
+                body_stmts[0] = p.s(S.If{
+                    .test_ = guard_expr,
+                    .yes = assign_stmt,
+                    .no = null,
+                }, body_loc);
+            } else {
+                body_stmts[0] = assign_stmt;
+            }
 
             // Register arrow scopes so the visit pass can pop them in order.
             // We don't parse anything inside these scopes — the RHS and LHS
