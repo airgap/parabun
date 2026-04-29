@@ -383,4 +383,56 @@ function fromInterval<T>(fn: () => T | Promise<T>, periodMs: number): DriverHand
   };
 }
 
-export default { signal, derived, effect, batch, untrack, fromAsync, fromInterval, pump, Signal: ReadableSignal };
+// ─── Edge-detection helpers ────────────────────────────────────────────────
+//
+// Common pattern: react to a *transition* in a boolean-coerced signal, not
+// every change. `onRising(s, fn)` calls `fn` once each time `s` goes from
+// falsy to truthy; `onFalling(s, fn)` is the dual. Initial state is taken
+// as already-observed — a signal that starts truthy does NOT fire `onRising`
+// on first run; only subsequent false→true transitions do.
+//
+// Both return a disposer with the same semantics as `effect()`.
+
+function onRising<T>(source: ReadableSignal<T>, fn: () => void): () => void {
+  if (!(source instanceof ReadableSignal)) {
+    throw new TypeError("bun:signals.onRising: first argument must be a signal");
+  }
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  let prev = !!source.peek();
+  return effect(() => {
+    const now = !!source.get();
+    if (now && !prev) fn();
+    prev = now;
+  });
+}
+
+function onFalling<T>(source: ReadableSignal<T>, fn: () => void): () => void {
+  if (!(source instanceof ReadableSignal)) {
+    throw new TypeError("bun:signals.onFalling: first argument must be a signal");
+  }
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  let prev = !!source.peek();
+  return effect(() => {
+    const now = !!source.get();
+    if (!now && prev) fn();
+    prev = now;
+  });
+}
+
+export default {
+  signal,
+  derived,
+  effect,
+  batch,
+  untrack,
+  fromAsync,
+  fromInterval,
+  pump,
+  onRising,
+  onFalling,
+  Signal: ReadableSignal,
+};
