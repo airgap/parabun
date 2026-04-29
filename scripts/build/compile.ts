@@ -123,8 +123,15 @@ export function registerCompileRules(n: Ninja, cfg: Config): void {
   });
 
   // ─── Static library archive ───
+  // `ar rcs` updates an existing archive in place — old members stay if their
+  // names don't collide with new members. That's wrong when a profile rebuilds
+  // for a different target arch and the source list shifts (e.g. tinycc
+  // x86_64-gen.c → arm64-gen.c): the previous arch's objects survive in the
+  // archive, the link step then mixes architectures and ld.lld errors out
+  // with `incompatible with elf64-littleaarch64`. `rm -f` first → fresh
+  // archive every time.
   n.rule("ar", {
-    command: cfg.windows ? `${ar} /nologo /out:$out @$out.rsp` : `${ar} rcs $out @$out.rsp`,
+    command: cfg.windows ? `${ar} /nologo /out:$out @$out.rsp` : `rm -f $out && ${ar} rcs $out @$out.rsp`,
     description: "ar $out",
     rspfile: "$out.rsp",
     rspfile_content: "$in_newline",
