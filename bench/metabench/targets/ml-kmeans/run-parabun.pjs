@@ -1,18 +1,18 @@
-// Parabun rewrite of k-means using bun:simd primitives.
+// Parabun rewrite of k-means using para:simd primitives.
 //
 // Algorithmic reformulation:
 //   dist²(x, c) = ||x||² + ||c||² − 2·(x·c)
 // so for assignment (argmin over k of dist²) the ||x||² term is constant
 // per point and drops out. We need (x·c) for all (i, k) pairs.
 //
-// Why we don't call `bun:simd.matVec` K times per iteration:
+// Why we don't call `para:simd.matVec` K times per iteration:
 //   matVec copies the full matrix into the WASM scratch pool on every call.
 //   At N=20 000 × D=128 that's 10 MB × K copies = 160 MB memcpy'd per
 //   iteration for no reason — dwarfing the actual FLOPs. Instead the
 //   assignment runs as a fused JS loop; JSC's FTL tier auto-vectorizes
 //   the inner dot-product into AVX2 f32x8 instructions, so the packed
 //   dataMat/centersMat layout pays off without the boundary crossing.
-//   We still use `bun:simd.dot` for the K centroid norms — cheap, and it
+//   We still use `para:simd.dot` for the K centroid norms — cheap, and it
 //   exercises the SIMD path on a non-trivial reduction.
 //
 // Layout:
@@ -30,7 +30,7 @@
 //   3. Update centers via a single scalar pass (sum per cluster + count).
 //   4. Convergence: max L2 distance of any center from its previous position.
 
-import { dot } from "bun:simd";
+import { dot } from "para:simd";
 import { generate, N, D, K } from "./gen.mjs";
 
 function kmeansRewrite({ dataMat, initCentersMat, maxIterations = 50, tolerance = 1e-6 }) {

@@ -1,8 +1,8 @@
 # Parabun benchmarks
 
 Eight end-to-end benchmarks that exercise Parabun's language features
-(`pure function`, `|>` pipelines) and runtime modules (`bun:simd`,
-`bun:parallel`, `bun:pipeline`) on real-world shaped workloads.
+(`pure function`, `|>` pipelines) and runtime modules (`para:simd`,
+`para:parallel`, `para:pipeline`) on real-world shaped workloads.
 
 Each bench lives in its own directory with a README that covers the
 workload, results (best-of-N medians), why the Parabun version wins (or
@@ -12,8 +12,8 @@ loses, in the layered diagnosis), running instructions, and a file list.
 |----------------------------------------------------------------------|----------------------------------------------|--------:|
 | [parabun-vector-search](./parabun-vector-search/README.md)           | layered diagnosis: SIMD + SAB + pmap         |  2.03×  |
 | [parabun-rag-retrieval](./parabun-rag-retrieval/README.md)           | drop-in vs real LangChain `VectorStore`      |  2.83×  |
-| [parabun-monte-carlo](./parabun-monte-carlo/README.md)               | `bun:parallel.pmap` alone (no SIMD/SAB)      |  5.56×  |
-| [parabun-streaming-etl](./parabun-streaming-etl/README.md)           | `bun:pipeline` fusion (affine → SIMD)        | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
+| [parabun-monte-carlo](./parabun-monte-carlo/README.md)               | `para:parallel.pmap` alone (no SIMD/SAB)      |  5.56×  |
+| [parabun-streaming-etl](./parabun-streaming-etl/README.md)           | `para:pipeline` fusion (affine → SIMD)        | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
 | [parabun-image-convolution](./parabun-image-convolution/README.md)   | `pmap + SAB` on `Uint8Array` (light kernel)  |  4.75×  |
 | [parabun-image-sobel](./parabun-image-sobel/README.md)               | `pmap + SAB` on `Uint8Array` (heavier CV kernel) | 5.94× |
 | [parabun-optical-flow](./parabun-optical-flow/README.md)             | two-frame temporal: both frames in SAB       |  2.63×  |
@@ -33,10 +33,10 @@ noise elsewhere.
 - **rag-retrieval** is the same workload re-framed as a drop-in LangChain
   `VectorStore` subclass — same public API, Parabun internals, 2.83× faster
   per search with no changes to caller code.
-- **monte-carlo** is the pure `bun:parallel.pmap` showcase. No SIMD, no SAB,
+- **monte-carlo** is the pure `para:parallel.pmap` showcase. No SIMD, no SAB,
   just a `pure function` kernel chunked across 8 workers with independent
   PRNG streams seeded from a Weyl constant.
-- **streaming-etl** is pure `bun:pipeline` fusion. A 4-stage affine chain
+- **streaming-etl** is pure `para:pipeline` fusion. A 4-stage affine chain
   collapses to `K · simd.sum(source) + C · n` — one SIMD pass plus two
   scalar ops, beating a hand-rolled tight loop by 1.24× while the
   idiomatic `.map().map().map().reduce()` version runs at ~50× the cost.

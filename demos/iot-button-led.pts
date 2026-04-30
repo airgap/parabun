@@ -8,13 +8,13 @@
 // operator desugars to `effect(() => led.write(...))` — every signal
 // read on the LHS is tracked automatically.
 //
-// `pollHz: 50` tells `bun:gpio` to drive `button.value` at 50 Hz in the
+// `pollHz: 50` tells `para:gpio` to drive `button.value` at 50 Hz in the
 // background — no manual `setInterval`, no separate read loop. (Once
 // `line.edges()` moves off the JS main thread (LYK-786), `edge: "..."`
 // will drive the signal at hardware-event latency and pollHz becomes
 // optional.)
 
-import gpio from "bun:gpio";
+import gpio from "para:gpio";
 
 const args = process.argv.slice(2);
 const sIdx = args.indexOf("--seconds");
@@ -24,7 +24,7 @@ const chips = gpio.chips();
 const rp1 = chips.find(c => c.label === "pinctrl-rp1");
 const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
 if (!chipPath) {
-  console.error("no /dev/gpiochip* found — bun:gpio is Linux-only.");
+  console.error("no /dev/gpiochip* found — para:gpio is Linux-only.");
   process.exit(1);
 }
 

@@ -10,8 +10,8 @@
 // overhead stays ~constant, so per-query latency drops until compute or
 // PCIe bandwidth dominates.
 
-import { GpuFloat32Array, matmul } from "bun:gpu";
-import { topK as simdTopK } from "bun:simd";
+import { GpuFloat32Array, matmul } from "para:gpu";
+import { topK as simdTopK } from "para:simd";
 import { generate, N, D, K } from "./gen.js";
 
 function mulberry32(seed: number) {

@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:gpu — argMin / argMax", () => {
+describe("para:gpu — argMin / argMax", () => {
   it("returns the index of the smallest / largest float on a small input", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-f32-basic",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([3, 1, 4, 1, 5, 9, 2, 6]);
         // Min value 1 first appears at index 1; max value 9 at index 5.
@@ -35,7 +35,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-tie",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // 1 appears twice for min; 9 appears twice for max. We want the
         // earliest index in both cases.
@@ -52,7 +52,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-nan",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, NaN, 3, NaN, 0]);
         console.log("argMin", gpu.argMin(input));
@@ -67,7 +67,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-nan-first",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([NaN, 1, 2, 3]);
         console.log("argMin", gpu.argMin(input));
@@ -82,7 +82,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-u32",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([100, 50, 75, 25, 90, 25, 100]);
         // min 25 first at index 3; max 100 first at index 0.
@@ -98,7 +98,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-empty",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const empty = new Float32Array(0);
         try {
@@ -123,7 +123,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-bad-input",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.argMax([1, 2, 3]);
@@ -143,7 +143,7 @@ describe("bun:gpu — argMin / argMax", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-argmm-consistency",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([7.5, -2.25, 100, 0, -2.25, 99.99]);
         const iMin = gpu.argMin(input);

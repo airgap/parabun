@@ -105,7 +105,7 @@ bun run build:release bench/parabun-optical-flow/run.ts
 - `baseline.js` — single-threaded: gradient pass then solve pass,
   scalar loops.
 - `variant-parabun.pjs` — same two-pass algorithm tiled across 8
-  workers via `bun:parallel.pmap`. Frames, gradient planes, and flow
+  workers via `para:parallel.pmap`. Frames, gradient planes, and flow
   outputs all SAB-backed.
 - `run.ts` — best-of-3 harness, verifies flow-field hash matches and
   prints recovered mean against the ground-truth shift.

@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-// bun:gpu reactive diagnostic signals (LYK-741/764).
+// para:gpu reactive diagnostic signals (LYK-741/764).
 // activeBackendSignal + availableSignal are lazy-init proxies — the
 // underlying signal materializes on first read so a CUDA-less host doesn't
-// pay probing cost just for loading bun:gpu.
+// pay probing cost just for loading para:gpu.
 
-describe("bun:gpu diagnostic signals (LYK-741/764)", () => {
+describe("para:gpu diagnostic signals (LYK-741/764)", () => {
   test("activeBackendSignal + availableSignal are Signal-shaped", async () => {
-    const gpu = (await import("bun:gpu")).default;
+    const gpu = (await import("para:gpu")).default;
     expect(typeof gpu.activeBackendSignal.get).toBe("function");
     expect(typeof gpu.activeBackendSignal.subscribe).toBe("function");
     expect(typeof gpu.activeBackendSignal.peek).toBe("function");
@@ -15,21 +15,21 @@ describe("bun:gpu diagnostic signals (LYK-741/764)", () => {
   });
 
   test("activeBackendSignal returns the same value as activeBackend()", async () => {
-    const gpu = (await import("bun:gpu")).default;
+    const gpu = (await import("para:gpu")).default;
     const sig = gpu.activeBackendSignal.get();
     const fn = gpu.activeBackend();
     expect(sig).toBe(fn);
   });
 
   test("availableSignal lists at least cpu", async () => {
-    const gpu = (await import("bun:gpu")).default;
+    const gpu = (await import("para:gpu")).default;
     const avail = gpu.availableSignal.get();
     expect(Array.isArray(avail)).toBe(true);
     expect(avail).toContain("cpu");
   });
 
   test("setBackend() flips activeBackendSignal", async () => {
-    const gpu = (await import("bun:gpu")).default;
+    const gpu = (await import("para:gpu")).default;
     const updates: string[] = [];
     const unsub = gpu.activeBackendSignal.subscribe((v: string) => updates.push(v));
     // Always-available: cpu. Always switching to it from anything else

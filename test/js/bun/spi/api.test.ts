@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import spi from "bun:spi";
+import spi from "para:spi";
 
-// API-surface tests for bun:spi (LYK-770). Real spidev transfers are
+// API-surface tests for para:spi (LYK-770). Real spidev transfers are
 // validated on Pi 5 in the embedded smoke suite (transfer / read /
 // transactSegments against /dev/spidev10.0); here we cover validation
 // + module-load paths.
 
 const haveSpi = existsSync("/dev/spidev0.0") || existsSync("/dev/spidev10.0");
 
-describe("bun:spi API surface", () => {
+describe("para:spi API surface", () => {
   test("exports default object with devices + open", () => {
     expect(typeof spi).toBe("object");
     expect(typeof spi.devices).toBe("function");

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import sigs from "bun:signals";
+import sigs from "para:signals";
 
-// bun:signals.fromInterval — drive a signal from a periodic fn call.
+// para:signals.fromInterval — drive a signal from a periodic fn call.
 
-describe("bun:signals.fromInterval", () => {
+describe("para:signals.fromInterval", () => {
   test("first value lands without waiting periodMs", async () => {
     const { signal: sig, dispose } = sigs.fromInterval(() => 42, 1000);
     // Initial value is undefined…

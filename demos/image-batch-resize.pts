@@ -1,4 +1,4 @@
-// Batch-resize a directory of images via bun:image + bun:parallel.
+// Batch-resize a directory of images via para:image + para:parallel.
 //
 //   bun run build:release demos/image-batch-resize.pts <inDir> <outDir> <maxEdge>
 //
@@ -6,7 +6,7 @@
 // long edge to `maxEdge` (preserving aspect), encodes back as JPEG at
 // quality 85. Runs across N worker threads via `parallel.pmap`.
 
-import parallel from "bun:parallel";
+import parallel from "para:parallel";
 import { Glob } from "bun";
 import { mkdirSync } from "node:fs";
 import { basename, extname, join } from "node:path";
@@ -38,7 +38,7 @@ const jobs: Job[] = files.map(name => ({
 
 const t0 = Bun.nanoseconds();
 const results = await parallel.pmap(async (job: Job) => {
-  const image = (await import("bun:image")).default;
+  const image = (await import("para:image")).default;
   const bytes = new Uint8Array(await Bun.file(job.inPath).arrayBuffer());
   const decoded = await image.decode(bytes);
   const longEdge = Math.max(decoded.width, decoded.height);

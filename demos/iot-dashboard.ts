@@ -12,7 +12,7 @@
 //   A ~> B.prop                →  signals.effect(() => { B.prop = A.get() })
 //   A ~> B.prop when C         →  signals.effect(() => { if (C.get()) B.prop = A.get() })
 
-import signals from "bun:signals";
+import signals from "para:signals";
 
 // Inputs — simulated sensor values updated by the loop at the bottom.
 const temperature = signals.signal(22); // °C

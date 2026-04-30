@@ -1,4 +1,4 @@
-// Variant: parallel scoring via bun:parallel.pmap, with the worker pool
+// Variant: parallel scoring via para:parallel.pmap, with the worker pool
 // warmed up before timing. This mirrors the realistic RAG-style pattern
 // where the pool is spawned once at startup and reused across many queries.
 //
@@ -7,7 +7,7 @@
 // invocation. Here we do a trivial warm-up pmap to pay those costs up front,
 // then time the real scoring pass.
 
-import parallel from "bun:parallel";
+import parallel from "para:parallel";
 import { generate, N, D, K } from "./gen.js";
 
 const { pmap } = parallel;

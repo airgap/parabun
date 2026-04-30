@@ -1,4 +1,4 @@
-// Browser shim for `bun:signals` — a minimal synchronous reactive core
+// Browser shim for `para:signals` — a minimal synchronous reactive core
 // matching the upstream surface (signal / derived / effect / batch /
 // untrack).
 //

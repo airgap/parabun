@@ -55,6 +55,35 @@ const { moduleList, nativeModuleIds, nativeModuleEnumToId, nativeModuleEnums, re
   createInternalModuleRegistry(BASE);
 globalThis.requireTransformer = requireTransformer;
 
+// Parabun-added modules under src/js/bun/ are exposed under the `para:`
+// namespace; upstream Bun built-ins (ffi, sqlite, sql, jsc, app, main, wrap,
+// test, internal-for-testing) keep `bun:`. Used by idToPublicSpecifierOrEnumName
+// below — declared up here because the bundling loop calls that function before
+// the function declaration's lexical position.
+const PARASCRIPT_MODULES: ReadonlySet<string> = new Set([
+  "arena",
+  "arrow",
+  "assistant",
+  "audio",
+  "camera",
+  "csv",
+  "gpio",
+  "gpu",
+  "i2c",
+  "image",
+  "llm",
+  "mcp",
+  "parallel",
+  "pipeline",
+  "rtp",
+  "signals",
+  "simd",
+  "speech",
+  "spi",
+  "video",
+  "vision",
+]);
+
 // these logs surround a very weird issue where writing files and then bundling sometimes doesn't
 // work, so i have lot of debug logs that blow up the console because not sure what is going on.
 // that is also the reason for using `retry` when theoretically writing a file the first time
@@ -275,10 +304,12 @@ for (const entrypoint of bundledEntryPoints) {
       (usesDebug
         ? createLogClientJS(
             file_path.replace(".js", ""),
-            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:/, ""),
+            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:/, ""),
           )
         : "") +
-      (usesAssert ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:/, "")) : ""),
+      (usesAssert
+        ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:/, ""))
+        : ""),
   );
   const errors = [...captured.matchAll(/@bundleError\((.*)\)/g)];
   if (errors.length) {
@@ -308,7 +339,9 @@ function idToPublicSpecifierOrEnumName(id: string) {
   if (id.startsWith("node/")) {
     return "node:" + id.slice(5).replaceAll(".", "/");
   } else if (id.startsWith("bun/")) {
-    return "bun:" + id.slice(4).replaceAll(".", "/");
+    const rest = id.slice(4).replaceAll(".", "/");
+    const top = rest.split("/")[0];
+    return (PARASCRIPT_MODULES.has(top) ? "para:" : "bun:") + rest;
   } else if (id.startsWith("internal/")) {
     return "internal:" + id.slice(9).replaceAll(".", "/");
   } else if (id.startsWith("thirdparty/")) {

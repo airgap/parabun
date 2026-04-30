@@ -6,7 +6,7 @@
 // Input + output both live in SharedArrayBuffers, so postMessage of a
 // Uint8Array view ships only a handle: no 64 MB clone per call.
 
-import parallel from "bun:parallel";
+import parallel from "para:parallel";
 import { generate, W, H, SIZE, fnv1a } from "./gen.js";
 
 const { pmap } = parallel;

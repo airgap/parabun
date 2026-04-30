@@ -1,4 +1,4 @@
-// Voice assistant with tool dispatch — bun:assistant.
+// Voice assistant with tool dispatch — para:assistant.
 //
 //   ASSISTANT_LLM=/path/to/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
 //   ASSISTANT_STT=/path/to/ggml-tiny.en.bin \
@@ -12,7 +12,7 @@
 // "idle" | "listening" | "thinking" | "speaking" — pipe it to a
 // status line via the `->` reactive call-binding operator. Ctrl-C to stop.
 
-import assistant from "bun:assistant";
+import assistant from "para:assistant";
 import { existsSync } from "node:fs";
 
 const llm = process.env.ASSISTANT_LLM;

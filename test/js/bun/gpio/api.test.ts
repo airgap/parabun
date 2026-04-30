@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import gpio from "bun:gpio";
+import gpio from "para:gpio";
 
-// API-surface tests for bun:gpio (LYK-772). Hardware-dependent paths
+// API-surface tests for para:gpio (LYK-772). Hardware-dependent paths
 // (open / line / write / edges) are skipped when /dev/gpiochip0 is
 // missing — those are validated on the Pi 5 in the embedded smoke
 // suite. The module-load + chip enumeration + error paths run
@@ -10,7 +10,7 @@ import gpio from "bun:gpio";
 
 const haveGpio = existsSync("/dev/gpiochip0");
 
-describe("bun:gpio API surface", () => {
+describe("para:gpio API surface", () => {
   test("exports default object with chips + open", () => {
     expect(typeof gpio).toBe("object");
     expect(typeof gpio.chips).toBe("function");

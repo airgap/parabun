@@ -2,7 +2,7 @@
 //   - node              (upstream lib as-is)
 //   - bun               (upstream lib as-is, Bun runtime)
 //   - parabun-drop-in   (upstream lib as-is, Parabun release build)
-//   - parabun-rewrite   (Float32Array + bun:simd.dot)
+//   - parabun-rewrite   (Float32Array + para:simd.dot)
 //
 // Each child emits JSON-per-line timing records. We aggregate into one
 // table per workload.
@@ -62,7 +62,7 @@ const groups: Row[] = [
   { label: "node (upstream)", rows: nodeRows },
   { label: "bun (upstream)", rows: bunRows },
   { label: "parabun drop-in (upstream)", rows: parabunDropInRows },
-  { label: "parabun rewrite (bun:simd)", rows: parabunRewriteRows },
+  { label: "parabun rewrite (para:simd)", rows: parabunRewriteRows },
 ];
 
 function key(r: Record): string {

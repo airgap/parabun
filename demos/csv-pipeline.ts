@@ -1,4 +1,4 @@
-// Stream a CSV with `bun:csv.parseCsv`, summarise the first numeric column.
+// Stream a CSV with `para:csv.parseCsv`, summarise the first numeric column.
 // (TypeScript form.)
 //
 //   bun run build:release demos/csv-pipeline.ts data.csv
@@ -7,7 +7,7 @@
 // (the parse-time purity check is the only thing the .pts variant adds —
 // runtime is identical) and `raw |> asNumber` becomes `asNumber(raw)`.
 
-import csv from "bun:csv";
+import csv from "para:csv";
 import { existsSync } from "node:fs";
 
 const path = process.argv[2];

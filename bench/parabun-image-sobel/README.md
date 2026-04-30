@@ -71,6 +71,6 @@ bun run build:release bench/parabun-image-sobel/run.ts
 - `baseline.js` — single-threaded Sobel with inlined Gx/Gy taps, clamped
   boundary reads, `sqrt` magnitude, clamp-to-255 write.
 - `variant-parabun.pjs` — same algorithm tiled across 8 workers via
-  `bun:parallel.pmap`. Input and output both SAB-backed; one pmap pass.
+  `para:parallel.pmap`. Input and output both SAB-backed; one pmap pass.
 - `run.ts` — best-of-3 harness, verifies output hash matches across
   variants.

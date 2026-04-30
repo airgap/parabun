@@ -1,11 +1,11 @@
-// Hardcoded module "bun:csv"
+// Hardcoded module "para:csv"
 //
 // Parabun: streaming CSV parser. RFC 4180-ish (comma delimiter, double-quote
 // quoting, doubled-quote escaping inside fields). Optional header row,
 // optional type inference, custom delimiter / quote / line-ending. Output
 // is an async iterator so we never load the whole file into memory.
 //
-//   import { parseCsv } from "bun:csv";
+//   import { parseCsv } from "para:csv";
 //
 //   for await (const row of parseCsv("./big.csv", { headers: true })) {
 //     // row is { col1: ..., col2: ... } with inferred types
@@ -15,7 +15,7 @@
 //     // row is ["v1", "v2", ...] — raw strings
 //   }
 //
-//   // Parallel mode — uses bun:parallel's worker pool. Materializes the
+//   // Parallel mode — uses para:parallel's worker pool. Materializes the
 //   // whole input first (loses streaming) and falls back to serial if the
 //   // input contains any quote characters (we'd need a pre-pass to find
 //   // safe chunk boundaries, which v1 doesn't do):
@@ -52,7 +52,7 @@ type ParseOptions = {
    */
   skipLines?: number;
   /**
-   * Opt-in parallel chunk parsing via bun:parallel's worker pool. Splits
+   * Opt-in parallel chunk parsing via para:parallel's worker pool. Splits
    * the input at line boundaries and parses chunks concurrently. Two
    * caveats:
    *   1. Input is materialized to a single string first (no streaming).
@@ -139,8 +139,8 @@ const enum State {
 }
 
 async function* tokenize(source: CsvSource, delimiter: string, quote: string): AsyncIterable<string[]> {
-  if (delimiter.length !== 1) throw new TypeError("bun:csv: delimiter must be a single character");
-  if (quote.length !== 1) throw new TypeError("bun:csv: quote must be a single character");
+  if (delimiter.length !== 1) throw new TypeError("para:csv: delimiter must be a single character");
+  if (quote.length !== 1) throw new TypeError("para:csv: quote must be a single character");
   const D = delimiter;
   const Q = quote;
 
@@ -261,7 +261,7 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
 
   // Flush the final row if the file didn't end with a newline.
   if (state === State.Quoted) {
-    throw new SyntaxError("bun:csv: unterminated quoted field at end of input");
+    throw new SyntaxError("para:csv: unterminated quoted field at end of input");
   }
   if (row.length > 0 || field.length > 0 || state === State.AfterQuote) {
     row.push(field);
@@ -305,7 +305,7 @@ function resolveOptions(options: ParseOptions): ResolvedOptions {
 const PARALLEL_MIN_BYTES = 64 * 1024;
 
 // ─── Parallel chunk parser (no-quote fast path) ────────────────────────────
-// This runs INSIDE a worker via bun:parallel.pmap. It must be a pure
+// This runs INSIDE a worker via para:parallel.pmap. It must be a pure
 // function — no closures, no outside references — because pmap stringifies
 // it and re-evals on the worker side.
 //

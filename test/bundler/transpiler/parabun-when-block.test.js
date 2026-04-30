@@ -4,8 +4,8 @@ import { bunEnv, bunExe, tempDir } from "harness";
 // Parabun `when EXPR { body }` and `when not EXPR { body }` block
 // statements. Slot into the existing `effect { body }` / `arena { body }`
 // keyword-block family. Desugar to:
-//   require("bun:signals").onRising(() => EXPR, () => { body })
-//   require("bun:signals").onFalling(() => EXPR, () => { body })
+//   require("para:signals").onRising(() => EXPR, () => { body })
+//   require("para:signals").onFalling(() => EXPR, () => { body })
 //
 // Block-form `when` is distinct from the suffix-form `when` clause used
 // by `~>` / `->` — position disambiguates. Suffix is an every-truthy
@@ -32,14 +32,14 @@ describe("Parabun: when block (rising / falling)", () => {
   describe("desugar", () => {
     it("`when EXPR { body }` calls onRising with two arrows", () => {
       const out = transform(`signal a = false; when a { console.log("hi"); }`);
-      expect(out).toContain(`require("bun:signals").onRising(`);
+      expect(out).toContain(`require("para:signals").onRising(`);
       expect(out).toContain("a.get()");
       expect(out).toContain('console.log("hi")');
     });
 
     it("`when not EXPR { body }` calls onFalling", () => {
       const out = transform(`signal a = true; when not a { console.log("bye"); }`);
-      expect(out).toContain(`require("bun:signals").onFalling(`);
+      expect(out).toContain(`require("para:signals").onFalling(`);
     });
 
     it("complex predicate composes multiple signals", () => {
@@ -87,7 +87,7 @@ describe("Parabun: when block (rising / falling)", () => {
 
     it("plain `effect { body }` still works alongside `when`", () => {
       const out = transform(`signal a = 0; effect { console.log(a); }`);
-      expect(out).toContain(`require("bun:signals").effect(`);
+      expect(out).toContain(`require("para:signals").effect(`);
       expect(out).not.toContain("onRising");
     });
   });

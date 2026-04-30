@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import llm from "bun:llm";
+import llm from "para:llm";
 
 // chat.chatJSON requires a schema (or grammar). The validation path runs
 // without loading a real model — we exercise it through a lightweight

@@ -1,4 +1,4 @@
-// Whisper-class STT for bun:llm.
+// Whisper-class STT for para:llm.
 //
 // Targets whisper.cpp's `ggml-*.bin` files (NOT GGUF — whisper.cpp's main
 // distribution format is its older custom GGML container). Implements:
@@ -24,12 +24,12 @@
 
 // Includes its own minimal FFT + mel preprocessing because the internal
 // builtin bundler can't satisfy cross-builtin file imports (whisper.ts is
-// inside `bun:llm` and can't pull in `bun:audio`'s mel implementation
+// inside `para:llm` and can't pull in `para:audio`'s mel implementation
 // without code duplication via the `./` resolver). The duplicated
 // surface is small (~80 lines for both) and self-contained so it
 // doesn't drift from `bun/audio.ts`'s public mel API.
 
-// bun:gpu is a sibling top-level builtin; the bundler resolves it through
+// para:gpu is a sibling top-level builtin; the bundler resolves it through
 // the relative file path. We use it to route both:
 //   - Decoder per-step matVecs through gpu.matVec (Q/K/V/O + MLP per
 //     layer + LM head). Weights HtoD'd once at load time.
@@ -108,7 +108,7 @@ function readBinModel(bytes: Uint8Array): BinModel {
 
   const magic = u32();
   if (magic !== MAGIC_GGML) {
-    throw new Error(`bun:llm whisper: not a whisper.cpp .bin file (magic 0x${magic.toString(16)} != 0x67676d6c)`);
+    throw new Error(`para:llm whisper: not a whisper.cpp .bin file (magic 0x${magic.toString(16)} != 0x67676d6c)`);
   }
 
   const hparams: WhisperHParams = {
@@ -180,7 +180,7 @@ function readBinModel(bytes: Uint8Array): BinModel {
     const nameLen = i32();
     const tFtype = i32();
     if (nDims < 1 || nDims > 4 || nameLen <= 0 || nameLen > 1024) {
-      throw new Error(`bun:llm whisper: invalid tensor header at offset ${cursor - 12}`);
+      throw new Error(`para:llm whisper: invalid tensor header at offset ${cursor - 12}`);
     }
     const dims: number[] = [];
     let nElements = 1;
@@ -219,7 +219,7 @@ function readBinModel(bytes: Uint8Array): BinModel {
       // an exact multiple of 32.
       if (nElements % QK !== 0) {
         throw new Error(
-          `bun:llm whisper: tensor "${name}" has ${nElements} elements, not a multiple of ${QK} (quantized block size)`,
+          `para:llm whisper: tensor "${name}" has ${nElements} elements, not a multiple of ${QK} (quantized block size)`,
         );
       }
       const nBlocks = nElements / QK;
@@ -228,7 +228,7 @@ function readBinModel(bytes: Uint8Array): BinModel {
       const offset = bytes.byteOffset + cursor;
       const need = nBlocks * blockBytes;
       if (cursor + need > bytes.byteLength) {
-        throw new Error(`bun:llm whisper: tensor "${name}" runs past EOF`);
+        throw new Error(`para:llm whisper: tensor "${name}" runs past EOF`);
       }
       const src = new Uint8Array(bytes.buffer, offset, need);
       switch (tFtype) {
@@ -248,7 +248,7 @@ function readBinModel(bytes: Uint8Array): BinModel {
       cursor += need;
     } else {
       throw new Error(
-        `bun:llm whisper: unsupported tensor ftype=${tFtype} for "${name}" (F32, F16, Q4_0, Q5_0, Q5_1, Q8_0 supported)`,
+        `para:llm whisper: unsupported tensor ftype=${tFtype} for "${name}" (F32, F16, Q4_0, Q5_0, Q5_1, Q8_0 supported)`,
       );
     }
 
@@ -296,7 +296,7 @@ function quantBlockSize(ftype: number): number {
     case 8:
       return 34; // Q8_0
   }
-  throw new Error(`bun:llm whisper: no block size for ftype=${ftype}`);
+  throw new Error(`para:llm whisper: no block size for ftype=${ftype}`);
 }
 
 function readF16(src: Uint8Array, off: number): number {
@@ -522,7 +522,7 @@ function matVecQ5_1(w: QuantTensor, vec: Float32Array, dst: Float32Array): void 
  */
 function quantMatVec(w: QuantTensor, vec: Float32Array): Float32Array {
   if (vec.length !== w.cols) {
-    throw new Error(`bun:llm whisper: quantMatVec dim mismatch — vec ${vec.length} vs cols ${w.cols}`);
+    throw new Error(`para:llm whisper: quantMatVec dim mismatch — vec ${vec.length} vs cols ${w.cols}`);
   }
   const dst = new Float32Array(w.rows);
   switch (w.ftype) {
@@ -539,7 +539,7 @@ function quantMatVec(w: QuantTensor, vec: Float32Array): Float32Array {
       matVecQ8_0(w, vec, dst);
       break;
     default:
-      throw new Error(`bun:llm whisper: quantMatVec ftype=${w.ftype} not supported`);
+      throw new Error(`para:llm whisper: quantMatVec ftype=${w.ftype} not supported`);
   }
   return dst;
 }
@@ -567,13 +567,13 @@ function dequantizeQ5_1(src: Uint8Array, nBlocks: number, dst: Float32Array): vo
   }
 }
 
-// ─── FFT + mel preprocessing (inlined from bun:audio) ─────────────────────
+// ─── FFT + mel preprocessing (inlined from para:audio) ─────────────────────
 // Standard Cooley-Tukey radix-2 in-place complex FFT. Operates on
 // interleaved real/imag pairs in `io[2k]=re, io[2k+1]=im`.
 function fftInPlace(io: Float32Array, forward: boolean): void {
   const N = io.length >>> 1;
   if (N === 0 || (N & (N - 1)) !== 0) {
-    throw new Error("bun:llm whisper FFT: complex length must be a power of 2 ≥ 2");
+    throw new Error("para:llm whisper FFT: complex length must be a power of 2 ≥ 2");
   }
   // Bit-reverse permutation.
   let j = 0;
@@ -1059,7 +1059,7 @@ class WhisperTokenizer {
     if (this.englishOnly) return [this.sot, this.noTimestamps];
     const lang = this.langToken.get(language);
     if (lang === undefined) {
-      throw new Error(`bun:llm whisper: unknown language code "${language}"`);
+      throw new Error(`para:llm whisper: unknown language code "${language}"`);
     }
     return [this.sot, lang, this.transcribe, this.noTimestamps];
   }
@@ -1186,7 +1186,7 @@ interface WhisperWeights {
 //     of projected keys/values as we step through tokens.
 //   - Cross-attention K/V: each layer's projection of the encoder output
 //     is computed once at encode-time and reused on every decoder step.
-// GpuFloat32Array wrapper from bun:gpu — same shape as a Float32Array
+// GpuFloat32Array wrapper from para:gpu — same shape as a Float32Array
 // for code that just reads `.view`, but with a device-resident handle
 // underneath that the fused SDPA kernel can dispatch against without
 // HtoD per call.
@@ -1348,7 +1348,7 @@ class WhisperModel {
 
     const Tenc = c2.Tout;
     if (Tenc > h.nAudioCtx) {
-      throw new Error(`bun:llm whisper: encoded ${Tenc} frames > audio ctx ${h.nAudioCtx}`);
+      throw new Error(`para:llm whisper: encoded ${Tenc} frames > audio ctx ${h.nAudioCtx}`);
     }
     // Add positional embedding (truncate to actual length).
     const x = c2.out;
@@ -1395,7 +1395,7 @@ class WhisperModel {
    */
   detectLanguage(mel: Float32Array, T: number): { language: string; prob: number } {
     if (this.tokenizer.englishOnly) {
-      throw new Error("bun:llm whisper: detectLanguage requires a multilingual model");
+      throw new Error("para:llm whisper: detectLanguage requires a multilingual model");
     }
     const h = this.hparams;
     const Tdesired = h.nAudioCtx * 2;
@@ -1422,7 +1422,7 @@ class WhisperModel {
    */
   detectLanguageFromEncoder(encoderOut: Float32Array): { language: string; prob: number } {
     if (this.tokenizer.englishOnly) {
-      throw new Error("bun:llm whisper: detectLanguage requires a multilingual model");
+      throw new Error("para:llm whisper: detectLanguage requires a multilingual model");
     }
     const state = this.newState();
     this.prepareState(state, encoderOut);
@@ -1468,7 +1468,7 @@ class WhisperModel {
     const encT = h.nAudioCtx;
     if (state.encoderT !== encT || state.dim !== dim) {
       throw new Error(
-        `bun:llm whisper: state shape mismatch — state expects [${state.encoderT}, ${state.dim}], model has [${encT}, ${dim}]`,
+        `para:llm whisper: state shape mismatch — state expects [${state.encoderT}, ${state.dim}], model has [${encT}, ${dim}]`,
       );
     }
     for (let i = 0; i < w.decBlocks.length; i++) {
@@ -1501,7 +1501,7 @@ class WhisperModel {
     const headDim = dim / nHead;
     const pos = state.selfLen;
     if (pos >= state.maxLen) {
-      throw new Error(`bun:llm whisper: decode position ${pos} exceeds nTextCtx=${state.maxLen}`);
+      throw new Error(`para:llm whisper: decode position ${pos} exceeds nTextCtx=${state.maxLen}`);
     }
 
     // Token + positional embed for the single new token. The token embed
@@ -1620,7 +1620,7 @@ class WhisperModel {
    * with zeros up to that length. If T is larger, the leading 3000
    * frames are processed and the rest is ignored.
    *
-   * Use `audio.melSpectrogram(audio, { mode: "whisper" })` from `bun:audio`
+   * Use `audio.melSpectrogram(audio, { mode: "whisper" })` from `para:audio`
    * to produce `mel` from raw 16 kHz mono PCM.
    */
   transcribeMel(
@@ -1646,7 +1646,7 @@ class WhisperModel {
     const language = opts?.language ?? "en";
     const beamSize = opts?.beamSize ?? 1;
     if (!Number.isInteger(beamSize) || beamSize < 1 || beamSize > 16) {
-      throw new RangeError(`bun:llm whisper: beamSize must be an integer in [1, 16], got ${beamSize}`);
+      throw new RangeError(`para:llm whisper: beamSize must be an integer in [1, 16], got ${beamSize}`);
     }
 
     // Pad / trim to exactly nAudioCtx*2 = 3000 frames.
@@ -1927,7 +1927,7 @@ class WhisperModel {
 function mapWeights(bin: BinModel): WhisperWeights {
   const get = (name: string): Float32Array => {
     const t = bin.tensors.get(name);
-    if (!t) throw new Error(`bun:llm whisper: missing tensor "${name}"`);
+    if (!t) throw new Error(`para:llm whisper: missing tensor "${name}"`);
     return t.data;
   };
 
@@ -2167,7 +2167,7 @@ function scaledDotProductAttention(
 
 // GPU-batched scaled-dot-product attention. Same semantics as
 // `scaledDotProductAttention` but offloads the per-head Q@K^T and
-// attn@V matmuls to bun:gpu. Used by the encoder where N=1500 makes the
+// attn@V matmuls to para:gpu. Used by the encoder where N=1500 makes the
 // CPU triple-loop the dominant cost.
 //
 // Layout convention: Q, K, V are [N, dim=nHead*headDim] interleaved-by-

@@ -3,11 +3,11 @@
 //   bun run build:release --asan=off bench/parabun-whisper/run.pjs
 //
 // Reports load time, encode time, decode time, ms/token and throughput.
-// Useful for sanity-checking each GPU dispatch change in bun:llm whisper.
+// Useful for sanity-checking each GPU dispatch change in para:llm whisper.
 
-import llm from "bun:llm";
-import audio from "bun:audio";
-import gpu from "bun:gpu";
+import llm from "para:llm";
+import audio from "para:audio";
+import gpu from "para:gpu";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

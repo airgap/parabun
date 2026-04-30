@@ -27,10 +27,10 @@ const isDebugBuild =
 const runLlmTests = !isDebugBuild || process.env.ASSISTANT_TOOLS_RUN_LLM === "1";
 const haveLLMAndCanRun = haveLLM && runLlmTests;
 
-describe("bun:assistant barge-in (LYK-735)", () => {
+describe("para:assistant barge-in (LYK-735)", () => {
   test("bot.interrupted starts false and bot.interrupt() flips it", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture! });
     try {
       expect(bot.interrupted.get()).toBe(false);
@@ -43,7 +43,7 @@ describe("bun:assistant barge-in (LYK-735)", () => {
 
   test("bot.interrupt() is idempotent within a turn", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture! });
     try {
       const trace: boolean[] = [];
@@ -63,7 +63,7 @@ describe("bun:assistant barge-in (LYK-735)", () => {
 
   test("interrupt() before next turn doesn't latch — flag resets", async () => {
     if (!haveLLMAndCanRun) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       system: "You are concise.",
@@ -86,7 +86,7 @@ describe("bun:assistant barge-in (LYK-735)", () => {
 
   test("interrupt() during ask() short-circuits the turn", async () => {
     if (!haveLLMAndCanRun) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       system: "You are concise.",

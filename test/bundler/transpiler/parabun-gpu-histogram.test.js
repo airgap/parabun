@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:gpu — histogram", () => {
+describe("para:gpu — histogram", () => {
   it("uniform input across the range produces evenly populated bins", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-uniform",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // 10 values exactly hitting bin centers 0..9 in a 10-bin [0,10] range.
         const input = new Float32Array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]);
@@ -36,7 +36,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-hand",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // Range [0, 4], 4 bins → bin width 1. Bin edges [0,1) [1,2) [2,3) [3,4].
         // Values: three in bin 0, two in bin 1, one in bin 2, four in bin 3.
@@ -58,7 +58,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-top-edge",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // Without top-edge inclusivity, the value exactly at max would
         // land in bin = bins (out of range) and be dropped. Verify it
@@ -77,7 +77,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-out-of-range",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([-5, 0.5, 1.5, 2.5, 100, NaN, 3.5]);
         const out = gpu.histogram(input, 4, { min: 0, max: 4 });
@@ -95,7 +95,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-auto-range",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // Without an explicit range, histogram should pick min=1, max=8 and
         // distribute 8 values across 4 bins (bin width = (8-1)/4 = 1.75).
@@ -116,7 +116,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-degenerate",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([5, 5, 5, 5, 5]);
         const out = gpu.histogram(input, 4, { min: 5, max: 5 });
@@ -131,7 +131,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-empty",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // No data → reduce(min)=+Inf, reduce(max)=-Inf → ±Infinity range,
         // returns an all-zero histogram without throwing.
@@ -147,7 +147,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-bad-bins",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3]);
         let threw = 0;
@@ -165,7 +165,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-bad-range",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3]);
         try {
@@ -184,7 +184,7 @@ describe("bun:gpu — histogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-hist-large",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         // 100k values uniformly in [0,1). Counts must sum to N exactly,
         // and the per-bin counts should be roughly N/bins.

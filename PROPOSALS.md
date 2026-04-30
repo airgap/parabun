@@ -24,7 +24,7 @@ Ordered by value-per-unit-effort, skewed toward things that **compose with exten
 6. `[ ]` **Function composition `>>`** — trivial, makes pipelines point-free
 7. `[ ]` **Do-blocks** — statement-as-expression; enables cleaner match later
 8. `[ ]` **Range literals `1..10` / `1..=10`** — cheap ergonomics, safe desugar
-9. `[x]` **Arena blocks** ✅ SHIPPED — `arena { body }` → `require("bun:arena").scope(() => body)`
+9. `[x]` **Arena blocks** ✅ SHIPPED — `arena { body }` → `require("para:arena").scope(() => body)`
 10. `[ ]` **`pure { ... }` blocks** — purity scope inside impure functions
 11. `[ ]` **Match expressions** — biggest surface area; ship last
 
@@ -346,7 +346,7 @@ arena {
 
 **Desugar:**
 ```js
-require("bun:arena").scope(() => {
+require("para:arena").scope(() => {
   const scratch = new Uint8Array(samples.length * 4);
   writeSamples(scratch, samples);
   out = finalize(scratch);
@@ -354,18 +354,18 @@ require("bun:arena").scope(() => {
 ```
 
 **What shipped vs the v1 sketch.**
-- **No bound variable.** The original sketch had `arena (a) { ... }` with an arena parameter. The actual `bun:arena` runtime doesn't expose a per-scope arena handle — `scope(fn)` just runs `fn` with `JSC::DeferGC` active and requests an Eden collection on exit. Since there's no handle to bind, v1 is `arena { body }` — a bare block. Desugars to `require("bun:arena").scope(() => { body })`.
-- **Latency-smoothing, not a bump allocator.** What shipped defers the JSC GC for the block's synchronous duration. The heap still pays the eventual collection cost — at the caller's chosen point, not at unpredictable allocation thresholds. Allocations don't get reclaimed at scope exit; they survive it. This matched the actual `bun:arena.scope` runtime, not the "allocations reclaimed at end of block" sketch.
+- **No bound variable.** The original sketch had `arena (a) { ... }` with an arena parameter. The actual `para:arena` runtime doesn't expose a per-scope arena handle — `scope(fn)` just runs `fn` with `JSC::DeferGC` active and requests an Eden collection on exit. Since there's no handle to bind, v1 is `arena { body }` — a bare block. Desugars to `require("para:arena").scope(() => { body })`.
+- **Latency-smoothing, not a bump allocator.** What shipped defers the JSC GC for the block's synchronous duration. The heap still pays the eventual collection cost — at the caller's chosen point, not at unpredictable allocation thresholds. Allocations don't get reclaimed at scope exit; they survive it. This matched the actual `para:arena.scope` runtime, not the "allocations reclaimed at end of block" sketch.
 - **Arrow-local return/break/continue.** The body is lifted into a synchronous arrow. `return` / `break` / `continue` are arrow-local (same as inside `.forEach(cb)`). To get a value out, assign to an outer `let`. Documented.
 - **No await inside the body.** Parser forbids `await` because microtasks fire *after* the deferral releases, so an async body wouldn't actually run with GC deferred — the parser's `fn_or_arrow_data` swap makes this a parse-time error instead of a silent runtime footgun.
-- **Require-shape desugar, not a `__parabunArena` runtime helper.** `bun:wrap` (where runtime helpers live) is pre-bundled by esbuild, which can't resolve `bun:*` specifiers at build time; adding a helper that requires `bun:arena` fails with esbuild's dynamic-require shim. Emitting `require("bun:arena").scope(arrow)` directly at parse time (via `storeNameInRef("require")`, so the visit pass's `transposeRequire` handles bookkeeping) avoids the runtime-bundling layer entirely.
+- **Require-shape desugar, not a `__parabunArena` runtime helper.** `bun:wrap` (where runtime helpers live) is pre-bundled by esbuild, which can't resolve `bun:*` specifiers at build time; adding a helper that requires `para:arena` fails with esbuild's dynamic-require shim. Emitting `require("para:arena").scope(arrow)` directly at parse time (via `storeNameInRef("require")`, so the visit pass's `transposeRequire` handles bookkeeping) avoids the runtime-bundling layer entirely.
 
 **Detection.** `parseStmtFallthrough` in `src/ast/parseStmt.zig` tentatively consumes `arena` and triggers only when the next token (no newline) is `{`. Any other token (`.`, `(`, `=`, `++`, etc.) rewinds so `arena` remains a plain identifier.
 
 **Tests.** 13 in `test/bundler/transpiler/parabun-arena-block.test.js` — desugar shape, identifier-context fallbacks, newline-to-block ASI, basic/nested/top-level body, throw propagation, arrow-local return, outer-let value capture, in-loop use.
 
 **Deferred.**
-- **Allocator-exposed arena.** If we ever add a real bump allocator (reset at scope exit), the `arena (a) { ... }` shape with a bound handle becomes meaningful. v1 skipped this because the `bun:arena` runtime doesn't offer a per-scope handle.
+- **Allocator-exposed arena.** If we ever add a real bump allocator (reset at scope exit), the `arena (a) { ... }` shape with a bound handle becomes meaningful. v1 skipped this because the `para:arena` runtime doesn't offer a per-scope handle.
 - **`arena async { ... }`.** A real async arena would need a different underlying API than `DeferGC`. Not blocked by syntax; blocked by the runtime.
 
 ---

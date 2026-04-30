@@ -6,7 +6,7 @@
 // signals (`signal name = …`), composes derived state with normal JS
 // expressions (the parser auto-promotes any expression that reads a
 // signal to a `derived()`), and reacts via `effect { … }`. Shows the
-// shape that real bun:gpio / bun:i2c sensor signals would slot into.
+// shape that real para:gpio / para:i2c sensor signals would slot into.
 
 // Inputs — simulated sensor values updated by the loop at the bottom.
 signal temperature = 22;     // °C

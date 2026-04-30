@@ -19,7 +19,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-relu",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function relu(x) { return x > 0 ? x : 0; }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = i - 500;
@@ -35,7 +35,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-square",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function square(x) { return x * x; }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = i - 500;
@@ -51,7 +51,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-sin",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function sinX(x) { return Math.sin(x); }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = (i - 500) / 100;
@@ -70,7 +70,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-exp",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function expX(x) { return Math.exp(x); }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = (i - 500) / 100;
@@ -88,7 +88,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-sqrt",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function sqrtX(x) { return Math.sqrt(x); }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = i + 1;
@@ -107,7 +107,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-clamp",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function clamp(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = (i - 500) / 100;
@@ -127,7 +127,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-pow",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function cube(x) { return x ** 3; }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = (i - 500) / 100;
@@ -146,7 +146,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-regression",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function triple(x) { return x * 3; }
         pure function addFive(x) { return x + 5; }
         const a = new Float32Array(1000);
@@ -164,7 +164,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-combined",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function combined(x) { return Math.abs(x) * Math.sin(x); }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = (i - 500) / 100;
@@ -184,7 +184,7 @@ describe("GPU custom kernel dispatch", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-cache",
       `
-        import { simdMap } from "bun:gpu";
+        import { simdMap } from "para:gpu";
         pure function relu(x) { return x > 0 ? x : 0; }
         const a = new Float32Array(1000);
         for (let i = 0; i < 1000; i++) a[i] = i - 500;
@@ -207,7 +207,7 @@ describe("affine detector 4-probe regression", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-relu",
       `
-        import { simdMap } from "bun:simd";
+        import { simdMap } from "para:simd";
         pure function relu(x) { return x > 0 ? x : 0; }
         const a = new Float32Array([-5, -1, 0, 1, 5]);
         const out = simdMap(relu, a);
@@ -222,7 +222,7 @@ describe("affine detector 4-probe regression", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-abs",
       `
-        import { simdMap } from "bun:simd";
+        import { simdMap } from "para:simd";
         pure function absX(x) { return Math.abs(x); }
         const a = new Float32Array([-5, -1, 0, 1, 5]);
         const out = simdMap(absX, a);
@@ -237,7 +237,7 @@ describe("affine detector 4-probe regression", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-true",
       `
-        import { simdMap } from "bun:simd";
+        import { simdMap } from "para:simd";
         pure function linear(x) { return 2 * x + 3; }
         const a = new Float32Array([0, 1, 2, 3, 4]);
         const out = simdMap(linear, a);

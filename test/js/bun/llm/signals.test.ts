@@ -12,12 +12,12 @@ const fixtureCandidates = [
 const fixture = fixtureCandidates.find(p => existsSync(p));
 const have = Boolean(fixture);
 
-describe("bun:llm LLM signals", () => {
+describe("para:llm LLM signals", () => {
   test.skipIf(!have)(
     "device matches active gpu backend; busy is initially false",
     async () => {
-      const llm = (await import("bun:llm")).default;
-      const gpu = (await import("bun:gpu")).default;
+      const llm = (await import("para:llm")).default;
+      const gpu = (await import("para:gpu")).default;
       const m = await llm.LLM.load(fixture!);
 
       expect(typeof m.busy.get).toBe("function");
@@ -33,7 +33,7 @@ describe("bun:llm LLM signals", () => {
   test.skipIf(!have)(
     "busy flips true during generate, false on completion",
     async () => {
-      const llm = (await import("bun:llm")).default;
+      const llm = (await import("para:llm")).default;
       const m = await llm.LLM.load(fixture!);
 
       const transitions: boolean[] = [];

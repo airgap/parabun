@@ -1,6 +1,6 @@
 // Deterministic xorshift-based numeric workload for simple-statistics bench.
 // Returns both a plain Array<number> (what the upstream lib accepts) and a
-// Float32Array (what the Parabun rewrite uses with bun:simd). Same numbers
+// Float32Array (what the Parabun rewrite uses with para:simd). Same numbers
 // in both — the sum/mean/variance values should agree to single-precision
 // across the two paths.
 

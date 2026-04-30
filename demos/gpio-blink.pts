@@ -1,4 +1,4 @@
-// Blink an LED + react to a button — bun:gpio.
+// Blink an LED + react to a button — para:gpio.
 //
 //   bun run build:release demos/gpio-blink.pts [--seconds N]
 //
@@ -13,7 +13,7 @@
 // Set GPIO_CHIP=/dev/gpiochipN if you're not on a Pi 5; default is
 // auto-detect (RP1 on Pi 5, chip 0 elsewhere).
 
-import gpio from "bun:gpio";
+import gpio from "para:gpio";
 
 const args = process.argv.slice(2);
 const secondsIdx = args.indexOf("--seconds");
@@ -23,7 +23,7 @@ const chips = gpio.chips();
 const rp1 = chips.find(c => c.label === "pinctrl-rp1");
 const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
 if (!chipPath) {
-  console.error("no /dev/gpiochip* found — bun:gpio is Linux-only.");
+  console.error("no /dev/gpiochip* found — para:gpio is Linux-only.");
   process.exit(1);
 }
 

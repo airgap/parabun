@@ -25,9 +25,9 @@ function p(seq: number, ts = 0): ParsedPacket {
   };
 }
 
-describe("bun:rtp JitterBuffer signals (LYK-744)", () => {
+describe("para:rtp JitterBuffer signals (LYK-744)", () => {
   test("pendingSignal / lossCountSignal / lossRateSignal are Signal-shaped", async () => {
-    const rtp = (await import("bun:rtp")).default;
+    const rtp = (await import("para:rtp")).default;
     const jb = new rtp.JitterBuffer({ maxLag: 5 });
     expect(typeof jb.pendingSignal.get).toBe("function");
     expect(typeof jb.pendingSignal.subscribe).toBe("function");
@@ -41,7 +41,7 @@ describe("bun:rtp JitterBuffer signals (LYK-744)", () => {
   });
 
   test("pendingSignal tracks buffer fill via push/pop", async () => {
-    const rtp = (await import("bun:rtp")).default;
+    const rtp = (await import("para:rtp")).default;
     const jb = new rtp.JitterBuffer({ maxLag: 10 });
 
     // First push: seq 100 — buffer holds 1, expected = 100.
@@ -61,7 +61,7 @@ describe("bun:rtp JitterBuffer signals (LYK-744)", () => {
   });
 
   test("lossCountSignal increments when a slot is declared lost", async () => {
-    const rtp = (await import("bun:rtp")).default;
+    const rtp = (await import("para:rtp")).default;
     // maxLag=2: once 3 packets ahead of expected sit in the buffer, the
     // missing slot is declared lost.
     const jb = new rtp.JitterBuffer({ maxLag: 2 });
@@ -81,7 +81,7 @@ describe("bun:rtp JitterBuffer signals (LYK-744)", () => {
   });
 
   test("lossRateSignal tracks loss / (loss + delivered) lifetime ratio", async () => {
-    const rtp = (await import("bun:rtp")).default;
+    const rtp = (await import("para:rtp")).default;
     const jb = new rtp.JitterBuffer({ maxLag: 1 });
 
     // Deliver 9 in-order.
@@ -103,7 +103,7 @@ describe("bun:rtp JitterBuffer signals (LYK-744)", () => {
   });
 
   test("subscribers fire on transitions", async () => {
-    const rtp = (await import("bun:rtp")).default;
+    const rtp = (await import("para:rtp")).default;
     const jb = new rtp.JitterBuffer({ maxLag: 5 });
 
     const lossUpdates: number[] = [];

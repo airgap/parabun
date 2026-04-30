@@ -3,12 +3,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { bunExe } from "harness";
 
-// bun:assistant tool dispatch + MCP integration (LYK-734).
+// para:assistant tool dispatch + MCP integration (LYK-734).
 //
 // Two paths covered:
 //   1. Inline `{ name, schema, run }` tools — the dispatch happens in
 //      this process, no subprocess required.
-//   2. MCP connections — bun:mcp's stdio-spawned fixture-server.ts is
+//   2. MCP connections — para:mcp's stdio-spawned fixture-server.ts is
 //      reused; the assistant flattens its tool list and routes calls.
 
 const llmCandidates = [
@@ -32,10 +32,10 @@ const haveLLMAndCanRun = haveLLM && runLlmTests;
 
 const mcpFixture = join(import.meta.dir, "..", "mcp", "fixture-server.ts");
 
-describe("bun:assistant tools (LYK-734)", () => {
+describe("para:assistant tools (LYK-734)", () => {
   test("inline tools register, expose schema, surface via bot.tools", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       tools: [
@@ -61,7 +61,7 @@ describe("bun:assistant tools (LYK-734)", () => {
 
   test("addTool / removeTool mutate the live list", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture! });
     try {
       expect(bot.tools.length).toBe(0);
@@ -83,8 +83,8 @@ describe("bun:assistant tools (LYK-734)", () => {
 
   test("MCP connection flattens into the assistant's tool list", async () => {
     if (!haveLLM) return;
-    const mcp = (await import("bun:mcp")).default;
-    const assistant = (await import("bun:assistant")).default;
+    const mcp = (await import("para:mcp")).default;
+    const assistant = (await import("para:assistant")).default;
 
     await using conn = await mcp.connect("stdio", bunExe(), { args: [mcpFixture] });
     expect(conn.tools.map(t => t.name).sort()).toEqual(["add", "echo"]);
@@ -100,7 +100,7 @@ describe("bun:assistant tools (LYK-734)", () => {
 
   test("ask() dispatches an inline tool end-to-end", async () => {
     if (!haveLLMAndCanRun) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     let callsSeen = 0;
     const bot = await assistant.create({
       llm: llmFixture!,
@@ -142,7 +142,7 @@ describe("bun:assistant tools (LYK-734)", () => {
 
   test("toolsActive signal flips during dispatch", async () => {
     if (!haveLLMAndCanRun) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const trace: number[] = [];
     let inFlight = false;
     const bot = await assistant.create({

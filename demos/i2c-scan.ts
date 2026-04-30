@@ -1,15 +1,15 @@
-// List every i2c bus + scan it for ack'ing devices — bun:i2c.
+// List every i2c bus + scan it for ack'ing devices — para:i2c.
 //
 //   bun run build:release demos/i2c-scan.ts
 //
 // Mirrors the shape of `i2cdetect -l && i2cdetect -y N` for every bus,
 // in TypeScript.
 
-import i2c from "bun:i2c";
+import i2c from "para:i2c";
 
 const buses = i2c.buses();
 if (buses.length === 0) {
-  console.error("no /dev/i2c-* — bun:i2c is Linux-only and needs i2c-dev loaded.");
+  console.error("no /dev/i2c-* — para:i2c is Linux-only and needs i2c-dev loaded.");
   process.exit(1);
 }
 

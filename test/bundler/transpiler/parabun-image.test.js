@@ -40,12 +40,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:image — decode", () => {
+describe("para:image — decode", () => {
   it("decodes a PNG with the right shape + format", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-png-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const r = image.decode(PNG);
         console.log("format", r.format);
         console.log("dims", r.width, r.height);
@@ -61,7 +61,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-png-pixels",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const r = image.decode(PNG);
         // RGBA at row-major offsets.
         console.log("p00", r.data[0], r.data[1], r.data[2], r.data[3]);  // red, opaque
@@ -76,7 +76,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-webp-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const r = image.decode(WEBP);
         console.log("format", r.format);
         console.log("dims", r.width, r.height);
@@ -93,7 +93,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-webp-pixels",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const r = image.decode(WEBP);
         // Lossless WebP should preserve the exact red/blue pixels.
         console.log("p00", r.data[0], r.data[1], r.data[2], r.data[3]);
@@ -108,7 +108,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-jpeg-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const r = image.decode(JPEG);
         console.log("format", r.format);
         console.log("dims", r.width, r.height);
@@ -132,7 +132,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-bytes",
       `
-        import image from "bun:image";
+        import image from "para:image";
         try {
           image.decode(new Uint8Array([1, 2, 3, 4, 5]));
           console.log("NO_THROW");
@@ -149,7 +149,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-empty",
       `
-        import image from "bun:image";
+        import image from "para:image";
         try {
           image.decode(new Uint8Array(0));
           console.log("NO_THROW");
@@ -166,7 +166,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-not-bytes",
       `
-        import image from "bun:image";
+        import image from "para:image";
         try {
           image.decode("a string");
           console.log("NO_THROW");
@@ -186,7 +186,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-png-roundtrip",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 4, h = 4;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -213,7 +213,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-jpeg-roundtrip",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 16, h = 16;  // 16×16 gives JPEG room to preserve a gradient
         const data = new Uint8Array(w * h * 3);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -242,7 +242,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-jpeg-from-rgba",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 16, h = 16;
         const data = new Uint8Array(w * h * 4);
         for (let i = 0; i < w * h; i++) {
@@ -264,7 +264,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-webp-roundtrip-lossless",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 4, h = 4;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -294,7 +294,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-webp-lossy",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 16, h = 16;
         const data = new Uint8Array(w * h * 3);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -321,7 +321,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-encode-bad-format",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = new Uint8Array(48);
         try {
           image.encode({ data, width: 4, height: 4, channels: 3, format: "jpeg" }, { format: "tiff" });
@@ -343,7 +343,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-identity",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const same = image.resize(orig, { width: orig.width, height: orig.height });
         console.log("dims", same.width, same.height, same.channels);
@@ -359,7 +359,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-up",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);  // 4×4 RGBA red/blue checker
         const up = image.resize(orig, { width: 8, height: 8 });
         console.log("dims", up.width, up.height, up.channels);
@@ -377,7 +377,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-down",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Build a 16×16 RGBA image with a horizontal gradient.
         const w = 16, h = 16;
         const data = new Uint8Array(w * h * 4);
@@ -405,7 +405,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-nonsquare",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const out = image.resize(orig, { width: 12, height: 6 });
         console.log("dims", out.width, out.height, out.channels);
@@ -424,7 +424,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-pipeline",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const decoded = image.decode(JPEG);
         const small = image.resize(decoded, { width: 2, height: 2 });
         const png = image.encode(small, { format: "png" });
@@ -444,7 +444,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-lanczos",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const out = image.resize(orig, { width: 8, height: 8, kernel: "lanczos" });
         console.log("dims", out.width, out.height, out.channels);
@@ -469,7 +469,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-lanczos-aliasing",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 32, h = 32;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -499,7 +499,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-bad-kernel",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         try {
           image.resize(orig, { width: 4, height: 4, kernel: "bicubic" });
@@ -523,7 +523,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-gpu-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 16, h = 16;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -560,7 +560,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-boxblur-zero",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const out = image.boxBlur(orig, { radius: 0 });
         const equal = out.data.length === orig.data.length && out.data.every((v, i) => v === orig.data[i]);
@@ -575,7 +575,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-boxblur-uniform",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // 32×32 RGBA, all pixels (100, 150, 200, 255).
         const w = 32, h = 32;
         const data = new Uint8Array(w * h * 4);
@@ -601,7 +601,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-boxblur-smooths",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // 32×32 alternating columns 0/255 — same fixture as the gaussian
         // blur smooth test, so we know the variance characteristic.
         const w = 32, h = 32;
@@ -637,7 +637,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-boxblur-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 64, h = 64;
         const data = new Uint8Array(w * h * 4);
         for (let i = 0; i < w * h; i++) {
@@ -665,7 +665,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-boxblur-channels",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = { data: new Uint8Array(64 * 64), width: 64, height: 64, channels: 1, format: "png" };
         try {
           image.boxBlur(orig, { radius: 5 });
@@ -683,7 +683,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-zero",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const out = image.blur(orig, { radius: 0 });
         console.log("dims", out.width, out.height, out.channels);
@@ -702,7 +702,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-smooths",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 32, h = 32;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -740,7 +740,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-alpha",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const blurred = image.blur(orig, { radius: 3 });
         // Every alpha byte (offset 3, 7, 11, ...) should stay 255.
@@ -756,7 +756,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-blur-bad-radius",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         try {
           image.blur(orig, { radius: 999 });
@@ -774,7 +774,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-resize-zero",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         try {
           image.resize(orig, { width: 0, height: 4 });
@@ -792,7 +792,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-sharpen-zero",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const out = image.sharpen(orig, { amount: 0, radius: 1 });
         console.log("dims", out.width, out.height, out.channels);
@@ -813,7 +813,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-sharpen-edge",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 16, h = 16;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -849,7 +849,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-sharpen-alpha",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 8, h = 8;
         const data = new Uint8Array(w * h * 4);
         for (let i = 0; i < w * h; i++) {
@@ -875,7 +875,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-edge-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);            // 4×4 RGBA
         const out = image.edgeDetect(orig);
         console.log("dims", out.width, out.height, out.channels);
@@ -893,7 +893,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-edge-vertical",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 8, h = 8;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -932,7 +932,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-rotate-90",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 3, h = 2;
         const px = (r, g, b) => [r, g, b, 255];
         const A = px(255, 0, 0);   // red
@@ -962,7 +962,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-rotate-180",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 3, h = 2;
         const px = (r, g, b) => [r, g, b, 255];
         const A = px(255, 0, 0);
@@ -993,7 +993,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-rotate-roundtrip",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);                   // 4×4 RGBA
         const r = image.rotate(image.rotate(orig, { degrees: 90 }), { degrees: 270 });
         console.log("dims", r.width, r.height, r.channels);
@@ -1009,7 +1009,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-rotate-bad-deg",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         let threw = 0;
         for (const d of [0, 45, 91, 360, -90]) {
@@ -1026,7 +1026,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-flip-h",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 3, h = 2;
         const px = (r, g, b) => [r, g, b, 255];
         const A = px(255, 0, 0);
@@ -1055,7 +1055,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-flip-v",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 3, h = 2;
         const px = (r, g, b) => [r, g, b, 255];
         const A = px(255, 0, 0);
@@ -1083,7 +1083,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-flip-double",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const back = image.flip(image.flip(orig, { axis: "horizontal" }), { axis: "horizontal" });
         const equal = back.data.length === orig.data.length && back.data.every((v, i) => v === orig.data[i]);
@@ -1098,7 +1098,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-flip-bad-axis",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         try {
           image.flip(orig, { axis: "diagonal" });
@@ -1119,7 +1119,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-crop-interior",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const w = 4, h = 4;
         const data = new Uint8Array(w * h * 4);
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -1152,7 +1152,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-crop-full",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);    // 4×4 RGBA
         const c = image.crop(orig, { x: 0, y: 0, width: orig.width, height: orig.height });
         const sameRef = c.data === orig.data;
@@ -1170,7 +1170,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-crop-format",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const c = image.crop(orig, { x: 0, y: 0, width: 2, height: 2 });
         console.log("format", c.format);
@@ -1184,7 +1184,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-crop-oob",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);    // 4×4
         let threw = 0;
         // Each of these extends past the right or bottom edge.
@@ -1207,7 +1207,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-crop-bad-args",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         let threw = 0;
         for (const r of [
@@ -1234,7 +1234,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-grayscale-rgba",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = Uint8Array.from([
           255,   0,   0, 255,   // red
             0, 255,   0, 255,   // green
@@ -1255,7 +1255,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-grayscale-passthrough",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = Uint8Array.from([10, 20, 30, 40, 50, 60, 70, 80]);
         const orig = { data, width: 4, height: 2, channels: 1, format: "png" };
         const g = image.toGrayscale(orig);
@@ -1276,7 +1276,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-grayscale-rgb-rgba-match",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const rgb = Uint8Array.from([128, 64, 200,  10, 220, 30]);
         const rgba = Uint8Array.from([128, 64, 200, 255,  10, 220, 30, 255]);
         const r1 = image.toGrayscale({ data: rgb,  width: 2, height: 1, channels: 3, format: "png" });
@@ -1295,7 +1295,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-grayscale-format",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const g = image.toGrayscale(orig);
         console.log("format", g.format);
@@ -1309,7 +1309,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-adjust-identity",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const out = image.adjust(orig, { brightness: 0, contrast: 0, saturation: 0 });
         const equal = out.data.length === orig.data.length && out.data.every((v, i) => v === orig.data[i]);
@@ -1324,7 +1324,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-adjust-brightness",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Mid-tone image — every byte 128.
         const data = new Uint8Array(16).fill(128);
         const orig = { data, width: 2, height: 2, channels: 4, format: "png" };
@@ -1345,7 +1345,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-adjust-contrast-flat",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Mixed values — bright and dark.
         const data = Uint8Array.from([
           0,   0,   0, 255,
@@ -1368,7 +1368,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-adjust-desaturate",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Full-saturation primary colors.
         const data = Uint8Array.from([
           255,   0,   0, 255,   // pure red
@@ -1400,7 +1400,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-adjust-contrast-up",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = Uint8Array.from([200, 50, 128, 0]);
         const orig = { data, width: 4, height: 1, channels: 1, format: "png" };
         const out = image.adjust(orig, { contrast: 1 });
@@ -1415,7 +1415,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-adjust-range",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         let threw = 0;
         for (const o of [
@@ -1441,7 +1441,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-histogram-rgba",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const N = 16;
         const data = new Uint8Array(N * 4);
         for (let i = 0; i < N; i++) {
@@ -1484,7 +1484,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-histogram-ramp",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = new Uint8Array(256);
         for (let i = 0; i < 256; i++) data[i] = i;
         const img = { data, width: 256, height: 1, channels: 1, format: "png" };
@@ -1505,7 +1505,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-histogram-invariant",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);     // 4×4 RGBA
         const expected = orig.width * orig.height;
         const h = image.histogram(orig);
@@ -1526,7 +1526,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-histogram-after-adjust",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Mid-gray uniform image, then push brightness +0.3 (≈ +76 on 8-bit).
         const data = new Uint8Array(64).fill(128);   // 4×4 RGBA all mid-gray
         const orig = { data, width: 4, height: 4, channels: 4, format: "png" };
@@ -1553,7 +1553,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-composite-opaque",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const baseData = new Uint8Array(4 * 4 * 3).fill(255);  // 4×4 RGB white
         const overData = new Uint8Array(2 * 2 * 4);            // 2×2 RGBA red
         for (let i = 0; i < 4; i++) {
@@ -1587,7 +1587,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-composite-blend",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const baseData = new Uint8Array(2 * 2 * 4);
         for (let i = 0; i < 4; i++) {
           baseData[i*4+0] = 255; baseData[i*4+1] = 255; baseData[i*4+2] = 255; baseData[i*4+3] = 255;
@@ -1610,7 +1610,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-composite-alpha-preserve",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const baseData = new Uint8Array(2 * 2 * 4);
         for (let i = 0; i < 4; i++) {
           baseData[i*4+0] = 200; baseData[i*4+1] = 200; baseData[i*4+2] = 200; baseData[i*4+3] = 100;
@@ -1636,7 +1636,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-composite-clip",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const baseData = new Uint8Array(2 * 2 * 3).fill(50);  // gray
         const overData = new Uint8Array([
           200, 0, 0,    0, 200, 0,
@@ -1661,7 +1661,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-composite-neg",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const baseData = new Uint8Array(2 * 2 * 3).fill(50);
         const overData = new Uint8Array([
           255,   0,   0,    0, 255,   0,
@@ -1684,7 +1684,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-composite-bad-channels",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const base = { data: new Uint8Array(16), width: 4, height: 4, channels: 1, format: "png" };
         const overlay = { data: new Uint8Array(4), width: 2, height: 2, channels: 1, format: "png" };
         try {
@@ -1703,7 +1703,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-invert-rgba",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // 1×2 RGBA: [10, 20, 30, 100], [255, 0, 128, 200]
         const data = Uint8Array.from([10, 20, 30, 100, 255, 0, 128, 200]);
         const orig = { data, width: 1, height: 2, channels: 4, format: "png" };
@@ -1720,7 +1720,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-invert-roundtrip",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         const back = image.invert(image.invert(orig));
         const equal = back.data.length === orig.data.length && back.data.every((v, i) => v === orig.data[i]);
@@ -1735,7 +1735,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-threshold-shape",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // 1-channel ramp 0..255 in 4 steps.
         const data = Uint8Array.from([100, 130, 200, 0]);
         const orig = { data, width: 4, height: 1, channels: 1, format: "png" };
@@ -1755,7 +1755,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-threshold-rgb",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = Uint8Array.from([255, 0, 0]); // pure red
         const orig = { data, width: 1, height: 1, channels: 3, format: "png" };
         const lo = image.threshold(orig, { value: 50 });
@@ -1771,7 +1771,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-threshold-default",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const data = Uint8Array.from([127, 128, 129]);
         const orig = { data, width: 3, height: 1, channels: 1, format: "png" };
         const out = image.threshold(orig);
@@ -1787,7 +1787,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-threshold-range",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const orig = image.decode(PNG);
         let threw = 0;
         for (const v of [-1, 256, 1000]) {
@@ -1804,7 +1804,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-pipeline-empty",
       `
-        import image from "bun:image";
+        import image from "para:image";
         const out = image.pipeline(PNG).toBytes({ format: "png" });
         // Decoding the round-trip should give 4×4 RGBA.
         const r = image.decode(out);
@@ -1819,7 +1819,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-pipeline-chain",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Build a 64×64 RGBA fixture (encoded as PNG so we have bytes).
         const w = 64, h = 64;
         const data = new Uint8Array(w * h * 4);
@@ -1861,7 +1861,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-pipeline-rotate-crop",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // 8×4 RGBA fixture.
         const w = 8, h = 4;
         const data = new Uint8Array(w * h * 4);
@@ -1889,7 +1889,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-pipeline-bad-op",
       `
-        import image from "bun:image";
+        import image from "para:image";
         try {
           // Inject a manually-crafted bad op via the underlying native call.
           const nativeRunPipeline = $cpp_directly_or_native_module;  // not exposed
@@ -1911,7 +1911,7 @@ describe("bun:image — decode", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-image-bad-jpeg",
       `
-        import image from "bun:image";
+        import image from "para:image";
         // Valid SOI marker (FF D8 FF) + garbage that fails libjpeg's
         // header read. Format detection passes; the codec then throws.
         const bad = new Uint8Array([0xFF, 0xD8, 0xFF, 0x00, 0x00, 0x00, 0x00]);
@@ -1919,7 +1919,7 @@ describe("bun:image — decode", () => {
           image.decode(bad);
           console.log("NO_THROW");
         } catch (e) {
-          console.log("THREW", e.message.startsWith("bun:image.decode:"));
+          console.log("THREW", e.message.startsWith("para:image.decode:"));
         }
       `,
     );

@@ -1,4 +1,4 @@
-// Llama-3 BPE tokenizer for bun:llm.
+// Llama-3 BPE tokenizer for para:llm.
 //
 // The vocab + merge table live inside the GGUF metadata — we don't re-parse
 // tokenizer.json. This matches the "llama-bpe" pre-tokenizer (Llama 3's regex
@@ -137,7 +137,7 @@ class LlamaTokenizer {
           for (const ch of piece) {
             const charId = this.vocabId.get(ch);
             if (charId === undefined) {
-              throw new Error(`bun:llm: tokenizer: no vocab entry for piece "${piece}" or char "${ch}"`);
+              throw new Error(`para:llm: tokenizer: no vocab entry for piece "${piece}" or char "${ch}"`);
             }
             out.push(charId);
           }
@@ -212,21 +212,21 @@ function bpe(text: string, mergeRank: Map<string, number>): string[] {
 function fromGGUF(gguf: { metadata: Map<string, unknown> }): LlamaTokenizer {
   const model = gguf.metadata.get("tokenizer.ggml.model");
   if (model !== "gpt2") {
-    throw new Error(`bun:llm: tokenizer model "${model}" not supported (want "gpt2")`);
+    throw new Error(`para:llm: tokenizer model "${model}" not supported (want "gpt2")`);
   }
   const preRaw = gguf.metadata.get("tokenizer.ggml.pre");
   let pre: PreTokenizer;
   if (preRaw === "llama-bpe") pre = "llama-bpe";
   else if (preRaw === "qwen2") pre = "qwen2";
-  else throw new Error(`bun:llm: tokenizer pre "${preRaw}" not supported (want "llama-bpe" or "qwen2")`);
+  else throw new Error(`para:llm: tokenizer pre "${preRaw}" not supported (want "llama-bpe" or "qwen2")`);
   const tokens = gguf.metadata.get("tokenizer.ggml.tokens");
   const merges = gguf.metadata.get("tokenizer.ggml.merges");
   const tokenType = gguf.metadata.get("tokenizer.ggml.token_type") as number[] | undefined;
   const bosRaw = gguf.metadata.get("tokenizer.ggml.bos_token_id");
   const eosRaw = gguf.metadata.get("tokenizer.ggml.eos_token_id");
-  if (!Array.isArray(tokens)) throw new Error("bun:llm: missing tokenizer.ggml.tokens");
-  if (!Array.isArray(merges)) throw new Error("bun:llm: missing tokenizer.ggml.merges");
-  if (typeof eosRaw !== "number") throw new Error("bun:llm: missing tokenizer.ggml.eos_token_id");
+  if (!Array.isArray(tokens)) throw new Error("para:llm: missing tokenizer.ggml.tokens");
+  if (!Array.isArray(merges)) throw new Error("para:llm: missing tokenizer.ggml.merges");
+  if (typeof eosRaw !== "number") throw new Error("para:llm: missing tokenizer.ggml.eos_token_id");
   // BOS is optional: some Qwen2 builds omit it (chat flows inject <|im_start|>
   // directly), and we treat missing-BOS as "don't prepend anything".
   const bos = typeof bosRaw === "number" ? bosRaw : -1;

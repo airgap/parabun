@@ -153,7 +153,7 @@ function transformArena(line: string): string {
 // (2 letters + 2 spaces); `when not ` is 9, `if      (!(` is also chosen to
 // keep the column of EXPR fixed. Body braces stay where they were so hover /
 // go-to-def land on the right span. The actual desugar is owned by Bun's
-// parser (→ require("bun:signals").onRising/onFalling); this transform exists
+// parser (→ require("para:signals").onRising/onFalling); this transform exists
 // only to satisfy the embedded TypeScript checker.
 function transformWhenBlock(line: string): string {
   // Negated form first — order matters because `when not` shares a prefix
@@ -1537,7 +1537,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "change, `B` gets re-assigned with `A`'s new value. `B` must be",
       "assignable — an identifier or property access.",
       "",
-      "Desugars to `require('bun:signals').effect(() => { B = A; })` —",
+      "Desugars to `require('para:signals').effect(() => { B = A; })` —",
       "evaluating `A` in a tracked context and returning the disposer, so",
       "you can capture it: `const stop = src ~> dst;`.",
       "",
@@ -1558,7 +1558,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "a callable target — an identifier, property access, or indexed",
       "function.",
       "",
-      "Desugars to `require('bun:signals').effect(() => { fn(A); })` — the",
+      "Desugars to `require('para:signals').effect(() => { fn(A); })` — the",
       "call-sink complement to `~>`. Same precedence, same disposer return,",
       "same optional `when COND` guard.",
       "",
@@ -1594,7 +1594,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "disambiguates. Suffix `when` is an every-truthy guard; the block form",
       "is edge-triggered.",
       "",
-      "Desugars to `require('bun:signals').onRising(() => EXPR, () => { BODY })`",
+      "Desugars to `require('para:signals').onRising(() => EXPR, () => { BODY })`",
       "(or `onFalling` for the `not` form).",
       "",
       "```typescript",
@@ -1622,7 +1622,7 @@ function getWordAt(line: string, col: number): string {
 
 // True when the cursor is sitting on the `signal` keyword of a `signal NAME =`
 // declaration (as opposed to a plain identifier named `signal` imported from
-// `bun:signals`). Gates the hover so `const x = signal(0)` — which is also
+// `para:signals`). Gates the hover so `const x = signal(0)` — which is also
 // valid — doesn't trigger the keyword tooltip.
 function isSignalDeclarationAt(line: string, col: number): boolean {
   const word = findWordBounds(line, col);

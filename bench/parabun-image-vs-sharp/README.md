@@ -1,4 +1,4 @@
-# bun:image vs sharp
+# para:image vs sharp
 
 Two benches with very different stories — and that difference is the
 key insight, not a footnote.
@@ -15,7 +15,7 @@ bun run build:release --asan=off bench/parabun-image-vs-sharp/kernels.ts
 bun run build:release --asan=off bench/parabun-image-vs-sharp/run.ts
 ```
 
-## Kernel-only — bun:image clearly surpasses Sharp
+## Kernel-only — para:image clearly surpasses Sharp
 
 16-core x86 release build (`-O3 -march=haswell`, AVX2 enabled),
 sharp 0.34.5, 4096² RGBA, best-of-7 per cell after 2 warmup runs:
@@ -101,13 +101,13 @@ bun run build:release --asan=off bench/parabun-image-vs-sharp/run.ts
 bun run build:release --asan=off bench/parabun-image-vs-sharp/gpu-warm.ts
 ```
 
-## When bun:image is the right pick
+## When para:image is the right pick
 
 - **Always** if your work is compute-bound on a single op — kernels
   are unconditionally faster than Sharp's.
 - **Always** for `bun build --compile` deploys — Sharp pulls ~30 MB
   of platform-specific native code per arch with prebuild downloads
-  at install time; bun:image is statically linked into the runtime.
+  at install time; para:image is statically linked into the runtime.
 - **Now** for end-to-end pipelines where you'd reach for Sharp on
   Node — the gap exists but is bounded; closing it is a roadmap
   item (chained pipeline API), not a fundamental limit.

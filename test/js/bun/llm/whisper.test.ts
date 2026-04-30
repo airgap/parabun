@@ -6,7 +6,7 @@ import { join } from "node:path";
 // Whisper regression coverage. Catches:
 //   - The base.en `[static]` failure mode (LYK-748) — silently shipped for
 //     several commits because nothing exercised the transcribe path.
-//   - bun:gpu CPU SDPA fallback returning all-NaN with GpuFloat32Array K/V
+//   - para:gpu CPU SDPA fallback returning all-NaN with GpuFloat32Array K/V
 //     (LYK-757) — symptom is `!!!!` repeating instead of real text.
 //   - Any future encoder/decoder regression that breaks the JFK clip
 //     transcription on a known-good model.
@@ -32,7 +32,7 @@ const haveTiny = existsSync(tinyEn) && existsSync(jfkWav);
 const haveBase = existsSync(baseEn) && existsSync(jfkWav);
 
 async function loadJfkMel() {
-  const audio = (await import("bun:audio")).default;
+  const audio = (await import("para:audio")).default;
   const wavBytes = new Uint8Array(await Bun.file(jfkWav).arrayBuffer());
   const wav = audio.readWav(wavBytes);
   const m = audio.melSpectrogram(wav.samples, { mode: "whisper" });
@@ -44,9 +44,9 @@ async function loadJfkMel() {
   return { mel: flat, T };
 }
 
-describe("bun:llm WhisperModel", () => {
+describe("para:llm WhisperModel", () => {
   test.skipIf(!haveTiny)("tiny.en transcribes JFK clip — substring match", async () => {
-    const llm = (await import("bun:llm")).default;
+    const llm = (await import("para:llm")).default;
     const model = await llm.WhisperModel.load(tinyEn);
     const { mel, T } = await loadJfkMel();
     const text = model.transcribeMel(mel, T);
@@ -67,7 +67,7 @@ describe("bun:llm WhisperModel", () => {
   });
 
   test.skipIf(!haveTiny)("WhisperModel.busy signal — initial false, transitions during transcribe", async () => {
-    const llm = (await import("bun:llm")).default;
+    const llm = (await import("para:llm")).default;
     const model = await llm.WhisperModel.load(tinyEn);
     const { mel, T } = await loadJfkMel();
 
@@ -94,7 +94,7 @@ describe("bun:llm WhisperModel", () => {
   // fixed. The failure mode also catches the older LYK-757 NaN cascade
   // ("!!!!" repeating) on the same path.
   test.skipIf(!haveBase)("base.en transcribes JFK clip — substring match (LYK-748)", async () => {
-    const llm = (await import("bun:llm")).default;
+    const llm = (await import("para:llm")).default;
     const model = await llm.WhisperModel.load(baseEn);
     const { mel, T } = await loadJfkMel();
     const text = model.transcribeMel(mel, T);

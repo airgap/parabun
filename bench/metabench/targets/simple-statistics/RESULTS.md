@@ -1,7 +1,7 @@
 # simple-statistics: node vs bun vs parabun vs parabun-rewrite
 
 Upstream: [`simple-statistics`](https://github.com/simple-statistics/simple-statistics) v7.8.9, published `dist/simple-statistics.mjs`.
-Parabun rewrite: reductions via `bun:simd.sum` and `bun:simd.dot`, with variance reformulated as `E[X²] − E[X]²` and covariance as `E[XY] − E[X]E[Y]`.
+Parabun rewrite: reductions via `para:simd.sum` and `para:simd.dot`, with variance reformulated as `E[X²] − E[X]²` and covariance as `E[XY] − E[X]E[Y]`.
 
 Host: Linux x86_64, 2026-04-14. N = 100 000 float samples in [0, 1). Best-of-9, ms.
 

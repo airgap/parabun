@@ -1,7 +1,7 @@
 {
   "name": "parabun-browser-shims",
   "version": "0.3.0",
-  "description": "Browser-compatible shims for the bun:* modules Parabun parse-time desugaring pulls in (bun:arena, bun:signals, bun:wrap, bun:parallel, bun:simd, bun:gpu, bun:llm). Lets .pts / .pjs code compile and run in browsers — at varying fidelity per module.",
+  "description": "Browser-compatible shims for the bun:* modules Parabun parse-time desugaring pulls in (para:arena, para:signals, bun:wrap, para:parallel, para:simd, para:gpu, para:llm). Lets .pts / .pjs code compile and run in browsers — at varying fidelity per module.",
   "type": "module",
   "main": "./src/index.js",
   "module": "./src/index.js",

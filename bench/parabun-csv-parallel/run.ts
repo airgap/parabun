@@ -1,4 +1,4 @@
-// Sweep bun:csv parse times across a few input sizes, comparing serial
+// Sweep para:csv parse times across a few input sizes, comparing serial
 // against parallel mode. Reports min/med/max ms and the median speedup
 // per size, so the per-size break-even point (if any) is visible.
 //
@@ -6,7 +6,7 @@
 //
 // Override sizes via CLI:  --sizes=5,50,200
 
-import csv from "bun:csv";
+import csv from "para:csv";
 import { existsSync, statSync, readFileSync } from "node:fs";
 import { generate, fixturePath } from "./seed.ts";
 
@@ -57,7 +57,7 @@ async function bench(text: string, parallel: boolean) {
 
 const sizes = parseSizes();
 
-console.log(`bun:csv parse — sweep across ${sizes.join(", ")} MB, best-of-${RUNS} per cell\n`);
+console.log(`para:csv parse — sweep across ${sizes.join(", ")} MB, best-of-${RUNS} per cell\n`);
 console.log(
   [
     "size".padEnd(7),

@@ -1,11 +1,11 @@
-// Hardcoded module "bun:gpu"
+// Hardcoded module "para:gpu"
 //
 // Parabun: GPU-accelerated vector primitives over typed arrays. Same public
-// surface as bun:simd for `dot`, `matVec`, `simdMap` — plus `matmul`, which
+// surface as para:simd for `dot`, `matVec`, `simdMap` — plus `matmul`, which
 // is where GPU really earns its keep. Designed to slot in behind
-// `bun:pipeline` fusion as a Tier 3 when the buffer crosses a size threshold.
+// `para:pipeline` fusion as a Tier 3 when the buffer crosses a size threshold.
 //
-//   import gpu from "bun:gpu";
+//   import gpu from "para:gpu";
 //   if (gpu.winsForSize("matVec", nRows, 4)) {
 //     return gpu.matVec(matrix, vector, nRows, nCols);
 //   }
@@ -16,7 +16,7 @@
 //              MTLComputePipelineState. Zero-copy via unified memory.
 //   - "cuda":  NVIDIA GPUs on Linux + Windows. bun:ffi to libcuda.so.1 /
 //              nvcuda.dll via the Driver API. Hand-written PTX kernels.
-//   - "cpu":   Fallback — forwards every op to bun:simd. Always available.
+//   - "cpu":   Fallback — forwards every op to para:simd. Always available.
 //
 // Backend selection is lazy + sticky. On first use we probe in order
 // [metal, cpu] on macOS and [cuda, cpu] elsewhere, and cache the result.
@@ -31,7 +31,7 @@ const cudaBackend = require("./gpu/cuda.ts");
 const metalBackend = require("./gpu/metal.ts");
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of bun:signals's
+// Structural Signal types — keep this module agnostic of para:signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / vision.ts / rtp.ts.
 type Signal<T> = {
   get(): T;
@@ -234,7 +234,7 @@ function unwrapGpuArg<T extends FArray>(x: T | GpuHandle | GpuFloat32Array): T |
 // ─── Backend protocol ──────────────────────────────────────────────────────
 //
 // Every backend implements this interface. The `cpu` backend is an alias
-// that forwards to bun:simd for ops it supports, and a JS fallback for
+// that forwards to para:simd for ops it supports, and a JS fallback for
 // matmul (simd doesn't have native matmul — we build it on matVec).
 //
 // Backend implementations MUST NOT throw on missing ops; they return
@@ -343,7 +343,7 @@ interface Backend {
   variance?(input: Float32Array | GpuHandle, ddof: number): number;
   /**
    * Single-launch fused Gaussian blur on packed RGBA uint8 — used by
-   * bun:image's GPU dispatch path. Returns null if the backend has no
+   * para:image's GPU dispatch path. Returns null if the backend has no
    * GPU implementation available (e.g. CUDA without NVRTC), so the
    * public wrapper can fall through to the CPU path.
    */
@@ -381,7 +381,7 @@ export type CalibrationResult = {
 
 function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
   if (isGpuHandle(x)) {
-    if (x.released) throw new Error("bun:gpu: op called on released handle");
+    if (x.released) throw new Error("para:gpu: op called on released handle");
     return x.view as T;
   }
   return x;
@@ -585,7 +585,7 @@ function cpuQuantileU32(input: Uint32Array, q: number): number {
 // returning -1 would silently break compositional code.
 function cpuArgMinF32(input: Float32Array): number {
   const n = input.length;
-  if (n === 0) throw new RangeError("bun:gpu.argMin: empty input has no extremum");
+  if (n === 0) throw new RangeError("para:gpu.argMin: empty input has no extremum");
   if (Number.isNaN(input[0])) return 0;
   let mi = 0;
   let m = input[0];
@@ -602,7 +602,7 @@ function cpuArgMinF32(input: Float32Array): number {
 
 function cpuArgMaxF32(input: Float32Array): number {
   const n = input.length;
-  if (n === 0) throw new RangeError("bun:gpu.argMax: empty input has no extremum");
+  if (n === 0) throw new RangeError("para:gpu.argMax: empty input has no extremum");
   if (Number.isNaN(input[0])) return 0;
   let mi = 0;
   let m = input[0];
@@ -619,7 +619,7 @@ function cpuArgMaxF32(input: Float32Array): number {
 
 function cpuArgMinU32(input: Uint32Array): number {
   const n = input.length;
-  if (n === 0) throw new RangeError("bun:gpu.argMin: empty input has no extremum");
+  if (n === 0) throw new RangeError("para:gpu.argMin: empty input has no extremum");
   let mi = 0;
   let m = input[0];
   for (let i = 1; i < n; i++) {
@@ -633,7 +633,7 @@ function cpuArgMinU32(input: Uint32Array): number {
 
 function cpuArgMaxU32(input: Uint32Array): number {
   const n = input.length;
-  if (n === 0) throw new RangeError("bun:gpu.argMax: empty input has no extremum");
+  if (n === 0) throw new RangeError("para:gpu.argMax: empty input has no extremum");
   let mi = 0;
   let m = input[0];
   for (let i = 1; i < n; i++) {
@@ -712,7 +712,7 @@ function cpuConv2D(
   return out;
 }
 
-// ─── CPU backend (always available — forwards to bun:simd) ──────────────────
+// ─── CPU backend (always available — forwards to para:simd) ──────────────────
 
 const cpuBackend: Backend = {
   name: "cpu",
@@ -859,7 +859,7 @@ function resolveActive(): Backend {
   }
   // `cpu` always probes true, so we're guaranteed to hit this only if
   // someone deletes the cpu backend. Keep the assert for safety.
-  $assert(false, "bun:gpu: no backend available (cpu missing?)");
+  $assert(false, "para:gpu: no backend available (cpu missing?)");
   active = cpuBackend;
   return cpuBackend;
 }
@@ -882,8 +882,8 @@ function setBackend(choice: BackendChoice): BackendName {
     return resolved;
   }
   const b = backends[choice];
-  if (!b) throw new RangeError(`bun:gpu: unknown backend ${JSON.stringify(choice)}`);
-  if (!b.probe()) throw new Error(`bun:gpu: backend ${choice} is not available on this host`);
+  if (!b) throw new RangeError(`para:gpu: unknown backend ${JSON.stringify(choice)}`);
+  if (!b.probe()) throw new Error(`para:gpu: backend ${choice} is not available on this host`);
   active = b;
   notifyBackendChanged();
   return choice;
@@ -891,20 +891,20 @@ function setBackend(choice: BackendChoice): BackendName {
 
 // ─── Threshold query ───────────────────────────────────────────────────────
 //
-// Delegates to the active backend. Callers use this to decide between bun:simd
-// and bun:gpu without hard-coding sizes:
+// Delegates to the active backend. Callers use this to decide between para:simd
+// and para:gpu without hard-coding sizes:
 //
 //   if (gpu.winsForSize("matVec", nRows * nCols, 4)) { ... }
 //
 // The `cpu` backend always returns `false` — that's intentional, so
 // consumers can guard with `if (winsForSize(...))` and fall through to
-// bun:simd without a second check.
+// para:simd without a second check.
 
 function winsForSize(op: OpKind, n: number, elemBytes: number): boolean {
   return resolveActive().winsForSize(op, n, elemBytes);
 }
 
-// Per-host calibration — sweeps the real GPU kernel against bun:simd at a
+// Per-host calibration — sweeps the real GPU kernel against para:simd at a
 // small set of sizes, persists the measured CPU→GPU crossover under
 // `~/.cache/parabun/gpu-calibrate-<hash>.json`, and rehydrates it on
 // subsequent process starts. Intended to be called once at app boot; the
@@ -919,7 +919,7 @@ function winsForSize(op: OpKind, n: number, elemBytes: number): boolean {
 function calibrate(): CalibrationResult {
   const b = resolveActive();
   if (!b.calibrate) {
-    throw new Error(`bun:gpu: backend ${b.name} has no crossover to calibrate`);
+    throw new Error(`para:gpu: backend ${b.name} has no crossover to calibrate`);
   }
   return b.calibrate();
 }
@@ -1140,7 +1140,7 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle | G
 
 // 2D valid-mode convolution. `input` is iH×iW row-major Float32Array,
 // `kernel` is kH×kW row-major Float32Array. Output is (iH-kH+1)×(iW-kW+1).
-// Used by `bun:image` for resize / blur / sharpen / edge-detect; useful as
+// Used by `para:image` for resize / blur / sharpen / edge-detect; useful as
 // a general 2D-correlation primitive for any pipeline that needs it.
 //
 // f32 only for v1. f64 follows when there's a use case for it; image and
@@ -1206,7 +1206,7 @@ function scan(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): 
   }
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.scan: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.scan: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1231,14 +1231,14 @@ function scan(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array): 
 // on CPU until someone needs a device-side integer reduction.
 function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, op: "sum" | "min" | "max"): number {
   if (op !== "sum" && op !== "min" && op !== "max") {
-    throw new TypeError(`bun:gpu.reduce: op must be "sum", "min", or "max"; got ${JSON.stringify(op)}`);
+    throw new TypeError(`para:gpu.reduce: op must be "sum", "min", or "max"; got ${JSON.stringify(op)}`);
   }
   if (input instanceof Uint32Array) {
     return cpuReduceU32(input, op);
   }
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.reduce: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.reduce: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1251,7 +1251,7 @@ function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
 }
 
 // Single-launch fused Gaussian blur on packed RGBA uint8. Used by
-// bun:image's `image.blur(img, { gpu: true })` path so the entire op
+// para:image's `image.blur(img, { gpu: true })` path so the entire op
 // happens in one CUDA / Metal kernel invocation, sidestepping the
 // JS-side deinterleave / reinterleave that would dominate a per-
 // channel `conv2D` dispatch.
@@ -1262,16 +1262,16 @@ function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
 // σ = radius/3 to match the C++ blur.
 function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number): Uint8Array | null {
   if (!(input instanceof Uint8Array)) {
-    throw new TypeError("bun:gpu.imageBlurRGBA: input must be a Uint8Array");
+    throw new TypeError("para:gpu.imageBlurRGBA: input must be a Uint8Array");
   }
   if (!Number.isInteger(w) || w < 1 || !Number.isInteger(h) || h < 1) {
-    throw new RangeError("bun:gpu.imageBlurRGBA: w and h must be positive integers");
+    throw new RangeError("para:gpu.imageBlurRGBA: w and h must be positive integers");
   }
   if (!Number.isInteger(radius) || radius < 0 || radius > 100) {
-    throw new RangeError("bun:gpu.imageBlurRGBA: radius must be an integer in [0, 100]");
+    throw new RangeError("para:gpu.imageBlurRGBA: radius must be an integer in [0, 100]");
   }
   if (input.length !== w * h * 4) {
-    throw new RangeError(`bun:gpu.imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`);
+    throw new RangeError(`para:gpu.imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`);
   }
   const backend = resolveActive();
   if (!backend.imageBlurRGBA) return null;
@@ -1296,11 +1296,11 @@ function histogram(
   opts?: { min?: number; max?: number },
 ): Uint32Array {
   if (!Number.isInteger(bins) || bins < 1) {
-    throw new RangeError(`bun:gpu.histogram: bins must be a positive integer; got ${bins}`);
+    throw new RangeError(`para:gpu.histogram: bins must be a positive integer; got ${bins}`);
   }
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.histogram: input must be a Float32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.histogram: input must be a Float32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1317,14 +1317,14 @@ function histogram(
   let min = minOpt !== undefined ? minOpt : cpuReduceF32(aV, "min");
   let max = maxOpt !== undefined ? maxOpt : cpuReduceF32(aV, "max");
   if (typeof min !== "number" || typeof max !== "number") {
-    throw new TypeError("bun:gpu.histogram: opts.min and opts.max must be numbers");
+    throw new TypeError("para:gpu.histogram: opts.min and opts.max must be numbers");
   }
   if (Number.isNaN(min) || Number.isNaN(max) || !Number.isFinite(min) || !Number.isFinite(max)) {
     // NaN or ±Infinity range — nothing meaningful to bucket against.
     return new Uint32Array(bins);
   }
   if (min > max) {
-    throw new RangeError(`bun:gpu.histogram: min ${min} must be <= max ${max}`);
+    throw new RangeError(`para:gpu.histogram: min ${min} must be <= max ${max}`);
   }
 
   const backend = resolveActive();
@@ -1348,12 +1348,12 @@ type VarianceOptions = {
 function variance(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, opts: VarianceOptions = {}): number {
   const ddof = opts.ddof ?? 0;
   if (typeof ddof !== "number" || !Number.isFinite(ddof) || ddof < 0) {
-    throw new RangeError(`bun:gpu.variance: ddof must be a finite non-negative number; got ${ddof}`);
+    throw new RangeError(`para:gpu.variance: ddof must be a finite non-negative number; got ${ddof}`);
   }
   if (input instanceof Uint32Array) return cpuVarianceU32(input, ddof);
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.variance: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.variance: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1384,12 +1384,12 @@ function stddev(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
 // now this matches numpy's default precision and keeps the code small.
 function quantile(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, q: number): number {
   if (typeof q !== "number" || !(q >= 0 && q <= 1)) {
-    throw new RangeError(`bun:gpu.quantile: q must be a number in [0, 1]; got ${q}`);
+    throw new RangeError(`para:gpu.quantile: q must be a number in [0, 1]; got ${q}`);
   }
   if (input instanceof Uint32Array) return cpuQuantileU32(input, q);
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.quantile: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.quantile: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1414,7 +1414,7 @@ function argMin(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array)
   if (input instanceof Uint32Array) return cpuArgMinU32(input);
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.argMin: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.argMin: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1431,7 +1431,7 @@ function argMax(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array)
   if (input instanceof Uint32Array) return cpuArgMaxU32(input);
   if (!(input instanceof Float32Array) && !isGpuHandle(input) && !isGpuFloat32Array(input)) {
     throw new TypeError(
-      `bun:gpu.argMax: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
+      `para:gpu.argMax: input must be a Float32Array, Uint32Array, GpuHandle, or GpuFloat32Array; got ${
         (input as any)?.constructor?.name ?? typeof input
       }`,
     );
@@ -1494,7 +1494,7 @@ function hold(arr: FArray): GpuHandle {
 function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
   const b = resolveActive() as any;
   if (typeof b.holdQ4K !== "function") {
-    throw new Error(`bun:gpu: backend ${b.name ?? "unknown"} does not support Q4_K residency`);
+    throw new Error(`para:gpu: backend ${b.name ?? "unknown"} does not support Q4_K residency`);
   }
   return b.holdQ4K(blocks, nElems);
 }
@@ -1505,7 +1505,7 @@ function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
 function holdQ6K(blocks: Uint8Array, nElems: number): GpuHandle {
   const b = resolveActive() as any;
   if (typeof b.holdQ6K !== "function") {
-    throw new Error(`bun:gpu: backend ${b.name ?? "unknown"} does not support Q6_K residency`);
+    throw new Error(`para:gpu: backend ${b.name ?? "unknown"} does not support Q6_K residency`);
   }
   return b.holdQ6K(blocks, nElems);
 }
@@ -1554,7 +1554,7 @@ function describe(): {
 // lets monitoring effects compose with the live `activeBackend`.
 //
 // Eager init at first read: we don't probe at module import time so a
-// CUDA-less host doesn't pay the dlopen cost just for loading bun:gpu.
+// CUDA-less host doesn't pay the dlopen cost just for loading para:gpu.
 //
 // `gpu.devices` and per-device `gpu.memUsed` from the plan need a dedicated
 // device-enumeration native binding (cuDeviceGetCount + cuDeviceGetName +
@@ -1611,7 +1611,7 @@ const availableSignalProxy: Signal<BackendName[]> = {
 };
 
 // Escape hatch to the active backend's device-resident kernel surface
-// (bun:llm forward-pass path). Returns null unless the active backend is
+// (para:llm forward-pass path). Returns null unless the active backend is
 // CUDA _and_ NVRTC is available to compile the device-ops module. See
 // src/js/bun/gpu/cuda.ts `DevOps` for the full shape.
 function getDevOps(): any {
@@ -1623,7 +1623,7 @@ function getDevOps(): any {
 // Internal accessor that returns whatever devOps-shape functions the
 // active backend has wired, even if the full forward-pass surface is
 // incomplete. Used by incremental-port tests to exercise individual
-// kernels as they land. bun:llm never calls this — it only calls
+// kernels as they land. para:llm never calls this — it only calls
 // getDevOps(), which returns null until the full surface is ready.
 function _getPartialDevOps(): any {
   const b = resolveActive();
@@ -1667,7 +1667,7 @@ export default {
   dispose,
   describe,
   // Reactive diagnostic surface (LYK-741/764). Lazy-init on first read so
-  // a CUDA-less host doesn't pay probing cost just for loading bun:gpu.
+  // a CUDA-less host doesn't pay probing cost just for loading para:gpu.
   activeBackendSignal: activeBackendSignalProxy,
   availableSignal: availableSignalProxy,
   getDevOps,

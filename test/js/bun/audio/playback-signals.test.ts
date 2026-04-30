@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 
 async function tryPlay(): Promise<{ spk: any; supported: boolean }> {
   try {
-    const audio = (await import("bun:audio")).default;
+    const audio = (await import("para:audio")).default;
     const spk = await audio.play({
       device: "default",
       sampleRate: 22050,
@@ -30,7 +30,7 @@ function silenceFrames(n: number): Float32Array {
   return new Float32Array(n);
 }
 
-describe("bun:audio playback signals (LYK-746)", () => {
+describe("para:audio playback signals (LYK-746)", () => {
   test("queuedMs is Signal-shaped", async () => {
     const { spk, supported } = await tryPlay();
     if (!supported) return;

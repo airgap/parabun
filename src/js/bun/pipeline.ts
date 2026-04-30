@@ -1,8 +1,8 @@
-// Hardcoded module "bun:pipeline"
+// Hardcoded module "para:pipeline"
 //
 // Parabun: lazy streaming combinators for the `|>` operator.
 //
-//   import { map, filter, take, collect } from "bun:pipeline";
+//   import { map, filter, take, collect } from "para:pipeline";
 //   const out = await (source |> map(double) |> filter(even) |> take(10) |> collect);
 //
 // Every combinator returns an async generator that consumes any iterable or
@@ -15,7 +15,7 @@
 // instead of wrapping the previous layer in another async generator. The
 // fusion-aware terminals (`collect`, `sum`, `toFloat32Array`,
 // `toFloat64Array`) walk the chain, compose affine kernels when possible,
-// and dispatch to `bun:simd` as a single pass. Non-fusion-aware combinators
+// and dispatch to `para:simd` as a single pass. Non-fusion-aware combinators
 // (filter/take/etc.) still accept a FusedChain because it exposes
 // `Symbol.asyncIterator`, so they realize the chain on demand and proceed
 // on the existing async-generator path.
@@ -26,7 +26,7 @@ function simd(): any {
   return _simd;
 }
 
-// bun:gpu is loaded lazily the first time we consider promoting a chain to
+// para:gpu is loaded lazily the first time we consider promoting a chain to
 // the GPU tier. Keeping it lazy means a pipeline that never grows a big
 // Float32Array never pays for backend probing / MSL compilation.
 let gpuMod: any = null;
@@ -114,10 +114,10 @@ function composeAffineChain(ops: FusedMap[]): { K: number; C: number } | null {
 }
 
 // Tier 3 — GPU dispatch for f32 affine chains. When the fused chain
-// collapses to a single `x*K + C` and the backend beats bun:simd at this
+// collapses to a single `x*K + C` and the backend beats para:simd at this
 // size, route the single affine pass to the GPU (one kernel launch vs
 // two SIMD passes: mulScalar + addScalar). Non-affine chains and f64
-// stay on bun:simd — neither Metal nor CUDA ship a kernel for them yet.
+// stay on para:simd — neither Metal nor CUDA ship a kernel for them yet.
 function affineGpuF32(source: Float32Array, K: number, C: number): Float32Array | null {
   const gpu = getGpu();
   if (gpu === null) return null;
@@ -403,7 +403,7 @@ function pipe<T>(source: Source<T>, ...transforms: Array<(s: any) => any>): any 
 }
 
 // ---------------------------------------------------------------------------
-// pipeParallel — parallel pipeline execution via bun:parallel
+// pipeParallel — parallel pipeline execution via para:parallel
 //
 // Inspects tagged stages to identify parallelizable segments:
 // - Consecutive `map` stages are composed into a single function and

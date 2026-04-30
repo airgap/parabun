@@ -6,7 +6,7 @@
 // `signals.effect(() => { ... })`. Same `signals.fromInterval` + `derived`
 // shape works in both forms.
 
-import signals from "bun:signals";
+import signals from "para:signals";
 
 let pulse = 0;
 const sensor = signals.fromInterval(() => {

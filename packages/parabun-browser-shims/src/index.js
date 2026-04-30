@@ -15,11 +15,11 @@ export * as quant from "./quant.js";
 // their `resolve.alias` / `build.rollupOptions.plugins` to map the
 // `bun:*` specifiers Parabun desugarings emit onto the shim modules.
 export const bunAliases = {
-  "bun:arena": new URL("./arena.js", import.meta.url).pathname,
-  "bun:signals": new URL("./signals.js", import.meta.url).pathname,
+  "para:arena": new URL("./arena.js", import.meta.url).pathname,
+  "para:signals": new URL("./signals.js", import.meta.url).pathname,
   "bun:wrap": new URL("./wrap.js", import.meta.url).pathname,
-  "bun:parallel": new URL("./parallel.js", import.meta.url).pathname,
-  "bun:simd": new URL("./simd.js", import.meta.url).pathname,
-  "bun:gpu": new URL("./gpu.js", import.meta.url).pathname,
-  "bun:llm": new URL("./llm.js", import.meta.url).pathname,
+  "para:parallel": new URL("./parallel.js", import.meta.url).pathname,
+  "para:simd": new URL("./simd.js", import.meta.url).pathname,
+  "para:gpu": new URL("./gpu.js", import.meta.url).pathname,
+  "para:llm": new URL("./llm.js", import.meta.url).pathname,
 };

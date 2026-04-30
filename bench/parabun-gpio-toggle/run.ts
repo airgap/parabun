@@ -1,4 +1,4 @@
-// bun:gpio toggle-rate bench
+// para:gpio toggle-rate bench
 //
 // Measures sustained pin-toggle throughput for single-line writes and
 // bulk-bank writes against /dev/gpiochip0 (or whatever's at index 0).
@@ -13,7 +13,7 @@
 //   --line N                — output line offset (default 17)
 //   --duration ms           — bench duration per phase (default 1000)
 
-import gpio from "bun:gpio";
+import gpio from "para:gpio";
 
 const args = process.argv.slice(2);
 function arg(name: string, fallback?: string): string | undefined {

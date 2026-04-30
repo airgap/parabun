@@ -1457,7 +1457,7 @@ fn NewLexer_(
                                 }
                                 // Parabun: `->` reactive binding for function/method
                                 // sinks. `A -> fn` desugars to
-                                //   require("bun:signals").effect(() => { fn(A); })
+                                //   require("para:signals").effect(() => { fn(A); })
                                 // Complement to `~>` (assignment sink).
                                 lexer.step();
                                 lexer.token = T.t_minus_greater_than;

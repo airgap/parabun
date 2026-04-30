@@ -1,13 +1,13 @@
-// Transcribe a wav file with bun:speech (Whisper) — VAD-free batch path.
+// Transcribe a wav file with para:speech (Whisper) — VAD-free batch path.
 //
 //   WHISPER_MODEL=/path/to/ggml-tiny.en.bin \
 //     bun run build:release demos/whisper-transcribe.pts <audio.wav>
 //
-// `bun:speech.transcribe` takes raw PCM (Float32 mono @ 16 kHz). bun:audio
+// `para:speech.transcribe` takes raw PCM (Float32 mono @ 16 kHz). para:audio
 // reads the WAV and returns the right shape directly.
 
-import speech from "bun:speech";
-import audio from "bun:audio";
+import speech from "para:speech";
+import audio from "para:audio";
 import { existsSync } from "node:fs";
 
 const wavPath = process.argv[2];

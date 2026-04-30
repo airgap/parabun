@@ -1,4 +1,4 @@
-// Parabun: native image-codec bindings for `bun:image`.
+// Parabun: native image-codec bindings for `para:image`.
 //
 // JPEG decode via libjpeg-turbo, PNG decode via libpng's simplified
 // png_image API. Both libs are statically linked (see
@@ -1711,13 +1711,13 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
 
     JSValue arg = callFrame->argument(0);
     if (!arg.isCell() || arg.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.decode: expected Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.decode: expected Uint8Array"_s);
         return {};
     }
     auto* view = jsCast<JSC::JSArrayBufferView*>(arg.asCell());
     void* dataPtr = view->vector();
     if (!dataPtr) {
-        throwTypeError(globalObject, scope, "bun:image.decode: typed array is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.decode: typed array is detached"_s);
         return {};
     }
     const uint8_t* bytes = static_cast<const uint8_t*>(dataPtr);
@@ -1725,7 +1725,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
 
     const char* format = detectFormat(bytes, len);
     if (!format) {
-        throwTypeError(globalObject, scope, "bun:image.decode: unrecognized format (expected JPEG or PNG)"_s);
+        throwTypeError(globalObject, scope, "para:image.decode: unrecognized format (expected JPEG or PNG)"_s);
         return {};
     }
 
@@ -1742,7 +1742,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
     }
 
     if (!ok) {
-        throwTypeError(globalObject, scope, makeString("bun:image.decode: "_s, String::fromUTF8(errMsg)));
+        throwTypeError(globalObject, scope, makeString("para:image.decode: "_s, String::fromUTF8(errMsg)));
         return {};
     }
 
@@ -1775,21 +1775,21 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.encode: img must be the object returned from decode()"_s);
+        throwTypeError(globalObject, scope, "para:image.encode: img must be the object returned from decode()"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
 
     // Pull the format string out of opts.
     if (!optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.encode: opts must be { format, quality? }"_s);
+        throwTypeError(globalObject, scope, "para:image.encode: opts must be { format, quality? }"_s);
         return {};
     }
     auto* optsObj = asObject(optsArg);
     JSValue formatVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!formatVal.isString()) {
-        throwTypeError(globalObject, scope, "bun:image.encode: opts.format must be \"jpeg\" or \"png\""_s);
+        throwTypeError(globalObject, scope, "para:image.encode: opts.format must be \"jpeg\" or \"png\""_s);
         return {};
     }
     auto formatStr = formatVal.toWTFString(globalObject).utf8();
@@ -1798,7 +1798,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     bool isPng = std::strcmp(formatStr.data(), "png") == 0;
     bool isWebp = std::strcmp(formatStr.data(), "webp") == 0;
     if (!isJpeg && !isPng && !isWebp) {
-        throwTypeError(globalObject, scope, makeString("bun:image.encode: unknown format "_s, formatVal.toWTFString(globalObject)));
+        throwTypeError(globalObject, scope, makeString("para:image.encode: unknown format "_s, formatVal.toWTFString(globalObject)));
         return {};
     }
 
@@ -1810,11 +1810,11 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!widthVal.isNumber() || !heightVal.isNumber() || !channelsVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.encode: img.width/height/channels must be numbers"_s);
+        throwTypeError(globalObject, scope, "para:image.encode: img.width/height/channels must be numbers"_s);
         return {};
     }
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.encode: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.encode: img.data must be a Uint8Array"_s);
         return {};
     }
     uint32_t width = widthVal.toUInt32(globalObject);
@@ -1823,12 +1823,12 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     auto* dataView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* pixelsRaw = dataView->vector();
     if (!pixelsRaw) {
-        throwTypeError(globalObject, scope, "bun:image.encode: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.encode: img.data is detached"_s);
         return {};
     }
     const uint8_t* pixels = static_cast<const uint8_t*>(pixelsRaw);
     if (dataView->length() != static_cast<size_t>(width) * height * channels) {
-        throwTypeError(globalObject, scope, "bun:image.encode: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.encode: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -1854,7 +1854,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     }
 
     if (!ok) {
-        throwTypeError(globalObject, scope, makeString("bun:image.encode: "_s, String::fromUTF8(errMsg)));
+        throwTypeError(globalObject, scope, makeString("para:image.encode: "_s, String::fromUTF8(errMsg)));
         return {};
     }
 
@@ -1878,7 +1878,7 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject() || !optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.resize: expected (img, { width, height })"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: expected (img, { width, height })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -1892,24 +1892,24 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.resize: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.resize: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: img.data is detached"_s);
         return {};
     }
     const uint32_t sw = widthVal.toUInt32(globalObject);
     const uint32_t sh = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.resize: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(sw) * sh * channels) {
-        throwTypeError(globalObject, scope, "bun:image.resize: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -1917,13 +1917,13 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
     JSValue dhVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!dwVal.isNumber() || !dhVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.resize: opts.width and opts.height are required"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: opts.width and opts.height are required"_s);
         return {};
     }
     const int32_t dwSigned = dwVal.toInt32(globalObject);
     const int32_t dhSigned = dhVal.toInt32(globalObject);
     if (dwSigned < 1 || dhSigned < 1) {
-        throwTypeError(globalObject, scope, "bun:image.resize: opts.width and opts.height must be >= 1"_s);
+        throwTypeError(globalObject, scope, "para:image.resize: opts.width and opts.height must be >= 1"_s);
         return {};
     }
     const uint32_t dw = static_cast<uint32_t>(dwSigned);
@@ -1940,7 +1940,7 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
         if (std::strcmp(kStr.data(), "lanczos") == 0) {
             useLanczos = true;
         } else if (std::strcmp(kStr.data(), "bilinear") != 0) {
-            throwTypeError(globalObject, scope, "bun:image.resize: opts.kernel must be \"bilinear\" or \"lanczos\""_s);
+            throwTypeError(globalObject, scope, "para:image.resize: opts.kernel must be \"bilinear\" or \"lanczos\""_s);
             return {};
         }
     }
@@ -1983,7 +1983,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBlur,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject() || !optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.blur: expected (img, { radius })"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: expected (img, { radius })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -1997,36 +1997,36 @@ JSC_DEFINE_HOST_FUNCTION(functionBlur,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.blur: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.blur: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.blur: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.blur: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
     JSValue radiusVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "radius"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!radiusVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.blur: opts.radius is required (number)"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: opts.radius is required (number)"_s);
         return {};
     }
     const int radius = radiusVal.toInt32(globalObject);
     if (radius < 0 || radius > 100) {
-        throwTypeError(globalObject, scope, "bun:image.blur: radius must be in [0, 100]"_s);
+        throwTypeError(globalObject, scope, "para:image.blur: radius must be in [0, 100]"_s);
         return {};
     }
 
@@ -2062,7 +2062,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSharpen,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: expected (img, { amount?, radius? })"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: expected (img, { amount?, radius? })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2076,24 +2076,24 @@ JSC_DEFINE_HOST_FUNCTION(functionSharpen,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2108,11 +2108,11 @@ JSC_DEFINE_HOST_FUNCTION(functionSharpen,
         if (amountVal.isNumber()) amount = static_cast<float>(amountVal.toNumber(globalObject));
     }
     if (radius < 0 || radius > 100) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: radius must be in [0, 100]"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: radius must be in [0, 100]"_s);
         return {};
     }
     if (!std::isfinite(amount) || amount < -10.0f || amount > 10.0f) {
-        throwTypeError(globalObject, scope, "bun:image.sharpen: amount must be a finite number in [-10, 10]"_s);
+        throwTypeError(globalObject, scope, "para:image.sharpen: amount must be a finite number in [-10, 10]"_s);
         return {};
     }
 
@@ -2147,7 +2147,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEdgeDetect,
 
     JSValue imgArg = callFrame->argument(0);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.edgeDetect: expected (img)"_s);
+        throwTypeError(globalObject, scope, "para:image.edgeDetect: expected (img)"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2160,24 +2160,24 @@ JSC_DEFINE_HOST_FUNCTION(functionEdgeDetect,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.edgeDetect: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.edgeDetect: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.edgeDetect: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.edgeDetect: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.edgeDetect: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.edgeDetect: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.edgeDetect: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.edgeDetect: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2212,7 +2212,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRotate,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject() || !optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: expected (img, { degrees })"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: expected (img, { degrees })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2226,36 +2226,36 @@ JSC_DEFINE_HOST_FUNCTION(functionRotate,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
     JSValue degVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "degrees"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!degVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: opts.degrees is required (number)"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: opts.degrees is required (number)"_s);
         return {};
     }
     const int32_t degrees = degVal.toInt32(globalObject);
     if (degrees != 90 && degrees != 180 && degrees != 270) {
-        throwTypeError(globalObject, scope, "bun:image.rotate: degrees must be 90, 180, or 270"_s);
+        throwTypeError(globalObject, scope, "para:image.rotate: degrees must be 90, 180, or 270"_s);
         return {};
     }
 
@@ -2298,7 +2298,7 @@ JSC_DEFINE_HOST_FUNCTION(functionFlip,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject() || !optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.flip: expected (img, { axis })"_s);
+        throwTypeError(globalObject, scope, "para:image.flip: expected (img, { axis })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2312,31 +2312,31 @@ JSC_DEFINE_HOST_FUNCTION(functionFlip,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.flip: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.flip: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.flip: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.flip: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.flip: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.flip: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.flip: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.flip: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
     JSValue axisVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "axis"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!axisVal.isString()) {
-        throwTypeError(globalObject, scope, "bun:image.flip: opts.axis must be \"horizontal\" or \"vertical\""_s);
+        throwTypeError(globalObject, scope, "para:image.flip: opts.axis must be \"horizontal\" or \"vertical\""_s);
         return {};
     }
     auto axisStr = axisVal.toWTFString(globalObject).utf8();
@@ -2344,7 +2344,7 @@ JSC_DEFINE_HOST_FUNCTION(functionFlip,
     const bool isHorizontal = std::strcmp(axisStr.data(), "horizontal") == 0;
     const bool isVertical = std::strcmp(axisStr.data(), "vertical") == 0;
     if (!isHorizontal && !isVertical) {
-        throwTypeError(globalObject, scope, "bun:image.flip: opts.axis must be \"horizontal\" or \"vertical\""_s);
+        throwTypeError(globalObject, scope, "para:image.flip: opts.axis must be \"horizontal\" or \"vertical\""_s);
         return {};
     }
 
@@ -2384,7 +2384,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject() || !optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.crop: expected (img, { x, y, width, height })"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: expected (img, { x, y, width, height })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2398,24 +2398,24 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.crop: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.crop: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: img.data is detached"_s);
         return {};
     }
     const uint32_t sw = widthVal.toUInt32(globalObject);
     const uint32_t sh = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.crop: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(sw) * sh * channels) {
-        throwTypeError(globalObject, scope, "bun:image.crop: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2425,7 +2425,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
     JSValue chVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "height"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!xVal.isNumber() || !yVal.isNumber() || !cwVal.isNumber() || !chVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.crop: opts.x, .y, .width, .height are all required (numbers)"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: opts.x, .y, .width, .height are all required (numbers)"_s);
         return {};
     }
     const int32_t xS = xVal.toInt32(globalObject);
@@ -2433,11 +2433,11 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
     const int32_t cwS = cwVal.toInt32(globalObject);
     const int32_t chS = chVal.toInt32(globalObject);
     if (xS < 0 || yS < 0) {
-        throwTypeError(globalObject, scope, "bun:image.crop: opts.x and opts.y must be >= 0"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: opts.x and opts.y must be >= 0"_s);
         return {};
     }
     if (cwS < 1 || chS < 1) {
-        throwTypeError(globalObject, scope, "bun:image.crop: opts.width and opts.height must be >= 1"_s);
+        throwTypeError(globalObject, scope, "para:image.crop: opts.width and opts.height must be >= 1"_s);
         return {};
     }
     const uint32_t x = static_cast<uint32_t>(xS);
@@ -2447,7 +2447,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
     // Bounds check — crop must fit entirely inside the source.
     if (x + cw > sw || y + ch > sh) {
         throwTypeError(globalObject, scope,
-            makeString("bun:image.crop: crop rectangle ("_s,
+            makeString("para:image.crop: crop rectangle ("_s,
                 String::number(x), ","_s, String::number(y), " "_s,
                 String::number(cw), "x"_s, String::number(ch),
                 ") extends past source bounds ("_s,
@@ -2486,7 +2486,7 @@ JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
 
     JSValue imgArg = callFrame->argument(0);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.toGrayscale: expected (img)"_s);
+        throwTypeError(globalObject, scope, "para:image.toGrayscale: expected (img)"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2499,24 +2499,24 @@ JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.toGrayscale: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.toGrayscale: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.toGrayscale: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.toGrayscale: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.toGrayscale: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.toGrayscale: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.toGrayscale: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.toGrayscale: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2552,7 +2552,7 @@ JSC_DEFINE_HOST_FUNCTION(functionHueShift,
     JSValue imgArg = callFrame->argument(0);
     JSValue degArg = callFrame->argument(1);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: expected (img, degrees)"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: expected (img, degrees)"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2564,34 +2564,34 @@ JSC_DEFINE_HOST_FUNCTION(functionHueShift,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
     if (!degArg.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: degrees must be a number"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: degrees must be a number"_s);
         return {};
     }
     double degrees = degArg.toNumber(globalObject);
     if (!std::isfinite(degrees)) {
-        throwTypeError(globalObject, scope, "bun:image.hueShift: degrees must be finite"_s);
+        throwTypeError(globalObject, scope, "para:image.hueShift: degrees must be finite"_s);
         return {};
     }
     // Wrap to [-360, 360] equivalent — full rotations cancel.
@@ -2626,7 +2626,7 @@ JSC_DEFINE_HOST_FUNCTION(functionAdjust,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.adjust: expected (img, { brightness?, contrast?, saturation? })"_s);
+        throwTypeError(globalObject, scope, "para:image.adjust: expected (img, { brightness?, contrast?, saturation? })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2640,24 +2640,24 @@ JSC_DEFINE_HOST_FUNCTION(functionAdjust,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.adjust: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.adjust: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.adjust: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.adjust: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.adjust: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.adjust: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.adjust: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.adjust: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2675,7 +2675,7 @@ JSC_DEFINE_HOST_FUNCTION(functionAdjust,
     }
     auto inRange = [](float v) { return std::isfinite(v) && v >= -1.0f && v <= 1.0f; };
     if (!inRange(brightness) || !inRange(contrast) || !inRange(saturation)) {
-        throwTypeError(globalObject, scope, "bun:image.adjust: brightness / contrast / saturation must each be a finite number in [-1, 1]"_s);
+        throwTypeError(globalObject, scope, "para:image.adjust: brightness / contrast / saturation must each be a finite number in [-1, 1]"_s);
         return {};
     }
 
@@ -2711,7 +2711,7 @@ JSC_DEFINE_HOST_FUNCTION(functionHistogram,
 
     JSValue imgArg = callFrame->argument(0);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.histogram: expected (img)"_s);
+        throwTypeError(globalObject, scope, "para:image.histogram: expected (img)"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2723,24 +2723,24 @@ JSC_DEFINE_HOST_FUNCTION(functionHistogram,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.histogram: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.histogram: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.histogram: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.histogram: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.histogram: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.histogram: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.histogram: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.histogram: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2777,7 +2777,7 @@ JSC_DEFINE_HOST_FUNCTION(functionComposite,
     JSValue overlayArg = callFrame->argument(1);
     JSValue optsArg = callFrame->argument(2);
     if (!baseArg.isObject() || !overlayArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.composite: expected (base, overlay, { x?, y? })"_s);
+        throwTypeError(globalObject, scope, "para:image.composite: expected (base, overlay, { x?, y? })"_s);
         return {};
     }
     auto* baseObj = asObject(baseArg);
@@ -2818,10 +2818,10 @@ JSC_DEFINE_HOST_FUNCTION(functionComposite,
 
     const uint8_t* basePtr = nullptr;
     uint32_t bw = 0, bh = 0, bChannels = 0;
-    if (!extract(baseObj, "bun:image.composite: base"_s, basePtr, bw, bh, bChannels)) return {};
+    if (!extract(baseObj, "para:image.composite: base"_s, basePtr, bw, bh, bChannels)) return {};
     const uint8_t* overlayPtr = nullptr;
     uint32_t ow = 0, oh = 0, oChannels = 0;
-    if (!extract(overlayObj, "bun:image.composite: overlay"_s, overlayPtr, ow, oh, oChannels)) return {};
+    if (!extract(overlayObj, "para:image.composite: overlay"_s, overlayPtr, ow, oh, oChannels)) return {};
 
     int32_t px = 0, py = 0;
     if (optsObj) {
@@ -2867,7 +2867,7 @@ JSC_DEFINE_HOST_FUNCTION(functionInvert,
 
     JSValue imgArg = callFrame->argument(0);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.invert: expected (img)"_s);
+        throwTypeError(globalObject, scope, "para:image.invert: expected (img)"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2880,24 +2880,24 @@ JSC_DEFINE_HOST_FUNCTION(functionInvert,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.invert: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.invert: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.invert: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.invert: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.invert: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.invert: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.invert: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.invert: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2931,7 +2931,7 @@ JSC_DEFINE_HOST_FUNCTION(functionThreshold,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.threshold: expected (img, { value? })"_s);
+        throwTypeError(globalObject, scope, "para:image.threshold: expected (img, { value? })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -2945,24 +2945,24 @@ JSC_DEFINE_HOST_FUNCTION(functionThreshold,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.threshold: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.threshold: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.threshold: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.threshold: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 1 && channels != 3 && channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.threshold: channels must be 1, 3, or 4"_s);
+        throwTypeError(globalObject, scope, "para:image.threshold: channels must be 1, 3, or 4"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.threshold: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.threshold: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
@@ -2973,7 +2973,7 @@ JSC_DEFINE_HOST_FUNCTION(functionThreshold,
         if (valVal.isNumber()) value = valVal.toInt32(globalObject);
     }
     if (value < 0 || value > 255) {
-        throwTypeError(globalObject, scope, "bun:image.threshold: value must be in [0, 255]"_s);
+        throwTypeError(globalObject, scope, "para:image.threshold: value must be in [0, 255]"_s);
         return {};
     }
 
@@ -3008,7 +3008,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBoxBlur,
     JSValue imgArg = callFrame->argument(0);
     JSValue optsArg = callFrame->argument(1);
     if (!imgArg.isObject() || !optsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: expected (img, { radius })"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: expected (img, { radius })"_s);
         return {};
     }
     auto* imgObj = asObject(imgArg);
@@ -3022,36 +3022,36 @@ JSC_DEFINE_HOST_FUNCTION(functionBoxBlur,
     RETURN_IF_EXCEPTION(scope, {});
 
     if (!dataVal.isCell() || dataVal.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: img.data must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: img.data must be a Uint8Array"_s);
         return {};
     }
     auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: img.data is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: img.data is detached"_s);
         return {};
     }
     const uint32_t w = widthVal.toUInt32(globalObject);
     const uint32_t h = heightVal.toUInt32(globalObject);
     const uint32_t channels = channelsVal.toUInt32(globalObject);
     if (channels != 4) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: only 4-channel RGBA inputs supported in v1"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: only 4-channel RGBA inputs supported in v1"_s);
         return {};
     }
     if (srcView->length() != static_cast<size_t>(w) * h * channels) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: img.data length doesn't match width*height*channels"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: img.data length doesn't match width*height*channels"_s);
         return {};
     }
 
     JSValue radiusVal = optsObj->get(globalObject, JSC::Identifier::fromString(vm, "radius"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!radiusVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: opts.radius is required (number)"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: opts.radius is required (number)"_s);
         return {};
     }
     const int radius = radiusVal.toInt32(globalObject);
     if (radius < 0 || radius > 1000) {
-        throwTypeError(globalObject, scope, "bun:image.boxBlur: radius must be in [0, 1000]"_s);
+        throwTypeError(globalObject, scope, "para:image.boxBlur: radius must be in [0, 1000]"_s);
         return {};
     }
 
@@ -3324,21 +3324,21 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
     JSValue outArg = callFrame->argument(2);
 
     if (!inArg.isCell() || inArg.asCell()->type() != JSC::Uint8ArrayType) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: input must be a Uint8Array"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: input must be a Uint8Array"_s);
         return {};
     }
     if (!opsArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: ops must be an array"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: ops must be an array"_s);
         return {};
     }
     if (!outArg.isObject()) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: out opts must be an object"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: out opts must be an object"_s);
         return {};
     }
     auto* inView = jsCast<JSC::JSArrayBufferView*>(inArg.asCell());
     void* inRaw = inView->vector();
     if (!inRaw) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: input is detached"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: input is detached"_s);
         return {};
     }
     const uint8_t* inBytes = static_cast<const uint8_t*>(inRaw);
@@ -3347,7 +3347,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
     // Decode once.
     const char* fmtIn = detectFormat(inBytes, inLen);
     if (!fmtIn) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: input format not recognized"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: input format not recognized"_s);
         return {};
     }
     PipelineState state;
@@ -3362,7 +3362,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
         ok = decodeWebPBytes(inBytes, inLen, state.a, state.w, state.h, state.channels, errMsg, sizeof(errMsg));
     }
     if (!ok) {
-        throwTypeError(globalObject, scope, makeString("bun:image.pipeline: decode: "_s, String::fromUTF8(errMsg)));
+        throwTypeError(globalObject, scope, makeString("para:image.pipeline: decode: "_s, String::fromUTF8(errMsg)));
         return {};
     }
 
@@ -3371,7 +3371,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
     JSValue lengthVal = opsObj->get(globalObject, vm.propertyNames->length);
     RETURN_IF_EXCEPTION(scope, {});
     if (!lengthVal.isNumber()) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: ops must have .length"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: ops must have .length"_s);
         return {};
     }
     const uint32_t numOps = lengthVal.toUInt32(globalObject);
@@ -3379,11 +3379,11 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
         JSValue opVal = opsObj->get(globalObject, i);
         RETURN_IF_EXCEPTION(scope, {});
         if (!opVal.isObject()) {
-            throwTypeError(globalObject, scope, makeString("bun:image.pipeline: ops["_s, String::number(i), "] must be an object"_s));
+            throwTypeError(globalObject, scope, makeString("para:image.pipeline: ops["_s, String::number(i), "] must be an object"_s));
             return {};
         }
         if (!applyPipelineOp(globalObject, scope, state, asObject(opVal), errMsg, sizeof(errMsg))) {
-            throwTypeError(globalObject, scope, makeString("bun:image.pipeline: "_s, String::fromUTF8(errMsg)));
+            throwTypeError(globalObject, scope, makeString("para:image.pipeline: "_s, String::fromUTF8(errMsg)));
             return {};
         }
     }
@@ -3393,7 +3393,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
     JSValue formatVal = outOpts->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
     RETURN_IF_EXCEPTION(scope, {});
     if (!formatVal.isString()) {
-        throwTypeError(globalObject, scope, "bun:image.pipeline: out.format is required"_s);
+        throwTypeError(globalObject, scope, "para:image.pipeline: out.format is required"_s);
         return {};
     }
     auto outFormatStr = formatVal.toWTFString(globalObject).utf8();
@@ -3416,11 +3416,11 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
     } else if (std::strcmp(outFormat, "webp") == 0) {
         encOk = encodeWebPBytes(state.current(), state.w, state.h, state.channels, quality, lossless, outBytes, errMsg, sizeof(errMsg));
     } else {
-        throwTypeError(globalObject, scope, makeString("bun:image.pipeline: unknown out.format "_s, formatVal.toWTFString(globalObject)));
+        throwTypeError(globalObject, scope, makeString("para:image.pipeline: unknown out.format "_s, formatVal.toWTFString(globalObject)));
         return {};
     }
     if (!encOk) {
-        throwTypeError(globalObject, scope, makeString("bun:image.pipeline: encode: "_s, String::fromUTF8(errMsg)));
+        throwTypeError(globalObject, scope, makeString("para:image.pipeline: encode: "_s, String::fromUTF8(errMsg)));
         return {};
     }
 

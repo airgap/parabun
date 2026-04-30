@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 
 async function tryCapture(): Promise<{ mic: any; supported: boolean }> {
   try {
-    const audio = (await import("bun:audio")).default;
+    const audio = (await import("para:audio")).default;
     const mic = await audio.capture({
       device: "default",
       sampleRate: 16000,
@@ -19,7 +19,7 @@ async function tryCapture(): Promise<{ mic: any; supported: boolean }> {
   }
 }
 
-describe("bun:audio capture signals", () => {
+describe("para:audio capture signals", () => {
   test("peakLevel + active are Signal-shaped", async () => {
     const { mic, supported } = await tryCapture();
     if (!supported) return;

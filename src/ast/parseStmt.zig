@@ -1447,7 +1447,7 @@ pub fn ParseStmt(
 
         // Parabun: parse an `arena { ...body... }` block statement. Desugars to
         //   __parabunArena(() => { ...body... });
-        // which delegates to bun:arena's `scope` — running the body with JSC
+        // which delegates to para:arena's `scope` — running the body with JSC
         // GC deferred, then requesting an Eden collection on scope exit.
         // Latency-smoothing, not a bump allocator.
         //
@@ -1493,7 +1493,7 @@ pub fn ParseStmt(
                 .is_async = false,
             }, arrow_loc);
 
-            // Build `require("bun:arena").scope(arrow)` via the user-typed
+            // Build `require("para:arena").scope(arrow)` via the user-typed
             // require identifier shape. During the visit pass the parser's
             // transposeRequire path rewrites the literal require call into
             // an E.RequireString with correct part-level import-record
@@ -1505,7 +1505,7 @@ pub fn ParseStmt(
             // resolves via findSymbol to whatever `require` is bound to.
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "bun:arena" }, arena_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "para:arena" }, arena_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, arena_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -1528,9 +1528,9 @@ pub fn ParseStmt(
         // Parabun: parse a `signal NAME = RHS` declaration. `signal` implies
         // `const` — there's no `signal let`/`const`/`var` form. Each RHS is
         // wrapped in
-        //   require("bun:signals").signal(RHS)
+        //   require("para:signals").signal(RHS)
         // by default, or
-        //   require("bun:signals").derived(() => RHS)
+        //   require("para:signals").derived(() => RHS)
         // when the RHS references another in-scope signal name (auto-derive).
         // The file-level pragma `// @parabun-strict-signals` disables
         // auto-derive, making every decl a plain `signal(RHS)`.
@@ -1615,7 +1615,7 @@ pub fn ParseStmt(
 
                             const require_ref = p.storeNameInRef("require") catch unreachable;
                             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, signal_range.loc);
+                            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, signal_range.loc);
                             const require_call = p.newExpr(E.Call{
                                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, signal_range.loc),
                                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -1742,7 +1742,7 @@ pub fn ParseStmt(
         }
 
         // Parabun: parse an `effect { ...body... }` block statement. Desugars to
-        //   require("bun:signals").effect(() => { ...body... });
+        //   require("para:signals").effect(() => { ...body... });
         // The runtime wraps the arrow in an EffectImpl which runs once eagerly,
         // tracks any signal `.get()` reads as deps, and re-runs on invalidation.
         // Return a function from the body for cleanup (React-style); it fires
@@ -1785,7 +1785,7 @@ pub fn ParseStmt(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, effect_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, effect_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -1807,14 +1807,14 @@ pub fn ParseStmt(
 
         // Parabun: parse `when EXPR { body }` or `when not EXPR { body }`
         // statement. Desugars to:
-        //   require("bun:signals").onRising(() => EXPR, () => { body });
-        //   require("bun:signals").onFalling(() => EXPR, () => { body });
+        //   require("para:signals").onRising(() => EXPR, () => { body });
+        //   require("para:signals").onFalling(() => EXPR, () => { body });
         //
         // Edge-triggered handler — fires the body once on each rising
         // (false→true) transition of the predicate, or each falling
         // (true→false) transition for the `not` form. The two arrows
         // mirror what callers would otherwise write by hand against
-        // `bun:signals.onRising`/`onFalling`.
+        // `para:signals.onRising`/`onFalling`.
         //
         // At entry: `when` has already been consumed; p.lexer is on the
         // first token of the predicate (which may be `not`).
@@ -1885,10 +1885,10 @@ pub fn ParseStmt(
                 .is_async = false,
             }, body_arrow_loc);
 
-            // require("bun:signals").<helper_name>(pred_arrow, body_arrow)
+            // require("para:signals").<helper_name>(pred_arrow, body_arrow)
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, when_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, when_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, when_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -2004,7 +2004,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "signal NAME = RHS" declaration — each RHS is wrapped
-            // in `require("bun:signals").signal(RHS)` and the declared ref is
+            // in `require("para:signals").signal(RHS)` and the declared ref is
             // marked as signal-bound so the visit pass rewrites reads/assigns
             // accordingly. `signal` implies `const` — there's no `signal let`
             // or `signal var`.
@@ -2020,11 +2020,11 @@ pub fn ParseStmt(
                     return try parseSignalStmt(p, signal_range, opts);
                 }
                 // Not a signal declaration — rewind so `signal` works as a
-                // plain identifier (`import { signal } from "bun:signals"; signal(0);`).
+                // plain identifier (`import { signal } from "para:signals"; signal(0);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising
-            // and falling edge handlers. Desugar to require("bun:signals").onRising
+            // and falling edge handlers. Desugar to require("para:signals").onRising
             // (() => EXPR, () => { body }) and onFalling(...) respectively.
             //
             // Block-form `when` is distinct from the suffix `when` clause used in
@@ -2053,7 +2053,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "effect { ...body... }" block statement — desugars to
-            //   require("bun:signals").effect(() => { ...body... });
+            //   require("para:signals").effect(() => { ...body... });
             // Only triggers when `effect` is immediately followed (no newline)
             // by `{`. Any other token means `effect` is a plain identifier
             // (including `effect(fn)` — that's a regular call expression).
@@ -2065,7 +2065,7 @@ pub fn ParseStmt(
                     return try parseEffectStmt(p, effect_range);
                 }
                 // Not an effect block — rewind so `effect` works as a plain
-                // identifier (`import { effect } from "bun:signals"; effect(fn);`).
+                // identifier (`import { effect } from "para:signals"; effect(fn);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "pure function" or "pure async function" statements

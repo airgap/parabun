@@ -15,9 +15,9 @@ const llmCandidates = [
 const llmFixture = llmCandidates.find(p => existsSync(p));
 const haveLLM = Boolean(llmFixture);
 
-describe("bun:assistant cron parser (LYK-737)", () => {
+describe("para:assistant cron parser (LYK-737)", () => {
   test("parses every-minute wildcard", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const spec = a.parseCron("* * * * *");
     expect(spec.minute.size).toBe(60);
     expect(spec.hour.size).toBe(24);
@@ -27,7 +27,7 @@ describe("bun:assistant cron parser (LYK-737)", () => {
   });
 
   test("parses exact value at the minute", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const spec = a.parseCron("0 8 * * *");
     expect([...spec.minute]).toEqual([0]);
     expect([...spec.hour]).toEqual([8]);
@@ -38,7 +38,7 @@ describe("bun:assistant cron parser (LYK-737)", () => {
   });
 
   test("parses ranges", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const spec = a.parseCron("0 9-17 * * 1-5");
     // 9 AM Monday matches; 8 AM and Saturday don't.
     expect(a.cronMatches(spec, new Date(2026, 0, 5, 9, 0, 0))).toBe(true); // Monday
@@ -49,31 +49,31 @@ describe("bun:assistant cron parser (LYK-737)", () => {
   });
 
   test("parses lists", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const spec = a.parseCron("0,15,30,45 * * * *");
     expect([...spec.minute].sort((x, y) => x - y)).toEqual([0, 15, 30, 45]);
   });
 
   test("parses step (*/N)", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const spec = a.parseCron("*/15 * * * *");
     expect([...spec.minute].sort((x, y) => x - y)).toEqual([0, 15, 30, 45]);
   });
 
   test("parses range with step", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const spec = a.parseCron("0-30/10 * * * *");
     expect([...spec.minute].sort((x, y) => x - y)).toEqual([0, 10, 20, 30]);
   });
 
   test("rejects wrong field count", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     expect(() => a.parseCron("* * * *")).toThrow(/5 fields/);
     expect(() => a.parseCron("* * * * * *")).toThrow(/5 fields/);
   });
 
   test("rejects out-of-range values", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     expect(() => a.parseCron("60 * * * *")).toThrow(/out of range/);
     expect(() => a.parseCron("* 24 * * *")).toThrow(/out of range/);
     expect(() => a.parseCron("* * 0 * *")).toThrow(/out of range/);
@@ -82,17 +82,17 @@ describe("bun:assistant cron parser (LYK-737)", () => {
   });
 
   test("rejects malformed ranges", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     expect(() => a.parseCron("10-5 * * * *")).toThrow(/out of range/);
   });
 
   test("rejects invalid step", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     expect(() => a.parseCron("*/0 * * * *")).toThrow(/invalid cron step/);
   });
 
   test("Sunday is dow=0, Saturday is dow=6", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const sunOnly = a.parseCron("0 0 * * 0");
     // 2026-01-04 is a Sunday.
     expect(a.cronMatches(sunOnly, new Date(2026, 0, 4, 0, 0, 0))).toBe(true);
@@ -100,10 +100,10 @@ describe("bun:assistant cron parser (LYK-737)", () => {
   });
 });
 
-describe("bun:assistant schedule option (LYK-737)", () => {
+describe("para:assistant schedule option (LYK-737)", () => {
   test("rejects invalid cron at create time", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     await expect(
       assistant.create({
         llm: llmFixture!,
@@ -114,7 +114,7 @@ describe("bun:assistant schedule option (LYK-737)", () => {
 
   test("accepts valid schedule and stays idle on construction", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       // Far-future Feb 30 — never matches; safe to exercise the timer
@@ -131,7 +131,7 @@ describe("bun:assistant schedule option (LYK-737)", () => {
 
   test("rejects schedule entries with non-string fields", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     await expect(
       assistant.create({
         llm: llmFixture!,

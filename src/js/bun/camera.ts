@@ -1,10 +1,10 @@
-// Hardcoded module "bun:camera"
+// Hardcoded module "para:camera"
 //
 // Parabun: zero-dependency camera capture for the embedded edge runtime.
 // V4L2 on Linux today; AVFoundation (macOS) and Media Foundation (Windows)
 // follow on top of the same JS surface.
 //
-//   import camera from "bun:camera";
+//   import camera from "para:camera";
 //
 //   // Enumerate cameras
 //   const devs = await camera.devices();
@@ -35,7 +35,7 @@
 const native = $cpp("parabun_camera.cpp", "createParabunCamera");
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of bun:signals's
+// Structural Signal types — keep this module agnostic of para:signals's
 // class hierarchy. Same shape as audio.ts / llm.ts / speech.ts.
 type Signal<T> = {
   get(): T;
@@ -320,7 +320,7 @@ async function open(path: string, opts: OpenOptions): Promise<Camera> {
 
 /**
  * Convert a captured frame into RGBA8 (length = width × height × 4). Routed
- * through bun:image for "mjpg" (JPEG decode) and a scalar YUV→RGB matrix
+ * through para:image for "mjpg" (JPEG decode) and a scalar YUV→RGB matrix
  * for "yuyv" / "nv12". A native fast path lands once the kernel-residency
  * tail of the pipeline is shaped.
  */
@@ -342,7 +342,7 @@ function toRgba(frame: Frame, _opts?: { gpu?: boolean }): Uint8Array {
   }
   if (frame.format === "yuyv") {
     // YUYV → RGBA. Two source pixels per 4-byte block (Y0 U Y1 V) → two
-    // RGBA pixels. Scalar reference; bun:image's SIMD shuffle path can
+    // RGBA pixels. Scalar reference; para:image's SIMD shuffle path can
     // be plugged in once it's externally callable.
     const w = frame.width,
       h = frame.height;
@@ -378,13 +378,13 @@ function toRgba(frame: Frame, _opts?: { gpu?: boolean }): Uint8Array {
     return out;
   }
   if (frame.format === "mjpg") {
-    // MJPEG frames are complete JPEG bitstreams — decode via bun:image:
-    //   import image from "bun:image";
+    // MJPEG frames are complete JPEG bitstreams — decode via para:image:
+    //   import image from "para:image";
     //   const decoded = await image.decode(frame.data);
-    // We don't import bun:image here because cross-module imports between
+    // We don't import para:image here because cross-module imports between
     // bun:* builtins aren't supported by the internal bundler.
     throw new Error(
-      'bun:camera.toRgba: for "mjpg" frames, decode the JPEG with bun:image: `await image.decode(frame.data)`',
+      'para:camera.toRgba: for "mjpg" frames, decode the JPEG with para:image: `await image.decode(frame.data)`',
     );
   }
   if (frame.format === "nv12") {
@@ -415,7 +415,7 @@ function toRgba(frame: Frame, _opts?: { gpu?: boolean }): Uint8Array {
     }
     return out;
   }
-  throw new Error(`bun:camera: toRgba does not yet support format "${frame.format}"`);
+  throw new Error(`para:camera: toRgba does not yet support format "${frame.format}"`);
 }
 
 export default {

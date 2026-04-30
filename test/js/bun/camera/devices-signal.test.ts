@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import camera from "bun:camera";
+import camera from "para:camera";
 
 // camera.devices is a callable signal (LYK-745). Calling it returns a
 // Promise<DeviceInfo[]> for backwards compat; .get / .peek / .subscribe are
 // the reactive surface backed by inotify on /dev for video* entries.
 
-describe("bun:camera.devices callable signal (LYK-745)", () => {
+describe("para:camera.devices callable signal (LYK-745)", () => {
   test("call form returns a Promise<DeviceInfo[]>", async () => {
     const result = camera.devices();
     expect(result).toBeInstanceOf(Promise);

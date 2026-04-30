@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:arena", () => {
+describe("para:arena", () => {
   it("acquires and releases a Uint8Array of the requested size", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-acquire",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const pool = new arena.Pool(Uint8Array, 1024);
         const buf = pool.acquire();
         console.log(buf.constructor.name, buf.length);
@@ -34,7 +34,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-recycle",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const pool = new arena.Pool(Uint8Array, 64);
         const a = pool.acquire();
         a[0] = 42;
@@ -51,7 +51,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-clear",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const dirty = new arena.Pool(Uint8Array, 8);
         const clean = new arena.Pool(Uint8Array, 8, { clear: true });
         for (const pool of [dirty, clean]) {
@@ -68,7 +68,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-use",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const pool = new arena.Pool(Uint8Array, 16);
         const sum = pool.use(buf => { for (let i = 0; i < buf.length; i++) buf[i] = i; return buf.reduce((a,b)=>a+b,0); });
         try { pool.use(() => { throw new Error("x"); }); } catch {}
@@ -83,7 +83,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-prewarm",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const pool = new arena.Pool(Uint8Array, 32, { prewarm: 4 });
         console.log(pool.stats().free);
       `,
@@ -96,7 +96,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-scope-return",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         console.log(arena.scope(() => 42));
         console.log(JSON.stringify(arena.scope(() => ({ a: 1, b: [2, 3] }))));
       `,
@@ -109,7 +109,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-scope-throw",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         try { arena.scope(() => { throw new Error("boom"); }); }
         catch (e) { console.log(e.message); }
         // If the deferral leaked, this Bun.gc(true) (sync full) would assert/hang.
@@ -125,7 +125,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-scope-nested",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const out = arena.scope(() => arena.scope(() => arena.scope(() => 7 * 6)));
         console.log(out);
       `,
@@ -138,7 +138,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-scope-non-callable",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         try { arena.scope(123); console.log("no-throw"); }
         catch (e) { console.log(e instanceof TypeError ? "TypeError" : "Other"); }
       `,
@@ -151,7 +151,7 @@ describe("bun:arena", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-arena-mismatch",
       `
-        import arena from "bun:arena";
+        import arena from "para:arena";
         const pool = new arena.Pool(Uint8Array, 32);
         try { pool.release(new Uint8Array(64)); console.log("no-throw"); }
         catch (e) { console.log(e instanceof TypeError ? "TypeError" : "Other"); }

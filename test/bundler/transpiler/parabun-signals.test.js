@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
-// Parabun `bun:signals` — fine-grained reactive primitives.
+// Parabun `para:signals` — fine-grained reactive primitives.
 // Exposed API: signal(v), derived(fn), effect(fn), batch(fn), untrack(fn).
 // The language-level `signal x` / `effect { }` sugar (not yet shipped) will
 // desugar to calls into this module; these tests cover the runtime surface.
@@ -21,12 +21,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:signals", () => {
+describe("para:signals", () => {
   it("signal: read and write", async () => {
     const { stdout, exitCode } = await runFixture(
       "signals-state",
       `
-        import { signal } from "bun:signals";
+        import { signal } from "para:signals";
         const count = signal(0);
         console.log(count.get());
         count.set(5);
@@ -41,7 +41,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-noop",
       `
-        import { signal, effect } from "bun:signals";
+        import { signal, effect } from "para:signals";
         const x = signal(1);
         let runs = 0;
         effect(() => { x.get(); runs++; });
@@ -58,7 +58,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-derived",
       `
-        import { signal, derived } from "bun:signals";
+        import { signal, derived } from "para:signals";
         const a = signal(2);
         const b = signal(3);
         let computes = 0;
@@ -78,7 +78,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-effect",
       `
-        import { signal, effect } from "bun:signals";
+        import { signal, effect } from "para:signals";
         const x = signal(1);
         const log = [];
         const dispose = effect(() => { log.push(x.get()); });
@@ -97,7 +97,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-cleanup",
       `
-        import { signal, effect } from "bun:signals";
+        import { signal, effect } from "para:signals";
         const x = signal(1);
         const log = [];
         const dispose = effect(() => {
@@ -119,7 +119,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-batch",
       `
-        import { signal, effect, batch } from "bun:signals";
+        import { signal, effect, batch } from "para:signals";
         const a = signal(1);
         const b = signal(2);
         let runs = 0;
@@ -136,7 +136,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-untrack",
       `
-        import { signal, effect, untrack } from "bun:signals";
+        import { signal, effect, untrack } from "para:signals";
         const a = signal(1);
         const b = signal(10);
         let runs = 0;
@@ -158,7 +158,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-diamond",
       `
-        import { signal, derived, effect } from "bun:signals";
+        import { signal, derived, effect } from "para:signals";
         const a = signal(1);
         const b = derived(() => a.get() + 1);
         const c = derived(() => a.get() + 10);
@@ -183,7 +183,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-peek",
       `
-        import { signal, effect } from "bun:signals";
+        import { signal, effect } from "para:signals";
         const a = signal(1);
         const b = signal(10);
         let runs = 0;
@@ -201,7 +201,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-update",
       `
-        import { signal } from "bun:signals";
+        import { signal } from "para:signals";
         const n = signal(5);
         n.update(x => x * 2);
         n.update(x => x + 1);
@@ -216,7 +216,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-dynamic-deps",
       `
-        import { signal, effect } from "bun:signals";
+        import { signal, effect } from "para:signals";
         const flag = signal(true);
         const a = signal("a");
         const b = signal("b");
@@ -237,7 +237,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-subscribe",
       `
-        import { signal } from "bun:signals";
+        import { signal } from "para:signals";
         const x = signal(0);
         const log = [];
         const unsub = x.subscribe(v => log.push(v));
@@ -256,7 +256,7 @@ describe("bun:signals", () => {
     const { stdout, exitCode } = await runFixture(
       "signals-derived-readonly",
       `
-        import { signal, derived } from "bun:signals";
+        import { signal, derived } from "para:signals";
         const a = signal(1);
         const b = derived(() => a.get() * 2);
         try { b.set(99); console.log("no-throw"); }
@@ -268,7 +268,7 @@ describe("bun:signals", () => {
   });
 });
 
-// Language-level sugar: `effect { body }` desugars to `require("bun:signals").effect(() => { body })`.
+// Language-level sugar: `effect { body }` desugars to `require("para:signals").effect(() => { body })`.
 // The identifier `effect` is only treated as a block-keyword when immediately followed (no newline)
 // by `{`; any other continuation leaves `effect` as a plain identifier.
 describe("parabun: effect { } block", () => {
@@ -276,7 +276,7 @@ describe("parabun: effect { } block", () => {
     const { stdout, exitCode } = await runFixture(
       "effect-block-basic",
       `
-        import { signal } from "bun:signals";
+        import { signal } from "para:signals";
         const x = signal(1);
         const log = [];
         effect {
@@ -295,7 +295,7 @@ describe("parabun: effect { } block", () => {
     const { stdout, exitCode } = await runFixture(
       "effect-block-cleanup",
       `
-        import { signal } from "bun:signals";
+        import { signal } from "para:signals";
         const x = signal(1);
         const log = [];
         effect {
@@ -328,7 +328,7 @@ describe("parabun: effect { } block", () => {
     const { stdout, exitCode } = await runFixture(
       "effect-identifier",
       `
-        import { signal, effect } from "bun:signals";
+        import { signal, effect } from "para:signals";
         const x = signal(1);
         const log = [];
         effect(() => { log.push(x.get()); });
@@ -366,7 +366,7 @@ describe("parabun: effect { } block", () => {
 });
 
 // Language-level sugar: `signal NAME = RHS` desugars to
-// `const NAME = require("bun:signals").signal(RHS)` at parse time, and NAME
+// `const NAME = require("para:signals").signal(RHS)` at parse time, and NAME
 // is marked signal-bound so bare reads become `NAME.get()` and writes become
 // `NAME.set(...)` during visit. `signal` always implies `const` — there's no
 // `signal let` or `signal var`. These M3b tests use explicit `.get()` /
@@ -406,7 +406,7 @@ describe("parabun: signal declaration", () => {
     const { stdout, exitCode } = await runFixture(
       "signal-as-ident-import",
       `
-        import { signal } from "bun:signals";
+        import { signal } from "para:signals";
         const x = signal(42);
         console.log(x.get());
       `,
@@ -894,7 +894,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-int-batch",
       `
-        import { batch } from "bun:signals";
+        import { batch } from "para:signals";
         signal a = 1;
         signal b = 2;
         let runs = 0;
@@ -916,7 +916,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-int-untrack",
       `
-        import { untrack } from "bun:signals";
+        import { untrack } from "para:signals";
         signal tracked = 1;
         signal silent = 0;
         let runs = 0;
@@ -938,7 +938,7 @@ describe("parabun: signal-bound assignment rewriting", () => {
     const { stdout, exitCode } = await runFixture(
       "sig-int-cleanup",
       `
-        import { effect as effectFn } from "bun:signals";
+        import { effect as effectFn } from "para:signals";
         signal v = 0;
         const log = [];
         const stop = effectFn(() => {

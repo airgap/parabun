@@ -107,7 +107,7 @@ the one-cell kernel managed but still plenty of room.
 
 With `gpu.hold(mat) + gpu.matmul(…)` now doing real work on CUDA, the
 pattern "hot weights, rotating batch" (classifier head, attention
-projection, embedding matmul) is viable on `bun:gpu`:
+projection, embedding matmul) is viable on `para:gpu`:
 
 ```js
 const W = gpu.hold(weights); // pay HtoD once

@@ -11,7 +11,7 @@
 // vertical pass only ever reads from intermediate and writes to output;
 // there is no write-after-write hazard on intermediate.
 
-import parallel from "bun:parallel";
+import parallel from "para:parallel";
 import { generate, KERNEL, W, H, SIZE, fnv1a } from "./gen.js";
 
 const { pmap } = parallel;

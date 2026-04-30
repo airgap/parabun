@@ -1,4 +1,4 @@
-// Compare bun:image (this fork) against sharp on representative ops.
+// Compare para:image (this fork) against sharp on representative ops.
 // All four ops are bytes-in / bytes-out so the codec time is included
 // — that's the realistic call site (read file, do thing, write back),
 // not raw kernel time on already-decoded pixels.
@@ -8,7 +8,7 @@
 //
 // Pass --sizes=small,medium to override the default sweep.
 
-import image from "bun:image";
+import image from "para:image";
 import sharp from "sharp";
 import { readFileSync, existsSync } from "node:fs";
 
@@ -113,7 +113,7 @@ async function bench(label: string, fn: () => Promise<unknown>) {
   return { label, ...stats(times) };
 }
 
-console.log(`bun:image vs sharp — best-of-${RUNS} per cell (after ${WARMUP} warmup runs)\n`);
+console.log(`para:image vs sharp — best-of-${RUNS} per cell (after ${WARMUP} warmup runs)\n`);
 
 for (const op of ops) {
   console.log(`# ${op.name}`);

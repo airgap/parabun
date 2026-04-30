@@ -3,8 +3,8 @@
 // per-query latency is ~the single-query number. Included as the honest
 // "what you get if you just loop the existing primitive" reference.
 
-import { GpuFloat32Array, matVec } from "bun:gpu";
-import { topK as simdTopK } from "bun:simd";
+import { GpuFloat32Array, matVec } from "para:gpu";
+import { topK as simdTopK } from "para:simd";
 import { generateBatch, N, D, K } from "./gen.js";
 
 const tGen0 = Bun.nanoseconds();

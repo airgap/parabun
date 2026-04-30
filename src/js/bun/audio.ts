@@ -1,10 +1,10 @@
-// Hardcoded module "bun:audio"
+// Hardcoded module "para:audio"
 //
 // Parabun: offline audio DSP for the niche where you need actual signal
 // processing, not just play/record. WebAudio is real-time-only and unusable
 // in Node; this module fills that gap.
 //
-//   import audio from "bun:audio";
+//   import audio from "para:audio";
 //
 //   // Read WAV → Float32Array of samples in [-1, 1]
 //   const { samples, sampleRate, channels } = audio.readWav(bytes);
@@ -61,7 +61,7 @@ const denoiserRegistry = new FinalizationRegistry<bigint>(handle => {
 function fftInPlace(io: Float32Array, forward: boolean): void {
   const n = io.length >>> 1;
   if (n < 2 || (n & (n - 1)) !== 0) {
-    throw new Error("bun:audio FFT: complex length must be a power of 2 ≥ 2");
+    throw new Error("para:audio FFT: complex length must be a power of 2 ≥ 2");
   }
 
   // Bit-reversal permutation. Swap io[i] with io[bitrev(i)] for i < bitrev(i).
@@ -141,7 +141,7 @@ function fft(input: Float32Array): Float32Array {
 // which is < 1e-5 for well-conditioned inputs).
 function ifft(complex: Float32Array): Float32Array {
   if ((complex.length & 1) !== 0) {
-    throw new Error("bun:audio ifft: complex length must be even (interleaved pairs)");
+    throw new Error("para:audio ifft: complex length must be even (interleaved pairs)");
   }
   const work = new Float32Array(complex);
   fftInPlace(work, false);
@@ -165,11 +165,11 @@ type WavData = {
 };
 
 function readWav(bytes: Uint8Array): WavData {
-  if (bytes.length < 44) throw new Error("bun:audio readWav: input too short for a WAV header");
+  if (bytes.length < 44) throw new Error("para:audio readWav: input too short for a WAV header");
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const tag = (off: number) => String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
   if (tag(0) !== "RIFF" || tag(8) !== "WAVE") {
-    throw new Error("bun:audio readWav: not a RIFF/WAVE file");
+    throw new Error("para:audio readWav: not a RIFF/WAVE file");
   }
 
   // Walk chunks. `fmt ` carries the format details, `data` carries samples.
@@ -191,8 +191,8 @@ function readWav(bytes: Uint8Array): WavData {
     }
     p += 8 + len + (len & 1); // chunks are padded to even length
   }
-  if (fmtAt < 0 || dataAt < 0) throw new Error("bun:audio readWav: missing fmt or data chunk");
-  if (fmtLen < 16) throw new Error("bun:audio readWav: fmt chunk truncated");
+  if (fmtAt < 0 || dataAt < 0) throw new Error("para:audio readWav: missing fmt or data chunk");
+  if (fmtLen < 16) throw new Error("para:audio readWav: fmt chunk truncated");
 
   const audioFormat = dv.getUint16(fmtAt + 0, true);
   const channels = dv.getUint16(fmtAt + 2, true);
@@ -215,7 +215,7 @@ function readWav(bytes: Uint8Array): WavData {
     }
   } else {
     throw new Error(
-      `bun:audio readWav: unsupported PCM ${audioFormat}/${bitsPerSample}-bit ` + `(supported: PCM s16, IEEE float32)`,
+      `para:audio readWav: unsupported PCM ${audioFormat}/${bitsPerSample}-bit ` + `(supported: PCM s16, IEEE float32)`,
     );
   }
 
@@ -229,7 +229,7 @@ type WriteWavOptions = {
 
 function writeWav(data: WavData, opts: WriteWavOptions = {}): Uint8Array {
   const bps = opts.bitsPerSample ?? 16;
-  if (bps !== 16 && bps !== 32) throw new Error("bun:audio writeWav: bitsPerSample must be 16 or 32");
+  if (bps !== 16 && bps !== 32) throw new Error("para:audio writeWav: bitsPerSample must be 16 or 32");
   const audioFormat = bps === 32 ? 3 : 1;
   const bytesPerSample = bps >>> 3;
   const dataBytes = data.samples.length * bytesPerSample;
@@ -325,9 +325,9 @@ function runBiquad(
 
 function lowpass(samples: Float32Array, opts: FilterOptions): Float32Array {
   const { cutoff, sampleRate } = opts;
-  if (!(cutoff > 0)) throw new RangeError("bun:audio lowpass: cutoff must be > 0");
+  if (!(cutoff > 0)) throw new RangeError("para:audio lowpass: cutoff must be > 0");
   if (!(cutoff < sampleRate / 2)) {
-    throw new RangeError(`bun:audio lowpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
+    throw new RangeError(`para:audio lowpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
   }
 
   const Q = Math.SQRT1_2; // Butterworth
@@ -351,9 +351,9 @@ function lowpass(samples: Float32Array, opts: FilterOptions): Float32Array {
 // microphone proximity-effect bass.
 function highpass(samples: Float32Array, opts: FilterOptions): Float32Array {
   const { cutoff, sampleRate } = opts;
-  if (!(cutoff > 0)) throw new RangeError("bun:audio highpass: cutoff must be > 0");
+  if (!(cutoff > 0)) throw new RangeError("para:audio highpass: cutoff must be > 0");
   if (!(cutoff < sampleRate / 2)) {
-    throw new RangeError(`bun:audio highpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
+    throw new RangeError(`para:audio highpass: cutoff (${cutoff}) must be < sampleRate / 2 (${sampleRate / 2})`);
   }
   const Q = Math.SQRT1_2;
   const w0 = (TWO_PI * cutoff) / sampleRate;
@@ -389,11 +389,11 @@ type BandFilterOptions = {
 function bandpass(samples: Float32Array, opts: BandFilterOptions): Float32Array {
   const { center, sampleRate } = opts;
   const Q = opts.Q ?? 1;
-  if (!(center > 0)) throw new RangeError("bun:audio bandpass: center must be > 0");
+  if (!(center > 0)) throw new RangeError("para:audio bandpass: center must be > 0");
   if (!(center < sampleRate / 2)) {
-    throw new RangeError(`bun:audio bandpass: center (${center}) must be < sampleRate / 2 (${sampleRate / 2})`);
+    throw new RangeError(`para:audio bandpass: center (${center}) must be < sampleRate / 2 (${sampleRate / 2})`);
   }
-  if (!(Q > 0)) throw new RangeError("bun:audio bandpass: Q must be > 0");
+  if (!(Q > 0)) throw new RangeError("para:audio bandpass: Q must be > 0");
   const w0 = (TWO_PI * center) / sampleRate;
   const cosW = Math.cos(w0);
   const sinW = Math.sin(w0);
@@ -416,11 +416,11 @@ function bandpass(samples: Float32Array, opts: BandFilterOptions): Float32Array 
 function notch(samples: Float32Array, opts: BandFilterOptions): Float32Array {
   const { center, sampleRate } = opts;
   const Q = opts.Q ?? 30;
-  if (!(center > 0)) throw new RangeError("bun:audio notch: center must be > 0");
+  if (!(center > 0)) throw new RangeError("para:audio notch: center must be > 0");
   if (!(center < sampleRate / 2)) {
-    throw new RangeError(`bun:audio notch: center (${center}) must be < sampleRate / 2 (${sampleRate / 2})`);
+    throw new RangeError(`para:audio notch: center (${center}) must be < sampleRate / 2 (${sampleRate / 2})`);
   }
-  if (!(Q > 0)) throw new RangeError("bun:audio notch: Q must be > 0");
+  if (!(Q > 0)) throw new RangeError("para:audio notch: Q must be > 0");
   const w0 = (TWO_PI * center) / sampleRate;
   const cosW = Math.cos(w0);
   const sinW = Math.sin(w0);
@@ -474,8 +474,8 @@ function linearResample(samples: Float32Array, ratio: number): Float32Array {
 
 function resample(samples: Float32Array, opts: ResampleOptions): Float32Array {
   const { from, to } = opts;
-  if (!(from > 0)) throw new RangeError("bun:audio resample: from must be > 0");
-  if (!(to > 0)) throw new RangeError("bun:audio resample: to must be > 0");
+  if (!(from > 0)) throw new RangeError("para:audio resample: from must be > 0");
+  if (!(to > 0)) throw new RangeError("para:audio resample: to must be > 0");
   if (from === to) return new Float32Array(samples);
 
   const ratio = from / to;
@@ -519,9 +519,9 @@ function hannWindow(n: number): Float32Array {
 function spectrogram(samples: Float32Array, opts: SpectrogramOptions): Float32Array[] {
   const { window: winSize, hop } = opts;
   if ((winSize & (winSize - 1)) !== 0) {
-    throw new RangeError("bun:audio spectrogram: window must be a power of 2");
+    throw new RangeError("para:audio spectrogram: window must be a power of 2");
   }
-  if (hop <= 0) throw new RangeError("bun:audio spectrogram: hop must be > 0");
+  if (hop <= 0) throw new RangeError("para:audio spectrogram: hop must be > 0");
   const win = hannWindow(winSize);
   const halfPlusOne = (winSize >>> 1) + 1;
   const frames: Float32Array[] = [];
@@ -675,10 +675,10 @@ function melSpectrogram(samples: Float32Array, opts: MelOptions = {}): MelSpectr
   const nFft = opts.nFft ?? nextPowerOfTwo(windowSize);
   const mode = opts.mode ?? "whisper";
   if ((nFft & (nFft - 1)) !== 0) {
-    throw new RangeError("bun:audio melSpectrogram: nFft must be a power of two");
+    throw new RangeError("para:audio melSpectrogram: nFft must be a power of two");
   }
   if (nFft < windowSize) {
-    throw new RangeError("bun:audio melSpectrogram: nFft must be >= windowSize");
+    throw new RangeError("para:audio melSpectrogram: nFft must be >= windowSize");
   }
 
   // Reflect-pad so the centered STFT starts from t=0 (matches librosa /
@@ -787,9 +787,9 @@ function detectVoice(samples: Float32Array, opts: VadOptions = {}): VadResult {
   const frameSize = opts.frameSize ?? 480;
   const ratio = opts.ratio ?? 3.0;
   const noiseWindow = opts.noiseWindow ?? 100;
-  if (frameSize < 1) throw new RangeError("bun:audio detectVoice: frameSize must be >= 1");
-  if (ratio < 1) throw new RangeError("bun:audio detectVoice: ratio must be >= 1");
-  if (noiseWindow < 1) throw new RangeError("bun:audio detectVoice: noiseWindow must be >= 1");
+  if (frameSize < 1) throw new RangeError("para:audio detectVoice: frameSize must be >= 1");
+  if (ratio < 1) throw new RangeError("para:audio detectVoice: ratio must be >= 1");
+  if (noiseWindow < 1) throw new RangeError("para:audio detectVoice: noiseWindow must be >= 1");
 
   const numFrames = Math.ceil(samples.length / frameSize);
   const energies = new Float32Array(numFrames);
@@ -830,7 +830,7 @@ function detectVoice(samples: Float32Array, opts: VadOptions = {}): VadResult {
 
 function decodeMp3(bytes: Uint8Array): WavData {
   if (!(bytes instanceof Uint8Array)) {
-    throw new TypeError("bun:audio decodeMp3: expected Uint8Array");
+    throw new TypeError("para:audio decodeMp3: expected Uint8Array");
   }
   return native.decodeMp3(bytes);
 }
@@ -874,7 +874,7 @@ class OpusEncoder {
    * interleaved (L, R, L, R, ...). Returns the encoded packet bytes.
    */
   encode(samples: Float32Array, frameSize: number): Uint8Array {
-    if (this.#handle === 0n) throw new Error("bun:audio OpusEncoder: closed");
+    if (this.#handle === 0n) throw new Error("para:audio OpusEncoder: closed");
     return native.opusEncode(this.#handle, samples, frameSize);
   }
 
@@ -911,7 +911,7 @@ class OpusDecoder {
    * `frameSize * channels` floats; stereo is interleaved.
    */
   decode(packet: Uint8Array, frameSize: number): Float32Array {
-    if (this.#handle === 0n) throw new Error("bun:audio OpusDecoder: closed");
+    if (this.#handle === 0n) throw new Error("para:audio OpusDecoder: closed");
     return native.opusDecode(this.#handle, packet, frameSize, this.channels);
   }
 
@@ -954,7 +954,7 @@ class Denoiser {
    * from the RNN (0 = noise/silence, 1 = clear voice).
    */
   process(frame: Float32Array): number {
-    if (this.#handle === 0n) throw new Error("bun:audio Denoiser: closed");
+    if (this.#handle === 0n) throw new Error("para:audio Denoiser: closed");
     return native.denoise(this.#handle, frame);
   }
 
@@ -982,7 +982,7 @@ class Denoiser {
 
 function interleave(channels: Float32Array[]): Float32Array {
   if (!Array.isArray(channels)) {
-    throw new TypeError("bun:audio.interleave: channels must be an array of Float32Arrays");
+    throw new TypeError("para:audio.interleave: channels must be an array of Float32Arrays");
   }
   const C = channels.length;
   if (C === 0) return new Float32Array(0);
@@ -990,11 +990,11 @@ function interleave(channels: Float32Array[]): Float32Array {
   const N = channels[0].length;
   for (let c = 0; c < C; c++) {
     if (!(channels[c] instanceof Float32Array)) {
-      throw new TypeError(`bun:audio.interleave: channels[${c}] must be a Float32Array`);
+      throw new TypeError(`para:audio.interleave: channels[${c}] must be a Float32Array`);
     }
     if (channels[c].length !== N) {
       throw new RangeError(
-        `bun:audio.interleave: all channels must have the same length; channels[0] is ${N}, channels[${c}] is ${channels[c].length}`,
+        `para:audio.interleave: all channels must have the same length; channels[0] is ${N}, channels[${c}] is ${channels[c].length}`,
       );
     }
   }
@@ -1017,14 +1017,14 @@ function interleave(channels: Float32Array[]): Float32Array {
 
 function deinterleave(samples: Float32Array, channelCount: number): Float32Array[] {
   if (!(samples instanceof Float32Array)) {
-    throw new TypeError("bun:audio.deinterleave: samples must be a Float32Array");
+    throw new TypeError("para:audio.deinterleave: samples must be a Float32Array");
   }
   if (!Number.isInteger(channelCount) || channelCount < 1) {
-    throw new RangeError(`bun:audio.deinterleave: channelCount must be a positive integer; got ${channelCount}`);
+    throw new RangeError(`para:audio.deinterleave: channelCount must be a positive integer; got ${channelCount}`);
   }
   if (samples.length % channelCount !== 0) {
     throw new RangeError(
-      `bun:audio.deinterleave: samples.length (${samples.length}) is not a multiple of channelCount (${channelCount})`,
+      `para:audio.deinterleave: samples.length (${samples.length}) is not a multiple of channelCount (${channelCount})`,
     );
   }
   const N = samples.length / channelCount;
@@ -1076,21 +1076,21 @@ type MixOptions = {
 
 function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
   if (!Array.isArray(tracks)) {
-    throw new TypeError("bun:audio.mix: tracks must be an array of Float32Arrays");
+    throw new TypeError("para:audio.mix: tracks must be an array of Float32Arrays");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("bun:audio.mix: opts must be an object");
+    throw new TypeError("para:audio.mix: opts must be an object");
   }
   if (tracks.length === 0) return new Float32Array(0);
 
   const N = tracks[0].length;
   for (let i = 0; i < tracks.length; i++) {
     if (!(tracks[i] instanceof Float32Array)) {
-      throw new TypeError(`bun:audio.mix: tracks[${i}] must be a Float32Array`);
+      throw new TypeError(`para:audio.mix: tracks[${i}] must be a Float32Array`);
     }
     if (tracks[i].length !== N) {
       throw new RangeError(
-        `bun:audio.mix: all tracks must have the same length; tracks[0] is ${N}, tracks[${i}] is ${tracks[i].length}`,
+        `para:audio.mix: all tracks must have the same length; tracks[0] is ${N}, tracks[${i}] is ${tracks[i].length}`,
       );
     }
   }
@@ -1098,23 +1098,23 @@ function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
   const gains = opts.gains;
   if (gains !== undefined) {
     if (!Array.isArray(gains)) {
-      throw new TypeError("bun:audio.mix: opts.gains must be an array of numbers");
+      throw new TypeError("para:audio.mix: opts.gains must be an array of numbers");
     }
     if (gains.length !== tracks.length) {
       throw new RangeError(
-        `bun:audio.mix: opts.gains length ${gains.length} must match tracks length ${tracks.length}`,
+        `para:audio.mix: opts.gains length ${gains.length} must match tracks length ${tracks.length}`,
       );
     }
     for (let t = 0; t < gains.length; t++) {
       if (typeof gains[t] !== "number" || !Number.isFinite(gains[t])) {
-        throw new TypeError(`bun:audio.mix: opts.gains[${t}] must be a finite number`);
+        throw new TypeError(`para:audio.mix: opts.gains[${t}] must be a finite number`);
       }
     }
   }
 
   const clip = opts.clip ?? "hard";
   if (clip !== "hard" && clip !== "soft" && clip !== "none") {
-    throw new TypeError(`bun:audio.mix: opts.clip must be "hard", "soft", or "none"; got ${JSON.stringify(clip)}`);
+    throw new TypeError(`para:audio.mix: opts.clip must be "hard", "soft", or "none"; got ${JSON.stringify(clip)}`);
   }
 
   const out = new Float32Array(N);
@@ -1164,7 +1164,7 @@ function mix(tracks: Float32Array[], opts: MixOptions = {}): Float32Array {
 
 function i16ToF32(input: Int16Array): Float32Array {
   if (!(input instanceof Int16Array)) {
-    throw new TypeError("bun:audio.i16ToF32: input must be an Int16Array");
+    throw new TypeError("para:audio.i16ToF32: input must be an Int16Array");
   }
   const out = new Float32Array(input.length);
   for (let i = 0; i < input.length; i++) out[i] = input[i] / 32768;
@@ -1173,7 +1173,7 @@ function i16ToF32(input: Int16Array): Float32Array {
 
 function f32ToI16(input: Float32Array): Int16Array {
   if (!(input instanceof Float32Array)) {
-    throw new TypeError("bun:audio.f32ToI16: input must be a Float32Array");
+    throw new TypeError("para:audio.f32ToI16: input must be a Float32Array");
   }
   const out = new Int16Array(input.length);
   for (let i = 0; i < input.length; i++) {
@@ -1207,7 +1207,7 @@ function f32ToI16(input: Float32Array): Int16Array {
 
 function peak(samples: Float32Array): number {
   if (!(samples instanceof Float32Array)) {
-    throw new TypeError("bun:audio.peak: samples must be a Float32Array");
+    throw new TypeError("para:audio.peak: samples must be a Float32Array");
   }
   let m = 0;
   for (let i = 0; i < samples.length; i++) {
@@ -1220,7 +1220,7 @@ function peak(samples: Float32Array): number {
 
 function rms(samples: Float32Array): number {
   if (!(samples instanceof Float32Array)) {
-    throw new TypeError("bun:audio.rms: samples must be a Float32Array");
+    throw new TypeError("para:audio.rms: samples must be a Float32Array");
   }
   const n = samples.length;
   if (n === 0) return 0;
@@ -1262,22 +1262,22 @@ type EnvelopeOptions = {
 
 function envelope(samples: Float32Array, opts: EnvelopeOptions = {}): Float32Array {
   if (!(samples instanceof Float32Array)) {
-    throw new TypeError("bun:audio.envelope: samples must be a Float32Array");
+    throw new TypeError("para:audio.envelope: samples must be a Float32Array");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("bun:audio.envelope: opts must be an object");
+    throw new TypeError("para:audio.envelope: opts must be an object");
   }
   const windowSize = opts.windowSize ?? 1024;
   const hopSize = opts.hopSize ?? windowSize;
   const mode = opts.mode ?? "peak";
   if (!Number.isInteger(windowSize) || windowSize < 1) {
-    throw new RangeError(`bun:audio.envelope: windowSize must be a positive integer; got ${windowSize}`);
+    throw new RangeError(`para:audio.envelope: windowSize must be a positive integer; got ${windowSize}`);
   }
   if (!Number.isInteger(hopSize) || hopSize < 1) {
-    throw new RangeError(`bun:audio.envelope: hopSize must be a positive integer; got ${hopSize}`);
+    throw new RangeError(`para:audio.envelope: hopSize must be a positive integer; got ${hopSize}`);
   }
   if (mode !== "peak" && mode !== "rms") {
-    throw new TypeError(`bun:audio.envelope: mode must be "peak" or "rms"; got ${JSON.stringify(mode)}`);
+    throw new TypeError(`para:audio.envelope: mode must be "peak" or "rms"; got ${JSON.stringify(mode)}`);
   }
 
   const N = samples.length;
@@ -1343,18 +1343,18 @@ type NormalizeOptions = {
 
 function normalize(samples: Float32Array, opts: NormalizeOptions = {}): Float32Array {
   if (!(samples instanceof Float32Array)) {
-    throw new TypeError("bun:audio.normalize: samples must be a Float32Array");
+    throw new TypeError("para:audio.normalize: samples must be a Float32Array");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("bun:audio.normalize: opts must be an object");
+    throw new TypeError("para:audio.normalize: opts must be an object");
   }
   const target = opts.target ?? 0.95;
   const mode = opts.mode ?? "peak";
   if (!(target > 0 && target <= 1) || !Number.isFinite(target)) {
-    throw new RangeError(`bun:audio.normalize: target must be in (0, 1]; got ${target}`);
+    throw new RangeError(`para:audio.normalize: target must be in (0, 1]; got ${target}`);
   }
   if (mode !== "peak" && mode !== "rms") {
-    throw new TypeError(`bun:audio.normalize: mode must be "peak" or "rms"; got ${JSON.stringify(mode)}`);
+    throw new TypeError(`para:audio.normalize: mode must be "peak" or "rms"; got ${JSON.stringify(mode)}`);
   }
   const N = samples.length;
   const out = new Float32Array(N);
@@ -1463,20 +1463,20 @@ class Gain {
 
   constructor(opts: GainOptions = {}) {
     if (typeof opts !== "object" || opts === null) {
-      throw new TypeError("bun:audio.Gain: opts must be an object");
+      throw new TypeError("para:audio.Gain: opts must be an object");
     }
     this.#targetLevel = opts.targetLevel ?? 0.1;
     this.#maxGain = opts.maxGain ?? 32;
     this.#noiseFloor = opts.noiseFloor ?? 1e-4;
     const sr = opts.sampleRate ?? 48000;
     if (this.#targetLevel <= 0 || this.#targetLevel > 1) {
-      throw new RangeError(`bun:audio.Gain: targetLevel must be in (0, 1]; got ${this.#targetLevel}`);
+      throw new RangeError(`para:audio.Gain: targetLevel must be in (0, 1]; got ${this.#targetLevel}`);
     }
     if (this.#maxGain <= 0) {
-      throw new RangeError(`bun:audio.Gain: maxGain must be > 0; got ${this.#maxGain}`);
+      throw new RangeError(`para:audio.Gain: maxGain must be > 0; got ${this.#maxGain}`);
     }
     if (sr <= 0) {
-      throw new RangeError(`bun:audio.Gain: sampleRate must be > 0; got ${sr}`);
+      throw new RangeError(`para:audio.Gain: sampleRate must be > 0; got ${sr}`);
     }
     this.#attackCoeff = timeConstantToCoeff(opts.attackMs ?? 5, sr);
     this.#releaseCoeff = timeConstantToCoeff(opts.releaseMs ?? 100, sr);
@@ -1492,7 +1492,7 @@ class Gain {
    */
   process(frame: Float32Array): number {
     if (!(frame instanceof Float32Array)) {
-      throw new TypeError("bun:audio.Gain.process: frame must be a Float32Array");
+      throw new TypeError("para:audio.Gain.process: frame must be a Float32Array");
     }
     let env = this.#envelope;
     let gainState = this.#gain;
@@ -1587,17 +1587,17 @@ class Compressor {
 
   constructor(opts: CompressorOptions) {
     if (typeof opts !== "object" || opts === null) {
-      throw new TypeError("bun:audio.Compressor: opts must be an object");
+      throw new TypeError("para:audio.Compressor: opts must be an object");
     }
     const sr = opts.sampleRate;
     if (typeof sr !== "number" || sr <= 0) {
-      throw new RangeError(`bun:audio.Compressor: sampleRate must be > 0; got ${sr}`);
+      throw new RangeError(`para:audio.Compressor: sampleRate must be > 0; got ${sr}`);
     }
     const threshDb = opts.thresholdDb ?? -20;
     const ratio = opts.ratio ?? 4;
     if (ratio < 1 || !Number.isFinite(ratio)) {
       throw new RangeError(
-        `bun:audio.Compressor: ratio must be a finite number >= 1; got ${ratio}. Use the Limiter class for hard limiting.`,
+        `para:audio.Compressor: ratio must be a finite number >= 1; got ${ratio}. Use the Limiter class for hard limiting.`,
       );
     }
     this.#threshold = Math.pow(10, threshDb / 20);
@@ -1615,7 +1615,7 @@ class Compressor {
    */
   process(frame: Float32Array): number {
     if (!(frame instanceof Float32Array)) {
-      throw new TypeError("bun:audio.Compressor.process: frame must be a Float32Array");
+      throw new TypeError("para:audio.Compressor.process: frame must be a Float32Array");
     }
     let env = this.#envelope;
     const t = this.#threshold;
@@ -1681,15 +1681,15 @@ class Limiter {
 
   constructor(opts: LimiterOptions) {
     if (typeof opts !== "object" || opts === null) {
-      throw new TypeError("bun:audio.Limiter: opts must be an object");
+      throw new TypeError("para:audio.Limiter: opts must be an object");
     }
     const sr = opts.sampleRate;
     if (typeof sr !== "number" || sr <= 0) {
-      throw new RangeError(`bun:audio.Limiter: sampleRate must be > 0; got ${sr}`);
+      throw new RangeError(`para:audio.Limiter: sampleRate must be > 0; got ${sr}`);
     }
     const ceilDb = opts.ceilingDb ?? -1;
     if (ceilDb > 0) {
-      throw new RangeError(`bun:audio.Limiter: ceilingDb must be <= 0 (sub-fullscale); got ${ceilDb}`);
+      throw new RangeError(`para:audio.Limiter: ceilingDb must be <= 0 (sub-fullscale); got ${ceilDb}`);
     }
     this.#ceiling = Math.pow(10, ceilDb / 20);
     this.#attackCoeff = timeConstantToCoeff(opts.attackMs ?? 0.5, sr);
@@ -1710,7 +1710,7 @@ class Limiter {
    */
   process(frame: Float32Array): number {
     if (!(frame instanceof Float32Array)) {
-      throw new TypeError("bun:audio.Limiter.process: frame must be a Float32Array");
+      throw new TypeError("para:audio.Limiter.process: frame must be a Float32Array");
     }
     let env = this.#envelope;
     const c = this.#ceiling;

@@ -46,12 +46,12 @@ dot product and per-row magnitude.
 2. **Pre-normalize on `addVectors`.** Cosine is scale-invariant, so
    normalizing the rows does not change any score. It does mean the search
    path becomes a pure dot product plus one constant divide by |query|.
-3. **Run the scoring across workers with `bun:parallel`.** The embedding
+3. **Run the scoring across workers with `para:parallel`.** The embedding
    matrix lives in a `SharedArrayBuffer`, so `postMessage` of a chunk
    view ships only a handle — not 150 MB of structured-cloned bytes.
 
 All three are standard optimizations. Parabun packages them as two language
-features (`pure function` for worker fns, `bun:parallel` for the pool)
+features (`pure function` for worker fns, `para:parallel` for the pool)
 so the user code inside `ParabunVectorStore` stays short and readable.
 
 ## Running it
@@ -71,6 +71,6 @@ min/med/max over `RUNS=3`.
 - `baseline-langchain.ts` — uses real `FakeVectorStore.addVectors` +
   `similaritySearchVectorWithScore`.
 - `parabun-store.pjs` — drop-in `extends VectorStore` with the same method
-  signatures. Internals use `bun:parallel.pmap` + SAB.
+  signatures. Internals use `para:parallel.pmap` + SAB.
 - `run.ts` — spawns each variant per run, parses timing line, reports
   min/med/max and verifies top-K matches across variants.

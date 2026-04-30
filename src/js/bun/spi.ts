@@ -1,10 +1,10 @@
-// Hardcoded module "bun:spi"
+// Hardcoded module "para:spi"
 //
 // Linux spidev character device wrapper. Full-duplex transfers + multi-
 // segment transactions with CS held across segments. Same shape on RPi
 // 4/5, Jetson, NUC + breakout — character device, no vendored libspidev.
 //
-//   import spi from "bun:spi";
+//   import spi from "para:spi";
 //
 //   spi.devices();   // sync — [{ path, bus, cs }, ...]
 //
@@ -109,7 +109,7 @@ class DeviceImpl implements Device {
   }
 
   #assertOpen(): void {
-    if (this.#closed) throw new Error("bun:spi: device is closed");
+    if (this.#closed) throw new Error("para:spi: device is closed");
   }
 
   async transfer(tx: Uint8Array, opts: { speedHz?: number; delayUs?: number } = {}): Promise<Uint8Array> {
@@ -128,7 +128,7 @@ class DeviceImpl implements Device {
   async read(length: number, opts: { speedHz?: number; delayUs?: number } = {}): Promise<Uint8Array> {
     this.#assertOpen();
     if (typeof length !== "number" || !Number.isInteger(length) || length <= 0) {
-      throw new RangeError(`bun:spi: read length must be a positive integer, got ${length}`);
+      throw new RangeError(`para:spi: read length must be a positive integer, got ${length}`);
     }
     // Half-duplex read shape: tx is a length-N zero buffer; rx is captured.
     const tx = new Uint8Array(length);
@@ -138,7 +138,7 @@ class DeviceImpl implements Device {
   async transactSegments(segments: TransactSegment[]): Promise<Array<Uint8Array | undefined>> {
     this.#assertOpen();
     if (!Array.isArray(segments)) {
-      throw new TypeError("bun:spi.transactSegments: segments must be an array");
+      throw new TypeError("para:spi.transactSegments: segments must be an array");
     }
     return native.transactSegments(this.#fd, segments) as Array<Uint8Array | undefined>;
   }
@@ -163,25 +163,25 @@ class DeviceImpl implements Device {
 /** Open a spidev device by absolute /dev path. */
 function open(path: string, opts: DeviceOptions = {}): Device {
   if (typeof path !== "string" || path.length === 0) {
-    throw new TypeError("bun:spi.open: path must be a non-empty string");
+    throw new TypeError("para:spi.open: path must be a non-empty string");
   }
   const mode = (opts.mode ?? 0) as 0 | 1 | 2 | 3;
   if (mode !== 0 && mode !== 1 && mode !== 2 && mode !== 3) {
-    throw new RangeError(`bun:spi: mode must be 0..3, got ${mode}`);
+    throw new RangeError(`para:spi: mode must be 0..3, got ${mode}`);
   }
   const bitsPerWord = opts.bitsPerWord ?? 8;
   if (typeof bitsPerWord !== "number" || !Number.isInteger(bitsPerWord) || bitsPerWord < 1 || bitsPerWord > 32) {
-    throw new RangeError(`bun:spi: bitsPerWord must be 1..32, got ${bitsPerWord}`);
+    throw new RangeError(`para:spi: bitsPerWord must be 1..32, got ${bitsPerWord}`);
   }
   const speedHz = opts.speedHz ?? 1_000_000;
   if (typeof speedHz !== "number" || !Number.isInteger(speedHz) || speedHz <= 0) {
-    throw new RangeError(`bun:spi: speedHz must be a positive integer, got ${speedHz}`);
+    throw new RangeError(`para:spi: speedHz must be a positive integer, got ${speedHz}`);
   }
 
   // Parse bus/cs from path: /dev/spidevN.M.
   const match = /\/dev\/spidev(\d+)\.(\d+)$/.exec(path);
   if (!match) {
-    throw new TypeError(`bun:spi.open: path must look like /dev/spidev<bus>.<cs>, got "${path}"`);
+    throw new TypeError(`para:spi.open: path must look like /dev/spidev<bus>.<cs>, got "${path}"`);
   }
   const info: DeviceInfo = { path, bus: Number(match[1]), cs: Number(match[2]) };
 

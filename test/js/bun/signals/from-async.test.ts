@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-// bun:signals.fromAsync + pump — drive a signal from an async iterable.
+// para:signals.fromAsync + pump — drive a signal from an async iterable.
 
 async function* range(n: number, spacingMs = 5) {
   for (let i = 0; i < n; i++) {
@@ -9,9 +9,9 @@ async function* range(n: number, spacingMs = 5) {
   }
 }
 
-describe("bun:signals.fromAsync", () => {
+describe("para:signals.fromAsync", () => {
   test("creates a signal driven by the async iterable", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const { signal: sig, dispose } = sigs.fromAsync(range(5));
     // Pre-emit: signal still at default (undefined).
     expect(sig.get()).toBeUndefined();
@@ -23,7 +23,7 @@ describe("bun:signals.fromAsync", () => {
   });
 
   test("init parameter sets the pre-emit value", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const { signal: sig, dispose } = sigs.fromAsync(range(3), x => x, -1);
     expect(sig.get()).toBe(-1);
 
@@ -33,7 +33,7 @@ describe("bun:signals.fromAsync", () => {
   });
 
   test("mapFn transforms each yielded value", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const { signal: sig, dispose } = sigs.fromAsync(range(4), x => x * 10, 0);
     await new Promise(r => setTimeout(r, 80));
     expect(sig.get()).toBe(30);
@@ -41,7 +41,7 @@ describe("bun:signals.fromAsync", () => {
   });
 
   test("subscribe sees initial + every emit", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const { signal: sig, dispose } = sigs.fromAsync(range(3, 5), x => x, -1);
     const trace: number[] = [];
     const unsub = sig.subscribe((v: number | undefined) => trace.push(v ?? -99));
@@ -55,7 +55,7 @@ describe("bun:signals.fromAsync", () => {
   });
 
   test("dispose stops the loop; signal stays at last value", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     // Long stream so dispose has work to interrupt.
     const { signal: sig, dispose } = sigs.fromAsync(range(50, 20), x => x, -1);
     await new Promise(r => setTimeout(r, 60));
@@ -76,7 +76,7 @@ describe("bun:signals.fromAsync", () => {
   });
 
   test("rejects non-iterables", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     // @ts-expect-error — runtime guard
     expect(() => sigs.fromAsync({ not: "iterable" })).toThrow(/async iterable/);
     // @ts-expect-error
@@ -84,15 +84,15 @@ describe("bun:signals.fromAsync", () => {
   });
 
   test("rejects non-function mapFn", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     // @ts-expect-error
     expect(() => sigs.fromAsync(range(1), 42)).toThrow();
   });
 });
 
-describe("bun:signals.pump", () => {
+describe("para:signals.pump", () => {
   test("drives an existing signal", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const sig = sigs.signal(-1);
     const stop = sigs.pump(range(4), sig);
     await new Promise(r => setTimeout(r, 80));
@@ -101,7 +101,7 @@ describe("bun:signals.pump", () => {
   });
 
   test("mapFn transforms before set", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const sig = sigs.signal(0);
     const stop = sigs.pump(range(3), sig, x => x * 100);
     await new Promise(r => setTimeout(r, 80));
@@ -110,13 +110,13 @@ describe("bun:signals.pump", () => {
   });
 
   test("rejects non-signal target", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     // @ts-expect-error
     expect(() => sigs.pump(range(1), { not: "a signal" })).toThrow(/writable signal/);
   });
 
   test("disposer breaks the loop", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const sig = sigs.signal(0);
     const stop = sigs.pump(range(50, 20), sig);
     await new Promise(r => setTimeout(r, 60));
@@ -130,7 +130,7 @@ describe("bun:signals.pump", () => {
 
 describe("integration: derived over fromAsync", () => {
   test("derived re-runs when the pump sets the source signal", async () => {
-    const sigs = (await import("bun:signals")).default;
+    const sigs = (await import("para:signals")).default;
     const { signal: src, dispose } = sigs.fromAsync(range(5), x => x, 0);
     const doubled = sigs.derived(() => (src.get() ?? 0) * 2);
 

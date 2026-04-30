@@ -1,4 +1,4 @@
-// Hardcoded module "bun:signals"
+// Hardcoded module "para:signals"
 //
 // Parabun: fine-grained reactive primitives. Three shapes:
 //   signal(v)    → State signal, .get()/.set()/.peek()
@@ -11,7 +11,7 @@
 // untrack(fn) to read signals without subscribing.
 //
 // The language surface (`signal x = 0`, `effect { ... }`) desugars to
-// calls against this module — same play as `arena { ... }` → bun:arena.
+// calls against this module — same play as `arena { ... }` → para:arena.
 
 let currentTarget: ComputedSignal<any> | EffectImpl | null = null;
 let batchDepth = 0;
@@ -305,7 +305,7 @@ function fromAsync<T>(iterable: AsyncIterable<T>): DriverHandle<T | undefined>;
 function fromAsync<T, V>(iterable: AsyncIterable<T>, mapFn: (v: T) => V, init?: V): DriverHandle<V | undefined>;
 function fromAsync<T, V = T>(iterable: AsyncIterable<T>, mapFn?: (v: T) => V, init?: V): DriverHandle<V | undefined> {
   if (iterable == null || typeof (iterable as any)[Symbol.asyncIterator] !== "function") {
-    throw new TypeError("bun:signals.fromAsync: first argument must be an async iterable");
+    throw new TypeError("para:signals.fromAsync: first argument must be an async iterable");
   }
   if (mapFn !== undefined && !$isCallable(mapFn)) {
     throw $ERR_INVALID_ARG_TYPE("mapFn", "function", mapFn);
@@ -319,10 +319,10 @@ function pump<T>(iterable: AsyncIterable<T>, sig: StateSignal<T>): () => void;
 function pump<T, V>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn: (v: T) => V): () => void;
 function pump<T, V = T>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn?: (v: T) => V): () => void {
   if (iterable == null || typeof (iterable as any)[Symbol.asyncIterator] !== "function") {
-    throw new TypeError("bun:signals.pump: first argument must be an async iterable");
+    throw new TypeError("para:signals.pump: first argument must be an async iterable");
   }
   if (!(sig instanceof StateSignal)) {
-    throw new TypeError("bun:signals.pump: second argument must be a writable signal (from `signal()`)");
+    throw new TypeError("para:signals.pump: second argument must be a writable signal (from `signal()`)");
   }
   if (mapFn !== undefined && !$isCallable(mapFn)) {
     throw $ERR_INVALID_ARG_TYPE("mapFn", "function", mapFn);
@@ -355,7 +355,7 @@ function fromInterval<T>(fn: () => T | Promise<T>, periodMs: number): DriverHand
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
   if (typeof periodMs !== "number" || !Number.isFinite(periodMs) || periodMs < 1) {
-    throw new RangeError("bun:signals.fromInterval: periodMs must be a positive finite number");
+    throw new RangeError("para:signals.fromInterval: periodMs must be a positive finite number");
   }
   const sig = new StateSignal<T | undefined>(undefined);
   let stopped = false;
@@ -408,7 +408,7 @@ function readEdgeSource<T>(name: string, source: EdgeSource<T>): { peek: () => b
   if ($isCallable(source)) {
     return { peek: () => !!untrack(() => (source as () => T)()), read: () => !!(source as () => T)() };
   }
-  throw new TypeError(`bun:signals.${name}: first argument must be a signal or a predicate function`);
+  throw new TypeError(`para:signals.${name}: first argument must be a signal or a predicate function`);
 }
 
 function onRising<T>(source: EdgeSource<T>, fn: () => void): () => void {

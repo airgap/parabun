@@ -16,7 +16,7 @@ describe.if(HAS_FIXTURE)("GGUF loader (Llama-3.2-1B Q8_0)", () => {
   let f;
 
   beforeAll(async () => {
-    llm = (await import("bun:llm")).default;
+    llm = (await import("para:llm")).default;
     f = await llm.loadGGUF(FIXTURE);
   }, 60_000);
 

@@ -5,14 +5,14 @@ parse-time desugarings import:
 
 | Module | Browser fidelity |
 |---|---|
-| `bun:arena` | No-op. Browsers don't expose GC control — `arena { body }` runs the body inline, same observable behavior. |
-| `bun:signals` | Real implementation. `signal` / `derived` / `effect` / `batch` / `untrack`. |
+| `para:arena` | No-op. Browsers don't expose GC control — `arena { body }` runs the body inline, same observable behavior. |
+| `para:signals` | Real implementation. `signal` / `derived` / `effect` / `batch` / `untrack`. |
 | `bun:wrap` | Real implementation. Carries the `__parabunMemo` / `__parabunDefer0` / `__parabunRange` runtime, including `.forget()` / `.clear()` / `.bypass()` cache invalidation. |
-| `bun:parallel` | **Web Worker pool** (`navigator.hardwareConcurrency` workers). `pmap` / `preduce` dispatch across workers; transparent sequential fallback under CSP or non-browser hosts. |
-| `bun:simd` | **WebAssembly SIMD kernels** (v128 f32x4). `mulScalar` / `addScalar` / `add` / `mul` / `sum` / `dot` dispatch to WASM; scalar JS fallback when WASM SIMD is unavailable. `alloc(n, "f32")` returns a `Float32Array` backed by the WASM linear memory for zero-copy calls. |
-| `bun:gpu` | **WebGPU compute shaders** for `matVecAsync` (workgroup reduction), `matmulAsync` (16×16 tiled), `dotAsync` (tree reduction). `holdQ4K` / `holdQ6K` dequantize at hold-time so matVec consumes quantized weights transparently. Opt-in via `await gpu.initWebGPU()`; sync surface stays CPU for drop-in compatibility. |
-| `bun:llm` | Throws on load with a clear message — a WebGPU GGUF / Llama port is substantial future work. |
-| *(sub-module)* `parabun-browser-shims/quant` | Pure-JS dequantizers for **Q4_K**, **Q6_K**, **Q8_0** (the ggml block formats Parabun's native `bun:llm` uses). Consumed by `bun:gpu`'s `holdQ4K` / `holdQ6K`; also exported directly for callers writing their own GGUF loader. |
+| `para:parallel` | **Web Worker pool** (`navigator.hardwareConcurrency` workers). `pmap` / `preduce` dispatch across workers; transparent sequential fallback under CSP or non-browser hosts. |
+| `para:simd` | **WebAssembly SIMD kernels** (v128 f32x4). `mulScalar` / `addScalar` / `add` / `mul` / `sum` / `dot` dispatch to WASM; scalar JS fallback when WASM SIMD is unavailable. `alloc(n, "f32")` returns a `Float32Array` backed by the WASM linear memory for zero-copy calls. |
+| `para:gpu` | **WebGPU compute shaders** for `matVecAsync` (workgroup reduction), `matmulAsync` (16×16 tiled), `dotAsync` (tree reduction). `holdQ4K` / `holdQ6K` dequantize at hold-time so matVec consumes quantized weights transparently. Opt-in via `await gpu.initWebGPU()`; sync surface stays CPU for drop-in compatibility. |
+| `para:llm` | Throws on load with a clear message — a WebGPU GGUF / Llama port is substantial future work. |
+| *(sub-module)* `parabun-browser-shims/quant` | Pure-JS dequantizers for **Q4_K**, **Q6_K**, **Q8_0** (the ggml block formats Parabun's native `para:llm` uses). Consumed by `para:gpu`'s `holdQ4K` / `holdQ6K`; also exported directly for callers writing their own GGUF loader. |
 
 Language surface that *doesn't* need a shim — all of these desugar to
 plain JS: `pure`, `memo` (statement and arrow forms, including
@@ -80,7 +80,7 @@ The sync `gpu.matVec(...)` path stays CPU so `.pts` code that uses it
 compiles unchanged. Opt into the GPU backend at startup:
 
 ```ts
-import gpu from "bun:gpu";
+import gpu from "para:gpu";
 
 await gpu.initWebGPU();                      // once per app
 const mat = gpu.hold(weights);               // uploads to GPU buffer
@@ -94,7 +94,7 @@ any init error.
 
 ## WebAssembly SIMD — f32 kernels
 
-`bun:simd` dispatches to v128 kernels compiled from
+`para:simd` dispatches to v128 kernels compiled from
 [`src/simd.wat`](src/simd.wat) for inputs of ≥256 elements on WASM
 SIMD-capable runtimes; smaller inputs and non-`Float32Array` types
 take the scalar path. `simd.alloc(n, "f32")` allocates inside the
@@ -102,7 +102,7 @@ WASM linear memory — calls on the returned array skip the per-call
 copy-in.
 
 ```ts
-import simd from "bun:simd";
+import simd from "para:simd";
 
 const a = simd.alloc(1_000_000, "f32");      // Float32Array, wasm-backed
 const b = simd.alloc(1_000_000, "f32");
@@ -115,14 +115,14 @@ memory per call.
 
 ## Web Worker pool — pmap / preduce
 
-`bun:parallel` lazily spins up `navigator.hardwareConcurrency` workers
+`para:parallel` lazily spins up `navigator.hardwareConcurrency` workers
 on first call. Each worker receives the stringified callback, evals
 it via `new Function(...)`, and processes a contiguous chunk of the
 input. Outputs transfer back (TypedArray buffers) to avoid per-chunk
 copies. Input structured-clones in.
 
 ```ts
-import { pmap, preduce, disposeWorkers } from "bun:parallel";
+import { pmap, preduce, disposeWorkers } from "para:parallel";
 
 const out = await pmap(x => x * x, input);  // chunks across workers
 const s = await preduce((a, b) => a + b, 0, input);

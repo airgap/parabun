@@ -11,13 +11,13 @@ import { existsSync } from "node:fs";
 const FIXTURE = "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q8_0.gguf";
 const HAS_FIXTURE = existsSync(FIXTURE);
 
-describe.if(HAS_FIXTURE)("bun:llm speculative decoding", () => {
+describe.if(HAS_FIXTURE)("para:llm speculative decoding", () => {
   let llm;
   let target;
   let draft;
 
   beforeAll(async () => {
-    llm = (await import("bun:llm")).default;
+    llm = (await import("para:llm")).default;
     target = await llm.LLM.load(FIXTURE);
     draft = await llm.LLM.load(FIXTURE);
   }, 240_000);
@@ -107,6 +107,6 @@ describe.if(HAS_FIXTURE)("bun:llm speculative decoding", () => {
   }, 120_000);
 });
 
-describe.if(!HAS_FIXTURE)("bun:llm speculative decoding", () => {
+describe.if(!HAS_FIXTURE)("para:llm speculative decoding", () => {
   it.skip(`skipped: fixture missing (${FIXTURE})`, () => {});
 });

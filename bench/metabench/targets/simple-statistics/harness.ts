@@ -2,7 +2,7 @@
 //   - node              (upstream ESM)
 //   - bun               (upstream ESM)
 //   - parabun-drop-in   (upstream ESM, Parabun release)
-//   - parabun-rewrite   (.pjs using bun:simd)
+//   - parabun-rewrite   (.pjs using para:simd)
 
 import { spawnSync } from "bun";
 

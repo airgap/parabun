@@ -1,4 +1,4 @@
-// End-to-end PTX bring-up for bun:gpu CUDA backend.
+// End-to-end PTX bring-up for para:gpu CUDA backend.
 //
 // Run: bun bd --asan=off run scripts/gpu-verify/simdmap.ts
 //

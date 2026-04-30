@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
 // Parabun `A ~> B` reactive-binding operator. Desugars `A ~> B` to
-//   require("bun:signals").effect(() => { B = A; })
+//   require("para:signals").effect(() => { B = A; })
 // so when `A` reads signals, any change to those signals re-runs the body
 // and re-assigns `B`. `B` must be assignable (identifier / property access).
 
@@ -27,7 +27,7 @@ describe("Parabun: ~> reactive binding", () => {
   describe("desugar", () => {
     it("signal → object property", () => {
       const out = transform(`signal a = 1; const obj = { v: 0 }; a ~> obj.v;`);
-      expect(out).toContain(`require("bun:signals").effect(() =>`);
+      expect(out).toContain(`require("para:signals").effect(() =>`);
       expect(out).toContain(`obj.v = a.get()`);
     });
 
@@ -43,7 +43,7 @@ describe("Parabun: ~> reactive binding", () => {
 
     it("captures disposer: const stop = src ~> dst", () => {
       const out = transform(`signal a = 1; const obj = { v: 0 }; const stop = a ~> obj.v;`);
-      expect(out).toContain(`const stop = require("bun:signals").effect`);
+      expect(out).toContain(`const stop = require("para:signals").effect`);
     });
 
     it("pipeline binds tighter than ~>", () => {
@@ -169,7 +169,7 @@ describe("Parabun: ~> reactive binding", () => {
   describe("when-clause desugar (LYK-767)", () => {
     it("emits an if(C) wrapper around the assignment", () => {
       const out = transform(`signal a = 1; signal cond = true; const obj = { v: 0 }; a ~> obj.v when cond;`);
-      expect(out).toContain(`require("bun:signals").effect(() =>`);
+      expect(out).toContain(`require("para:signals").effect(() =>`);
       // The guard reads the signal too — the desugar must call .get() on it
       // (signal-bound identifier rewriting handles that for free).
       expect(out).toContain(`if (cond.get())`);

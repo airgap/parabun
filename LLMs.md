@@ -1,14 +1,14 @@
-# Parabun — LLM Context
+# Parabun + ParaScript — LLM Context
 
-Parabun is a fork of [Bun](https://bun.com) (the JavaScript/TypeScript runtime) that adds language extensions for purity, error handling, and pipelines. All extensions desugar to standard JavaScript at parse time in the Zig-based parser. No runtime changes.
+**Parabun** is a fork of [Bun](https://bun.com) (the JavaScript/TypeScript runtime) that ships native modules for parallel compute, GPU, SIMD, and direct hardware I/O. **ParaScript** is the optional TypeScript dialect Parabun ships alongside it — purity, error chaining, pipelines, ranges, reactivity, and edge-triggered handlers, written in `.pts` files. All ParaScript extensions desugar to standard JavaScript at parse time in the Zig-based parser; no runtime changes. The same extensions also work over plain JavaScript in `.pjs` files (un-branded — `.pts` is the canonical surface). The runtime and the language are independent: you can use Parabun without ParaScript, and (once the standalone transpiler ships) ParaScript without Parabun.
 
 ## File Extensions
 
-- `.pts` — Parabun TypeScript (superset of `.ts`)
-- `.pjs` — Parabun JavaScript (superset of `.js`)
+- `.pts` — **ParaScript** (superset of `.ts`). The canonical surface — what the docs and editor tooling lead with.
+- `.pjs` — same extensions over plain JavaScript (superset of `.js`). Supported, un-branded; the marketing focuses on `.pts`.
 - Standard `.ts`/`.js` files are unaffected.
 
-## Language Extensions
+## ParaScript Language Extensions
 
 ### `pure` keyword
 
@@ -152,7 +152,7 @@ Zero `_` falls back to the function-target form (`x |> f(y)` means `f(y)(x)`). M
 
 ### `~>` (reactive binding operator)
 
-Desugars `A ~> B` to `require("bun:signals").effect(() => { B = A; })` — an `effect` that evaluates `A` in a tracked context and re-assigns `B` whenever any signal read by `A` changes. Precedence: assign level (lower than `|>`, so `a |> f ~> sink` parses as `(a |> f) ~> sink`).
+Desugars `A ~> B` to `require("para:signals").effect(() => { B = A; })` — an `effect` that evaluates `A` in a tracked context and re-assigns `B` whenever any signal read by `A` changes. Precedence: assign level (lower than `|>`, so `a |> f ~> sink` parses as `(a |> f) ~> sink`).
 
 ```
 signal count = 0;
@@ -171,7 +171,7 @@ The expression evaluates to the disposer returned by `effect()`, so users can ca
 
 ### `->` (reactive call-binding operator)
 
-Desugars `A -> fn` to `require("bun:signals").effect(() => { fn(A); })` — the call-sink complement to `~>`. When `A` reads signals, any change re-runs the body and re-calls `fn` with the latest value. Same precedence as `~>` (assign level), same disposer return shape, same optional `when COND` guard.
+Desugars `A -> fn` to `require("para:signals").effect(() => { fn(A); })` — the call-sink complement to `~>`. When `A` reads signals, any change re-runs the body and re-calls `fn` with the latest value. Same precedence as `~>` (assign level), same disposer return shape, same optional `when COND` guard.
 
 ```
 signal a = 1;
@@ -189,7 +189,7 @@ When `A` reads signals, the bare-read sugar rewrites each to `.get()` inside the
 
 ### `when EXPR { … }` (edge-triggered block)
 
-Statement-level edge handler. `when EXPR { BODY }` desugars to `require("bun:signals").onRising(() => EXPR, () => { BODY })` — fires `BODY` once each time `EXPR` transitions falsy → truthy. `when not EXPR { BODY }` desugars to `onFalling(...)` — fires on the truthy → falsy edge. Reads inside `EXPR` are tracked the same way they would be inside `effect { … }`.
+Statement-level edge handler. `when EXPR { BODY }` desugars to `require("para:signals").onRising(() => EXPR, () => { BODY })` — fires `BODY` once each time `EXPR` transitions falsy → truthy. `when not EXPR { BODY }` desugars to `onFalling(...)` — fires on the truthy → falsy edge. Reads inside `EXPR` are tracked the same way they would be inside `effect { … }`.
 
 ```
 when motion.detected.get() && bot.state.get() === "idle" {
@@ -254,7 +254,7 @@ Runs a block of statements with JSC garbage collection deferred for its synchron
 
 ```
 arena { body }
-  →  require("bun:arena").scope(() => { body });
+  →  require("para:arena").scope(() => { body });
 ```
 
 Use for short, allocation-heavy sections where mid-work GC pauses hurt latency — the collector's work shifts to the end of the block instead of firing at unpredictable thresholds. This is **latency-smoothing, not a bump allocator**: the heap still pays the eventual collection cost, just at a time of the caller's choosing.
@@ -350,14 +350,14 @@ test/bundler/transpiler/parabun-defer.test.js                — defer / defer a
 
 ## Runtime
 
-### `bun:parallel` — `pmap`, `preduce`
+### `para:parallel` — `pmap`, `preduce`
 
 Parallel map and reduce over arrays using a Worker pool. Functions must be
 pure; their source is shipped to each worker via `fn.toString()`, so closures
 and outer references are not available by design.
 
 ```
-import { pmap, preduce } from "bun:parallel";
+import { pmap, preduce } from "para:parallel";
 pure function double(x) { return x * 2; }
 const out = await pmap(double, [1, 2, 3, 4]); // → [2, 4, 6, 8]
 
@@ -378,13 +378,13 @@ rejections on the returned promise.
 Implementation: `src/js/bun/parallel.ts` (registered via
 `src/bun.js/HardcodedModule.zig`).
 
-### `bun:pipeline` — lazy streaming combinators
+### `para:pipeline` — lazy streaming combinators
 
 Combinators designed for the `|>` operator. Nothing runs until a terminal
 (`collect`, `reduce`, `forEach`, `count`) pulls from the stream.
 
 ```
-import { map, filter, take, collect, range } from "bun:pipeline";
+import { map, filter, take, collect, range } from "para:pipeline";
 pure function sq(x) { return x * x; }
 pure function gt10(x) { return x > 10; }
 const out = await (range(100) |> map(sq) |> filter(gt10) |> take(3) |> collect);
@@ -404,7 +404,7 @@ async generator. Fusion-aware terminals (`collect`, `sum`,
 `toFloat32Array`, `toFloat64Array`) walk the chain and:
 - probe each map fn for affine shape (`x*k+c`) via four-point evaluation,
 - if all affine, collapse the chain to a single `(K, C)` and dispatch to
-  `bun:simd` (`mulScalar`/`addScalar`) — one pass over the array,
+  `para:simd` (`mulScalar`/`addScalar`) — one pass over the array,
 - on any non-affine fn, fall back to `simdMap(composed_fn, source)` — one
   pass, no intermediate arrays.
 
@@ -421,7 +421,7 @@ which realizes the chain on demand and proceeds on the existing
 async-generator path.
 
 **Parallel pipeline (`pipeParallel`):** dispatches pipeline stages via
-`bun:parallel` for data parallelism. Consecutive `map` stages are composed
+`para:parallel` for data parallelism. Consecutive `map` stages are composed
 into a single function and dispatched via `pmap`. When consecutive maps are
 immediately followed by a `reduce`, the maps are fused into the reduce via
 `preduce`'s `mapFn` option — maps execute inside each worker's reduce loop
@@ -432,7 +432,7 @@ parallel segment resumes. Falls back to serial `pipe` for small inputs
 (< 256 items).
 
 ```
-import { map, filter, reduce, pipeParallel } from "bun:pipeline";
+import { map, filter, reduce, pipeParallel } from "para:pipeline";
 pure function triple(x) { return x * 3; }
 pure function isOdd(x) { return x % 2 !== 0; }
 pure function add(acc, x) { return acc + x; }
@@ -441,7 +441,7 @@ const sum = await pipeParallel(data, map(triple), filter(isOdd), reduce(add, 0))
 
 Implementation: `src/js/bun/pipeline.ts`.
 
-### `bun:simd` — vector primitives for typed arrays
+### `para:simd` — vector primitives for typed arrays
 
 Polymorphic vector primitives over `Float32Array` and `Float64Array`,
 designed for use with `pure` functions and the `|>` pipeline operator. Each
@@ -450,7 +450,7 @@ WASM kernel, `Float64Array` → f64x2 kernel. JS tight-loop fallbacks are kept
 for both widths.
 
 ```
-import { mulScalar, add, dot, simdMap } from "bun:simd";
+import { mulScalar, add, dot, simdMap } from "para:simd";
 const y32 = mulScalar(new Float32Array([1, 2, 3, 4]), 3);             // [3, 6, 9, 12]
 const y64 = mulScalar(new Float64Array([1, 2, 3, 4]), 3);             // same, f64x2 path
 const z   = add(new Float32Array([1, 2]), new Float32Array([10, 20])); // [11, 22]
@@ -479,7 +479,7 @@ caller-provided typed array (same element type and length as the
 inputs). The two options are mutually exclusive.
 
 **True zero-copy via `alloc()`**: `alloc(length, "f32" | "f64")` returns
-a typed array backed by the `bun:simd` WASM instance's linear memory.
+a typed array backed by the `para:simd` WASM instance's linear memory.
 When every input and the destination of an output op is wasm-backed
 (detectable via `isWasmBacked(arr)`), the op dispatches to an
 offset-parameterized `*At` kernel that reads and writes the alloc pool
@@ -491,7 +491,7 @@ without invalidating existing views, so ops past the commit point
 either fit in pool-adjacent scratch or fall back to the JS tight loop.
 
 ```js
-import { alloc, mulScalar } from "bun:simd";
+import { alloc, mulScalar } from "para:simd";
 const a = alloc(2_000_000, "f32");           // backed by WASM memory
 const out = alloc(2_000_000, "f32");         // also backed
 // ... fill `a` ...
@@ -526,7 +526,7 @@ Benchmark (`bench/simd.pjs`, release build, best-of-200):
 
 N = 100,000:
 
-| op                  | array | `.map`/`.reduce` | tight loop | `bun:simd` |
+| op                  | array | `.map`/`.reduce` | tight loop | `para:simd` |
 |---------------------|:-----:|-----------------:|-----------:|-----------:|
 | mulScalar(a, 3)     | F32   | 808 µs           | 60 µs      | **30 µs**  |
 | add(a, b)           | F32   | 884 µs           | 73 µs      | **40 µs**  |
@@ -543,7 +543,7 @@ N = 100,000:
 
 N = 1,000,000 (reduce ops take the threshold fallback):
 
-| op                  | array | `.map`/`.reduce` | tight loop | `bun:simd` |
+| op                  | array | `.map`/`.reduce` | tight loop | `para:simd` |
 |---------------------|:-----:|-----------------:|-----------:|-----------:|
 | sum(a)              | F32   | 5.82 ms          | 388 µs     | **296 µs** |
 | dot(a, b)           | F32   | 6.51 ms          | 483 µs     | **462 µs** |
@@ -567,16 +567,16 @@ and JSC can't inline the kernel; the F64 fallback still wins over inline
 because the underlying `out[i] = fn(a[i], i)` form survives auto-vectorization
 better than the `Math.sqrt(x*x+1)` tight loop in JS source.
 
-### `bun:gpu` — GPU compute for vector/matrix primitives
+### `para:gpu` — GPU compute for vector/matrix primitives
 
-Compute-only GPU surface (no graphics) that mirrors a subset of `bun:simd`.
+Compute-only GPU surface (no graphics) that mirrors a subset of `para:simd`.
 Probes a backend chain — Metal on darwin, CUDA on Linux/Windows, always
-falling back to a CPU path that just forwards to `bun:simd`. All callers
+falling back to a CPU path that just forwards to `para:simd`. All callers
 see the same contract regardless of host; the kernel that runs underneath
 is the host's fastest option.
 
 ```
-import gpu from "bun:gpu";
+import gpu from "para:gpu";
 gpu.describe();           // { active: "metal", available: ["metal","cpu"], platform: "darwin" }
 gpu.dot(a, b);            // number
 gpu.matVec(mat, vec, M, K); // Float32Array of length M
@@ -599,7 +599,7 @@ and dispatches through `newBufferWithBytesNoCopy:length:options:deallocator:`
 — skipping the MTLBuffer-internal memcpy that dominates matVec time at
 large sizes. Callers that don't use `alloc` still work; they just take
 the COPY path. Alloc'd memory is held for the backend's lifetime (same
-commit-for-lifetime model as `bun:simd.alloc`). On CPU/CUDA, `alloc`
+commit-for-lifetime model as `para:simd.alloc`). On CPU/CUDA, `alloc`
 returns a plain typed array.
 
 `hold(arr) → GpuHandle` / `release(handle)` lets callers keep a typed
@@ -619,7 +619,7 @@ Two thresholds, not one:
 - **Dispatch threshold** — above this size, the op hits the real GPU
   kernel. Exists so the kernel gets exercised in tests.
 - **Wins threshold** (`winsForSize`) — above this size, *callers* should
-  route to `bun:gpu` rather than `bun:simd`. `bun:pipeline`'s fusion tier
+  route to `para:gpu` rather than `para:simd`. `para:pipeline`'s fusion tier
   reads this when deciding whether to promote a fused affine chain.
 
 They're decoupled because a compiled-and-correct kernel isn't always a
@@ -649,11 +649,11 @@ Backend implementations:
   `matmul` dispatch to their PTX kernels past fixed size thresholds
   (or unconditionally if a caller held an input via `gpu.hold`); `dot`
   dispatches only when a caller holds an input — cold dot loses to
-  `bun:simd` at every measured size because per-call HtoD dominates.
+  `para:simd` at every measured size because per-call HtoD dominates.
   `winsForSize` stays parked at Infinity for all three — callers opt
   in via `gpu.hold`. See `bench/parabun-gpu-matmul` (up to ~114× JS on
   held 1024×512×1024 matmul) and `bench/parabun-gpu-dot` (up to ~24×
-  `bun:simd` on held 128 MB dot) on an RTX 4070 Ti.
+  `para:simd` on held 128 MB dot) on an RTX 4070 Ti.
 
   **Dynamic kernel compilation (NVRTC):** When `simdMap` encounters a
   non-affine `pure` function on a `Float32Array`, it attempts runtime
@@ -671,10 +671,10 @@ Backend implementations:
   functions, `Math.pow`/`Math.hypot`/`Math.atan2`, constants
   (`Math.PI`, `Math.E`, etc.). Unsupported expressions (closures,
   multi-statement bodies, string ops) silently fall back to WASM/scalar.
-- **CPU** (`src/js/bun/gpu/cpu.ts`) — every op forwards to `bun:simd`.
+- **CPU** (`src/js/bun/gpu/cpu.ts`) — every op forwards to `para:simd`.
 
 Pipeline integration: when a fused affine chain on a `Float32Array` is
-large enough (`winsForSize("simdMap", n, 4)`), `bun:pipeline`'s
+large enough (`winsForSize("simdMap", n, 4)`), `para:pipeline`'s
 `realizeChain` dispatches to `gpu.simdMap` instead of stacking
 `simd.mulScalar`+`simd.addScalar`. Transparent fallback on hosts
 without a real GPU backend — same code path, CPU kernels at the end.
@@ -686,23 +686,23 @@ primitives above. They aren't reproduced here — see the README for
 the user-facing surface, and `src/js/bun/*.ts` for the source:
 
 - **Tier 1** (codecs + capture + inference + peripheral I/O):
-  `bun:image`, `bun:audio` (codecs + DSP + ALSA capture/playback;
+  `para:image`, `para:audio` (codecs + DSP + ALSA capture/playback;
   `audio.devices` is a callable signal — `.subscribe(cb)` for
-  inotify-driven hotplug events on `/dev/snd`), `bun:camera` (V4L2;
+  inotify-driven hotplug events on `/dev/snd`), `para:camera` (V4L2;
   `camera.devices` is a callable signal — 2 s polling because
   Bun's fs.watch on `/dev` recurses into permission-restricted
-  entries), `bun:csv`, `bun:llm` (GGUF Llama/Qwen2 + BERT
+  entries), `para:csv`, `para:llm` (GGUF Llama/Qwen2 + BERT
   embeddings + Whisper STT, with `m.busy` / `m.device` reactive
   signals; `m.chatJSON([...], { schema })` is the single-shot
   grammar-constrained convenience that drains and parses
-  for tool dispatch), `bun:rtp` (with `JitterBuffer.pendingSignal` /
-  `lossCountSignal` / `lossRateSignal`), `bun:mcp` (Model Context
-  Protocol client — stdio + WebSocket transports), `bun:gpio` /
-  `bun:i2c` / `bun:spi` (userspace peripheral access on Linux SBCs
+  for tool dispatch), `para:rtp` (with `JitterBuffer.pendingSignal` /
+  `lossCountSignal` / `lossRateSignal`), `para:mcp` (Model Context
+  Protocol client — stdio + WebSocket transports), `para:gpio` /
+  `para:i2c` / `para:spi` (userspace peripheral access on Linux SBCs
   via `/dev/gpiochipN`, `/dev/i2c-N`, `/dev/spidevN.M` — same surface
-  across Pi 4/5, Jetson, any Linux SBC; `bun:gpio` exposes both
+  across Pi 4/5, Jetson, any Linux SBC; `para:gpio` exposes both
   single-line `chip.line(...)` and atomic multi-line `chip.bank(...)`).
-- **Tier 2** (applications): `bun:speech` (`listen` / `transcribe` /
+- **Tier 2** (applications): `para:speech` (`listen` / `transcribe` /
   `say` / `speak` / `wakeWord` / `matchWakePhrase`, with reactive
   `active` / `noiseFloor` / `lastUtterance` signals on listen and
   `active` / `lastTrigger` on wakeWord; `say(text, { model })` is the
@@ -710,15 +710,15 @@ the user-facing surface, and `src/js/bun/*.ts` for the source:
   process-wide PlaybackStream cache; `speak()` returns raw PCM for
   callers that need it. Backed by a long-running per-voice piper
   subprocess cached for the process lifetime),
-  `bun:assistant` (the 3-line voice-assistant facade — composes
-  `bun:audio` + `bun:speech` + `bun:llm` / `bun:mcp`, ships
+  `para:assistant` (the 3-line voice-assistant facade — composes
+  `para:audio` + `para:speech` + `para:llm` / `para:mcp`, ships
   sqlite-backed persistent memory, tool dispatch (inline + MCP),
   VAD-driven barge-in + `bot.interrupt()`, wake-word gate, cron-driven
   scheduled prompts, and RAG over a local doc directory; exposes
   `state` / `history` / `lastTurn` / `interrupted` / `toolsActive`
-  signals), `bun:vision` (motion detection ships with `detected` /
+  signals), `para:vision` (motion detection ships with `detected` /
   `score` signals on the returned iterator; detector / OCR engines
-  stubbed), `bun:arrow` (in-memory tables + computes + IPC streaming
+  stubbed), `para:arrow` (in-memory tables + computes + IPC streaming
   wire-compatible with apache-arrow 21.x).
 
 All of these are registered in `src/bun.js/HardcodedModule.zig`.
@@ -728,7 +728,7 @@ Edits to `src/js/bun/*.ts` need a runtime cache clear
 
 ## Browser compilation
 
-Parse-time syntax (`pure`, `memo`, `|>`, `..=`, `..!`, `..&`, range, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `bun:arena`, `signal` / `effect` / `~>` import `bun:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
+Parse-time syntax (`pure`, `memo`, `|>`, `..=`, `..!`, `..&`, range, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
 
 [`packages/parabun-browser-shims`](packages/parabun-browser-shims) is the browser shim package. Applications targeting the browser alias the `bun:*` specifiers onto it via bundler config:
 
@@ -741,13 +741,13 @@ export default defineConfig({ resolve: { alias: bunAliases } });
 
 Module fidelity:
 
-- **`bun:arena`** — no-op (browsers don't expose GC control; inline body is semantically correct).
-- **`bun:signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`, plus `fromAsync(asyncIterable)` and `fromInterval(fn, periodMs)` — the latter the canonical "periodic source → reactive signal" helper for IoT sensor reads.
+- **`para:arena`** — no-op (browsers don't expose GC control; inline body is semantically correct).
+- **`para:signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`, plus `fromAsync(asyncIterable)` and `fromInterval(fn, periodMs)` — the latter the canonical "periodic source → reactive signal" helper for IoT sensor reads.
 - **`bun:wrap`** — full implementation of `__parabunMemo` (with `.forget` / `.clear` / `.bypass`), `__parabunDefer0`, `__parabunAsyncDefer0`, `__parabunRange`, `__parabunRangeInclusive`.
-- **`bun:parallel`** — sequential fallback. `pmap` / `preduce` run on the main thread; Web-Worker-backed implementation is future work.
-- **`bun:simd`** — scalar JS loops. Correct output; ~5–20× slower than v128 on large TypedArrays. WebAssembly SIMD swap-in is future work.
-- **`bun:gpu`** — CPU fallback via `bun:simd`. WebGPU / WebGL2 compute-shader backend is future work.
-- **`bun:llm`** — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
+- **`para:parallel`** — sequential fallback. `pmap` / `preduce` run on the main thread; Web-Worker-backed implementation is future work.
+- **`para:simd`** — scalar JS loops. Correct output; ~5–20× slower than v128 on large TypedArrays. WebAssembly SIMD swap-in is future work.
+- **`para:gpu`** — CPU fallback via `para:simd`. WebGPU / WebGL2 compute-shader backend is future work.
+- **`para:llm`** — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
 
 ## Real-world benchmark: SQLite analytical workload
 
@@ -761,7 +761,7 @@ speedup?
 - **Variant B** (`variant-b.pjs`): same code, `.pjs` extension. Zero
   Parabun features used; just confirms the parser imposes no overhead.
 - **Variant C** (`variant-c.pjs`): columnar extraction into
-  `Float64Array`, `bun:simd` `sum`/`dot` for mean/stddev/weighted-dot,
+  `Float64Array`, `para:simd` `sum`/`dot` for mean/stddev/weighted-dot,
   pure anomaly-count kernel, shared weights across sensors.
 
 Best-of-5 per variant (release build; `bun run bench/parabun-sqlite/run.ts`):
@@ -791,7 +791,7 @@ different bottleneck: per-row `simd.dot` boundary cost, bulk `simd.matVec`
 copy-in, Worker spawn, structured-clone, SAB residency, and finally
 `gpu.matVec` on held embeddings. Every tier teaches which cost dominates
 until it's removed; the GPU row lands at ~10× baseline once
-`bun:simd.topK` replaces the idiomatic `map → sort → slice` that was
+`para:simd.topK` replaces the idiomatic `map → sort → slice` that was
 masking the CUDA kernel's real compute win.
 
 Batched retrieval (Q = 32 queries, one `gpu.matmul` call against the held
@@ -807,7 +807,7 @@ breakdown and the sweep curve.
 
 ## Pending Work
 
-- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `bun:gpu`
+- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `para:gpu`
   ships both the affine special case (GPU kernel for `x*K + C` on
   Float32Array; pipeline fusion promotes matching chains automatically)
   and **dynamic kernel compilation** for arbitrary non-affine pure
@@ -823,7 +823,7 @@ breakdown and the sweep curve.
 - **Auto-accel dispatch, Tier 4 (implicit cross-call residency)** — the
   explicit opt-in (`gpu.hold`/`release` on Float32Array matrices) is live
   on **both** Metal and CUDA, and accepted by every op (`dot`, `matVec`,
-  `matmul`, `simdMap`). On an RTX 4070 Ti the held path beats `bun:simd`
+  `matmul`, `simdMap`). On an RTX 4070 Ti the held path beats `para:simd`
   1.4–17× across 4–32 MiB matrices (see `bench/parabun-cuda-residency`);
   held-vs-cold is 25–220× because the cold path's per-call HtoD +
   `cuCtxSynchronize` round-trip is eliminated. Still pending: implicit

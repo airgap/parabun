@@ -13,7 +13,7 @@
 //   - Sample covariance: E[XY] - E[X]E[Y] — one `simd.dot(x, y)` and two
 //     `simd.sum` calls. Same numerical caveat as variance.
 
-import { sum as simdSum, dot as simdDot } from "bun:simd";
+import { sum as simdSum, dot as simdDot } from "para:simd";
 import { generateSingle, generatePair } from "./gen.js";
 
 const WARMUPS = 3;

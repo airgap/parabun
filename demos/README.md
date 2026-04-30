@@ -20,7 +20,7 @@ Not everyone wants to leave TypeScript and that's 100% ok — every demo runs wi
 | `image-batch-resize` ([.pts](image-batch-resize.pts) / [.ts](image-batch-resize.ts)) | Decode → resize → encode a directory of images via `parallel.pmap` worker pool | None — pass `<inDir> <outDir> <maxEdge>`. |
 | `audio-meter` ([.pts](audio-meter.pts) / [.ts](audio-meter.ts)) | Live mic peak meter — `effect` over `mic.peakLevel` | ALSA / CoreAudio / WASAPI input. |
 | `llm-chat` ([.pts](llm-chat.pts) / [.ts](llm-chat.ts)) | Stream tokens from a GGUF Llama checkpoint, report tokens-per-second | `LLM_FIXTURE=<path>.gguf`. |
-| `whisper-transcribe` ([.pts](whisper-transcribe.pts) / [.ts](whisper-transcribe.ts)) | Transcribe a WAV via `bun:speech` (Whisper backend). `.pts` uses `..=`; `.ts` uses `await` | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
+| `whisper-transcribe` ([.pts](whisper-transcribe.pts) / [.ts](whisper-transcribe.ts)) | Transcribe a WAV via `para:speech` (Whisper backend). `.pts` uses `..=`; `.ts` uses `await` | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
 | `assistant-3line` ([.pts](assistant-3line.pts) / [.ts](assistant-3line.ts)) | Voice assistant with tools dispatch (mic → STT → LLM → TTS → speaker) | LLM gguf + Whisper bin + Piper onnx. |
 
 Four of the demos (`gpio-blink`, `i2c-scan`, `llm-chat`, `image-batch-resize`) use no parabun-specific sugar at all, so the `.pts` and `.ts` files are byte-identical apart from the extension — the dual listing is just so you can pick either one without breaking convention.
@@ -73,7 +73,7 @@ bun bd run demos/<demo>.pts [args]
 
 Three primitives carry the full IoT story:
 
-- **`chip.line({ pollHz: N })`** / **`chip.bank({ pollHz: N })`** — driver-level polling baked into bun:gpio so `line.value` / `bank.value` update on hardware change without the caller wiring `setInterval`.
+- **`chip.line({ pollHz: N })`** / **`chip.bank({ pollHz: N })`** — driver-level polling baked into para:gpio so `line.value` / `bank.value` update on hardware change without the caller wiring `setInterval`.
 - **`signals.fromInterval(fn, periodMs)`** — the same shape for any periodic source. Wraps `i2c.smbus.readWord(...)` / `dev.read(...)` / a custom HTTP poll into a `Signal` with one call.
 - **`effect { … }`** + **`derived(() => …)`** — the reaction surface. Every signal read inside is tracked automatically; the body re-runs on any change.
 
@@ -87,6 +87,6 @@ effect { if (isHot.get()) console.log("HOT"); }
 
 Same shape works for GPIO inputs, audio levels, network polls — anywhere a value changes over time.
 
-## Known limitation: bun:gpio edge events
+## Known limitation: para:gpio edge events
 
 `line.edges()` calls a synchronous blocking `read()` on the kernel-event fd, which currently runs on the JS main thread — so it can't be drained in the background while another reactive control loop runs in parallel. The IoT demos use `pollHz` (poll-based) instead. Filed as LYK-786 to move `readEvent` off-thread; once that ships, `edge: "..."` will drive `line.value` at hardware-event latency too.

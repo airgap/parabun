@@ -26,26 +26,26 @@ describe("Parabun arena blocks", () => {
   describe("parse-time desugar", () => {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
 
-    it("desugars `arena { body }` to a bun:arena scope call", () => {
+    it("desugars `arena { body }` to a para:arena scope call", () => {
       const out = transpiler.transformSync(`arena { let x = 1; console.log(x); }`);
-      expect(out).toContain("bun:arena");
+      expect(out).toContain("para:arena");
       expect(out).toContain(".scope");
     });
 
     it("`arena` is still a valid identifier when not followed by `{`", () => {
       const out = transpiler.transformSync(`const arena = 42; console.log(arena + 1);`);
-      expect(out).not.toContain("bun:arena");
+      expect(out).not.toContain("para:arena");
       expect(out).toContain("arena");
     });
 
     it("`arena.foo()` is a property call, not an arena block", () => {
       const out = transpiler.transformSync(`arena.foo();`);
-      expect(out).not.toContain("bun:arena");
+      expect(out).not.toContain("para:arena");
     });
 
     it("`arena(x)` is a function call, not an arena block", () => {
       const out = transpiler.transformSync(`arena(1, 2, 3);`);
-      expect(out).not.toContain("bun:arena");
+      expect(out).not.toContain("para:arena");
     });
 
     it("newline between `arena` and `{` keeps `arena` as an identifier", () => {
@@ -53,7 +53,7 @@ describe("Parabun arena blocks", () => {
       // block, we preserve that reading: `arena;` expression statement + a
       // separate block. Matches how ASI works elsewhere in JS.
       const out = transpiler.transformSync(`arena\n{ let x = 1; }`);
-      expect(out).not.toContain("bun:arena");
+      expect(out).not.toContain("para:arena");
     });
   });
 

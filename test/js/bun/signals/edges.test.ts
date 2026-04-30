@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import sigs from "bun:signals";
+import sigs from "para:signals";
 
-// bun:signals.onRising / onFalling — fire fn once per false→true (or
+// para:signals.onRising / onFalling — fire fn once per false→true (or
 // true→false) transition. Initial state is treated as already-observed.
 
-describe("bun:signals.onRising", () => {
+describe("para:signals.onRising", () => {
   test("fires on false→true transition", async () => {
     const s = sigs.signal(false);
     let n = 0;
@@ -164,7 +164,7 @@ describe("bun:signals.onRising", () => {
   });
 });
 
-describe("bun:signals.onFalling", () => {
+describe("para:signals.onFalling", () => {
   test("fires on true→false transition", async () => {
     const s = sigs.signal(true);
     let n = 0;

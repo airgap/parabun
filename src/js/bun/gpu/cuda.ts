@@ -1,4 +1,4 @@
-// Parabun CUDA backend for bun:gpu.
+// Parabun CUDA backend for para:gpu.
 //
 // Loaded by src/js/bun/gpu.ts — exposes a `Backend`-conforming object that
 // drives NVIDIA GPUs via the CUDA Driver API (libcuda.so.1 / nvcuda.dll).
@@ -25,7 +25,7 @@
 //     at every size we measure on an RTX 4070 Ti (~0.09–0.4× speedup —
 //     see bench/parabun-gpu-matvec). Residency (alloc once + reuse)
 //     is the real unlock here; kernel tuning won't move the needle.
-// dot / matmul still fall back to bun:simd.
+// dot / matmul still fall back to para:simd.
 
 const simd = require("../simd.ts");
 
@@ -769,7 +769,7 @@ function isGpuHandle(x: unknown): x is GpuHandle {
 
 function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
   if (isGpuHandle(x)) {
-    if (x.released) throw new Error("bun:gpu: op called on released handle");
+    if (x.released) throw new Error("para:gpu: op called on released handle");
     return x.view as T;
   }
   return x;
@@ -822,7 +822,7 @@ function probe(): boolean {
   if (s.cuModuleLoadDataEx(ptr(modBuf), ptr(ptxBytes), 2, ptr(options), ptr(optVals)) !== 0) {
     const end = errLog.indexOf(0);
     if (end > 0) {
-      console.error(`bun:gpu cuda: PTX module load failed:\n${new TextDecoder().decode(errLog.subarray(0, end))}`);
+      console.error(`para:gpu cuda: PTX module load failed:\n${new TextDecoder().decode(errLog.subarray(0, end))}`);
     }
     s.cuCtxDestroy_v2(ctx);
     ctx = null;
@@ -935,16 +935,16 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
 
   const dInBuf = new BigUint64Array(1);
   const dOutBuf = new BigUint64Array(1);
-  if (s.cuMemAlloc_v2(ptr(dInBuf), bytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(in) failed");
+  if (s.cuMemAlloc_v2(ptr(dInBuf), bytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(in) failed");
   if (s.cuMemAlloc_v2(ptr(dOutBuf), bytes) !== 0) {
     s.cuMemFree_v2(dInBuf[0]);
-    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(out) failed");
   }
   const dIn = dInBuf[0];
   const dOut = dOutBuf[0];
 
   try {
-    if (s.cuMemcpyHtoD_v2(dIn, ptr(a), bytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD failed");
+    if (s.cuMemcpyHtoD_v2(dIn, ptr(a), bytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyHtoD failed");
 
     // kernelParams is void** — array of pointers to each param slot.
     const pInBuf = new BigUint64Array([dIn]);
@@ -963,11 +963,11 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
     const blockDim = 256;
     const gridDim = Math.floor((n + blockDim - 1) / blockDim);
     const r = s.cuLaunchKernel(fnAffineF32!, gridDim, 1, 1, blockDim, 1, 1, 0, 0n, ptr(paramPtrs), null);
-    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel failed (${r})`);
-    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 
     const out = new Float32Array(n);
-    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, bytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH failed");
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, bytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyDtoH failed");
     return out;
   } finally {
     s.cuMemFree_v2(dIn);
@@ -995,13 +995,13 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
   let dMat: bigint;
   let matOwned: boolean;
   if (isGpuHandle(mat)) {
-    if (mat.released) throw new Error("bun:gpu: matVec called on released handle");
-    if (mat.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (mat.released) throw new Error("para:gpu: matVec called on released handle");
+    if (mat.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dMat = mat.buffer;
     matOwned = false;
   } else {
     const dMatBuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dMatBuf), matBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(mat) failed");
+    if (s.cuMemAlloc_v2(ptr(dMatBuf), matBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(mat) failed");
     dMat = dMatBuf[0];
     matOwned = true;
   }
@@ -1010,19 +1010,19 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
   let dOut: bigint = 0n;
   try {
     const dVecBuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dVecBuf), vecBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(vec) failed");
+    if (s.cuMemAlloc_v2(ptr(dVecBuf), vecBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(vec) failed");
     dVec = dVecBuf[0];
 
     const dOutBuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+    if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(out) failed");
     dOut = dOutBuf[0];
 
     if (matOwned) {
       if (s.cuMemcpyHtoD_v2(dMat, ptr(mat as Float32Array), matBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(mat) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(mat) failed");
       }
     }
-    if (s.cuMemcpyHtoD_v2(dVec, ptr(vec), vecBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD(vec) failed");
+    if (s.cuMemcpyHtoD_v2(dVec, ptr(vec), vecBytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyHtoD(vec) failed");
 
     const pMatBuf = new BigUint64Array([dMat]);
     const pVecBuf = new BigUint64Array([dVec]);
@@ -1041,11 +1041,11 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
     // warp reduction via shfl.sync.bfly with a full membermask works
     // because the block is exactly one warp and always fully active.
     const r = s.cuLaunchKernel(fnMatVecF32!, m, 1, 1, 32, 1, 1, 0, 0n, ptr(paramPtrs), null);
-    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matVec) failed (${r})`);
-    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel(matVec) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 
     const out = new Float32Array(m);
-    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH failed");
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyDtoH failed");
     return out;
   } finally {
     if (matOwned && dMat !== 0n) s.cuMemFree_v2(dMat);
@@ -1078,13 +1078,13 @@ function launchMatmulF32(
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(a)) {
-    if (a.released) throw new Error("bun:gpu: matmul called on released handle");
-    if (a.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (a.released) throw new Error("para:gpu: matmul called on released handle");
+    if (a.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = a.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(A) failed");
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(A) failed");
     dA = dABuf[0];
     aOwned = true;
   }
@@ -1092,15 +1092,15 @@ function launchMatmulF32(
   let dB: bigint;
   let bOwned: boolean;
   if (isGpuHandle(b)) {
-    if (b.released) throw new Error("bun:gpu: matmul called on released handle");
-    if (b.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (b.released) throw new Error("para:gpu: matmul called on released handle");
+    if (b.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dB = b.buffer;
     bOwned = false;
   } else {
     const dBBuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dBBuf), bBytes) !== 0) {
       if (aOwned) s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemAlloc(B) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(B) failed");
     }
     dB = dBBuf[0];
     bOwned = true;
@@ -1109,17 +1109,17 @@ function launchMatmulF32(
   let dC: bigint = 0n;
   try {
     const dCBuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dCBuf), cBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(C) failed");
+    if (s.cuMemAlloc_v2(ptr(dCBuf), cBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(C) failed");
     dC = dCBuf[0];
 
     if (aOwned) {
       if (s.cuMemcpyHtoD_v2(dA, ptr(a as Float32Array), aBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(A) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(A) failed");
       }
     }
     if (bOwned) {
       if (s.cuMemcpyHtoD_v2(dB, ptr(b as Float32Array), bBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(B) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(B) failed");
       }
     }
 
@@ -1149,8 +1149,8 @@ function launchMatmulF32(
         dC,
         n,
       );
-      if (r !== 0) throw new Error(`bun:gpu cublasSgemm failed (${r})`);
-      if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+      if (r !== 0) throw new Error(`para:gpu cublasSgemm failed (${r})`);
+      if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
     } else {
       const pABuf = new BigUint64Array([dA]);
       const pBBuf = new BigUint64Array([dB]);
@@ -1174,8 +1174,8 @@ function launchMatmulF32(
       const gridX = Math.floor((n + OUT_TILE - 1) / OUT_TILE);
       const gridY = Math.floor((m + OUT_TILE - 1) / OUT_TILE);
       const r = s.cuLaunchKernel(fnMatmulF32!, gridX, gridY, 1, 8, 8, 1, 0, 0n, ptr(paramPtrs), null);
-      if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
-      if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+      if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
+      if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
     }
 
     // DtoH directly into the caller's buffer when provided — including
@@ -1184,7 +1184,7 @@ function launchMatmulF32(
     // point of the out-buffer API: skip the CPU-side copy that parallel
     // top-K was paying at Q=256.
     const dst = out ?? new Float32Array(m * n);
-    if (s.cuMemcpyDtoH_v2(ptr(dst), dC, cBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(C) failed");
+    if (s.cuMemcpyDtoH_v2(ptr(dst), dC, cBytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyDtoH(C) failed");
     return dst;
   } finally {
     if (aOwned && dA !== 0n) s.cuMemFree_v2(dA);
@@ -1218,13 +1218,13 @@ function launchConv2DF32(
   let dIn: bigint;
   let inOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error("bun:gpu: conv2D called on released handle");
-    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (input.released) throw new Error("para:gpu: conv2D called on released handle");
+    if (input.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dIn = input.buffer;
     inOwned = false;
   } else {
     const dInBuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dInBuf), inBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+    if (s.cuMemAlloc_v2(ptr(dInBuf), inBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(input) failed");
     dIn = dInBuf[0];
     inOwned = true;
   }
@@ -1232,15 +1232,15 @@ function launchConv2DF32(
   let dK: bigint;
   let kOwned: boolean;
   if (isGpuHandle(kernel)) {
-    if (kernel.released) throw new Error("bun:gpu: conv2D called on released handle");
-    if (kernel.buffer === 0n) throw new Error("bun:gpu cuda: kernel handle has no device buffer");
+    if (kernel.released) throw new Error("para:gpu: conv2D called on released handle");
+    if (kernel.buffer === 0n) throw new Error("para:gpu cuda: kernel handle has no device buffer");
     dK = kernel.buffer;
     kOwned = false;
   } else {
     const dKBuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dKBuf), kBytes) !== 0) {
       if (inOwned) s.cuMemFree_v2(dIn);
-      throw new Error("bun:gpu cuda: cuMemAlloc(kernel) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(kernel) failed");
     }
     dK = dKBuf[0];
     kOwned = true;
@@ -1249,17 +1249,17 @@ function launchConv2DF32(
   let dOut: bigint = 0n;
   try {
     const dOutBuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(output) failed");
+    if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(output) failed");
     dOut = dOutBuf[0];
 
     if (inOwned) {
       if (s.cuMemcpyHtoD_v2(dIn, ptr(input as Float32Array), inBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
       }
     }
     if (kOwned) {
       if (s.cuMemcpyHtoD_v2(dK, ptr(kernel as Float32Array), kBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(kernel) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(kernel) failed");
       }
     }
 
@@ -1284,11 +1284,11 @@ function launchConv2DF32(
     const gridX = Math.floor((oW + 15) / 16);
     const gridY = Math.floor((oH + 15) / 16);
     const r = s.cuLaunchKernel(devOpsFns!.conv2D, gridX, gridY, 1, 16, 16, 1, 0, 0n, ptr(paramPtrs), null);
-    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(conv2D) failed (${r})`);
-    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel(conv2D) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 
     const out = new Float32Array(oW * oH);
-    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH(output) failed");
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyDtoH(output) failed");
     return out;
   } finally {
     if (inOwned && dIn !== 0n) s.cuMemFree_v2(dIn);
@@ -1312,7 +1312,7 @@ function launchConv2DF32(
 // repeated same-size dispatches reuse them. Free on backend dispose().
 //
 // Caller must ensure NVRTC is available (probeDevOps()); the public
-// wrapper on bun:gpu falls back to CPU otherwise.
+// wrapper on para:gpu falls back to CPU otherwise.
 const cachedDeviceBuffers: Map<bigint, bigint> = new Map();
 const cachedPinnedBuffers: Map<bigint, bigint> = new Map();
 
@@ -1323,7 +1323,7 @@ function getCachedDevBuf(bytes: bigint): bigint {
   const ptr = ffiPtr!;
   const buf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(buf), bytes) !== 0) {
-    throw new Error(`bun:gpu cuda: cuMemAlloc(${bytes}) failed`);
+    throw new Error(`para:gpu cuda: cuMemAlloc(${bytes}) failed`);
   }
   cachedDeviceBuffers.set(bytes, buf[0]);
   return buf[0];
@@ -1336,7 +1336,7 @@ function getCachedPinnedBuf(bytes: bigint): bigint {
   const ptr = ffiPtr!;
   const buf = new BigUint64Array(1);
   if (s.cuMemAllocHost_v2(ptr(buf), bytes) !== 0) {
-    throw new Error(`bun:gpu cuda: cuMemAllocHost(${bytes}) failed`);
+    throw new Error(`para:gpu cuda: cuMemAllocHost(${bytes}) failed`);
   }
   cachedPinnedBuffers.set(bytes, buf[0]);
   return buf[0];
@@ -1396,10 +1396,10 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
   pinnedInView.set(input);
 
   if (s.cuMemcpyHtoD_v2(dIn, Number(pinnedInPtr), inBytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
   }
   if (s.cuMemcpyHtoD_v2(dKern, ptr(k1d), kBytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD(kern) failed");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD(kern) failed");
   }
 
   const pIn = new BigUint64Array([dIn]);
@@ -1428,12 +1428,12 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
   const fn = useTiled ? devOpsFns!.gaussianBlurRGBAu8Tiled : devOpsFns!.gaussianBlurRGBAu8;
   const sharedBytes = useTiled ? (16 + 2 * radius) * (16 + 2 * radius) * 4 : 0;
   const r = s.cuLaunchKernel(fn, gridX, gridY, 1, 16, 16, 1, sharedBytes, 0n, ptr(paramPtrs), null);
-  if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(gaussianBlurRGBAu8) failed (${r})`);
-  if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+  if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel(gaussianBlurRGBAu8) failed (${r})`);
+  if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 
   const out = new Uint8Array(input.length);
   if (s.cuMemcpyDtoH_v2(Number(pinnedOutPtr), dOut, inBytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(output) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(output) failed");
   }
   out.set(pinnedOutView);
   return out;
@@ -1457,7 +1457,7 @@ const REDUCE_GRID = 1024;
 function launchReduceF32(input: Float32Array | GpuHandle, op: "sum" | "min" | "max"): number {
   if (!probeDevOps()) {
     // No NVRTC — caller must fall back to CPU.
-    throw new Error("bun:gpu cuda: NVRTC not available; reduce requires devOps module");
+    throw new Error("para:gpu cuda: NVRTC not available; reduce requires devOps module");
   }
   const s = cudaLib!.symbols;
   const ptr = ffiPtr!;
@@ -1474,27 +1474,27 @@ function launchReduceF32(input: Float32Array | GpuHandle, op: "sum" | "min" | "m
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error("bun:gpu: reduce called on released handle");
-    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (input.released) throw new Error("para:gpu: reduce called on released handle");
+    if (input.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = input.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(input) failed");
     }
     dA = dABuf[0];
     aOwned = true;
     if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
       s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+      throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
     }
   }
 
   const dPartialsBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dPartialsBuf), partialsBytes) !== 0) {
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(partials) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(partials) failed");
   }
   const dPartials = dPartialsBuf[0];
 
@@ -1509,12 +1509,12 @@ function launchReduceF32(input: Float32Array | GpuHandle, op: "sum" | "min" | "m
   if (r !== 0) {
     s.cuMemFree_v2(dPartials);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error(`bun:gpu cuda: cuLaunchKernel(reduce_${op}) failed (${r})`);
+    throw new Error(`para:gpu cuda: cuLaunchKernel(reduce_${op}) failed (${r})`);
   }
   if (s.cuCtxSynchronize() !== 0) {
     s.cuMemFree_v2(dPartials);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    throw new Error("para:gpu cuda: cuCtxSynchronize failed");
   }
 
   // Pull partials back, run final reduction on host. REDUCE_GRID = 1024
@@ -1523,7 +1523,7 @@ function launchReduceF32(input: Float32Array | GpuHandle, op: "sum" | "min" | "m
   if (s.cuMemcpyDtoH_v2(ptr(partials), dPartials, partialsBytes) !== 0) {
     s.cuMemFree_v2(dPartials);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(partials) failed");
   }
 
   s.cuMemFree_v2(dPartials);
@@ -1594,27 +1594,27 @@ function launchHistogramF32(
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error("bun:gpu: histogram called on released handle");
-    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (input.released) throw new Error("para:gpu: histogram called on released handle");
+    if (input.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = input.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(input) failed");
     }
     dA = dABuf[0];
     aOwned = true;
     if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
       s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+      throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
     }
   }
 
   const dOutBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dOutBuf), outBytes) !== 0) {
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(out) failed");
   }
   const dOut = dOutBuf[0];
   // Zero the output bins (MEM_SET_D32 would be cleaner but requires more
@@ -1623,7 +1623,7 @@ function launchHistogramF32(
   if (s.cuMemcpyHtoD_v2(dOut, ptr(zero), outBytes) !== 0) {
     s.cuMemFree_v2(dOut);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD(zero) failed");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD(zero) failed");
   }
 
   const pIn = new BigUint64Array([dA]);
@@ -1657,18 +1657,18 @@ function launchHistogramF32(
   if (r !== 0) {
     s.cuMemFree_v2(dOut);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error(`bun:gpu cuda: cuLaunchKernel(histogram) failed (${r})`);
+    throw new Error(`para:gpu cuda: cuLaunchKernel(histogram) failed (${r})`);
   }
   if (s.cuCtxSynchronize() !== 0) {
     s.cuMemFree_v2(dOut);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    throw new Error("para:gpu cuda: cuCtxSynchronize failed");
   }
 
   if (s.cuMemcpyDtoH_v2(ptr(out), dOut, outBytes) !== 0) {
     s.cuMemFree_v2(dOut);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(out) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(out) failed");
   }
   s.cuMemFree_v2(dOut);
   if (aOwned) s.cuMemFree_v2(dA);
@@ -1711,27 +1711,27 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error("bun:gpu: scan called on released handle");
-    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (input.released) throw new Error("para:gpu: scan called on released handle");
+    if (input.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = input.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(input) failed");
     }
     dA = dABuf[0];
     aOwned = true;
     if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
       s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+      throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
     }
   }
 
   const dOutBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dOutBuf), aBytes) !== 0) {
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(out) failed");
   }
   const dOut = dOutBuf[0];
 
@@ -1739,7 +1739,7 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
   if (s.cuMemAlloc_v2(ptr(dSumsBuf), blockSumsBytes) !== 0) {
     s.cuMemFree_v2(dOut);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(blockSums) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(blockSums) failed");
   }
   const dSums = dSumsBuf[0];
   // Zero the padding tail of blockSums (rounded-up area beyond numBlocks)
@@ -1750,7 +1750,7 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
     s.cuMemFree_v2(dSums);
     s.cuMemFree_v2(dOut);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD(blockSums zero) failed");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD(blockSums zero) failed");
   }
 
   const cleanup = () => {
@@ -1781,7 +1781,7 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
     );
     if (r !== 0) {
       cleanup();
-      throw new Error(`bun:gpu cuda: cuLaunchKernel(scan_block_inclusive) failed (${r})`);
+      throw new Error(`para:gpu cuda: cuLaunchKernel(scan_block_inclusive) failed (${r})`);
     }
   }
 
@@ -1805,7 +1805,7 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
     );
     if (r !== 0) {
       cleanup();
-      throw new Error(`bun:gpu cuda: cuLaunchKernel(scan_blocksums_inclusive) failed (${r})`);
+      throw new Error(`para:gpu cuda: cuLaunchKernel(scan_blocksums_inclusive) failed (${r})`);
     }
   }
 
@@ -1819,19 +1819,19 @@ function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
     const r = s.cuLaunchKernel(devOpsFns!.scanAddOffsets, numBlocks, 1, 1, SCAN_BLOCK, 1, 1, 0, 0n, ptr(params), null);
     if (r !== 0) {
       cleanup();
-      throw new Error(`bun:gpu cuda: cuLaunchKernel(scan_add_offsets) failed (${r})`);
+      throw new Error(`para:gpu cuda: cuLaunchKernel(scan_add_offsets) failed (${r})`);
     }
   }
 
   if (s.cuCtxSynchronize() !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    throw new Error("para:gpu cuda: cuCtxSynchronize failed");
   }
 
   const out = new Float32Array(n);
   if (s.cuMemcpyDtoH_v2(ptr(out), dOut, aBytes) !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(out) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(out) failed");
   }
   cleanup();
   return out;
@@ -1853,7 +1853,7 @@ function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): num
     // keeps the no-NVRTC and with-NVRTC paths byte-for-byte equivalent.
     const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
     if (view.length === 0) {
-      throw new RangeError(`bun:gpu cuda: arg${mode} on empty input`);
+      throw new RangeError(`para:gpu cuda: arg${mode} on empty input`);
     }
     let bestI = 0;
     let bestV = view[0];
@@ -1871,7 +1871,7 @@ function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): num
   const ptr = ffiPtr!;
   const aView = isGpuHandle(input) ? (input.view as Float32Array) : input;
   const n = aView.length;
-  if (n === 0) throw new RangeError(`bun:gpu cuda: arg${mode} on empty input`);
+  if (n === 0) throw new RangeError(`para:gpu cuda: arg${mode} on empty input`);
 
   const aBytes = BigInt(n * 4);
   const partialVBytes = BigInt(ARGMIN_GRID * 4);
@@ -1880,33 +1880,33 @@ function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): num
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error(`bun:gpu: arg${mode} called on released handle`);
-    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (input.released) throw new Error(`para:gpu: arg${mode} called on released handle`);
+    if (input.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = input.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(input) failed");
     }
     dA = dABuf[0];
     aOwned = true;
     if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
       s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+      throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
     }
   }
 
   const dPVBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dPVBuf), partialVBytes) !== 0) {
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(partial_v) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(partial_v) failed");
   }
   const dPIBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dPIBuf), partialIBytes) !== 0) {
     s.cuMemFree_v2(dPVBuf[0]);
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(partial_i) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(partial_i) failed");
   }
   const dPV = dPVBuf[0];
   const dPI = dPIBuf[0];
@@ -1927,11 +1927,11 @@ function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): num
   const r = s.cuLaunchKernel(fn, ARGMIN_GRID, 1, 1, ARGMIN_BLOCK, 1, 1, 0, 0n, ptr(params), null);
   if (r !== 0) {
     cleanup();
-    throw new Error(`bun:gpu cuda: cuLaunchKernel(arg${mode}_f32) failed (${r})`);
+    throw new Error(`para:gpu cuda: cuLaunchKernel(arg${mode}_f32) failed (${r})`);
   }
   if (s.cuCtxSynchronize() !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    throw new Error("para:gpu cuda: cuCtxSynchronize failed");
   }
 
   // Pull both partial buffers back, find the global winner host-side.
@@ -1939,11 +1939,11 @@ function launchArgF32(input: Float32Array | GpuHandle, mode: "min" | "max"): num
   const partialI = new Uint32Array(ARGMIN_GRID);
   if (s.cuMemcpyDtoH_v2(ptr(partialV), dPV, partialVBytes) !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partial_v) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(partial_v) failed");
   }
   if (s.cuMemcpyDtoH_v2(ptr(partialI), dPI, partialIBytes) !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partial_i) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(partial_i) failed");
   }
   cleanup();
 
@@ -2020,27 +2020,27 @@ function launchVarianceF32(input: Float32Array | GpuHandle, ddof: number): numbe
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error("bun:gpu: variance called on released handle");
-    if (input.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (input.released) throw new Error("para:gpu: variance called on released handle");
+    if (input.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = input.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAlloc(input) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(input) failed");
     }
     dA = dABuf[0];
     aOwned = true;
     if (s.cuMemcpyHtoD_v2(dA, ptr(view), aBytes) !== 0) {
       s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemcpyHtoD(input) failed");
+      throw new Error("para:gpu cuda: cuMemcpyHtoD(input) failed");
     }
   }
 
   const dPartialsBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dPartialsBuf), partialsBytes) !== 0) {
     if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("bun:gpu cuda: cuMemAlloc(partials) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(partials) failed");
   }
   const dPartials = dPartialsBuf[0];
 
@@ -2058,19 +2058,19 @@ function launchVarianceF32(input: Float32Array | GpuHandle, ddof: number): numbe
     const r = s.cuLaunchKernel(devOpsFns!.reduceSum, REDUCE_GRID, 1, 1, REDUCE_BLOCK, 1, 1, 0, 0n, ptr(params), null);
     if (r !== 0) {
       cleanup();
-      throw new Error(`bun:gpu cuda: cuLaunchKernel(reduce_sum for variance) failed (${r})`);
+      throw new Error(`para:gpu cuda: cuLaunchKernel(reduce_sum for variance) failed (${r})`);
     }
   }
 
   if (s.cuCtxSynchronize() !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuCtxSynchronize after pass 1 failed");
+    throw new Error("para:gpu cuda: cuCtxSynchronize after pass 1 failed");
   }
 
   const partials = new Float32Array(REDUCE_GRID);
   if (s.cuMemcpyDtoH_v2(ptr(partials), dPartials, partialsBytes) !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials pass 1) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(partials pass 1) failed");
   }
   let totalSum = 0;
   let c = 0;
@@ -2104,19 +2104,19 @@ function launchVarianceF32(input: Float32Array | GpuHandle, ddof: number): numbe
     );
     if (r !== 0) {
       cleanup();
-      throw new Error(`bun:gpu cuda: cuLaunchKernel(variance_sumsq) failed (${r})`);
+      throw new Error(`para:gpu cuda: cuLaunchKernel(variance_sumsq) failed (${r})`);
     }
   }
 
   if (s.cuCtxSynchronize() !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuCtxSynchronize after pass 2 failed");
+    throw new Error("para:gpu cuda: cuCtxSynchronize after pass 2 failed");
   }
 
   const partials2 = new Float32Array(REDUCE_GRID);
   if (s.cuMemcpyDtoH_v2(ptr(partials2), dPartials, partialsBytes) !== 0) {
     cleanup();
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials pass 2) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(partials pass 2) failed");
   }
   cleanup();
 
@@ -2154,13 +2154,13 @@ function launchDotF32(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle):
   let dA: bigint;
   let aOwned: boolean;
   if (isGpuHandle(a)) {
-    if (a.released) throw new Error("bun:gpu: dot called on released handle");
-    if (a.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (a.released) throw new Error("para:gpu: dot called on released handle");
+    if (a.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dA = a.buffer;
     aOwned = false;
   } else {
     const dABuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(A) failed");
+    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(A) failed");
     dA = dABuf[0];
     aOwned = true;
   }
@@ -2168,15 +2168,15 @@ function launchDotF32(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle):
   let dB: bigint;
   let bOwned: boolean;
   if (isGpuHandle(b)) {
-    if (b.released) throw new Error("bun:gpu: dot called on released handle");
-    if (b.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer (f64?)");
+    if (b.released) throw new Error("para:gpu: dot called on released handle");
+    if (b.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer (f64?)");
     dB = b.buffer;
     bOwned = false;
   } else {
     const dBBuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dBBuf), bBytes) !== 0) {
       if (aOwned) s.cuMemFree_v2(dA);
-      throw new Error("bun:gpu cuda: cuMemAlloc(B) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(B) failed");
     }
     dB = dBBuf[0];
     bOwned = true;
@@ -2186,17 +2186,17 @@ function launchDotF32(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle):
   try {
     const dPartBuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(ptr(dPartBuf), partialsBytes) !== 0)
-      throw new Error("bun:gpu cuda: cuMemAlloc(partials) failed");
+      throw new Error("para:gpu cuda: cuMemAlloc(partials) failed");
     dPart = dPartBuf[0];
 
     if (aOwned) {
       if (s.cuMemcpyHtoD_v2(dA, ptr(a as Float32Array), aBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(A) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(A) failed");
       }
     }
     if (bOwned) {
       if (s.cuMemcpyHtoD_v2(dB, ptr(b as Float32Array), bBytes) !== 0) {
-        throw new Error("bun:gpu cuda: cuMemcpyHtoD(B) failed");
+        throw new Error("para:gpu cuda: cuMemcpyHtoD(B) failed");
       }
     }
 
@@ -2212,12 +2212,12 @@ function launchDotF32(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle):
     ]);
 
     const r = s.cuLaunchKernel(fnDotF32!, DOT_GRID, 1, 1, 32, 1, 1, 0, 0n, ptr(paramPtrs), null);
-    if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel(dot) failed (${r})`);
-    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel(dot) failed (${r})`);
+    if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 
     const partials = new Float32Array(DOT_GRID);
     if (s.cuMemcpyDtoH_v2(ptr(partials), dPart, partialsBytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemcpyDtoH(partials) failed");
+      throw new Error("para:gpu cuda: cuMemcpyDtoH(partials) failed");
     }
     // Final host reduction. DOT_GRID = 1024 f32 values; the summation order
     // deviates from SIMD's, so results match SIMD only within f32-FMA tolerance.
@@ -2251,10 +2251,10 @@ let MIN_SIMDMAP_ELEMS = DEFAULT_MIN_SIMDMAP_ELEMS;
 //     exercise the real GPU path.
 //   - MIN_MATVEC_WINS_ELEMS:     above this, `winsForSize("matVec", ...)`
 //     returns true — pipeline-style callers use this to decide whether to
-//     route the op to bun:gpu at all.
+//     route the op to para:gpu at all.
 //
 // Benchmarked on an RTX 4070 Ti + PCIe 4.0 ×16: the non-resident path
-// loses 3–10× to bun:simd at every size we care about because the
+// loses 3–10× to para:simd at every size we care about because the
 // cuMemcpyHtoD + cuCtxSynchronize per call dominates the actual kernel
 // (see bench/parabun-gpu-matvec). `wins` stays at Infinity until the
 // residency path (alloc once, reuse across calls) lands. When it does,
@@ -2263,14 +2263,14 @@ const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
 const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
 
 // matmul dispatch threshold: at M*N*K below this, the PTX naive kernel
-// doesn't win against bun:simd's tiled JS loop because per-call HtoD+sync
+// doesn't win against para:simd's tiled JS loop because per-call HtoD+sync
 // dominates. Held inputs bypass this (their HtoD already happened).
 // `wins` stays at Infinity for now — the held path is the winner; cold
 // dispatch is parked. Revisit once we have a 4070 Ti matmul benchmark.
 const MIN_MATMUL_DISPATCH_FLOPS = 1 << 24; // 16M multiply-adds (e.g. 256^3)
 const MIN_MATMUL_WINS_FLOPS = Number.POSITIVE_INFINITY;
 
-// dot: cold GPU loses 9–18× to bun:simd at every size we measured on an RTX
+// dot: cold GPU loses 9–18× to para:simd at every size we measured on an RTX
 // 4070 Ti — the per-call HtoD (pageable memory copy at ~760 MB/s) dominates
 // the warp-reduce kernel no matter how big the vector is. Residency is the
 // only path that wins, so dispatch and wins thresholds are both parked at
@@ -2292,10 +2292,10 @@ function winsForSize(op: string, n: number, elemBytes: number): boolean {
 // ─── Per-host calibration ─────────────────────────────────────────────────
 //
 // `simdMap` is the only op today where the CPU→GPU crossover genuinely
-// varies by hardware; matVec / matmul / dot all lose to bun:simd at every
+// varies by hardware; matVec / matmul / dot all lose to para:simd at every
 // measured size on the non-resident path, so their thresholds are parked
 // at Infinity. `calibrate()` sweeps a handful of sizes with the real PTX
-// kernel vs bun:simd, finds the smallest N where GPU wins by ≥10% (margin
+// kernel vs para:simd, finds the smallest N where GPU wins by ≥10% (margin
 // absorbs host noise), and persists the result to
 // `~/.cache/parabun/gpu-calibrate-<hash>.json`. The hash keys on
 // deviceName + backend + platform + arch so a laptop dock switch (or a
@@ -2403,8 +2403,8 @@ function sweepSimdMapCrossover(): number {
 }
 
 function calibrate(): { simdMap: number; cacheFile: string; deviceName: string } {
-  if (!probed && !probe()) throw new Error("bun:gpu cuda: cannot calibrate — backend not available");
-  if (!probeResult) throw new Error("bun:gpu cuda: cannot calibrate — probe failed");
+  if (!probed && !probe()) throw new Error("para:gpu cuda: cannot calibrate — backend not available");
+  if (!probeResult) throw new Error("para:gpu cuda: cannot calibrate — probe failed");
 
   const crossover = sweepSimdMapCrossover();
   MIN_SIMDMAP_ELEMS = crossover;
@@ -2427,7 +2427,7 @@ function calibrate(): { simdMap: number; cacheFile: string; deviceName: string }
     // Calibration is never required for correctness. Log but don't throw —
     // the in-memory MIN_SIMDMAP_ELEMS is still correct for this process.
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`bun:gpu cuda: failed to persist calibration (${msg}) — using in-memory value`);
+    console.error(`para:gpu cuda: failed to persist calibration (${msg}) — using in-memory value`);
   }
 
   return { simdMap: crossover, cacheFile: cacheFilePath(), deviceName };
@@ -2438,8 +2438,8 @@ function calibrate(): { simdMap: number; cacheFile: string; deviceName: string }
 function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
   const aIsHandle = isGpuHandle(a);
   const bIsHandle = isGpuHandle(b);
-  if (aIsHandle && a.released) throw new Error("bun:gpu: dot called on released handle");
-  if (bIsHandle && b.released) throw new Error("bun:gpu: dot called on released handle");
+  if (aIsHandle && a.released) throw new Error("para:gpu: dot called on released handle");
+  if (bIsHandle && b.released) throw new Error("para:gpu: dot called on released handle");
   const av = aIsHandle ? a.view : (a as FArray);
   const bv = bIsHandle ? b.view : (b as FArray);
   // GPU dispatch when both sides are Float32Array and either (a) a residency
@@ -2466,7 +2466,7 @@ function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
 function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
   const matIsHandle = isGpuHandle(matrix);
   if (matIsHandle && matrix.released) {
-    throw new Error("bun:gpu: matVec called on released handle");
+    throw new Error("para:gpu: matVec called on released handle");
   }
   const matView = matIsHandle ? matrix.view : (matrix as FArray);
   // Held F32 handles keep their resident device pointer — dispatch even if
@@ -2487,8 +2487,8 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
 function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray {
   const aIsHandle = isGpuHandle(a);
   const bIsHandle = isGpuHandle(b);
-  if (aIsHandle && a.released) throw new Error("bun:gpu: matmul called on released handle");
-  if (bIsHandle && b.released) throw new Error("bun:gpu: matmul called on released handle");
+  if (aIsHandle && a.released) throw new Error("para:gpu: matmul called on released handle");
+  if (bIsHandle && b.released) throw new Error("para:gpu: matmul called on released handle");
   const av = aIsHandle ? a.view : (a as FArray);
   const bv = bIsHandle ? b.view : (b as FArray);
   if (av.constructor !== bv.constructor) {
@@ -2561,8 +2561,8 @@ function matmulBatched(
 
   const aIsHandle = isGpuHandle(a);
   const bIsHandle = isGpuHandle(b);
-  if (aIsHandle && a.released) throw new Error("bun:gpu: matmulBatched called on released handle");
-  if (bIsHandle && b.released) throw new Error("bun:gpu: matmulBatched called on released handle");
+  if (aIsHandle && a.released) throw new Error("para:gpu: matmulBatched called on released handle");
+  if (bIsHandle && b.released) throw new Error("para:gpu: matmulBatched called on released handle");
   const av = aIsHandle ? a.view : (a as FArray);
   const bv = bIsHandle ? b.view : (b as FArray);
   if (!(av instanceof Float32Array) || !(bv instanceof Float32Array)) {
@@ -2702,8 +2702,8 @@ function sdpaSelf(
 
     const wrap = (x: FArray | GpuHandle): { dev: bigint; owned: boolean } => {
       if (isGpuHandle(x)) {
-        if (x.released) throw new Error("bun:gpu: sdpaSelf called on released handle");
-        if (x.buffer === 0n) throw new Error("bun:gpu cuda: sdpaSelf: handle has no device buffer");
+        if (x.released) throw new Error("para:gpu: sdpaSelf called on released handle");
+        if (x.buffer === 0n) throw new Error("para:gpu cuda: sdpaSelf: handle has no device buffer");
         return { dev: x.buffer, owned: false };
       }
       const buf = new BigUint64Array(1);
@@ -2826,8 +2826,8 @@ function sdpaSingleQuery(
 
     const wrap = (x: FArray | GpuHandle, bytes: bigint): { dev: bigint; owned: boolean } => {
       if (isGpuHandle(x)) {
-        if (x.released) throw new Error("bun:gpu: sdpaSingleQuery called on released handle");
-        if (x.buffer === 0n) throw new Error("bun:gpu cuda: sdpaSingleQuery: handle has no device buffer");
+        if (x.released) throw new Error("para:gpu: sdpaSingleQuery called on released handle");
+        if (x.buffer === 0n) throw new Error("para:gpu cuda: sdpaSingleQuery: handle has no device buffer");
         return { dev: x.buffer, owned: false };
       }
       const buf = new BigUint64Array(1);
@@ -3145,16 +3145,16 @@ function launchCustomF32(a: Float32Array, kernel: CachedKernel): Float32Array {
 
   const dInBuf = new BigUint64Array(1);
   const dOutBuf = new BigUint64Array(1);
-  if (s.cuMemAlloc_v2(ptr(dInBuf), bytes) !== 0) throw new Error("bun:gpu cuda: cuMemAlloc(in) failed");
+  if (s.cuMemAlloc_v2(ptr(dInBuf), bytes) !== 0) throw new Error("para:gpu cuda: cuMemAlloc(in) failed");
   if (s.cuMemAlloc_v2(ptr(dOutBuf), bytes) !== 0) {
     s.cuMemFree_v2(dInBuf[0]);
-    throw new Error("bun:gpu cuda: cuMemAlloc(out) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(out) failed");
   }
   const dIn = dInBuf[0];
   const dOut = dOutBuf[0];
 
   try {
-    if (s.cuMemcpyHtoD_v2(dIn, ptr(a), bytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyHtoD failed");
+    if (s.cuMemcpyHtoD_v2(dIn, ptr(a), bytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyHtoD failed");
 
     const pInBuf = new BigUint64Array([dIn]);
     const pOutBuf = new BigUint64Array([dOut]);
@@ -3164,12 +3164,12 @@ function launchCustomF32(a: Float32Array, kernel: CachedKernel): Float32Array {
     const blockSize = 256;
     const gridSize = Math.ceil(n / blockSize);
     if (s.cuLaunchKernel(kernel.fn, gridSize, 1, 1, blockSize, 1, 1, 0, 0n, ptr(params), null) !== 0) {
-      throw new Error("bun:gpu cuda: cuLaunchKernel failed");
+      throw new Error("para:gpu cuda: cuLaunchKernel failed");
     }
-    if (s.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+    if (s.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 
     const out = new Float32Array(n);
-    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, bytes) !== 0) throw new Error("bun:gpu cuda: cuMemcpyDtoH failed");
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, bytes) !== 0) throw new Error("para:gpu cuda: cuMemcpyDtoH failed");
     return out;
   } finally {
     s.cuMemFree_v2(dIn);
@@ -3236,7 +3236,7 @@ function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number):
 function reduce(input: FArray | GpuHandle, op: "sum" | "min" | "max"): number {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
-    throw new TypeError("bun:gpu cuda: reduce requires Float32Array (f64 not yet supported)");
+    throw new TypeError("para:gpu cuda: reduce requires Float32Array (f64 not yet supported)");
   }
   if (!probeDevOps()) {
     // Caller-side fallback: do the CPU reduce inline so the public wrapper
@@ -3278,7 +3278,7 @@ function reduce(input: FArray | GpuHandle, op: "sum" | "min" | "max"): number {
 function histogram(input: FArray | GpuHandle, bins: number, min: number, max: number): Uint32Array {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
-    throw new TypeError("bun:gpu cuda: histogram requires Float32Array (f64 not yet supported)");
+    throw new TypeError("para:gpu cuda: histogram requires Float32Array (f64 not yet supported)");
   }
   const out = launchHistogramF32(input as Float32Array | GpuHandle, bins, min, max);
   if (out !== null) return out;
@@ -3303,7 +3303,7 @@ function histogram(input: FArray | GpuHandle, bins: number, min: number, max: nu
 function scan(input: FArray | GpuHandle): FArray {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
-    throw new TypeError("bun:gpu cuda: scan requires Float32Array (f64 not yet supported)");
+    throw new TypeError("para:gpu cuda: scan requires Float32Array (f64 not yet supported)");
   }
   const out = launchScanF32(input as Float32Array | GpuHandle);
   if (out !== null) return out;
@@ -3328,7 +3328,7 @@ function scan(input: FArray | GpuHandle): FArray {
 function argMin(input: FArray | GpuHandle): number {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
-    throw new TypeError("bun:gpu cuda: argMin requires Float32Array (f64 not yet supported)");
+    throw new TypeError("para:gpu cuda: argMin requires Float32Array (f64 not yet supported)");
   }
   return launchArgF32(input as Float32Array | GpuHandle, "min");
 }
@@ -3336,7 +3336,7 @@ function argMin(input: FArray | GpuHandle): number {
 function argMax(input: FArray | GpuHandle): number {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
-    throw new TypeError("bun:gpu cuda: argMax requires Float32Array (f64 not yet supported)");
+    throw new TypeError("para:gpu cuda: argMax requires Float32Array (f64 not yet supported)");
   }
   return launchArgF32(input as Float32Array | GpuHandle, "max");
 }
@@ -3347,7 +3347,7 @@ function argMax(input: FArray | GpuHandle): number {
 function variance(input: FArray | GpuHandle, ddof: number): number {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
-    throw new TypeError("bun:gpu cuda: variance requires Float32Array (f64 not yet supported)");
+    throw new TypeError("para:gpu cuda: variance requires Float32Array (f64 not yet supported)");
   }
   return launchVarianceF32(input as Float32Array | GpuHandle, ddof);
 }
@@ -3431,7 +3431,7 @@ function alloc(length: number, type: "f32" | "f64", opts?: AllocOptions): FArray
     const tab = ffiToArrayBuffer!;
     const dPtrBuf = new BigUint64Array(1);
     if (s.cuMemAllocHost_v2(p(dPtrBuf), BigInt(bytes)) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAllocHost failed");
+      throw new Error("para:gpu cuda: cuMemAllocHost failed");
     }
     const hostPtr = dPtrBuf[0];
     // toArrayBuffer wants a Number-typed Pointer; convert from the bigint
@@ -3478,7 +3478,7 @@ function isAligned(arr: FArray): boolean {
 // Tier 4 residency: hold(arr) on an f32 array does the cuMemAlloc +
 // cuMemcpyHtoD once, so subsequent matVec calls against the handle skip
 // the per-call copy. f64 handles aren't wired to a CUDA kernel yet, so
-// those just wrap the view and matVec falls through to bun:simd.
+// those just wrap the view and matVec falls through to para:simd.
 //
 // Lifetime: caller MUST call release(handle). releaseHandle is
 // idempotent, and after it runs any op that dereferences the handle
@@ -3496,12 +3496,12 @@ function hold(arr: FArray): GpuHandle {
     const bytes = BigInt(arr.byteLength);
     const dPtrBuf = new BigUint64Array(1);
     if (s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
-      throw new Error("bun:gpu cuda: cuMemAlloc failed in hold");
+      throw new Error("para:gpu cuda: cuMemAlloc failed in hold");
     }
     const dPtr = dPtrBuf[0];
     if (s.cuMemcpyHtoD_v2(dPtr, p(arr), bytes) !== 0) {
       s.cuMemFree_v2(dPtr);
-      throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in hold");
+      throw new Error("para:gpu cuda: cuMemcpyHtoD failed in hold");
     }
     buffer = dPtr;
   }
@@ -3535,22 +3535,22 @@ function releaseHandle(handle: GpuHandle): void {
  */
 function writeHandleAt(handle: GpuHandle, offsetElems: number, src: FArray): void {
   if (!isGpuHandle(handle)) throw new TypeError(`writeHandleAt expected a GpuHandle; got ${typeof handle}`);
-  if (handle.released) throw new Error("bun:gpu: writeHandleAt on released handle");
+  if (handle.released) throw new Error("para:gpu: writeHandleAt on released handle");
   if (handle.buffer === 0n) {
     // f64 handles or backends-that-don't-allocate paths — no-op (the
     // wrapper has already mirrored into the host view).
     return;
   }
-  if (!cudaLib) throw new Error("bun:gpu cuda: writeHandleAt called before tryLoadCuda");
+  if (!cudaLib) throw new Error("para:gpu cuda: writeHandleAt called before tryLoadCuda");
   if (handle.qFormat) {
-    throw new Error("bun:gpu cuda: writeHandleAt not supported on quantized handles");
+    throw new Error("para:gpu cuda: writeHandleAt not supported on quantized handles");
   }
   const elemBytes = handle.type === "f32" ? 4 : 8;
   const offsetBytes = BigInt(offsetElems * elemBytes);
   const sizeBytes = BigInt(src.byteLength);
   const dst = handle.buffer + offsetBytes;
   if (cudaLib.symbols.cuMemcpyHtoD_v2(dst, ffiPtr!(src), sizeBytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in writeHandleAt");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD failed in writeHandleAt");
   }
 }
 
@@ -3576,19 +3576,19 @@ function holdQ6K(blocks: Uint8Array, nElems: number): GpuHandle {
   if (blocks.byteLength !== expectedBytes) {
     throw new RangeError(`holdQ6K: expected ${expectedBytes} bytes for ${nElems} elements; got ${blocks.byteLength}`);
   }
-  if (!probe()) throw new Error("bun:gpu cuda: not available");
+  if (!probe()) throw new Error("para:gpu cuda: not available");
 
   const s = cudaLib!.symbols;
   const p = ffiPtr!;
   const dPtrBuf = new BigUint64Array(1);
   const bytes = BigInt(blocks.byteLength);
   if (s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemAlloc failed in holdQ6K");
+    throw new Error("para:gpu cuda: cuMemAlloc failed in holdQ6K");
   }
   const dPtr = dPtrBuf[0];
   if (s.cuMemcpyHtoD_v2(dPtr, p(blocks), bytes) !== 0) {
     s.cuMemFree_v2(dPtr);
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in holdQ6K");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD failed in holdQ6K");
   }
   return {
     __bunGpuHandle: true,
@@ -3613,19 +3613,19 @@ function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
   if (blocks.byteLength !== expectedBytes) {
     throw new RangeError(`holdQ4K: expected ${expectedBytes} bytes for ${nElems} elements; got ${blocks.byteLength}`);
   }
-  if (!probe()) throw new Error("bun:gpu cuda: not available");
+  if (!probe()) throw new Error("para:gpu cuda: not available");
 
   const s = cudaLib!.symbols;
   const p = ffiPtr!;
   const dPtrBuf = new BigUint64Array(1);
   const bytes = BigInt(blocks.byteLength);
   if (s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemAlloc failed in holdQ4K");
+    throw new Error("para:gpu cuda: cuMemAlloc failed in holdQ4K");
   }
   const dPtr = dPtrBuf[0];
   if (s.cuMemcpyHtoD_v2(dPtr, p(blocks), bytes) !== 0) {
     s.cuMemFree_v2(dPtr);
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD failed in holdQ4K");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD failed in holdQ4K");
   }
   return {
     __bunGpuHandle: true,
@@ -3645,7 +3645,7 @@ function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
 // call HtoDs its inputs and DtoH's its output. That's fine for one-shot
 // calls, but catastrophic for a transformer decode loop where the 8KB
 // residual stream ping-pongs across PCIe ~113 times per token. For
-// bun:llm (and future device-residency consumers) we expose a second
+// para:llm (and future device-residency consumers) we expose a second
 // surface — `devOps` — where the caller explicitly allocates device
 // scratch buffers and drives ops with device pointers only. No HtoD/DtoH
 // in the hot path; the only host↔device traffic per token is the 4-byte
@@ -3655,7 +3655,7 @@ function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
 // use. PTX hand-coding for 11+ kernels would be unshippably painful,
 // and NVRTC's per-module compile time (~200ms) is paid exactly once
 // per process. If NVRTC isn't installed, `devOps` returns null and
-// bun:llm falls back to the old host-loop path.
+// para:llm falls back to the old host-loop path.
 //
 // Kernel conventions:
 //   - All kernels operate on f32 only.
@@ -5078,7 +5078,7 @@ type DevOpsFns = {
   scanBlocksumsInclusive: bigint;
   scanAddOffsets: bigint;
   /** General-purpose multi-block argmin/argmax over arbitrary-N Float32Arrays.
-   *  Distinct from the existing `argmax` field above, which is bun:llm's
+   *  Distinct from the existing `argmax` field above, which is para:llm's
    *  hand-written single-block argmax for sampling logits. */
   argminGrid: bigint;
   argmaxGrid: bigint;
@@ -5118,7 +5118,7 @@ function probeDevOps(): boolean {
       ns.nvrtcGetProgramLog(prog, p(logBytes));
       const end = logBytes.indexOf(0);
       console.error(
-        `bun:gpu cuda: devOps NVRTC compile failed:\n${new TextDecoder().decode(logBytes.subarray(0, end < 0 ? logBytes.length : end))}`,
+        `para:gpu cuda: devOps NVRTC compile failed:\n${new TextDecoder().decode(logBytes.subarray(0, end < 0 ? logBytes.length : end))}`,
       );
     }
     ns.nvrtcDestroyProgram(p(progBuf));
@@ -5225,7 +5225,7 @@ function probeDevOps(): boolean {
     if (fn === null) {
       cs.cuModuleUnload(devOpsMod!);
       devOpsMod = null;
-      console.error(`bun:gpu cuda: devOps missing kernel ${kernelNames[k]}`);
+      console.error(`para:gpu cuda: devOps missing kernel ${kernelNames[k]}`);
       return false;
     }
     fns[k] = fn;
@@ -5261,11 +5261,11 @@ function isGpuScratch(x: unknown): x is GpuScratch {
 
 function devPtr(x: GpuScratch | GpuHandle): bigint {
   if (isGpuScratch(x)) {
-    if (x.released) throw new Error("bun:gpu cuda: op on released scratch");
+    if (x.released) throw new Error("para:gpu cuda: op on released scratch");
     return x.buffer;
   }
-  if (x.released) throw new Error("bun:gpu cuda: op on released handle");
-  if (x.buffer === 0n) throw new Error("bun:gpu cuda: handle has no device buffer");
+  if (x.released) throw new Error("para:gpu cuda: op on released handle");
+  if (x.buffer === 0n) throw new Error("para:gpu cuda: handle has no device buffer");
   return x.buffer;
 }
 
@@ -5273,13 +5273,13 @@ function allocScratch(length: number, type: "f32" | "i32" = "f32"): GpuScratch {
   if (!Number.isInteger(length) || length < 0) {
     throw new RangeError(`length must be a non-negative integer; got ${length}`);
   }
-  if (!probe()) throw new Error("bun:gpu cuda: not available");
+  if (!probe()) throw new Error("para:gpu cuda: not available");
   const s = cudaLib!.symbols;
   const p = ffiPtr!;
   const bytes = BigInt(length * 4);
   const dPtrBuf = new BigUint64Array(1);
   if (length > 0 && s.cuMemAlloc_v2(p(dPtrBuf), bytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemAlloc(scratch) failed");
+    throw new Error("para:gpu cuda: cuMemAlloc(scratch) failed");
   }
   return {
     __bunGpuScratch: true,
@@ -5292,7 +5292,7 @@ function allocScratch(length: number, type: "f32" | "i32" = "f32"): GpuScratch {
 }
 
 function scratchSlice(s: GpuScratch, elemOffset: number, length: number): GpuScratch {
-  if (s.released) throw new Error("bun:gpu cuda: slice on released scratch");
+  if (s.released) throw new Error("para:gpu cuda: slice on released scratch");
   if (elemOffset < 0 || length < 0 || elemOffset + length > s.length) {
     throw new RangeError(`slice out of bounds: offset=${elemOffset}, length=${length}, total=${s.length}`);
   }
@@ -5320,7 +5320,7 @@ function freeScratch(s: GpuScratch): void {
 }
 
 function uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOffset = 0): void {
-  if (s.released) throw new Error("bun:gpu cuda: uploadScratch on released");
+  if (s.released) throw new Error("para:gpu cuda: uploadScratch on released");
   if (dstElemOffset + src.length > s.length) {
     throw new RangeError(`uploadScratch: ${src.length} elems at offset ${dstElemOffset} > scratch length ${s.length}`);
   }
@@ -5330,12 +5330,12 @@ function uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOff
   const bytes = BigInt(src.byteLength);
   const dst = s.buffer + BigInt(dstElemOffset * 4);
   if (sym.cuMemcpyHtoD_v2(dst, p(src), bytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemcpyHtoD(scratch) failed");
+    throw new Error("para:gpu cuda: cuMemcpyHtoD(scratch) failed");
   }
 }
 
 function downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemOffset = 0): void {
-  if (s.released) throw new Error("bun:gpu cuda: downloadScratch on released");
+  if (s.released) throw new Error("para:gpu cuda: downloadScratch on released");
   if (srcElemOffset + dst.length > s.length) {
     throw new RangeError(
       `downloadScratch: ${dst.length} elems at offset ${srcElemOffset} > scratch length ${s.length}`,
@@ -5347,7 +5347,7 @@ function downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemO
   const bytes = BigInt(dst.byteLength);
   const src = s.buffer + BigInt(srcElemOffset * 4);
   if (sym.cuMemcpyDtoH_v2(p(dst), src, bytes) !== 0) {
-    throw new Error("bun:gpu cuda: cuMemcpyDtoH(scratch) failed");
+    throw new Error("para:gpu cuda: cuMemcpyDtoH(scratch) failed");
   }
 }
 
@@ -5414,11 +5414,11 @@ function launchWith(
   const addrs = s.addrs;
   for (let i = 0; i < s.nSlots; i++) pp[i] = addrs[i];
   const r = cudaLib!.symbols.cuLaunchKernel(fn, gx, gy, gz, bx, by, bz, 0, 0n, paramPtrsAddr, null);
-  if (r !== 0) throw new Error(`bun:gpu cuda: cuLaunchKernel failed (${r})`);
+  if (r !== 0) throw new Error(`para:gpu cuda: cuLaunchKernel failed (${r})`);
 }
 
 function syncCtx(): void {
-  if (cudaLib!.symbols.cuCtxSynchronize() !== 0) throw new Error("bun:gpu cuda: cuCtxSynchronize failed");
+  if (cudaLib!.symbols.cuCtxSynchronize() !== 0) throw new Error("para:gpu cuda: cuCtxSynchronize failed");
 }
 
 let slEmbed: KernelSlots | null = null;
@@ -5700,7 +5700,7 @@ function launchMatVecDev(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number
 }
 
 // Exposed devOps namespace. Returns null if NVRTC is unavailable — callers
-// (bun:llm) must then fall back to the host-loop path.
+// (para:llm) must then fall back to the host-loop path.
 function getDevOps(): DevOps | null {
   if (!probeDevOps()) return null;
   return {

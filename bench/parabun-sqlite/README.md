@@ -6,7 +6,7 @@ questions:
 
 1. Does shipping code as `.pjs` (through Parabun's parser) impose any
    overhead on idiomatic Bun code? *(variant A → B)*
-2. Do Parabun's language features (`pure`, `bun:simd`, typed-array
+2. Do Parabun's language features (`pure`, `para:simd`, typed-array
    columnar extraction) deliver a practical speedup when applied
    deliberately? *(variant A → C)*
 
@@ -44,7 +44,7 @@ the same across all three variants and dominates total runtime.
    SQLite's native row iterator (an array-of-rows shape). Variant C
    copies the column into a `Float64Array` once during the load phase.
    The analytical step then operates on contiguous, typed memory.
-2. **`bun:simd.sum` / `bun:simd.dot`** replace the scalar reduction
+2. **`para:simd.sum` / `para:simd.dot`** replace the scalar reduction
    loops for mean and variance.
 3. **`dot(values, values)` = Σvᵢ²** is reused as the variance input, so
    two passes collapse into one `simd.dot` call.
@@ -80,6 +80,6 @@ phase across 5 runs.
 - `variant-a.js` — idiomatic `bun:sqlite` + scalar JS analytics. Reference.
 - `variant-b.pjs` — byte-identical to A with a `.pjs` extension. Zero-
   overhead check for Parabun's parser.
-- `variant-c.pjs` — columnar Float64Array extraction, `bun:simd.sum`/`dot`,
+- `variant-c.pjs` — columnar Float64Array extraction, `para:simd.sum`/`dot`,
   shared precomputed weights.
 - `run.ts` — best-of-5 harness.

@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:parallel — Mutex", () => {
+describe("para:parallel — Mutex", () => {
   it("lock/unlock, locked predicate, tryLock", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-mutex-basic",
       `
-        import { Mutex } from "bun:parallel";
+        import { Mutex } from "para:parallel";
         const m = new Mutex();
         console.log("init.locked", m.locked);
         await m.lock();
@@ -47,7 +47,7 @@ describe("bun:parallel — Mutex", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-mutex-with",
       `
-        import { Mutex } from "bun:parallel";
+        import { Mutex } from "para:parallel";
         const m = new Mutex();
         const result = await m.with(async () => {
           console.log("inside.locked", m.locked);
@@ -65,7 +65,7 @@ describe("bun:parallel — Mutex", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-mutex-with-throws",
       `
-        import { Mutex } from "bun:parallel";
+        import { Mutex } from "para:parallel";
         const m = new Mutex();
         try {
           await m.with(() => { throw new Error("boom"); });
@@ -87,7 +87,7 @@ describe("bun:parallel — Mutex", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-mutex-serialize",
       `
-        import { Mutex } from "bun:parallel";
+        import { Mutex } from "para:parallel";
         const m = new Mutex();
         let active = 0, maxActive = 0;
         async function critical(id) {
@@ -114,7 +114,7 @@ describe("bun:parallel — Mutex", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-mutex-shared-sab",
       `
-        import { Mutex } from "bun:parallel";
+        import { Mutex } from "para:parallel";
         const a = new Mutex();
         const b = new Mutex(a.sab);          // same backing storage
         await a.lock();
@@ -131,7 +131,7 @@ describe("bun:parallel — Mutex", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-mutex-bad-sab",
       `
-        import { Mutex } from "bun:parallel";
+        import { Mutex } from "para:parallel";
         try {
           new Mutex(new SharedArrayBuffer(2));
           console.log("NO_THROW");
@@ -145,12 +145,12 @@ describe("bun:parallel — Mutex", () => {
   });
 });
 
-describe("bun:parallel — Semaphore", () => {
+describe("para:parallel — Semaphore", () => {
   it("acquire / release / permits / tryAcquire", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-sem-basic",
       `
-        import { Semaphore } from "bun:parallel";
+        import { Semaphore } from "para:parallel";
         const s = new Semaphore(2);
         console.log("init", s.permits);
         console.log("tryAcquire-1", s.tryAcquire(), s.permits);
@@ -179,7 +179,7 @@ describe("bun:parallel — Semaphore", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-sem-blocking",
       `
-        import { Semaphore } from "bun:parallel";
+        import { Semaphore } from "para:parallel";
         const s = new Semaphore(0);
         let done = false;
         const p = (async () => { await s.acquire(); done = true; })();
@@ -201,7 +201,7 @@ describe("bun:parallel — Semaphore", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-sem-limit",
       `
-        import { Semaphore } from "bun:parallel";
+        import { Semaphore } from "para:parallel";
         const s = new Semaphore(3);
         let active = 0, maxActive = 0;
         async function task() {
@@ -225,7 +225,7 @@ describe("bun:parallel — Semaphore", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-sem-with-throws",
       `
-        import { Semaphore } from "bun:parallel";
+        import { Semaphore } from "para:parallel";
         const s = new Semaphore(1);
         try {
           await s.with(() => { throw new Error("boom"); });
@@ -243,7 +243,7 @@ describe("bun:parallel — Semaphore", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-sem-bad-init",
       `
-        import { Semaphore } from "bun:parallel";
+        import { Semaphore } from "para:parallel";
         try {
           new Semaphore(-1);
           console.log("NO_THROW");

@@ -13,7 +13,7 @@
 // Baseline is js so "× speedup" reads naturally. Held scenario also reports
 // aggregate hold cost (HtoD for a + b once) so the break-even is visible.
 
-import gpu from "bun:gpu";
+import gpu from "para:gpu";
 
 const desc = gpu.describe();
 console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}\n`);

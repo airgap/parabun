@@ -1,11 +1,11 @@
-// Hardcoded module "bun:gpio"
+// Hardcoded module "para:gpio"
 //
 // Linux GPIO character device (uAPI v2) wrapper. Same surface across
 // RPi 4, RPi 5 (the new pinctrl-rp1 driver exposes the same uAPI),
 // Jetson, and any other Linux SBC — character-device, not deprecated
 // sysfs.
 //
-//   import gpio from "bun:gpio";
+//   import gpio from "para:gpio";
 //
 //   const chips = gpio.chips();   // sync — [{ path, label, lines }]
 //
@@ -28,7 +28,7 @@
 const native = $cpp("parabun_gpio.cpp", "createParabunGpio");
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of bun:signals's
+// Structural Signal types — keep this module agnostic of para:signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / vision.ts.
 type Signal<T> = {
   get(): T;
@@ -163,7 +163,7 @@ const EDGE_CODES: Record<LineEdge, number> = { none: 0, rising: 1, falling: 2, b
 
 // FinalizationRegistry backstops — if a Chip / Line drops without close(),
 // the kernel fd is freed at GC time rather than leaking. Same pattern as
-// bun:audio's pcmRegistry / bun:camera's cameraRegistry.
+// para:audio's pcmRegistry / para:camera's cameraRegistry.
 const chipRegistry = new FinalizationRegistry<bigint>(fd => {
   if (fd !== 0n) native.closeChip(fd);
 });
@@ -219,15 +219,15 @@ class LineImpl implements Line {
   }
 
   read(): 0 | 1 {
-    if (this.#closed) throw new Error("bun:gpio: line is closed");
+    if (this.#closed) throw new Error("para:gpio: line is closed");
     const v = native.readLine(this.#fd) as 0 | 1;
     if (v !== this.#value.peek()) this.#value.set(v);
     return v;
   }
 
   write(v: 0 | 1): void {
-    if (this.#closed) throw new Error("bun:gpio: line is closed");
-    if (this.#mode !== "out") throw new Error("bun:gpio: write() requires an output line");
+    if (this.#closed) throw new Error("para:gpio: line is closed");
+    if (this.#mode !== "out") throw new Error("para:gpio: write() requires an output line");
     const value: 0 | 1 = v ? 1 : 0;
     native.writeLine(this.#fd, value);
     if (value !== this.#value.peek()) this.#value.set(value);
@@ -240,7 +240,7 @@ class LineImpl implements Line {
   }
 
   async *edges(): AsyncIterableIterator<EdgeEvent> {
-    if (this.#mode !== "in") throw new Error("bun:gpio: edges() requires an input line");
+    if (this.#mode !== "in") throw new Error("para:gpio: edges() requires an input line");
     while (!this.#closed) {
       let ev: EdgeEvent;
       try {
@@ -314,15 +314,15 @@ class LineBankImpl implements LineBank {
   }
 
   read(): bigint {
-    if (this.#closed) throw new Error("bun:gpio: bank is closed");
+    if (this.#closed) throw new Error("para:gpio: bank is closed");
     const v = native.readLines(this.#fd, this.offsets.length) as bigint;
     if (v !== this.#value.peek()) this.#value.set(v);
     return v;
   }
 
   write(values: bigint, mask?: bigint): void {
-    if (this.#closed) throw new Error("bun:gpio: bank is closed");
-    if (this.#mode !== "out") throw new Error("bun:gpio: write() requires output lines");
+    if (this.#closed) throw new Error("para:gpio: bank is closed");
+    if (this.#mode !== "out") throw new Error("para:gpio: write() requires output lines");
     const m = mask ?? this.#allMask;
     const next = BigInt(values) & m;
     native.writeLines(this.#fd, BigInt(values), BigInt(m));
@@ -366,21 +366,21 @@ class ChipImpl implements Chip {
   }
 
   line(offset: number, opts: LineOptions): Line {
-    if (this.#closed) throw new Error("bun:gpio: chip is closed");
+    if (this.#closed) throw new Error("para:gpio: chip is closed");
     if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset >= this.lines) {
-      throw new RangeError(`bun:gpio: line offset must be an integer in [0, ${this.lines})`);
+      throw new RangeError(`para:gpio: line offset must be an integer in [0, ${this.lines})`);
     }
     const mode = opts.mode;
     if (mode !== "in" && mode !== "out") {
-      throw new TypeError('bun:gpio: line mode must be "in" or "out"');
+      throw new TypeError('para:gpio: line mode must be "in" or "out"');
     }
     const pull = opts.pull ?? "off";
     if (PULL_CODES[pull] === undefined) {
-      throw new TypeError(`bun:gpio: pull must be "up" / "down" / "off", got "${pull}"`);
+      throw new TypeError(`para:gpio: pull must be "up" / "down" / "off", got "${pull}"`);
     }
     const edge = opts.edge ?? "none";
     if (EDGE_CODES[edge] === undefined) {
-      throw new TypeError(`bun:gpio: edge must be "rising" / "falling" / "both" / "none", got "${edge}"`);
+      throw new TypeError(`para:gpio: edge must be "rising" / "falling" / "both" / "none", got "${edge}"`);
     }
     const debounceMs = Math.max(0, Math.floor(opts.debounceMs ?? 0));
     const initial: 0 | 1 = opts.initial === 1 ? 1 : 0;
@@ -399,26 +399,26 @@ class ChipImpl implements Chip {
   }
 
   bank(offsets: number[], opts: Omit<LineOptions, "initial"> & { initial?: bigint | number }): LineBank {
-    if (this.#closed) throw new Error("bun:gpio: chip is closed");
+    if (this.#closed) throw new Error("para:gpio: chip is closed");
     if (!Array.isArray(offsets) || offsets.length === 0 || offsets.length > 64) {
-      throw new RangeError("bun:gpio: bank offsets must be an array of 1..64 entries");
+      throw new RangeError("para:gpio: bank offsets must be an array of 1..64 entries");
     }
     for (const o of offsets) {
       if (typeof o !== "number" || !Number.isInteger(o) || o < 0 || o >= this.lines) {
-        throw new RangeError(`bun:gpio: every offset must be an integer in [0, ${this.lines}), got ${o}`);
+        throw new RangeError(`para:gpio: every offset must be an integer in [0, ${this.lines}), got ${o}`);
       }
     }
     const mode = opts.mode;
     if (mode !== "in" && mode !== "out") {
-      throw new TypeError('bun:gpio: line mode must be "in" or "out"');
+      throw new TypeError('para:gpio: line mode must be "in" or "out"');
     }
     const pull = opts.pull ?? "off";
     if (PULL_CODES[pull] === undefined) {
-      throw new TypeError(`bun:gpio: pull must be "up" / "down" / "off", got "${pull}"`);
+      throw new TypeError(`para:gpio: pull must be "up" / "down" / "off", got "${pull}"`);
     }
     const edge = opts.edge ?? "none";
     if (EDGE_CODES[edge] === undefined) {
-      throw new TypeError(`bun:gpio: edge must be "rising" / "falling" / "both" / "none", got "${edge}"`);
+      throw new TypeError(`para:gpio: edge must be "rising" / "falling" / "both" / "none", got "${edge}"`);
     }
     const debounceMs = Math.max(0, Math.floor(opts.debounceMs ?? 0));
     const initialMask = opts.initial !== undefined ? BigInt(opts.initial) : 0n;
@@ -457,7 +457,7 @@ class ChipImpl implements Chip {
 /** Open a gpiochip by absolute /dev path. */
 function open(path: string): Chip {
   if (typeof path !== "string" || path.length === 0) {
-    throw new TypeError("bun:gpio.open: path must be a non-empty string");
+    throw new TypeError("para:gpio.open: path must be a non-empty string");
   }
   // Ask the native side for chip info first so the path/label/lines are
   // available before we hand back the chip — and we get a clear error if

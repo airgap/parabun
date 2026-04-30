@@ -1,6 +1,6 @@
 # parabun-gpu-matvec
 
-Microbenchmark: `bun:simd.matVec` vs `bun:gpu.matVec` across a grid of
+Microbenchmark: `para:simd.matVec` vs `para:gpu.matVec` across a grid of
 M × K sizes, plus bit-exactness cross-check.
 
 Answers one question: does the GPU kernel beat the tight `f32x4` SIMD
@@ -48,7 +48,7 @@ synchronize dwarf it. Residency (`cuMemAlloc` once + reuse) is the
 unlock here, not kernel tuning.
 
 On a Linux host without CUDA (or with ASAN-disabled `cuInit`), both
-`bun:gpu.matVec` and `bun:simd.matVec` resolve to the same tight SIMD
+`para:gpu.matVec` and `para:simd.matVec` resolve to the same tight SIMD
 path, so the reported speedup is ~1.0× and `wins?` is `no` for every
 row.
 
@@ -111,13 +111,13 @@ Columns:
 - The matrix is filled with a deterministic LCG, so every run sees the
   same input and every backend must return the same scores. The cross-
   check asserts `maxErr < 1e-3`; the MSL kernel's per-row FMA order
-  matches `bun:simd` closely enough that this is usually exact.
+  matches `para:simd` closely enough that this is usually exact.
 - `winsForSize("matVec", …)` returns `false` for every size right now.
   The `MIN_MATVEC_DISPATCH_ELEMS` threshold (1<<20) is separate — it's
   what lets the benchmark exercise the real MSL kernel so we'd notice
   a regression. When someone tunes the kernel (threadgroup tiling,
   vec-in-shared-memory reuse, reduction-per-threadgroup) to actually
-  beat `bun:simd`, drop `MIN_MATVEC_WINS_ELEMS` back down to a concrete
+  beat `para:simd`, drop `MIN_MATVEC_WINS_ELEMS` back down to a concrete
   number and these two constants collapse into one.
-- `bun:gpu.matVec` on hosts with no real GPU backend (cpu backend) just
-  forwards to `bun:simd`, so there's no harm in calling it regardless.
+- `para:gpu.matVec` on hosts with no real GPU backend (cpu backend) just
+  forwards to `para:simd`, so there's no harm in calling it regardless.

@@ -15,9 +15,9 @@ const piperBin = process.env.PARABUN_PIPER_BIN ?? "/raid/parabun/.cache/piper/pi
 const voiceModel = process.env.PARABUN_PIPER_VOICE ?? "/raid/parabun/.cache/piper/voices/lessac.onnx";
 const have = existsSync(piperBin) && existsSync(voiceModel) && existsSync(`${voiceModel}.json`);
 
-describe("bun:speech.speak (Piper subprocess)", () => {
+describe("para:speech.speak (Piper subprocess)", () => {
   test.skipIf(!have)("synthesizes text → mono PCM at voice native rate", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     const result = await speech.speak("Hello from Parabun.", {
       engine: "piper",
       model: voiceModel,
@@ -49,17 +49,17 @@ describe("bun:speech.speak (Piper subprocess)", () => {
   });
 
   test("rejects unknown engine", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     await expect(speech.speak("hi", { engine: "festival" as "piper", model: "/x" })).rejects.toThrow(/unknown engine/);
   });
 
   test("rejects empty text", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     await expect(speech.speak("", { engine: "piper", model: "/x" })).rejects.toThrow(/non-empty string/);
   });
 
   test("rejects missing model path", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     await expect(speech.speak("hi", { engine: "piper", model: "/definitely/not/here.onnx" })).rejects.toThrow(
       /voice model not found/,
     );
@@ -71,7 +71,7 @@ describe("bun:speech.speak (Piper subprocess)", () => {
   // bench-validated separately (timing assertions are too flaky on
   // debug builds + asan to land in CI).
   test.skipIf(!have)("sequential calls succeed against a cached session", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     await speech.closePiperSessions();
 
     const r1 = await speech.speak("First sentence.", { engine: "piper", model: voiceModel, binPath: piperBin });
@@ -90,7 +90,7 @@ describe("bun:speech.speak (Piper subprocess)", () => {
   });
 
   test.skipIf(!have)("closePiperSessions kills the subprocess; subsequent speak respawns cleanly", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     const r1 = await speech.speak("First.", { engine: "piper", model: voiceModel, binPath: piperBin });
     expect(r1.samples.length).toBeGreaterThan(0);
 

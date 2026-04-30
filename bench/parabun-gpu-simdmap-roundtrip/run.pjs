@@ -1,8 +1,8 @@
-// bun:gpu simdMap round-trip wallclock vs bun:simd, across a size sweep.
+// para:gpu simdMap round-trip wallclock vs para:simd, across a size sweep.
 //
 // Target: Apple Silicon (unified memory + shared-storage MTLBuffers) to
 // validate LYK-709's 2-4x claim. On discrete GPU or non-darwin hosts the
-// gpu backend either falls through to CPU or loses to bun:simd by large
+// gpu backend either falls through to CPU or loses to para:simd by large
 // margins — the bench still prints the numbers so you can see *why*.
 //
 // What we measure: full caller-observable wallclock of one simdMap call
@@ -13,8 +13,8 @@
 //
 // Usage: bun bd bench/parabun-gpu-simdmap-roundtrip/run.pjs
 
-import gpu from "bun:gpu";
-import simd from "bun:simd";
+import gpu from "para:gpu";
+import simd from "para:simd";
 
 const SIZES = [1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24];
 const ITERS = 50;
@@ -22,7 +22,7 @@ const WARMUP = 10;
 
 // Affine fn — simdMap's fast path requires the mapping be detectable as
 // affine. `x * 1.5 + 2.0` trivially lifts to `y = k1*x + k0` and both
-// backends (bun:simd AVX/NEON + Metal simdMapAffineF32) take their
+// backends (para:simd AVX/NEON + Metal simdMapAffineF32) take their
 // specialized paths.
 const affine = x => x * 1.5 + 2.0;
 

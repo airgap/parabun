@@ -6,7 +6,7 @@
 // pays ~150 MB of structured-clone for every pmap call (~17 ms × 8 chunks
 // serialized through the main thread). Here that drops to <1 ms total.
 
-import parallel from "bun:parallel";
+import parallel from "para:parallel";
 import { generate, N, D, K } from "./gen.js";
 
 const { pmap } = parallel;

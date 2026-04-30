@@ -1,4 +1,4 @@
-// Transcribe a wav file with bun:speech (Whisper). (TypeScript form.)
+// Transcribe a wav file with para:speech (Whisper). (TypeScript form.)
 //
 //   WHISPER_MODEL=/path/to/ggml-tiny.en.bin \
 //     bun run build:release demos/whisper-transcribe.ts <audio.wav>
@@ -6,8 +6,8 @@
 // Same demo as whisper-transcribe.pts; `const text ..= expr` becomes
 // `const text = await expr`. Identical behavior.
 
-import speech from "bun:speech";
-import audio from "bun:audio";
+import speech from "para:speech";
+import audio from "para:audio";
 import { existsSync } from "node:fs";
 
 const wavPath = process.argv[2];

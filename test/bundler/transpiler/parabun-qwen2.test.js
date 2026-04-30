@@ -10,13 +10,13 @@ import { existsSync } from "node:fs";
 const FIXTURE = "/rigil/parabun-fixtures/llm/Qwen2.5-0.5B-Instruct-Q8_0.gguf";
 const HAS_FIXTURE = existsSync(FIXTURE);
 
-describe.if(HAS_FIXTURE)("bun:llm Qwen2 (Qwen2.5-0.5B-Instruct)", () => {
+describe.if(HAS_FIXTURE)("para:llm Qwen2 (Qwen2.5-0.5B-Instruct)", () => {
   let llm;
   let file;
   let model;
 
   beforeAll(async () => {
-    llm = (await import("bun:llm")).default;
+    llm = (await import("para:llm")).default;
     file = await llm.loadGGUF(FIXTURE);
     model = await llm.LLM.load(FIXTURE);
   }, 180_000);
@@ -72,6 +72,6 @@ describe.if(HAS_FIXTURE)("bun:llm Qwen2 (Qwen2.5-0.5B-Instruct)", () => {
   }, 240_000);
 });
 
-describe.if(!HAS_FIXTURE)("bun:llm Qwen2", () => {
+describe.if(!HAS_FIXTURE)("para:llm Qwen2", () => {
   it.skip(`skipped: fixture missing (${FIXTURE})`, () => {});
 });

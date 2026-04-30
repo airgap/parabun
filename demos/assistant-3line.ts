@@ -1,4 +1,4 @@
-// Voice assistant with tool dispatch — bun:assistant. (TypeScript form.)
+// Voice assistant with tool dispatch — para:assistant. (TypeScript form.)
 //
 //   ASSISTANT_LLM=/path/to/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
 //   ASSISTANT_STT=/path/to/ggml-tiny.en.bin \
@@ -9,8 +9,8 @@
 // call-binding becomes `signals.effect(() => fn(A))` here. Identical
 // behavior.
 
-import assistant from "bun:assistant";
-import signals from "bun:signals";
+import assistant from "para:assistant";
+import signals from "para:signals";
 import { existsSync } from "node:fs";
 
 const llm = process.env.ASSISTANT_LLM;

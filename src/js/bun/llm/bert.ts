@@ -1,4 +1,4 @@
-// BERT-style sentence encoder for bun:llm.
+// BERT-style sentence encoder for para:llm.
 //
 // Targets BGE / E5 / MiniLM GGUFs (general.architecture="bert"). Bidirectional
 // attention, post-LN residuals, GELU FFN, token + position + segment
@@ -9,7 +9,7 @@
 // Host-only. These models are tiny (BGE-small is 384-dim / 12 layers / ~67 MB
 // f16) and callers typically hit them in large batches of short strings; the
 // per-call compute is dominated by the matmuls which are fine in plain JS.
-// Wiring through bun:gpu would add HtoD overhead per call that dwarfs the
+// Wiring through para:gpu would add HtoD overhead per call that dwarfs the
 // forward at these sizes.
 //
 // GGUF tensor layout convention (shared with llama.ts): dims=[ncols, nrows].
@@ -307,9 +307,9 @@ class BertModel {
   embed(tokenIds: number[], opts?: { pool?: "cls" | "mean"; normalize?: boolean }): Float32Array {
     const cfg = this.cfg;
     const N = tokenIds.length;
-    if (N === 0) throw new Error("bun:llm: cannot embed empty token list");
+    if (N === 0) throw new Error("para:llm: cannot embed empty token list");
     if (N > cfg.maxContext) {
-      throw new Error(`bun:llm: input has ${N} tokens, exceeds maxContext=${cfg.maxContext}`);
+      throw new Error(`para:llm: input has ${N} tokens, exceeds maxContext=${cfg.maxContext}`);
     }
     const pool = opts?.pool ?? cfg.poolingType;
     const normalize = opts?.normalize ?? true;
@@ -441,7 +441,7 @@ class BertModel {
 function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): BertModel {
   const arch = gguf.metadata.get("general.architecture");
   if (arch !== "bert") {
-    throw new Error(`bun:llm: bert encoder requires architecture="bert", got "${arch}"`);
+    throw new Error(`para:llm: bert encoder requires architecture="bert", got "${arch}"`);
   }
 
   const numOr = (key: string, fallback: number): number => {
@@ -470,7 +470,7 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): BertModel {
     poolingType: pooling,
   };
   if (cfg.headDim * cfg.nHead !== cfg.dModel) {
-    throw new Error(`bun:llm: head_dim*n_head != d_model (${cfg.headDim}*${cfg.nHead} != ${cfg.dModel})`);
+    throw new Error(`para:llm: head_dim*n_head != d_model (${cfg.headDim}*${cfg.nHead} != ${cfg.dModel})`);
   }
 
   const layers: BertLayer[] = new Array(cfg.nLayer);
@@ -514,10 +514,10 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): BertModel {
 function tokenizerFromGGUF(gguf: GGUFLike): BertTokenizer {
   const model = gguf.metadata.get("tokenizer.ggml.model");
   if (model !== "bert") {
-    throw new Error(`bun:llm: bert tokenizer requires tokenizer.ggml.model="bert", got "${model}"`);
+    throw new Error(`para:llm: bert tokenizer requires tokenizer.ggml.model="bert", got "${model}"`);
   }
   const tokens = gguf.metadata.get("tokenizer.ggml.tokens");
-  if (!Array.isArray(tokens)) throw new Error("bun:llm: missing tokenizer.ggml.tokens");
+  if (!Array.isArray(tokens)) throw new Error("para:llm: missing tokenizer.ggml.tokens");
 
   const numOr = (key: string, fallback: number): number => {
     const v = gguf.metadata.get(key);
@@ -559,13 +559,13 @@ class Encoder {
   }
 
   embed(text: string, opts?: { pool?: "cls" | "mean"; normalize?: boolean }): Float32Array {
-    if (this.#disposed) throw new Error("bun:llm: Encoder already disposed");
+    if (this.#disposed) throw new Error("para:llm: Encoder already disposed");
     const ids = this.tokenizer.encode(text, { maxLen: this.model.cfg.maxContext });
     return this.model.embed(ids, opts);
   }
 
   embedMany(texts: string[], opts?: { pool?: "cls" | "mean"; normalize?: boolean }): Float32Array[] {
-    if (this.#disposed) throw new Error("bun:llm: Encoder already disposed");
+    if (this.#disposed) throw new Error("para:llm: Encoder already disposed");
     const out: Float32Array[] = new Array(texts.length);
     for (let i = 0; i < texts.length; i++) out[i] = this.embed(texts[i], opts);
     return out;

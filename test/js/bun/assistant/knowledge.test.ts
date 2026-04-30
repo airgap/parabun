@@ -47,9 +47,9 @@ function mockEncoder() {
   };
 }
 
-describe("bun:assistant chunkText (LYK-738)", () => {
+describe("para:assistant chunkText (LYK-738)", () => {
   test("splits on blank-line boundaries, preserves offsets", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const out = a.chunkText("one\n\ntwo\n\nthree");
     expect(out.map(c => c.text)).toEqual(["one", "two", "three"]);
     expect(out[0].offset).toBe(0);
@@ -58,13 +58,13 @@ describe("bun:assistant chunkText (LYK-738)", () => {
   });
 
   test("normalizes \\r\\n and trims whitespace per chunk", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const out = a.chunkText("alpha\r\n\r\n  beta  \r\n\r\ngamma");
     expect(out.map(c => c.text)).toEqual(["alpha", "beta", "gamma"]);
   });
 
   test("breaks long paragraphs into overlapping chunks", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const long = "x".repeat(2000);
     const out = a.chunkText(long, { chunkSize: 500, chunkOverlap: 100 });
     // step = 400; expected windows at 0, 400, 800, 1200, 1600.
@@ -75,15 +75,15 @@ describe("bun:assistant chunkText (LYK-738)", () => {
   });
 
   test("drops empty input, returns empty array", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     expect(a.chunkText("")).toEqual([]);
     expect(a.chunkText("   \n\n\n   ")).toEqual([]);
   });
 });
 
-describe("bun:assistant KnowledgeStore (LYK-738)", () => {
+describe("para:assistant KnowledgeStore (LYK-738)", () => {
   test("indexes a directory, returns top-k by cosine", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-knowledge", {
       "cats.md": "Cats are independent animals. They love to nap in the sun.\n",
       "dogs.md": "Dogs are loyal companions. They love long walks.\n",
@@ -115,7 +115,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("walks subdirectories", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-nested", {
       "top.md": "Top level note about cats.",
       "sub/inner.md": "Nested note about dogs.",
@@ -130,7 +130,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("respects extensions option — non-listed files are skipped", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-extensions", {
       "good.md": "Cats and dogs.",
       "skipped.json": '{"about": "cats and dogs"}',
@@ -153,7 +153,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("skips dotfiles and dotdirs (.git, .obsidian)", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-dotskip", {
       "real.md": "real note about cats",
       ".obsidian/config.md": "obsidian config noise about cats",
@@ -169,7 +169,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("skips files larger than maxFileBytes", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const huge = "cats ".repeat(50000); // ~250KB
     using dir = tempDir("rag-size", {
       "small.md": "tiny cats note",
@@ -188,14 +188,14 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("rejects when dir doesn't exist", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     await expect(
       a.KnowledgeStore.create({ dir: "/definitely/not/a/real/path/xyz", encoder: mockEncoder(), watch: false }),
     ).rejects.toThrow(/directory not found/);
   });
 
   test("rejects bad encoder shape", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-bad-encoder", { "x.md": "hello" });
     await expect(
       // @ts-expect-error — exercising the runtime guard
@@ -204,7 +204,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("reindex picks up new files", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-reindex", {
       "first.md": "Initial note about cats.",
     });
@@ -225,7 +225,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("close() makes search() throw", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-close", { "x.md": "cats" });
     const store = await a.KnowledgeStore.create({ dir: String(dir), encoder: mockEncoder(), watch: false });
     await store.close();
@@ -233,7 +233,7 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 
   test("returns empty array on empty index", async () => {
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-empty", { "skipped.json": "not indexed" });
     const store = await a.KnowledgeStore.create({ dir: String(dir), encoder: mockEncoder(), watch: false });
     try {
@@ -245,10 +245,10 @@ describe("bun:assistant KnowledgeStore (LYK-738)", () => {
   });
 });
 
-describe("bun:assistant `knowledge` option (LYK-738)", () => {
+describe("para:assistant `knowledge` option (LYK-738)", () => {
   test("accepts pre-loaded encoder + exposes bot.knowledge", async () => {
     if (!haveLLM) return;
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     using dir = tempDir("rag-bot", {
       "rust.md": "Rust ownership rules.",
       "python.md": "Python list comprehensions.",
@@ -271,7 +271,7 @@ describe("bun:assistant `knowledge` option (LYK-738)", () => {
 
   test("bot.knowledge is null when no knowledge option passed", async () => {
     if (!haveLLM) return;
-    const a = (await import("bun:assistant")).default;
+    const a = (await import("para:assistant")).default;
     const bot = await a.create({ llm: llmFixture! });
     try {
       expect(bot.knowledge).toBeNull();

@@ -14,7 +14,7 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:audio — FFT", () => {
+describe("para:audio — FFT", () => {
   it("FFT of a pure sine wave has a single dominant bin", async () => {
     // 64-sample real signal: a 4-cycle sine over the window. After FFT,
     // bin 4 (and its mirror at 60 = N-4) should be the only large
@@ -22,7 +22,7 @@ describe("bun:audio — FFT", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-fft-sine",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 64, k = 4;
         const samples = new Float32Array(N);
         for (let n = 0; n < N; n++) samples[n] = Math.sin(2 * Math.PI * k * n / N);
@@ -50,7 +50,7 @@ describe("bun:audio — FFT", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-fft-roundtrip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 256;
         const samples = new Float32Array(N);
         for (let i = 0; i < N; i++) samples[i] = Math.sin(i * 0.1) + 0.5 * Math.cos(i * 0.37);
@@ -68,7 +68,7 @@ describe("bun:audio — FFT", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-fft-bad-len",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.fft(new Float32Array(7));
           console.log("NO_THROW");
@@ -82,12 +82,12 @@ describe("bun:audio — FFT", () => {
   });
 });
 
-describe("bun:audio — WAV I/O", () => {
+describe("para:audio — WAV I/O", () => {
   it("writeWav → readWav roundtrip preserves samples (s16)", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-wav-s16",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 1024;
         const orig = new Float32Array(N);
         for (let i = 0; i < N; i++) orig[i] = 0.5 * Math.sin(i * 0.05);
@@ -111,7 +111,7 @@ describe("bun:audio — WAV I/O", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-wav-f32",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 512;
         const orig = new Float32Array(N);
         for (let i = 0; i < N; i++) orig[i] = (i / N) * 2 - 1;  // -1 → ~1
@@ -135,7 +135,7 @@ describe("bun:audio — WAV I/O", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-wav-bad-input",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.readWav(new Uint8Array(64));  // all zeros
           console.log("NO_THROW");
@@ -152,7 +152,7 @@ describe("bun:audio — WAV I/O", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-wav-stereo",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // 4 frames × 2 channels → 8 interleaved samples.
         const samples = new Float32Array([0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4]);
         const bytes = audio.writeWav(
@@ -170,7 +170,7 @@ describe("bun:audio — WAV I/O", () => {
   });
 });
 
-describe("bun:audio — lowpass", () => {
+describe("para:audio — lowpass", () => {
   it("attenuates a high-frequency tone, preserves a low-frequency one", async () => {
     // Mix a 200 Hz sine and a 4000 Hz sine at 16000 Hz sample rate.
     // Lowpass at 1000 Hz should crush the 4 kHz component but pass the
@@ -179,7 +179,7 @@ describe("bun:audio — lowpass", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-lowpass",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 16000, N = 4096;
         const sig = new Float32Array(N);
         for (let i = 0; i < N; i++) {
@@ -214,7 +214,7 @@ describe("bun:audio — lowpass", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-lowpass-bad-cutoff",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.lowpass(new Float32Array(64), { cutoff: 10000, sampleRate: 8000 });
           console.log("NO_THROW");
@@ -228,14 +228,14 @@ describe("bun:audio — lowpass", () => {
   });
 });
 
-describe("bun:audio — highpass", () => {
+describe("para:audio — highpass", () => {
   it("kills a low tone, passes a high one", async () => {
     // 200 Hz + 4 kHz mix at 16 kHz, highpass at 1 kHz: 200 should be
     // crushed, 4 kHz should survive.
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-highpass",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 16000, N = 4096;
         const sig = new Float32Array(N);
         for (let i = 0; i < N; i++) {
@@ -267,7 +267,7 @@ describe("bun:audio — highpass", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-highpass-dc",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 16000, N = 4096;
         const sig = new Float32Array(N);
         for (let i = 0; i < N; i++) sig[i] = 0.5;          // pure DC
@@ -285,14 +285,14 @@ describe("bun:audio — highpass", () => {
   });
 });
 
-describe("bun:audio — bandpass", () => {
+describe("para:audio — bandpass", () => {
   it("isolates the center band — kills tones above and below", async () => {
     // 100 Hz + 1000 Hz + 8 kHz triple-tone mix at 32 kHz. Bandpass
     // centered at 1 kHz with Q=2 should keep the middle, kill both ends.
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-bandpass",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 32000, N = 4096;
         const sig = new Float32Array(N);
         for (let i = 0; i < N; i++) {
@@ -320,7 +320,7 @@ describe("bun:audio — bandpass", () => {
   });
 });
 
-describe("bun:audio — notch", () => {
+describe("para:audio — notch", () => {
   it("kills a single offending frequency, leaves others intact", async () => {
     // FFT bins don't fall exactly on 60 Hz at sr=16k/N=4096, so use the
     // time domain instead: feed a pure 60 Hz tone, measure RMS in the
@@ -329,7 +329,7 @@ describe("bun:audio — notch", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-notch",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 16000, N = 4096;
         function pureTone(freq) {
           const a = new Float32Array(N);
@@ -360,7 +360,7 @@ describe("bun:audio — notch", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-notch-bad-q",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.notch(new Float32Array(64), { center: 60, Q: 0, sampleRate: 16000 });
           console.log("NO_THROW");
@@ -374,12 +374,12 @@ describe("bun:audio — notch", () => {
   });
 });
 
-describe("bun:audio — resample", () => {
+describe("para:audio — resample", () => {
   it("identity (from === to) returns a copy of the input", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-resample-identity",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const samples = new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5]);
         const out = audio.resample(samples, { from: 48000, to: 48000 });
         console.log("len", out.length);
@@ -396,7 +396,7 @@ describe("bun:audio — resample", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-resample-up",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const samples = new Float32Array(1000);
         for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(i * 0.1);
         const out = audio.resample(samples, { from: 8000, to: 16000 });
@@ -411,7 +411,7 @@ describe("bun:audio — resample", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-resample-down",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const samples = new Float32Array(48000);  // 1 second at 48 kHz
         for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(2 * Math.PI * 200 * i / 48000);
         const out = audio.resample(samples, { from: 48000, to: 16000 });
@@ -428,7 +428,7 @@ describe("bun:audio — resample", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-resample-preserves-tone",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr1 = 48000, sr2 = 16000, N = 48000;
         const samples = new Float32Array(N);
         for (let i = 0; i < N; i++) samples[i] = Math.sin(2 * Math.PI * 200 * i / sr1);
@@ -462,7 +462,7 @@ describe("bun:audio — resample", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-resample-antialias",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr1 = 48000, sr2 = 16000, N = 48000;
         const samples = new Float32Array(N);
         // 12 kHz tone — above the 16 kHz target's 8 kHz Nyquist.
@@ -487,7 +487,7 @@ describe("bun:audio — resample", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-resample-bad-rate",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.resample(new Float32Array(64), { from: 0, to: 16000 });
           console.log("NO_THROW");
@@ -501,12 +501,12 @@ describe("bun:audio — resample", () => {
   });
 });
 
-describe("bun:audio — Denoiser (rnnoise)", () => {
+describe("para:audio — Denoiser (rnnoise)", () => {
   it("processes a 480-sample frame and returns a probability in [0, 1]", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-denoise-basic",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const den = new audio.Denoiser();
         const frame = new Float32Array(audio.Denoiser.FRAME_SIZE);
         // White-ish noise — should produce a low voice probability
@@ -526,7 +526,7 @@ describe("bun:audio — Denoiser (rnnoise)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-denoise-attenuate",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const den = new audio.Denoiser();
 
         // White noise at moderate amplitude. The RNN warm-up takes a few
@@ -559,7 +559,7 @@ describe("bun:audio — Denoiser (rnnoise)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-denoise-bad-frame",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const den = new audio.Denoiser();
         try {
           den.process(new Float32Array(320));  // 10 ms at 16 kHz, not 480
@@ -578,7 +578,7 @@ describe("bun:audio — Denoiser (rnnoise)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-denoise-close",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const den = new audio.Denoiser();
         den.close();
         try {
@@ -596,12 +596,12 @@ describe("bun:audio — Denoiser (rnnoise)", () => {
   });
 });
 
-describe("bun:audio — VAD (voice activity detection)", () => {
+describe("para:audio — VAD (voice activity detection)", () => {
   it("classifies pure silence as non-speech", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-vad-silence",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const samples = new Float32Array(48000);  // 1 s at 48 kHz, all zeros
         const { energies, speech } = audio.detectVoice(samples, { frameSize: 480 });
         console.log("frames", energies.length);
@@ -621,7 +621,7 @@ describe("bun:audio — VAD (voice activity detection)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-vad-burst",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 48000, silentTo = N / 4;  // 250 ms silence + 750 ms loud
         const samples = new Float32Array(N);
         // Tiny background noise so noise floor settles non-zero
@@ -645,7 +645,7 @@ describe("bun:audio — VAD (voice activity detection)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-vad-mixed",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 48000, half = N / 2;
         const samples = new Float32Array(N);
         // Tiny background noise so the noise floor is non-zero
@@ -672,7 +672,7 @@ describe("bun:audio — VAD (voice activity detection)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-vad-noisefloor",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const samples = new Float32Array(4800);  // pure silence
         const { noiseFloor } = audio.detectVoice(samples, { frameSize: 480 });
         // Pure silence → noise floor should be 0 (or very close).
@@ -687,7 +687,7 @@ describe("bun:audio — VAD (voice activity detection)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-vad-bad-opts",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         let n = 0;
         function check(fn, msg) {
           try { fn(); } catch (e) { if (e.message.includes(msg)) n++; }
@@ -703,7 +703,7 @@ describe("bun:audio — VAD (voice activity detection)", () => {
   });
 });
 
-describe("bun:audio — MP3 decode (minimp3)", () => {
+describe("para:audio — MP3 decode (minimp3)", () => {
   // Tiny 0.05s MP3 of a 440 Hz sine at 22050 Hz / 32 kbps mono. Generated
   // via `ffmpeg -f lavfi -i sine=frequency=440:duration=0.05:sample_rate=22050
   // -ac 1 -ab 32k`. ID3 + LAME encoder header overhead means even short
@@ -718,7 +718,7 @@ describe("bun:audio — MP3 decode (minimp3)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mp3-shape",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         ${mp3Setup}
         const { samples, sampleRate, channels } = audio.decodeMp3(MP3);
         console.log("isFloat32", samples instanceof Float32Array);
@@ -737,7 +737,7 @@ describe("bun:audio — MP3 decode (minimp3)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mp3-tone",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         ${mp3Setup}
         const { samples, sampleRate } = audio.decodeMp3(MP3);
 
@@ -764,7 +764,7 @@ describe("bun:audio — MP3 decode (minimp3)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mp3-bad",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.decodeMp3(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
           console.log("NO_THROW");
@@ -784,7 +784,7 @@ describe("bun:audio — MP3 decode (minimp3)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mp3-bad-type",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.decodeMp3("not bytes");
           console.log("NO_THROW");
@@ -798,7 +798,7 @@ describe("bun:audio — MP3 decode (minimp3)", () => {
   });
 });
 
-describe("bun:audio — Opus codec", () => {
+describe("para:audio — Opus codec", () => {
   it("encode → decode round-trip preserves the dominant frequency", async () => {
     // 16 kHz, 20 ms frame = 320 samples. Encode a 200 Hz sine, decode
     // it, verify the dominant FFT bin survived. Opus is lossy, so we
@@ -807,7 +807,7 @@ describe("bun:audio — Opus codec", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-opus-roundtrip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 16000, frameSize = 320, freq = 200;
         const samples = new Float32Array(frameSize);
         for (let i = 0; i < frameSize; i++) samples[i] = 0.5 * Math.sin(2 * Math.PI * freq * i / sr);
@@ -859,7 +859,7 @@ describe("bun:audio — Opus codec", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-opus-compresses",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 16000, frameSize = 320;
         const samples = new Float32Array(frameSize);
         for (let i = 0; i < frameSize; i++) samples[i] = 0.5 * Math.sin(i * 0.1);
@@ -879,7 +879,7 @@ describe("bun:audio — Opus codec", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-opus-stereo",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 48000, frameSize = 960;  // 20 ms at 48 kHz
         const samples = new Float32Array(frameSize * 2);  // stereo interleaved
         for (let i = 0; i < frameSize; i++) {
@@ -905,7 +905,7 @@ describe("bun:audio — Opus codec", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-opus-bad-rate",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           new audio.OpusEncoder({ sampleRate: 44100, channels: 1 });
           console.log("NO_THROW");
@@ -922,7 +922,7 @@ describe("bun:audio — Opus codec", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-opus-after-close",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const enc = new audio.OpusEncoder({ sampleRate: 16000, channels: 1 });
         enc.close();
         try {
@@ -948,7 +948,7 @@ describe("bun:audio — Opus codec", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-opus-pipeline",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr1 = 48000, sr2 = 16000;
         const N = 4800;  // 100 ms at 48 kHz
         const mic = new Float32Array(N);
@@ -983,12 +983,12 @@ describe("bun:audio — Opus codec", () => {
   });
 });
 
-describe("bun:audio — spectrogram", () => {
+describe("para:audio — spectrogram", () => {
   it("produces frame count consistent with hop / window settings", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-spectrogram-shape",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 4096, win = 512, hop = 256;
         const samples = new Float32Array(N);
         for (let i = 0; i < N; i++) samples[i] = Math.sin(i * 0.1);
@@ -1010,7 +1010,7 @@ describe("bun:audio — spectrogram", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-spectrogram-sweep",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const sr = 8000, win = 512, hop = 128;
         const N = 4096;
         const sig = new Float32Array(N);
@@ -1034,12 +1034,12 @@ describe("bun:audio — spectrogram", () => {
   });
 });
 
-describe("bun:audio — interleave / deinterleave", () => {
+describe("para:audio — interleave / deinterleave", () => {
   it("stereo round-trip: deinterleave then interleave reproduces input bit-exactly", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-interleave-roundtrip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // 4 stereo frames: L=[1,2,3,4], R=[10,20,30,40] interleaved.
         const stereo = new Float32Array([1, 10, 2, 20, 3, 30, 4, 40]);
         const planes = audio.deinterleave(stereo, 2);
@@ -1059,7 +1059,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-interleave-6ch",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // 2 frames × 6 channels. Frame 0: 0,1,2,3,4,5. Frame 1: 10,11,12,13,14,15.
         const interleaved = new Float32Array([0,1,2,3,4,5, 10,11,12,13,14,15]);
         const planes = audio.deinterleave(interleaved, 6);
@@ -1079,7 +1079,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-interleave-mono",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const m = new Float32Array([1, 2, 3, 4]);
         const planes = audio.deinterleave(m, 1);
         // Returns a *copy* — not the same buffer (so caller mutations don't leak).
@@ -1103,7 +1103,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-interleave-empty",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const a = audio.interleave([]);
         const b = audio.deinterleave(new Float32Array(0), 2);
         console.log("a.len", a.length, "ctor", a.constructor.name);
@@ -1118,7 +1118,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-interleave-mismatch",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.interleave([new Float32Array(4), new Float32Array(7)]);
           console.log("NO_THROW");
@@ -1135,7 +1135,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-deinterleave-bad-len",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           // 7 samples can't divide cleanly into 2 channels.
           audio.deinterleave(new Float32Array(7), 2);
@@ -1153,7 +1153,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-deinterleave-bad-count",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         let threw = 0;
         try { audio.deinterleave(new Float32Array(8), 0); } catch { threw++; }
         try { audio.deinterleave(new Float32Array(8), -1); } catch { threw++; }
@@ -1172,7 +1172,7 @@ describe("bun:audio — interleave / deinterleave", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-interleave-fold",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const stereo = new Float32Array([0.4, 0.6, -0.5, 0.5, 0.9, 0.1]);
         const planes = audio.deinterleave(stereo, 2);
         const mono = audio.mix(planes, { gains: [0.5, 0.5], clip: "none" });
@@ -1185,12 +1185,12 @@ describe("bun:audio — interleave / deinterleave", () => {
   });
 });
 
-describe("bun:audio — mix", () => {
+describe("para:audio — mix", () => {
   it("two tracks sum sample-wise", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-basic",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const a = new Float32Array([0.1, 0.2, 0.3, 0.4]);
         const b = new Float32Array([0.5, 0.4, 0.3, 0.2]);
         const out = audio.mix([a, b]);
@@ -1206,7 +1206,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-hard",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const a = new Float32Array([0.8, -0.9, 0.0, 1.5]);
         const b = new Float32Array([0.6, -0.5,  0.3, 0.5]);
         // Sums: 1.4 (clip→1), -1.4 (clip→-1), 0.3 (passthrough), 2.0 (clip→1)
@@ -1222,7 +1222,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-soft",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // Mix two tracks each at 0.6 — sum is 1.2, well past hard-clip.
         const a = new Float32Array([0.6, 0.6, 0.6, 0.6]);
         const b = new Float32Array([0.6, 0.6, 0.6, 0.6]);
@@ -1244,7 +1244,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-none",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const a = new Float32Array([0.7, -0.7]);
         const b = new Float32Array([0.7, -0.7]);
         const out = audio.mix([a, b], { clip: "none" });
@@ -1260,7 +1260,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-gains",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const a = new Float32Array([0.1, 0.2, 0.3]);
         const b = new Float32Array([0.5, 0.5, 0.5]);
         // a contributes ×2 = [0.2, 0.4, 0.6]; b contributes ×0.5 = [0.25, 0.25, 0.25].
@@ -1277,7 +1277,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-single",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const a = new Float32Array([0.1, 0.2, 0.3]);
         const passthrough = audio.mix([a], { clip: "none" });
         const halved = audio.mix([a], { gains: [0.5], clip: "none" });
@@ -1293,7 +1293,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-empty",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const out = audio.mix([]);
         console.log("len", out.length, "ctor", out.constructor.name);
       `,
@@ -1306,7 +1306,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-len-mismatch",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.mix([new Float32Array(4), new Float32Array(8)]);
           console.log("NO_THROW");
@@ -1323,7 +1323,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-gains-mismatch",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.mix([new Float32Array(4), new Float32Array(4)], { gains: [1, 1, 1] });
           console.log("NO_THROW");
@@ -1340,7 +1340,7 @@ describe("bun:audio — mix", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-mix-bad-clip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         try {
           audio.mix([new Float32Array(4), new Float32Array(4)], { clip: "tape" });
           console.log("NO_THROW");
@@ -1354,12 +1354,12 @@ describe("bun:audio — mix", () => {
   });
 });
 
-describe("bun:audio — i16 ⇄ f32 PCM", () => {
+describe("para:audio — i16 ⇄ f32 PCM", () => {
   it("i16ToF32 maps the i16 limits to ±1 (mostly)", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-i16-to-f32",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Int16Array([0, -32768, 32767, 16384, -16384]);
         const out = audio.i16ToF32(input);
         // -32768/32768 = -1 exactly; 32767/32768 ≈ 0.99997.
@@ -1381,7 +1381,7 @@ describe("bun:audio — i16 ⇄ f32 PCM", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-f32-to-i16",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array([0, 1, -1, 0.5, -0.5]);
         const out = audio.f32ToI16(input);
         console.log("ctor", out.constructor.name);
@@ -1399,7 +1399,7 @@ describe("bun:audio — i16 ⇄ f32 PCM", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-f32-to-i16-clip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array([2.0, -2.0, 1.5, -1.5]);
         const out = audio.f32ToI16(input);
         console.log(Array.from(out).join(","));
@@ -1413,7 +1413,7 @@ describe("bun:audio — i16 ⇄ f32 PCM", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-pcm-roundtrip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // 1024 random-ish samples in [-1, 1] via a simple LCG.
         const N = 1024;
         const orig = new Float32Array(N);
@@ -1441,7 +1441,7 @@ describe("bun:audio — i16 ⇄ f32 PCM", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-pcm-bad",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         let threw = 0;
         try { audio.i16ToF32(new Float32Array(4)); } catch { threw++; }
         try { audio.i16ToF32([1, 2, 3]); } catch { threw++; }
@@ -1455,12 +1455,12 @@ describe("bun:audio — i16 ⇄ f32 PCM", () => {
   });
 });
 
-describe("bun:audio — envelope", () => {
+describe("para:audio — envelope", () => {
   it("constant input → constant envelope (peak mode)", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-env-constant",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array(4096).fill(0.5);
         const env = audio.envelope(input, { windowSize: 1024 });
         // Expect 4 windows of all 0.5.
@@ -1476,7 +1476,7 @@ describe("bun:audio — envelope", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-env-rms-sine",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 16000, N = 4096;
         const input = new Float32Array(N);
         for (let i = 0; i < N; i++) input[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / SR);
@@ -1500,7 +1500,7 @@ describe("bun:audio — envelope", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-env-shape",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 8192;
         const input = new Float32Array(N);
         for (let i = 0; i < N; i++) {
@@ -1528,7 +1528,7 @@ describe("bun:audio — envelope", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-env-hop",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array(4096).fill(0.5);
         const noOverlap = audio.envelope(input, { windowSize: 1024, hopSize: 1024 });
         const halfOverlap = audio.envelope(input, { windowSize: 1024, hopSize: 512 });
@@ -1546,7 +1546,7 @@ describe("bun:audio — envelope", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-env-too-short",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const env = audio.envelope(new Float32Array(100), { windowSize: 1024 });
         console.log("len", env.length, "ctor", env.constructor.name);
       `,
@@ -1559,7 +1559,7 @@ describe("bun:audio — envelope", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-env-bad-args",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array(2048);
         let threw = 0;
         for (const o of [
@@ -1579,12 +1579,12 @@ describe("bun:audio — envelope", () => {
   });
 });
 
-describe("bun:audio — peak / rms", () => {
+describe("para:audio — peak / rms", () => {
   it("peak returns the largest absolute sample", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-peak-basic",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array([0.1, -0.2, 0.4, -0.05, 0.3, -0.7, 0.6]);
         console.log("peak", audio.peak(input).toFixed(4));
       `,
@@ -1598,7 +1598,7 @@ describe("bun:audio — peak / rms", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-rms-sine",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 16000, N = 4096;
         const input = new Float32Array(N);
         for (let i = 0; i < N; i++) input[i] = 0.5 * Math.sin(2 * Math.PI * 1000 * i / SR);
@@ -1617,7 +1617,7 @@ describe("bun:audio — peak / rms", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-empty",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const empty = new Float32Array(0);
         console.log("peak", audio.peak(empty));
         console.log("rms",  audio.rms(empty));
@@ -1631,7 +1631,7 @@ describe("bun:audio — peak / rms", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-silent",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const silent = new Float32Array(1024);
         console.log("peak", audio.peak(silent));
         console.log("rms",  audio.rms(silent));
@@ -1645,7 +1645,7 @@ describe("bun:audio — peak / rms", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-peak-rms-bad",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         let threw = 0;
         try { audio.peak([1, 2, 3]); } catch { threw++; }
         try { audio.rms([1, 2, 3]); } catch { threw++; }
@@ -1665,7 +1665,7 @@ describe("bun:audio — peak / rms", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-peak-after-normalize",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array([0.1, -0.2, 0.4, -0.05, 0.3]);
         const normed = audio.normalize(input, { target: 0.7, mode: "peak" });
         const got = audio.peak(normed);
@@ -1677,12 +1677,12 @@ describe("bun:audio — peak / rms", () => {
   });
 });
 
-describe("bun:audio — normalize", () => {
+describe("para:audio — normalize", () => {
   it("peak mode brings max(|x|) exactly to the target", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-norm-peak",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array([0.1, -0.2, 0.4, -0.05, 0.3]);
         const out = audio.normalize(input, { target: 0.9, mode: "peak" });
         let maxAbs = 0;
@@ -1703,7 +1703,7 @@ describe("bun:audio — normalize", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-norm-rms",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // 1 kHz sine at amplitude 0.05 — RMS = amp / sqrt(2) ≈ 0.0354.
         const SR = 16000, N = 4096;
         const input = new Float32Array(N);
@@ -1725,7 +1725,7 @@ describe("bun:audio — normalize", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-norm-clip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         // Mostly quiet with one big spike — RMS-normalize aggressively, the
         // spike will clip. Verify the hard-clip envelope is honored.
         const input = new Float32Array(1000).fill(0.01);
@@ -1744,7 +1744,7 @@ describe("bun:audio — normalize", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-norm-silent",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array(64); // all zeros
         const out = audio.normalize(input, { target: 0.9 });
         const allZero = out.every(v => v === 0);
@@ -1761,7 +1761,7 @@ describe("bun:audio — normalize", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-norm-empty",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const out = audio.normalize(new Float32Array(0));
         console.log("len", out.length, "ctor", out.constructor.name);
       `,
@@ -1774,7 +1774,7 @@ describe("bun:audio — normalize", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-audio-norm-bad-args",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const input = new Float32Array([0.1, 0.2, 0.3]);
         let threw = 0;
         for (const o of [
@@ -1794,7 +1794,7 @@ describe("bun:audio — normalize", () => {
   });
 });
 
-describe("bun:audio — Gain (AGC)", () => {
+describe("para:audio — Gain (AGC)", () => {
   it("brings a quiet sine wave up toward the target level", async () => {
     // Quiet 440 Hz sine at amplitude 0.01 → AGC should boost it toward
     // targetLevel=0.1 over the first ~release-window seconds. Compare
@@ -1803,7 +1803,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-quiet",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 48000;
         const N = SR; // 1 second
         const input = new Float32Array(N);
@@ -1830,7 +1830,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-loud",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 48000;
         const N = SR;
         const input = new Float32Array(N);
@@ -1853,7 +1853,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-noclip",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 48000;
         const N = SR / 10; // 100 ms
         const input = new Float32Array(N);
@@ -1877,7 +1877,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-silence",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const N = 4800;
         const input = new Float32Array(N); // all zeros
         const agc = new audio.Gain({ targetLevel: 0.1, sampleRate: 48000, maxGain: 100 });
@@ -1898,7 +1898,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-state",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 48000;
         const N = SR;
         const mkSine = () => {
@@ -1928,7 +1928,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-bad-opts",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         let threw = 0;
         try { new audio.Gain({ targetLevel: 0 }); } catch { threw++; }
         try { new audio.Gain({ targetLevel: 2 }); } catch { threw++; }
@@ -1946,7 +1946,7 @@ describe("bun:audio — Gain (AGC)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gain-reset",
       `
-        import audio from "bun:audio";
+        import audio from "para:audio";
         const SR = 48000;
         const N = SR;
         const noisy = new Float32Array(N);

@@ -13,9 +13,9 @@ import { existsSync } from "node:fs";
 
 const haveVideo = existsSync("/dev/video0");
 
-describe("bun:camera signals (LYK-761)", () => {
+describe("para:camera signals (LYK-761)", () => {
   test.skipIf(!haveVideo)("active, fps, cameraFormat are Signal-shaped", async () => {
-    const camera = (await import("bun:camera")).default;
+    const camera = (await import("para:camera")).default;
     let cam: any;
     try {
       cam = await camera.open("/dev/video0", { format: "yuyv", width: 640, height: 480 });
@@ -37,7 +37,7 @@ describe("bun:camera signals (LYK-761)", () => {
   });
 
   test.skipIf(!haveVideo)("initial signal values reflect open() args", async () => {
-    const camera = (await import("bun:camera")).default;
+    const camera = (await import("para:camera")).default;
     let cam: any;
     try {
       cam = await camera.open("/dev/video0", { format: "yuyv", width: 320, height: 240 });
@@ -60,7 +60,7 @@ describe("bun:camera signals (LYK-761)", () => {
   });
 
   test.skipIf(!haveVideo)("close() drives signals to inert state", async () => {
-    const camera = (await import("bun:camera")).default;
+    const camera = (await import("para:camera")).default;
     let cam: any;
     try {
       cam = await camera.open("/dev/video0", { format: "yuyv", width: 640, height: 480 });

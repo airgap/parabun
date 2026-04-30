@@ -9,8 +9,8 @@
 // Wire BCM 22, 23, 24, 25 → buttons-to-ground (pull-up). Wire
 // BCM 5, 6, 12, 13 → LEDs. Each press lights the matching LED.
 
-import gpio from "bun:gpio";
-import signals from "bun:signals";
+import gpio from "para:gpio";
+import signals from "para:signals";
 
 const args = process.argv.slice(2);
 const sIdx = args.indexOf("--seconds");
@@ -20,7 +20,7 @@ const chips = gpio.chips();
 const rp1 = chips.find(c => c.label === "pinctrl-rp1");
 const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
 if (!chipPath) {
-  console.error("no /dev/gpiochip* found — bun:gpio is Linux-only.");
+  console.error("no /dev/gpiochip* found — para:gpio is Linux-only.");
   process.exit(1);
 }
 

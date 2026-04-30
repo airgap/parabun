@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 
 describe("LYK-759: await using in builtin modules", () => {
   test("dispose fires after the function body completes", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     const probe: (events: string[]) => Promise<void> = (speech as any).__lyk759Probe;
     expect(typeof probe).toBe("function");
 
@@ -31,7 +31,7 @@ describe("LYK-759: await using in builtin modules", () => {
   });
 
   test("re-entry: probe can be called more than once without leaking state", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     const probe: (events: string[]) => Promise<void> = (speech as any).__lyk759Probe;
     const a: string[] = [];
     const b: string[] = [];

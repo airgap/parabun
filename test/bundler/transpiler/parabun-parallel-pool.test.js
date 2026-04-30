@@ -15,14 +15,14 @@ async function runFixture(prefix, files) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:parallel — pool", () => {
+describe("para:parallel — pool", () => {
   it("runs an exported function on a worker and returns the result", async () => {
     const { stdout, exitCode } = await runFixture("parabun-pool-basic", {
       "worker.ts": `
         export function double(x: number) { return x * 2; }
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 2, module: "file://" + path.resolve("./worker.ts") });
         const result = await p.run("double", 21);
@@ -48,7 +48,7 @@ describe("bun:parallel — pool", () => {
         }
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 4, module: "file://" + path.resolve("./worker.ts") });
         const tags = await Promise.all(
@@ -74,7 +74,7 @@ describe("bun:parallel — pool", () => {
         }
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 2, module: "file://" + path.resolve("./worker.ts") });
         const out = await Promise.all([0, 1, 2, 3, 4, 5].map(t => p.run("tagged", t)));
@@ -92,7 +92,7 @@ describe("bun:parallel — pool", () => {
         export function explode() { throw new Error("kaboom from worker"); }
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 2, module: "file://" + path.resolve("./worker.ts") });
         try {
@@ -114,7 +114,7 @@ describe("bun:parallel — pool", () => {
         export function present() { return 1; }
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 1, module: "file://" + path.resolve("./worker.ts") });
         try {
@@ -139,7 +139,7 @@ describe("bun:parallel — pool", () => {
         }
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 1, module: "file://" + path.resolve("./worker.ts") });
         const racer = p.run("slow").then(
@@ -152,14 +152,14 @@ describe("bun:parallel — pool", () => {
         console.log(await racer);
       `,
     });
-    expect(stdout).toBe("REJECTED:bun:parallel pool: disposed");
+    expect(stdout).toBe("REJECTED:para:parallel pool: disposed");
     expect(exitCode).toBe(0);
   });
 
   it("rejects relative module paths up front", async () => {
     const { stdout, exitCode } = await runFixture("parabun-pool-relative-rejected", {
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         try {
           pool({ size: 1, module: "./worker.ts" });
           console.log("NO_THROW");
@@ -178,7 +178,7 @@ describe("bun:parallel — pool", () => {
         export default { triple: (x: number) => x * 3 };
       `,
       "index.ts": `
-        import { pool } from "bun:parallel";
+        import { pool } from "para:parallel";
         import path from "node:path";
         const p = pool({ size: 1, module: "file://" + path.resolve("./worker.ts") });
         const r = await p.run("triple", 7);

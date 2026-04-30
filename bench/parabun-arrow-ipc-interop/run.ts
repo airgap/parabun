@@ -1,4 +1,4 @@
-// Wire-compat interop test for bun:arrow IPC against apache-arrow's
+// Wire-compat interop test for para:arrow IPC against apache-arrow's
 // reference JS implementation. Two directions:
 //
 //   1. Parabun encodes → apache-arrow decodes (validates our writer
@@ -13,7 +13,7 @@
 //
 // Run:  bun bd bench/parabun-arrow-ipc-interop/run.ts
 
-import parabunArrow from "bun:arrow";
+import parabunArrow from "para:arrow";
 import {
   tableFromIPC,
   tableToIPC,
@@ -37,7 +37,7 @@ import {
   Schema as AASchema,
 } from "apache-arrow";
 
-console.log("=== bun:arrow ↔ apache-arrow IPC interop ===\n");
+console.log("=== para:arrow ↔ apache-arrow IPC interop ===\n");
 
 // ─── Direction 1: Parabun → apache-arrow ──────────────────────────────────
 
@@ -304,6 +304,6 @@ console.log(`  apache-arrow → Parabun file round-trip: ${pass6 ? "✓" : "✗"
 
 const allPass = pass && pass2 && pass3 && pass4 && pass5 && pass6;
 console.log(
-  `\n${allPass ? "=== all directions ok — bun:arrow IPC is wire-compatible with apache-arrow ===" : "=== INTEROP FAILURES ==="}`,
+  `\n${allPass ? "=== all directions ok — para:arrow IPC is wire-compatible with apache-arrow ===" : "=== INTEROP FAILURES ==="}`,
 );
 process.exit(allPass ? 0 : 1);

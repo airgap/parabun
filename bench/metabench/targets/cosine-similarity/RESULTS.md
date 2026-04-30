@@ -1,7 +1,7 @@
 # cosine-similarity: node vs bun vs parabun vs parabun-rewrite
 
 Upstream: [`compute-cosine-similarity`](https://github.com/compute-io/cosine-similarity) v1.1.0 (scalar JS via `compute-dot` + `compute-l2norm`).
-Parabun rewrite: `dot(x, y) / (sqrt(dot(x, x)) * sqrt(dot(y, y)))` where `dot` is `bun:simd.dot` (WASM v128 kernel).
+Parabun rewrite: `dot(x, y) / (sqrt(dot(x, x)) * sqrt(dot(y, y)))` where `dot` is `para:simd.dot` (WASM v128 kernel).
 
 Host: Linux x86_64, 2026-04-14. Best-of-9, ms. All four runtimes return identical float values to 6 decimals.
 

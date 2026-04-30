@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 
-// bun:assistant smoke + interface contract.
+// para:assistant smoke + interface contract.
 //
 // The voice loop (mic + STT + speaker + TTS) needs real hardware; the
 // text path (just the LLM) is testable headlessly. This file covers the
@@ -15,9 +15,9 @@ const llmCandidates = [
 const llmFixture = llmCandidates.find(p => existsSync(p));
 const haveLLM = Boolean(llmFixture);
 
-describe("bun:assistant", () => {
+describe("para:assistant", () => {
   test("rejects missing llm option", async () => {
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     await expect(
       // @ts-expect-error — exercising the runtime guard
       assistant.create({}),
@@ -26,7 +26,7 @@ describe("bun:assistant", () => {
 
   test("turns() rejects without stt/mic configured", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("bun:assistant")).default;
+    const assistant = (await import("para:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture! });
     try {
       const it = bot.turns();
@@ -39,7 +39,7 @@ describe("bun:assistant", () => {
   test.skipIf(!haveLLM)(
     "ask() drives a full LLM turn, updates history + lastTurn signals",
     async () => {
-      const assistant = (await import("bun:assistant")).default;
+      const assistant = (await import("para:assistant")).default;
       const bot = await assistant.create({
         llm: llmFixture!,
         system: "You are a concise assistant. Answer in one sentence.",
@@ -86,7 +86,7 @@ describe("bun:assistant", () => {
   test.skipIf(!haveLLM)(
     "close() is idempotent + flips to idle",
     async () => {
-      const assistant = (await import("bun:assistant")).default;
+      const assistant = (await import("para:assistant")).default;
       const bot = await assistant.create({ llm: llmFixture! });
       await bot.close();
       expect(bot.state.get()).toBe("idle");

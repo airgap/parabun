@@ -9,10 +9,10 @@
 // Wire BCM 27 → button to ground (pull-up), BCM 17 → LED. The whole
 // control loop is one `effect()` callback: when `button.value`
 // changes, the effect re-runs and writes the LED. `pollHz: 50` tells
-// `bun:gpio` to drive the value signal at 50 Hz in the background.
+// `para:gpio` to drive the value signal at 50 Hz in the background.
 
-import gpio from "bun:gpio";
-import signals from "bun:signals";
+import gpio from "para:gpio";
+import signals from "para:signals";
 
 const args = process.argv.slice(2);
 const sIdx = args.indexOf("--seconds");
@@ -22,7 +22,7 @@ const chips = gpio.chips();
 const rp1 = chips.find(c => c.label === "pinctrl-rp1");
 const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
 if (!chipPath) {
-  console.error("no /dev/gpiochip* found — bun:gpio is Linux-only.");
+  console.error("no /dev/gpiochip* found — para:gpio is Linux-only.");
   process.exit(1);
 }
 

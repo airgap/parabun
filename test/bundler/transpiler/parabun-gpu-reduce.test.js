@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("bun:gpu — reduce", () => {
+describe("para:gpu — reduce", () => {
   it("Float32Array sum/min/max on a small input matches the analytical answers", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-f32-basic",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([3, 1, 4, 1, 5, 9, 2, 6]);
         console.log("sum", gpu.reduce(input, "sum"));
@@ -35,7 +35,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-empty",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const empty = new Float32Array(0);
         console.log("sum", gpu.reduce(empty, "sum"));
@@ -54,7 +54,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-kahan",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const N = 1_000_000;
         const input = new Float32Array(N);
@@ -74,7 +74,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-nan",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const withNan = new Float32Array([1, 2, NaN, 4]);
         console.log("min", gpu.reduce(withNan, "min"));
@@ -89,7 +89,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-u32-basic",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([3, 1, 4, 1, 5, 9, 2, 6]);
         console.log("sum", gpu.reduce(input, "sum"));
@@ -105,7 +105,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-u32-wrap",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([0x80000000, 0x80000000, 7]);
         console.log("sum", gpu.reduce(input, "sum"));
@@ -119,7 +119,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-bad-op",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.reduce(new Float32Array([1, 2, 3]), "product");
@@ -137,7 +137,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-bad-input",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.reduce([1, 2, 3], "sum");
@@ -155,7 +155,7 @@ describe("bun:gpu — reduce", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-reduce-handle",
       `
-        import gpu from "bun:gpu";
+        import gpu from "para:gpu";
         gpu.setBackend("cpu");
         using held = new gpu.GpuFloat32Array(new Float32Array([10, 20, 30, 40]));
         console.log("sum", gpu.reduce(held, "sum"));

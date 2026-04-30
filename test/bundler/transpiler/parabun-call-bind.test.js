@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
 // Parabun `A -> fn` reactive call-binding operator. Desugars `A -> fn`
-// to `require("bun:signals").effect(() => { fn(A); })` so when `A`
+// to `require("para:signals").effect(() => { fn(A); })` so when `A`
 // reads signals, any change to those signals re-runs the body and
 // re-calls `fn` with the latest value.
 //
@@ -31,7 +31,7 @@ describe("Parabun: -> reactive call-binding", () => {
   describe("desugar", () => {
     it("signal → function identifier", () => {
       const out = transform(`signal a = 1; const log = (s) => {}; a -> log;`);
-      expect(out).toContain(`require("bun:signals").effect(() =>`);
+      expect(out).toContain(`require("para:signals").effect(() =>`);
       expect(out).toContain(`log(a.get())`);
     });
 
@@ -47,7 +47,7 @@ describe("Parabun: -> reactive call-binding", () => {
 
     it("captures disposer: const stop = src -> fn", () => {
       const out = transform(`signal a = 1; const log = (s) => {}; const stop = a -> log;`);
-      expect(out).toContain(`const stop = require("bun:signals").effect`);
+      expect(out).toContain(`const stop = require("para:signals").effect`);
     });
 
     it("pipeline binds tighter than ->", () => {
@@ -164,7 +164,7 @@ describe("Parabun: -> reactive call-binding", () => {
   describe("when-clause", () => {
     it("emits an if(C) wrapper around the call", () => {
       const out = transform(`signal a = 1; const log = (s) => {}; let on = true; a -> log when on;`);
-      expect(out).toContain(`require("bun:signals").effect(() =>`);
+      expect(out).toContain(`require("para:signals").effect(() =>`);
       expect(out).toContain(`if (on)`);
       expect(out).toContain(`log(a.get())`);
     });

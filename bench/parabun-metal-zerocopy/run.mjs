@@ -2,7 +2,7 @@
 // staging for a 1024×1024 f32 matrix (= 4 MiB) across three paths:
 //
 //   (A) COPY    — newBufferWithBytes:length:options:
-//                 (current bun:gpu metal.ts path; memcpy into MTLBuffer)
+//                 (current para:gpu metal.ts path; memcpy into MTLBuffer)
 //   (B) NOCOPY  — newBufferWithBytesNoCopy:length:options:deallocator:
 //                 (page-aligned input; no memcpy; still creates an MTLBuffer
 //                 header per call)

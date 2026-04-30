@@ -1,4 +1,4 @@
-// Parabun: native Highway SIMD kernels exposed to bun:simd.
+// Parabun: native Highway SIMD kernels exposed to para:simd.
 //
 // The hand-assembled WASM v128 kernels in src/js/bun/simd.ts pay a copy-in
 // cost — the JS typed array's bytes have to be copied into wasm.memory before

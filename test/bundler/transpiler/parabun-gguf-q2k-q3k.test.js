@@ -12,12 +12,12 @@ const Q3KM_FIXTURE = "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q3_K_M.g
 const HAS_Q2K = existsSync(Q2K_FIXTURE);
 const HAS_Q3KM = existsSync(Q3KM_FIXTURE);
 
-describe.if(HAS_Q3KM)("bun:llm GGUF Q3_K_M (Llama-3.2-1B)", () => {
+describe.if(HAS_Q3KM)("para:llm GGUF Q3_K_M (Llama-3.2-1B)", () => {
   let llm;
   let file;
 
   beforeAll(async () => {
-    llm = (await import("bun:llm")).default;
+    llm = (await import("para:llm")).default;
     file = await llm.loadGGUF(Q3KM_FIXTURE);
   }, 60_000);
 
@@ -72,12 +72,12 @@ describe.if(HAS_Q3KM)("bun:llm GGUF Q3_K_M (Llama-3.2-1B)", () => {
   }, 240_000);
 });
 
-describe.if(HAS_Q2K)("bun:llm GGUF Q2_K (Llama-3.2-1B)", () => {
+describe.if(HAS_Q2K)("para:llm GGUF Q2_K (Llama-3.2-1B)", () => {
   let llm;
   let file;
 
   beforeAll(async () => {
-    llm = (await import("bun:llm")).default;
+    llm = (await import("para:llm")).default;
     file = await llm.loadGGUF(Q2K_FIXTURE);
   }, 60_000);
 
@@ -139,6 +139,6 @@ describe.if(HAS_Q2K)("bun:llm GGUF Q2_K (Llama-3.2-1B)", () => {
   }, 240_000);
 });
 
-describe.if(!HAS_Q3KM && !HAS_Q2K)("bun:llm GGUF Q2_K/Q3_K", () => {
+describe.if(!HAS_Q3KM && !HAS_Q2K)("para:llm GGUF Q2_K/Q3_K", () => {
   it.skip(`skipped: fixtures missing (${Q2K_FIXTURE}, ${Q3KM_FIXTURE})`, () => {});
 });

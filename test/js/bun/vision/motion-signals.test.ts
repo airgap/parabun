@@ -32,9 +32,9 @@ async function* synthFrames(levels: number[], spacingMs = 110) {
   }
 }
 
-describe("bun:vision motion signals (LYK-742/762)", () => {
+describe("para:vision motion signals (LYK-742/762)", () => {
   test("detected + score are Signal-shaped, initial values clean", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     const m = vision.detectMotion(synthFrames([]));
 
     expect(typeof m.detected.get).toBe("function");
@@ -50,7 +50,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test("detected stays false on a still scene", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     const m = vision.detectMotion(synthFrames([100, 100, 100, 100]), { sensitivity: 0.05 });
 
     for await (const _ of m) void _;
@@ -61,7 +61,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test("detected flips true when frames change abruptly", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     // First-frame baseline at 50 (dark grey), then a hard cut to 200 (bright).
     // The downsampled luma diff at the default threshold (16) flags every
     // pixel as changed → score = 1.0 raw. Smoothing(0.3) means the first
@@ -95,7 +95,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test("score signal fires for subscribers as motion ramps", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     const m = vision.detectMotion(synthFrames([0, 0, 255, 0, 255, 0]), { sensitivity: 0.05 });
 
     const seenScores: number[] = [];
@@ -114,7 +114,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test("detected subscribers see the rising and falling edges", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     // Levels: still, still, hard cut, sustain bright, back to still, still.
     // Expect rising edge near frame 2, falling edge as smoothing decays.
     const m = vision.detectMotion(synthFrames([20, 20, 200, 200, 20, 20, 20, 20, 20]), {
@@ -136,7 +136,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test(".run() drains in the background; signals update without iterating", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     const m = vision.detectMotion(synthFrames([20, 20, 200, 200, 20, 20]), {
       sensitivity: 0.05,
       smoothing: 0.5,
@@ -158,7 +158,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test(".run() is idempotent — second call returns the same disposer", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     const m = vision.detectMotion(synthFrames([10, 10]));
     const stopA = m.run();
     const stopB = m.run();
@@ -167,7 +167,7 @@ describe("bun:vision motion signals (LYK-742/762)", () => {
   });
 
   test(".run() disposer fires the generator's finally — signals reset", async () => {
-    const vision = (await import("bun:vision")).default;
+    const vision = (await import("para:vision")).default;
     // Long-ish stream so the dispose has work to interrupt.
     const m = vision.detectMotion(synthFrames([20, 200, 20, 200, 20, 200, 20]));
 

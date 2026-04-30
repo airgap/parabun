@@ -5,7 +5,7 @@ per-call copy.
 
 Answers one question the main `bench/parabun-gpu-matvec` run could not:
 **once the HtoD cost is amortized across many `matVec` calls, does the
-CUDA kernel beat `bun:simd`?** Yes — by a lot, on an RTX 4070 Ti.
+CUDA kernel beat `para:simd`?** Yes — by a lot, on an RTX 4070 Ti.
 
 The general matVec bench keeps `gpu.matVec(mat, vec, M, K)` as the
 non-resident path, which pays `cuMemAlloc + cuMemcpyHtoD +
@@ -82,7 +82,7 @@ measurements in `bench/parabun-metal-zerocopy` covered Apple Silicon,
 and CUDA had no residency path (its `hold` was a stub). With
 `cuMemAlloc + cuMemcpyHtoD` in `hold()` and a held-aware
 `launchMatVecF32`, the CUDA backend is now the first place in
-`bun:gpu` where a dedicated GPU can credibly beat SIMD — it just needs
+`para:gpu` where a dedicated GPU can credibly beat SIMD — it just needs
 the caller to say "this matrix is hot" via `gpu.hold`.
 
 Pending per Tier 4:

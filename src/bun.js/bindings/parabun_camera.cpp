@@ -1,4 +1,4 @@
-// Parabun: native camera-capture bindings for `bun:camera`.
+// Parabun: native camera-capture bindings for `para:camera`.
 //
 // v1: V4L2 on Linux. AVFoundation + Media Foundation come on top of the
 // same JS surface in follow-ups. The Linux path covers:
@@ -17,7 +17,7 @@
 //   captureNext(handle) → { data, width, height, format, timestampMs, sequence }
 //   formatToRgba(data, format, width, height) → Uint8Array  (YUYV/RGB24 fast path)
 //
-// On non-Linux every entry point throws "bun:camera not yet implemented on
+// On non-Linux every entry point throws "para:camera not yet implemented on
 // this platform". macOS / Windows backends are scaffolded later.
 
 #include "root.h"
@@ -314,7 +314,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpenDevice,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "bun:camera capture not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "para:camera capture not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 5) {
@@ -470,7 +470,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCaptureNext,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "bun:camera capture not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "para:camera capture not yet implemented on this platform"_s);
     return {};
 #else
     auto* sess = asSession(callFrame->argument(0));

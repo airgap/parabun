@@ -8,7 +8,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         const result = await preduce(add, [1, 2, 3, 4, 5], 0);
         console.log(result);
@@ -30,7 +30,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         const result = await preduce(add, [], 42);
         console.log(result);
@@ -52,7 +52,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function cat(acc, x) { return acc + x; }
         const result = await preduce(cat, ["a", "b", "c"], "");
         console.log(result);
@@ -74,7 +74,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         const result = await preduce(add, [10, 20, 30], 0, { concurrency: 1 });
         console.log(result);
@@ -96,7 +96,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         const result = await preduce(add, new Float32Array([1, 2, 3, 4]), 0);
         console.log(result);
@@ -118,7 +118,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function mul(acc, x) { return acc * x; }
         const result = await preduce(mul, new Float64Array([2, 3, 4]), 1);
         console.log(result);
@@ -140,7 +140,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function max(acc, x) { return acc > x ? acc : x; }
         const result = await preduce(max, new Int32Array([3, 7, 2, 9, 1]), -Infinity);
         console.log(result);
@@ -162,7 +162,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         const result = await preduce(add, new Float32Array(0), 99);
         console.log(result);
@@ -181,7 +181,7 @@ describe("preduce", () => {
   it("dispatches large TypedArray to workers via SAB", async () => {
     using dir = tempDir("preduce-sab-large", {
       "index.pjs": `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         const input = new Float64Array(2000);
         for (let i = 0; i < 2000; i++) input[i] = i + 1;
@@ -210,7 +210,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         try {
           await preduce(42, [1, 2], 0);
           console.log("no error");
@@ -235,7 +235,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { preduce } from "bun:parallel";
+        import { preduce } from "para:parallel";
         pure function add(acc, x) { return acc + x; }
         try {
           await preduce(add, "not an array", 0);
@@ -261,7 +261,7 @@ describe("preduce", () => {
         bunExe(),
         "-e",
         `
-        import { pmap } from "bun:parallel";
+        import { pmap } from "para:parallel";
         pure function double(x) { return x * 2; }
         const out = await pmap(double, [1, 2, 3]);
         console.log(JSON.stringify(out));

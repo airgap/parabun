@@ -27,9 +27,9 @@ async function* synthStream() {
   for (let i = 0; i < 27; i++) yield { samples: silentFrame(FRAME), timestampMs: 800 + i * 30 };
 }
 
-describe("bun:speech listen() signals", () => {
+describe("para:speech listen() signals", () => {
   test("active flips during utterance; lastUtterance lands on seal; noiseFloor adapts", async () => {
-    const speech = (await import("bun:speech")).default;
+    const speech = (await import("para:speech")).default;
     const it = speech.listen(synthStream(), {
       sampleRate: SR,
       frameSize: FRAME,

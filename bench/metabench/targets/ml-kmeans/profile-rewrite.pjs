@@ -1,7 +1,7 @@
 // Phase profiling for the rewrite: break per-iteration time into
 //   (1) centroid-norm dots   (2) assignment   (3) update   (4) convergence
 
-import { dot } from "bun:simd";
+import { dot } from "para:simd";
 import { generate, N, D, K } from "./gen.mjs";
 
 const { dataMat, initCentersMat } = generate();

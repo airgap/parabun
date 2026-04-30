@@ -1,13 +1,13 @@
-// Variant: single bun:simd.matVec call. The whole scoring pass becomes one
+// Variant: single para:simd.matVec call. The whole scoring pass becomes one
 // WASM kernel invocation — the matrix is copied into WASM linear memory
 // once, the kernel does N × D fused multiply-adds using f32x4 lanes, and
 // the N scores come back as a Float32Array.
 //
-// Contrast with variant-simd.pjs which calls bun:simd.dot once per row —
+// Contrast with variant-simd.pjs which calls para:simd.dot once per row —
 // each call pays WASM-boundary overhead that erases the f32x4 win at D=384.
 // matVec amortizes that overhead across the whole matrix.
 
-import { matVec, topK as simdTopK } from "bun:simd";
+import { matVec, topK as simdTopK } from "para:simd";
 import { generate, N, D, K } from "./gen.js";
 
 const tGen0 = Bun.nanoseconds();

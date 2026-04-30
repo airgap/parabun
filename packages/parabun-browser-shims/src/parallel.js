@@ -1,4 +1,4 @@
-// Browser shim for `bun:parallel`. Defaults to a persistent Web Worker
+// Browser shim for `para:parallel`. Defaults to a persistent Web Worker
 // pool (one per hardwareConcurrency core) backing `pmap` / `preduce`,
 // with a transparent sequential fallback when Worker + `new Function`
 // aren't available (CSP-restricted contexts, non-browser hosts).

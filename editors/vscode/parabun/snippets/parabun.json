@@ -52,22 +52,22 @@
   "Parallel Pipeline": {
     "prefix": "ppipe",
     "body": [
-      "import { pipeParallel } from \"bun:pipeline\";",
+      "import { pipeParallel } from \"para:pipeline\";",
       "",
       "const result = pipeParallel(${1:data}, [",
       "\t{ stage: \"${2:map}\", fn: (${3:x}) => ${4:x * 2} },",
       "\t$0",
       "]);"
     ],
-    "description": "Parallel pipeline with bun:pipeline"
+    "description": "Parallel pipeline with para:pipeline"
   },
   "SIMD Vector Op": {
     "prefix": "simd",
     "body": [
-      "import { ${1|f32x4Add,f32x4Mul,f32x4Sub,f32x4Div|} } from \"bun:simd\";",
+      "import { ${1|f32x4Add,f32x4Mul,f32x4Sub,f32x4Div|} } from \"para:simd\";",
       "",
       "const result = ${1}(${2:a}, ${3:b});"
     ],
-    "description": "SIMD vector operation with bun:simd"
+    "description": "SIMD vector operation with para:simd"
   }
 }

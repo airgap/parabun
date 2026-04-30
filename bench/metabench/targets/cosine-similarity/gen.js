@@ -1,7 +1,7 @@
 // Deterministic xorshift-based workload generator. Returns both:
 //   - plain Array<number> views (for the upstream lib path — it takes
 //     generic arrays, not typed arrays)
-//   - Float32Array views (for the Parabun rewrite — bun:simd.dot wants a
+//   - Float32Array views (for the Parabun rewrite — para:simd.dot wants a
 //     contiguous typed array)
 // Same numeric values either way, so cosine-similarity results match.
 

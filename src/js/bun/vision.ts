@@ -1,12 +1,12 @@
-// Hardcoded module "bun:vision"
+// Hardcoded module "para:vision"
 //
-// Tier 2 orchestration module — composes a camera frame iterator (bun:camera
+// Tier 2 orchestration module — composes a camera frame iterator (para:camera
 // or any AsyncIterable<RawFrame>) into a decoded-RGBA frame stream with
 // optional motion detection, plus pluggable detector / OCR engine surfaces.
 //
-//   import camera from "bun:camera";
-//   import image  from "bun:image";
-//   import vision from "bun:vision";
+//   import camera from "para:camera";
+//   import image  from "para:image";
+//   import vision from "para:vision";
 //
 //   await using cam = await camera.open("/dev/video0", {
 //     format: "mjpg", width: 1280, height: 720,
@@ -28,7 +28,7 @@
 //   - `frames()` — decode any RawFrame stream to packed RGBA8 (one frame per
 //      input frame), independent of camera format. Caller injects the JPEG
 //      decoder for "mjpg"; YUYV / NV12 / RGB24 use the BT.601 / pad path
-//      from bun:camera.toRgba (wired here so vision doesn't cross-builtin
+//      from para:camera.toRgba (wired here so vision doesn't cross-builtin
 //      import).
 //   - `detectMotion()` — frame-diff motion estimator with a downsampled
 //      luma comparison + temporal smoothing. Pure JS, no detector model.
@@ -42,7 +42,7 @@
 
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of bun:signals's
+// Structural Signal types — keep this module agnostic of para:signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / speech.ts / llm.ts.
 type Signal<T> = {
   get(): T;
@@ -78,8 +78,8 @@ type RgbaFrame = {
 type FramesOptions = {
   /**
    * Caller-injected JPEG decoder used for "mjpg" frames. Required if your
-   * camera emits MJPEG. Hand `image.decode` from bun:image:
-   *   import image from "bun:image";
+   * camera emits MJPEG. Hand `image.decode` from para:image:
+   *   import image from "para:image";
    *   vision.frames(cam.frames(), { decodeMjpg: image.decode })
    * Cross-builtin imports between bun:* modules aren't supported, so
    * dependency injection lives at the user's call site.
@@ -140,7 +140,7 @@ async function* frames(stream: AsyncIterable<RawFrame>, opts: FramesOptions = {}
       const decode = opts.decodeMjpg;
       if (!decode) {
         throw new Error(
-          'bun:vision.frames: "mjpg" frames need an MJPEG decoder. Pass `decodeMjpg: image.decode` from bun:image.',
+          'para:vision.frames: "mjpg" frames need an MJPEG decoder. Pass `decodeMjpg: image.decode` from para:image.',
         );
       }
       const decoded = decode(f.data);
@@ -150,7 +150,7 @@ async function* frames(stream: AsyncIterable<RawFrame>, opts: FramesOptions = {}
         rgba = rgb24ToRgba(decoded.data);
       }
     } else {
-      throw new Error(`bun:vision.frames: unsupported format "${(f as RawFrame).format}"`);
+      throw new Error(`para:vision.frames: unsupported format "${(f as RawFrame).format}"`);
     }
 
     yield {
@@ -324,12 +324,12 @@ type Detection = {
 };
 
 const DETECT_NOT_IMPL =
-  "bun:vision.detect: object-detection engines (YOLO / SSD / RT-DETR) require ONNX runtime as a " +
-  "vendored dep — not yet wired. Tracked in the roadmap as bun:vision (Tier 2).";
+  "para:vision.detect: object-detection engines (YOLO / SSD / RT-DETR) require ONNX runtime as a " +
+  "vendored dep — not yet wired. Tracked in the roadmap as para:vision (Tier 2).";
 
 const RECOGNIZE_NOT_IMPL =
-  "bun:vision.recognize: OCR engines (Tesseract / EasyOCR-class) need a vendored OCR runtime — " +
-  "not yet wired. Tracked in the roadmap as bun:vision (Tier 2).";
+  "para:vision.recognize: OCR engines (Tesseract / EasyOCR-class) need a vendored OCR runtime — " +
+  "not yet wired. Tracked in the roadmap as para:vision (Tier 2).";
 
 async function detect(_frame: RgbaFrame, _opts: DetectOptions): Promise<Detection[]> {
   throw new Error(DETECT_NOT_IMPL);
@@ -339,7 +339,7 @@ async function recognize(_frame: RgbaFrame, _opts: RecognizeOptions): Promise<st
   throw new Error(RECOGNIZE_NOT_IMPL);
 }
 
-// ─── Pixel helpers (mirrored from bun:camera.toRgba) ───────────────────────
+// ─── Pixel helpers (mirrored from para:camera.toRgba) ───────────────────────
 
 function rgb24ToRgba(src: Uint8Array): Uint8Array {
   const n = src.length / 3;

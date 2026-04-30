@@ -1,4 +1,4 @@
-import { mulScalar, addScalar, add, mul, sum, dot, simdMap, alloc } from "bun:simd";
+import { mulScalar, addScalar, add, mul, sum, dot, simdMap, alloc } from "para:simd";
 
 // Fair-ish microbench:
 //   - warm up each variant (let JSC tier up to FTL)
@@ -35,7 +35,7 @@ function row(label, results) {
 
 function header(sizeLabel) {
   console.log(`\n=== ${sizeLabel} ===`);
-  console.log(`${"op".padEnd(26)}\t.map/.reduce\ttight loop\tbun:simd\t(vs naive: tight, simd)`);
+  console.log(`${"op".padEnd(26)}\t.map/.reduce\ttight loop\tpara:simd\t(vs naive: tight, simd)`);
 }
 
 function runSize(N, Ctor, label, { zeroCopy = false } = {}) {

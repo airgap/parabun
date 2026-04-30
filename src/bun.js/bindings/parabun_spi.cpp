@@ -1,4 +1,4 @@
-// Parabun: native SPI bindings for `bun:spi` (LYK-770 / PLAN-bun-hal).
+// Parabun: native SPI bindings for `para:spi` (LYK-770 / PLAN-bun-hal).
 //
 // Linux spidev character device wrapper. Full-duplex transfers + multi-
 // segment transactions with CS held across segments.
@@ -13,7 +13,7 @@
 //        // segments: [{tx?: Uint8Array, rx?: number, speed?, delayUs?,
 //        //             bitsPerWord?, csChange?}, ...]
 //
-// On non-Linux every entry point throws "bun:spi not yet implemented on
+// On non-Linux every entry point throws "para:spi not yet implemented on
 // this platform".
 
 #include "root.h"
@@ -136,7 +136,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiOpenDevice,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "bun:spi not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "para:spi not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 4) {
@@ -206,7 +206,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransfer,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "bun:spi not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "para:spi not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 2) {
@@ -278,7 +278,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransactSegments,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "bun:spi not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "para:spi not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 2) {

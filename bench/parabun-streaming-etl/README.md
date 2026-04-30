@@ -15,7 +15,7 @@ loop, and a Parabun `|>` pipeline with fusion.
 
 All three transforms are affine, so the full chain collapses to
 `total = K · sum(data) + C · n` with `K = 998`, `C = 2.495`. Parabun's
-Tier 2 fusion detects this and dispatches to `bun:simd.sum` as one
+Tier 2 fusion detects this and dispatches to `para:simd.sum` as one
 SIMD-accelerated pass.
 
 ## Results (best-of-5, release build)
