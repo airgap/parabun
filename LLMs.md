@@ -188,6 +188,21 @@ Block-form `when` is **distinct** from the suffix `when` clause used by `~>` / `
 
 Initial state is treated as already-observed: a predicate that starts truthy does **not** fire on first run; only subsequent transitions do. Same convention as `signals.onRising`/`onFalling` used directly.
 
+**Paired form — `when EXPR { … } when not { … }`.** A bare `when not { BODY }` immediately following a `when EXPR { … }` block (no predicate after `not`, just the brace) pairs with it as the inverse-edge handler. The two desugar to `onRising(() => EXPR, …)` + `onFalling(() => EXPR, …)` sharing the same predicate (deep-cloned). `else` is intentionally avoided so the two arms keep `when` as the keyword and the edge-triggered semantic stays explicit.
+
+```
+signal connected = false;
+
+when connected {
+  showOnlineBanner();
+}
+when not {
+  showOfflineBanner();
+}
+```
+
+If the leading block is itself negated (`when not X { … }`), the bare `when not { … }` flips back to the rising edge — `else` always means "the other edge." Adjacency is required: an intervening statement breaks the pairing, and the second `when not { … }` then reverts to a normal `when not EXPR { … }` parse (which errors with no predicate).
+
 `when` keeps its identifier reading when followed by `(`, `;`, `=`, `.`, `,`, `?.`, or end-of-line — `const when = ...; when(x);` and `import { when } from "..."` work unchanged. Block form requires the next token to start a predicate expression (identifier, `!`, string, etc.).
 
 ### `defer`

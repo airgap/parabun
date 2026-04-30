@@ -197,4 +197,135 @@ describe("Parabun: when block (rising / falling)", () => {
       expect(exitCode).toBe(0);
     });
   });
+
+  describe("paired form (when … when not …)", () => {
+    describe("desugar", () => {
+      it("`when X { } when not { }` emits onRising + onFalling on the same predicate", () => {
+        const out = transform(`
+          signal a = false;
+          when a { console.log("rise"); }
+          when not { console.log("fall"); }
+        `);
+        expect(out).toContain(`require("para:signals").onRising(`);
+        expect(out).toContain(`require("para:signals").onFalling(`);
+        // Both helpers reference the same predicate (a.get())
+        expect(out.match(/a\.get\(\)/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+      });
+
+      it("`when not X { } when not { }` emits onFalling + onRising (else flips edge)", () => {
+        const out = transform(`
+          signal a = true;
+          when not a { console.log("fall"); }
+          when not { console.log("rise"); }
+        `);
+        expect(out).toContain(`require("para:signals").onFalling(`);
+        expect(out).toContain(`require("para:signals").onRising(`);
+      });
+
+      it("`when X { } when not Y { }` is NOT paired — Y is its own predicate", () => {
+        const out = transform(`
+          signal a = false;
+          signal b = true;
+          when a { console.log("a-rise"); }
+          when not b { console.log("b-fall"); }
+        `);
+        // Both still emit, but each with its own predicate. The paired-form
+        // lookahead bails out because Y is not bare-{ after `not`.
+        expect(out).toContain("onRising");
+        expect(out).toContain("onFalling");
+        expect(out).toContain("a.get()");
+        expect(out).toContain("b.get()");
+      });
+
+      it("intervening statement breaks adjacency — second `when not { }` errors", () => {
+        let threw = false;
+        try {
+          transform(`
+            signal a = false;
+            when a { console.log("rise"); }
+            console.log("between");
+            when not { console.log("fall"); }
+          `);
+        } catch {
+          threw = true;
+        }
+        // The second `when not { }` no longer has a paired predicate to
+        // inherit. Falling through to the normal predicate-required path
+        // produces a parse error (the bare `{` is read as an empty object
+        // literal predicate, then no body brace remains).
+        expect(threw).toBe(true);
+      });
+    });
+
+    describe("runtime", () => {
+      it("paired form fires both edges on transitions", async () => {
+        const { stdout, exitCode } = await runFixture(
+          "when-paired",
+          `
+            signal a = false;
+            const out = [];
+            when a { out.push("rise"); }
+            when not { out.push("fall"); }
+            a = true;
+            await Promise.resolve();
+            a = false;
+            await Promise.resolve();
+            a = true;
+            await Promise.resolve();
+            a = false;
+            await Promise.resolve();
+            console.log(out.join(","));
+          `,
+        );
+        expect(stdout).toBe("rise,fall,rise,fall");
+        expect(exitCode).toBe(0);
+      });
+
+      it("negated paired form fires falling first, rising second", async () => {
+        const { stdout, exitCode } = await runFixture(
+          "when-paired-negated",
+          `
+            signal a = true;
+            const out = [];
+            when not a { out.push("fall"); }
+            when not { out.push("rise"); }
+            a = false;
+            await Promise.resolve();
+            a = true;
+            await Promise.resolve();
+            console.log(out.join(","));
+          `,
+        );
+        expect(stdout).toBe("fall,rise");
+        expect(exitCode).toBe(0);
+      });
+
+      it("predicate is shared (writes to either side affect both)", async () => {
+        const { stdout, exitCode } = await runFixture(
+          "when-paired-shared",
+          `
+            signal x = 0;
+            const out = [];
+            when x >= 100 { out.push("over"); }
+            when not { out.push("under"); }
+            x = 50;
+            await Promise.resolve();
+            x = 100;
+            await Promise.resolve();
+            x = 150;
+            await Promise.resolve();
+            x = 50;
+            await Promise.resolve();
+            console.log(out.join(","));
+          `,
+        );
+        // 0→50: still under, no edge.
+        // 50→100: under→over, "over" fires.
+        // 100→150: still over, no edge.
+        // 150→50: over→under, "under" fires.
+        expect(stdout).toBe("over,under");
+        expect(exitCode).toBe(0);
+      });
+    });
+  });
 });

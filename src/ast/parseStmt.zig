@@ -1906,7 +1906,115 @@ pub fn ParseStmt(
                 .args = js_ast.ExprNodeList.fromOwnedSlice(helper_args),
             }, when_range.loc);
 
-            return p.s(S.SExpr{ .value = helper_call }, when_range.loc);
+            const first_stmt = p.s(S.SExpr{ .value = helper_call }, when_range.loc);
+
+            // Parabun: paired-edge form. After `when EXPR { body }` (or `when
+            // not EXPR { body }`), if the immediately-following statement is a
+            // bare `when not { body }` — the word `not` followed directly by
+            // `{` with no predicate — pair the two as opposite-edge handlers
+            // sharing this when's predicate. Adjacency is enforced by parsing
+            // both arms in the same call; intervening statements break it.
+            //
+            //   when X { a } when not { b }   →  onRising(X,a) + onFalling(X,b)
+            //   when not X { a } when not { b } →  onFalling(X,a) + onRising(X,b)
+            //
+            // The shared predicate is deep-cloned so the visit pass walks two
+            // independent identifier trees instead of double-walking one.
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "when")) {
+                const saved_after_first = p.lexer;
+                const second_when_loc = p.lexer.loc();
+                try p.lexer.next();
+                const is_paired = p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "not");
+                if (is_paired) {
+                    try p.lexer.next();
+                    if (p.lexer.token == .t_open_brace) {
+                        // Confirmed paired form. Build the inverse-edge handler.
+                        const second_helper_name: []const u8 = if (negate) "onRising" else "onFalling";
+                        const cloned_predicate = bun.handleOom(predicate.deepClone(p.allocator));
+
+                        const second_pred_arrow_loc = second_when_loc;
+                        const second_pred_body_loc = logger.Loc{ .start = second_when_loc.start + 1 };
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, second_pred_arrow_loc) catch bun.outOfMemory();
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, second_pred_body_loc) catch bun.outOfMemory();
+                        p.popScope();
+                        p.popScope();
+
+                        const second_pred_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                        second_pred_stmts[0] = p.s(S.Return{ .value = cloned_predicate }, second_pred_body_loc);
+                        const second_pred_arrow = p.newExpr(E.Arrow{
+                            .args = &.{},
+                            .body = .{ .loc = second_pred_body_loc, .stmts = second_pred_stmts },
+                            .prefer_expr = true,
+                            .is_async = false,
+                        }, second_pred_arrow_loc);
+
+                        const second_body_arrow_loc = logger.Loc{ .start = second_when_loc.start + 2 };
+                        const second_body_loc = p.lexer.loc();
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, second_body_arrow_loc) catch bun.outOfMemory();
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, second_body_loc) catch bun.outOfMemory();
+
+                        const old_fn_or_arrow_data2 = std.mem.toBytes(p.fn_or_arrow_data_parse);
+                        var arrow_data2 = p.fn_or_arrow_data_parse;
+                        arrow_data2.allow_await = .allow_ident;
+                        arrow_data2.allow_yield = .allow_ident;
+                        p.fn_or_arrow_data_parse = arrow_data2;
+
+                        try p.lexer.expect(.t_open_brace);
+                        var body_opts2 = ParseStatementOptions{};
+                        const second_body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts2);
+                        try p.lexer.expect(.t_close_brace);
+
+                        p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data2);
+                        p.popScope();
+                        p.popScope();
+
+                        const second_body_arrow = p.newExpr(E.Arrow{
+                            .args = &.{},
+                            .body = .{ .loc = second_body_loc, .stmts = second_body_stmts },
+                            .prefer_expr = false,
+                            .is_async = false,
+                        }, second_body_arrow_loc);
+
+                        const second_require_ref = p.storeNameInRef("require") catch unreachable;
+                        const second_require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                        second_require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, second_when_loc);
+                        const second_require_call = p.newExpr(E.Call{
+                            .target = p.newExpr(E.Identifier{ .ref = second_require_ref }, second_when_loc),
+                            .args = js_ast.ExprNodeList.fromOwnedSlice(second_require_args),
+                        }, second_when_loc);
+                        const second_helper_dot = p.newExpr(E.Dot{
+                            .target = second_require_call,
+                            .name = second_helper_name,
+                            .name_loc = second_when_loc,
+                        }, second_when_loc);
+                        const second_helper_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+                        second_helper_args[0] = second_pred_arrow;
+                        second_helper_args[1] = second_body_arrow;
+                        const second_helper_call = p.newExpr(E.Call{
+                            .target = second_helper_dot,
+                            .args = js_ast.ExprNodeList.fromOwnedSlice(second_helper_args),
+                        }, second_when_loc);
+
+                        // Combine both helpers as a comma expression at
+                        // statement position. The printer normalizes
+                        // statement-level commas back into separate stmts,
+                        // and there's no extra scope to register (avoiding
+                        // the scope-collision issues a wrapping `S.Block`
+                        // would introduce at the same loc as the predicate
+                        // arrow's function_args scope).
+                        const combined = p.newExpr(E.Binary{
+                            .op = .bin_comma,
+                            .left = helper_call,
+                            .right = second_helper_call,
+                        }, when_range.loc);
+                        return p.s(S.SExpr{ .value = combined }, when_range.loc);
+                    }
+                }
+                // Not paired form — restore lexer for the outer dispatch.
+                p.lexer.restore(&saved_after_first);
+            }
+
+            return first_stmt;
         }
 
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {

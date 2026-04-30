@@ -146,19 +146,23 @@ function transformArena(line: string): string {
   return line.replace(/\b(arena)\b(?=\s*\{)/g, "     ");
 }
 
-// `when EXPR { body }` → `if  (EXPR) { body }` and
-// `when not EXPR { body }` → `if      (!(EXPR)) { body }` — column-preserving
-// rewrites that give TS a normal `if` block. `when` is 4 chars, `if  ` is 4
-// (2 letters + 2 spaces); `when not ` is 9, `if      (!(` is also chosen to
-// keep the column of EXPR fixed. Body braces stay where they were so hover /
-// go-to-def land on the right span. The actual desugar is owned by Bun's
-// parser (→ require("para:signals").onRising/onFalling); this transform exists
-// only to satisfy the embedded TypeScript checker.
+// `when EXPR { body }` → `if  (EXPR) { body }`
+// `when not EXPR { body }` → `if      (!(EXPR)) { body }`
+// `when not { body }` (bare paired form) → `else     { body }`
+//
+// Column-preserving rewrites that give TS a normal `if`/`else` shape so the
+// embedded TypeScript checker doesn't choke on the surface syntax. The paired
+// `when not { … }` lands as `else { … }` so it attaches to the preceding
+// transformed `if` — readers still get sensible hover / TS diagnostics. The
+// actual desugar is owned by the parser (→ require("para:signals").onRising
+// /onFalling pair sharing the predicate); this transform is a TS-side shim only.
 function transformWhenBlock(line: string): string {
-  // Negated form first — order matters because `when not` shares a prefix
-  // with `when`. Predicate is everything between `when not ` (or `when `)
-  // and the trailing `{` on the same line.
+  // Bare paired form first — `when not` followed directly by `{` (no
+  // predicate). 8 chars `when not` ↔ 8 chars `else    `, brace column held.
+  line = line.replace(/\bwhen\s+not(\s*\{)/g, (_m, brace) => `else    ${brace}`);
+  // Negated form with predicate.
   line = line.replace(/\bwhen\s+not\s+(.+?)(\s*\{)/g, (_m, expr, brace) => `if      (!(${expr}))${brace}`);
+  // Plain form with predicate.
   line = line.replace(/\bwhen\s+(.+?)(\s*\{)/g, (_m, expr, brace) => `if  (${expr})${brace}`);
   return line;
 }
@@ -1583,21 +1587,25 @@ function getParabunHover(content: string, line: number, character: number): stri
       "false→true. `when not EXPR { BODY }` fires on the true→false edge.",
       "Reads inside `EXPR` are auto-tracked — every signal becomes a dep.",
       "",
+      "**Paired form:** a bare `when not { BODY }` immediately following a",
+      "`when EXPR { … }` block (no predicate after `not`) pairs with it as",
+      "the inverse-edge handler, sharing the same predicate.",
+      "",
       "Distinct from the suffix `when` clause used by `~>` / `->`: position",
       "disambiguates. Suffix `when` is an every-truthy guard; the block form",
       "is edge-triggered.",
       "",
       "Desugars to `require('para:signals').onRising(() => EXPR, () => { BODY })`",
-      "(or `onFalling` for the `not` form).",
+      "(or `onFalling` for the `not` form, or both when paired).",
       "",
       "```typescript",
       "when motion.detected.get() && bot.state.get() === 'idle' {",
       "  bot.say('Welcome back!');",
       "}",
       "",
-      "when not motion.detected.get() {",
-      "  bot.dim();",
-      "}",
+      "// Paired form: bare `when not { … }` reuses the predicate above",
+      "when connected { showOnlineBanner(); }",
+      "when not       { showOfflineBanner(); }",
       "```",
     ].join("\n");
   }
