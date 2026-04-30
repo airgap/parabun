@@ -1806,15 +1806,15 @@ pub fn ParseStmt(
         }
 
         // Parabun: parse `when EXPR { body }` or `when not EXPR { body }`
-        // statement. Desugars to:
-        //   require("para:signals").onRising(() => EXPR, () => { body });
-        //   require("para:signals").onFalling(() => EXPR, () => { body });
+        // statement. Both forms desugar to a single helper:
+        //   when EXPR { body }     → require("para:signals").when(() => EXPR, () => { body });
+        //   when not EXPR { body } → require("para:signals").when(() => !(EXPR), () => { body });
         //
         // Edge-triggered handler — fires the body once on each rising
-        // (false→true) transition of the predicate, or each falling
-        // (true→false) transition for the `not` form. The two arrows
-        // mirror what callers would otherwise write by hand against
-        // `para:signals.onRising`/`onFalling`.
+        // (false→true) transition of the predicate. The `not` form is the
+        // rising edge of the negated predicate, which is the falling edge
+        // of EXPR; the negation is pushed into the arrow body so the
+        // runtime helper has only one direction.
         //
         // At entry: `when` has already been consumed; p.lexer is on the
         // first token of the predicate (which may be `not`).
@@ -1828,13 +1828,21 @@ pub fn ParseStmt(
                 negate = true;
             }
 
-            const helper_name: []const u8 = if (negate) "onFalling" else "onRising";
+            // Single helper: `signals.when(predicate, body)` fires once per
+            // false→true transition. The `not` form is just the rising edge
+            // of the negated predicate, so we push the negation into the
+            // arrow body instead of dispatching to a different helper.
+            const helper_name: []const u8 = "when";
 
             // Parse the predicate at the outer scope. The expression-form
             // arrow built around it later registers its scopes empty, the
             // same way `~> ... when COND` does for the COND clause.
             const pred_loc = p.lexer.loc();
-            const predicate = try p.parseExpr(.assign);
+            const raw_predicate = try p.parseExpr(.assign);
+            const predicate = if (negate)
+                p.newExpr(E.Unary{ .op = .un_not, .value = raw_predicate }, pred_loc)
+            else
+                raw_predicate;
 
             // Synthesize distinct locs for the predicate arrow's two scopes
             // — same loc-bumping trick `parseDeferStmt` uses (line 1388) so
@@ -1915,8 +1923,8 @@ pub fn ParseStmt(
             // sharing this when's predicate. Adjacency is enforced by parsing
             // both arms in the same call; intervening statements break it.
             //
-            //   when X { a } when not { b }   →  onRising(X,a) + onFalling(X,b)
-            //   when not X { a } when not { b } →  onFalling(X,a) + onRising(X,b)
+            //   when X { a } when not { b }   →  when(X,a) + when(!X,b)
+            //   when not X { a } when not { b } →  when(!X,a) + when(X,b)
             //
             // The shared predicate is deep-cloned so the visit pass walks two
             // independent identifier trees instead of double-walking one.
@@ -1929,8 +1937,19 @@ pub fn ParseStmt(
                     try p.lexer.next();
                     if (p.lexer.token == .t_open_brace) {
                         // Confirmed paired form. Build the inverse-edge handler.
-                        const second_helper_name: []const u8 = if (negate) "onRising" else "onFalling";
-                        const cloned_predicate = bun.handleOom(predicate.deepClone(p.allocator));
+                        // Both arms call `when`; the second arm's predicate is
+                        // the logical inverse of the first arm's effective
+                        // predicate. Clone the RAW (pre-negation) predicate
+                        // and choose negation based on this arm's direction:
+                        //   first  `when X { … }`     (negate=false) →  second predicate = !X
+                        //   first  `when not X { … }` (negate=true)  →  second predicate = X
+                        // (avoids `!!X` you'd get cloning the already-negated form).
+                        const second_helper_name: []const u8 = "when";
+                        const cloned_raw = bun.handleOom(raw_predicate.deepClone(p.allocator));
+                        const cloned_predicate = if (!negate)
+                            p.newExpr(E.Unary{ .op = .un_not, .value = cloned_raw }, second_when_loc)
+                        else
+                            cloned_raw;
 
                         const second_pred_arrow_loc = second_when_loc;
                         const second_pred_body_loc = logger.Loc{ .start = second_when_loc.start + 1 };
@@ -2132,8 +2151,9 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising
-            // and falling edge handlers. Desugar to require("para:signals").onRising
-            // (() => EXPR, () => { body }) and onFalling(...) respectively.
+            // and falling edge handlers. Both desugar to require("para:signals")
+            // .when(() => EXPR, () => { body }); the `not` form negates the
+            // predicate inside the arrow.
             //
             // Block-form `when` is distinct from the suffix `when` clause used in
             // `A ~> B when C` and `A -> fn when C`: position disambiguates. The

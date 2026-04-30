@@ -154,8 +154,9 @@ function transformArena(line: string): string {
 // embedded TypeScript checker doesn't choke on the surface syntax. The paired
 // `when not { … }` lands as `else { … }` so it attaches to the preceding
 // transformed `if` — readers still get sensible hover / TS diagnostics. The
-// actual desugar is owned by the parser (→ require("para:signals").onRising
-// /onFalling pair sharing the predicate); this transform is a TS-side shim only.
+// actual desugar is owned by the parser (→ require("para:signals").when(...)
+// with the predicate negated for the `not` form); this transform is a TS-side
+// shim only.
 function transformWhenBlock(line: string): string {
   // Bare paired form first — `when not` followed directly by `{` (no
   // predicate). 8 chars `when not` ↔ 8 chars `else    `, brace column held.
@@ -1595,8 +1596,9 @@ function getParabunHover(content: string, line: number, character: number): stri
       "disambiguates. Suffix `when` is an every-truthy guard; the block form",
       "is edge-triggered.",
       "",
-      "Desugars to `require('para:signals').onRising(() => EXPR, () => { BODY })`",
-      "(or `onFalling` for the `not` form, or both when paired).",
+      "Desugars to `require('para:signals').when(() => EXPR, () => { BODY })`",
+      "— the `not` form negates the predicate (`() => !(EXPR)`), and the paired",
+      "form emits two such calls.",
       "",
       "```typescript",
       "when motion.detected.get() && bot.state.get() === 'idle' {",

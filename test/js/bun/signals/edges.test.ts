@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import sigs from "para:signals";
 
-// para:signals.onRising / onFalling — fire fn once per false→true (or
-// true→false) transition. Initial state is treated as already-observed.
+// para:signals.when(src, fn) — fires fn once per false→true transition of
+// src. Initial state is treated as already-observed. The falling edge is
+// just the rising edge of the negated predicate: when(() => !s.get(), fn).
 
-describe("para:signals.onRising", () => {
+describe("para:signals.when (rising-edge form)", () => {
   test("fires on false→true transition", async () => {
     const s = sigs.signal(false);
     let n = 0;
-    const stop = sigs.onRising(s, () => n++);
+    const stop = sigs.when(s, () => n++);
     s.set(true);
     await Promise.resolve();
     expect(n).toBe(1);
@@ -18,7 +19,7 @@ describe("para:signals.onRising", () => {
   test("does NOT fire on the initial run when signal starts truthy", async () => {
     const s = sigs.signal(true);
     let n = 0;
-    const stop = sigs.onRising(s, () => n++);
+    const stop = sigs.when(s, () => n++);
     await Promise.resolve();
     expect(n).toBe(0);
     s.set(false);
@@ -32,7 +33,7 @@ describe("para:signals.onRising", () => {
   test("does not fire on falling edges", async () => {
     const s = sigs.signal(true);
     let n = 0;
-    const stop = sigs.onRising(s, () => n++);
+    const stop = sigs.when(s, () => n++);
     s.set(false);
     await Promise.resolve();
     expect(n).toBe(0);
@@ -42,7 +43,7 @@ describe("para:signals.onRising", () => {
   test("re-fires on every rising edge in a sequence", async () => {
     const s = sigs.signal(false);
     let n = 0;
-    const stop = sigs.onRising(s, () => n++);
+    const stop = sigs.when(s, () => n++);
     for (const v of [true, false, true, false, true]) {
       s.set(v);
       await Promise.resolve();
@@ -54,7 +55,7 @@ describe("para:signals.onRising", () => {
   test("coerces non-boolean source values", async () => {
     const s = sigs.signal<number>(0);
     let n = 0;
-    const stop = sigs.onRising(s, () => n++);
+    const stop = sigs.when(s, () => n++);
     s.set(1); // truthy
     await Promise.resolve();
     s.set(2); // still truthy → no edge
@@ -70,7 +71,7 @@ describe("para:signals.onRising", () => {
   test("disposer stops further fires", async () => {
     const s = sigs.signal(false);
     let n = 0;
-    const stop = sigs.onRising(s, () => n++);
+    const stop = sigs.when(s, () => n++);
     s.set(true);
     await Promise.resolve();
     stop();
@@ -81,14 +82,14 @@ describe("para:signals.onRising", () => {
   });
 
   test("rejects non-signal, non-function source", () => {
-    expect(() => sigs.onRising({} as any, () => {})).toThrow(/signal or a predicate function/);
+    expect(() => sigs.when({} as any, () => {})).toThrow(/signal or a predicate function/);
   });
 
   test("predicate form: tracks signal reads inside the function", async () => {
     const a = sigs.signal(0);
     const b = sigs.signal(0);
     let n = 0;
-    const stop = sigs.onRising(
+    const stop = sigs.when(
       () => a.get() > 0 && b.get() > 0,
       () => n++,
     );
@@ -109,7 +110,7 @@ describe("para:signals.onRising", () => {
   test("predicate form: initial truthy does NOT fire", async () => {
     const a = sigs.signal(1);
     let n = 0;
-    const stop = sigs.onRising(
+    const stop = sigs.when(
       () => a.get() > 0,
       () => n++,
     );
@@ -126,7 +127,7 @@ describe("para:signals.onRising", () => {
   test("predicate form: initial peek does not subscribe", async () => {
     const a = sigs.signal(1);
     let predicateCalls = 0;
-    const stop = sigs.onRising(
+    const stop = sigs.when(
       () => {
         predicateCalls++;
         return a.get() > 0;
@@ -140,7 +141,7 @@ describe("para:signals.onRising", () => {
 
   test("rejects non-function fn", () => {
     const s = sigs.signal(false);
-    expect(() => sigs.onRising(s, 42 as any)).toThrow();
+    expect(() => sigs.when(s, 42 as any)).toThrow();
   });
 
   test("works on a derived signal", async () => {
@@ -148,7 +149,7 @@ describe("para:signals.onRising", () => {
     const b = sigs.signal(0);
     const both = sigs.derived(() => a.get() > 0 && b.get() > 0);
     let n = 0;
-    const stop = sigs.onRising(both, () => n++);
+    const stop = sigs.when(both, () => n++);
     a.set(1);
     await Promise.resolve();
     expect(n).toBe(0); // both still false (b=0)
@@ -164,11 +165,18 @@ describe("para:signals.onRising", () => {
   });
 });
 
-describe("para:signals.onFalling", () => {
+describe("para:signals.when (falling-edge via negated predicate)", () => {
+  // The falling edge is just the rising edge of the negated predicate. The
+  // block syntax `when not X { … }` does this rewrite at parse time; direct
+  // callers spell it `when(() => !s.get(), fn)`.
+
   test("fires on true→false transition", async () => {
     const s = sigs.signal(true);
     let n = 0;
-    const stop = sigs.onFalling(s, () => n++);
+    const stop = sigs.when(
+      () => !s.get(),
+      () => n++,
+    );
     s.set(false);
     await Promise.resolve();
     expect(n).toBe(1);
@@ -178,7 +186,10 @@ describe("para:signals.onFalling", () => {
   test("does NOT fire on the initial run when signal starts falsy", async () => {
     const s = sigs.signal(false);
     let n = 0;
-    const stop = sigs.onFalling(s, () => n++);
+    const stop = sigs.when(
+      () => !s.get(),
+      () => n++,
+    );
     await Promise.resolve();
     expect(n).toBe(0);
     s.set(true);
@@ -192,7 +203,10 @@ describe("para:signals.onFalling", () => {
   test("does not fire on rising edges", async () => {
     const s = sigs.signal(false);
     let n = 0;
-    const stop = sigs.onFalling(s, () => n++);
+    const stop = sigs.when(
+      () => !s.get(),
+      () => n++,
+    );
     s.set(true);
     await Promise.resolve();
     expect(n).toBe(0);

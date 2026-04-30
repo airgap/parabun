@@ -383,56 +383,44 @@ function fromInterval<T>(fn: () => T | Promise<T>, periodMs: number): DriverHand
   };
 }
 
-// ─── Edge-detection helpers ────────────────────────────────────────────────
+// ─── Edge-detection helper ─────────────────────────────────────────────────
 //
-// Common pattern: react to a *transition* in a boolean-coerced computation,
-// not every change. `onRising(src, fn)` calls `fn` once each time `src` goes
-// from falsy to truthy; `onFalling(src, fn)` is the dual. Initial state is
-// taken as already-observed — a source that starts truthy does NOT fire
-// `onRising` on first run; only subsequent false→true transitions do.
+// `when(src, fn)` calls `fn` once each time `src` transitions from falsy to
+// truthy. Initial state is taken as already-observed — a source that starts
+// truthy does NOT fire on first run; only subsequent false→true transitions
+// do. The falling edge is just the rising edge of the negated predicate:
+// `when(() => !x.get(), fn)`. The block syntax `when not X { … }` desugars
+// to that form automatically, so user code rarely writes the negation by hand.
 //
 // `src` can be either a `Signal<T>` or a predicate function. The predicate
 // form auto-derives — passing `() => a.get() && b.get() === "x"` saves the
-// explicit `derived(...)` wrapper, which is almost always what callers
-// would do otherwise. Reads inside the predicate are tracked the same way
-// they would be inside an `effect`.
+// explicit `derived(...)` wrapper, which is almost always what callers would
+// do otherwise. Reads inside the predicate are tracked the same way they
+// would be inside an `effect`.
 //
-// Both return a disposer with the same semantics as `effect()`.
+// Returns a disposer with the same semantics as `effect()`.
 
 type EdgeSource<T> = ReadableSignal<T> | (() => T);
 
-function readEdgeSource<T>(name: string, source: EdgeSource<T>): { peek: () => boolean; read: () => boolean } {
+function readEdgeSource<T>(source: EdgeSource<T>): { peek: () => boolean; read: () => boolean } {
   if (source instanceof ReadableSignal) {
     return { peek: () => !!source.peek(), read: () => !!source.get() };
   }
   if ($isCallable(source)) {
     return { peek: () => !!untrack(() => (source as () => T)()), read: () => !!(source as () => T)() };
   }
-  throw new TypeError(`para:signals.${name}: first argument must be a signal or a predicate function`);
+  throw new TypeError("para:signals.when: first argument must be a signal or a predicate function");
 }
 
-function onRising<T>(source: EdgeSource<T>, fn: () => void): () => void {
+function when<T>(source: EdgeSource<T>, fn: () => void): () => void {
   if (!$isCallable(fn)) {
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
-  const { peek, read } = readEdgeSource("onRising", source);
+  const { peek, read } = readEdgeSource(source);
   let prev = peek();
   return effect(() => {
     const now = read();
     if (now && !prev) fn();
-    prev = now;
-  });
-}
-
-function onFalling<T>(source: EdgeSource<T>, fn: () => void): () => void {
-  if (!$isCallable(fn)) {
-    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
-  }
-  const { peek, read } = readEdgeSource("onFalling", source);
-  let prev = peek();
-  return effect(() => {
-    const now = read();
-    if (!now && prev) fn();
     prev = now;
   });
 }
@@ -446,7 +434,6 @@ export default {
   fromAsync,
   fromInterval,
   pump,
-  onRising,
-  onFalling,
+  when,
   Signal: ReadableSignal,
 };

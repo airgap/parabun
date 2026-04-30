@@ -172,7 +172,7 @@ When `A` reads signals, the bare-read sugar rewrites each to `.get()` inside the
 
 ### `when EXPR { … }` (edge-triggered block)
 
-Statement-level edge handler. `when EXPR { BODY }` desugars to `require("para:signals").onRising(() => EXPR, () => { BODY })` — fires `BODY` once each time `EXPR` transitions falsy → truthy. `when not EXPR { BODY }` desugars to `onFalling(...)` — fires on the truthy → falsy edge. Reads inside `EXPR` are tracked the same way they would be inside `effect { … }`.
+Statement-level edge handler. `when EXPR { BODY }` desugars to `require("para:signals").when(() => EXPR, () => { BODY })` — fires `BODY` once each time `EXPR` transitions falsy → truthy. `when not EXPR { BODY }` desugars to the same call with the predicate negated: `signals.when(() => !(EXPR), () => { BODY })` — i.e. the falling edge is just the rising edge of the inverse. Reads inside `EXPR` are tracked the same way they would be inside `effect { … }`.
 
 ```
 when motion.detected.get() && bot.state.get() === "idle" {
@@ -186,9 +186,9 @@ when not bot.busy.get() {
 
 Block-form `when` is **distinct** from the suffix `when` clause used by `~>` / `->` (`A ~> B when C` and `A -> fn when C`): position disambiguates. The suffix form is an every-truthy guard — it re-fires whenever a tracked dep changes and `C` is currently truthy. The block form is edge-triggered — it fires once per false→true (or true→false) transition. Same word, two related but distinct semantics; pick by position.
 
-Initial state is treated as already-observed: a predicate that starts truthy does **not** fire on first run; only subsequent transitions do. Same convention as `signals.onRising`/`onFalling` used directly.
+Initial state is treated as already-observed: a predicate that starts truthy does **not** fire on first run; only subsequent transitions do. Same convention as `signals.when` used directly.
 
-**Paired form — `when EXPR { … } when not { … }`.** A bare `when not { BODY }` immediately following a `when EXPR { … }` block (no predicate after `not`, just the brace) pairs with it as the inverse-edge handler. The two desugar to `onRising(() => EXPR, …)` + `onFalling(() => EXPR, …)` sharing the same predicate (deep-cloned). `else` is intentionally avoided so the two arms keep `when` as the keyword and the edge-triggered semantic stays explicit.
+**Paired form — `when EXPR { … } when not { … }`.** A bare `when not { BODY }` immediately following a `when EXPR { … }` block (no predicate after `not`, just the brace) pairs with it as the inverse-edge handler. The two desugar to two `signals.when(...)` calls sharing the predicate (deep-cloned), with the second arm's predicate negated. `else` is intentionally avoided so the two arms keep `when` as the keyword and the edge-triggered semantic stays explicit.
 
 ```
 signal connected = false;
