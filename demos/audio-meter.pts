@@ -9,7 +9,7 @@
 
 import audio from "bun:audio";
 
-await using mic = await audio.capture({
+await using mic ..= audio.capture({
   device: "default",
   sampleRate: 16000,
   channels: 1,

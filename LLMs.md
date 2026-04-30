@@ -87,6 +87,17 @@ fetchProfile.clear();               // drop all cached profiles
 
 Desugars `const x ..= expr` to `const x = await expr`. Requires async context.
 
+Works on every declaration form that takes an initializer — `const`, `let`, `var`, `using`, and `await using`:
+
+```
+const data ..= fetch("/api").then(r => r.json());
+let temp ..= readSensor();
+using cam ..= camera.open("/dev/video0");           //   using cam = await camera.open(...)
+await using bot ..= assistant.create({ llm, tts }); //   await using bot = await assistant.create(...)
+```
+
+`using x ..= EXPR` collapses the doubled `await` in the very common `await using x = await resource.open()` shape — the resource handle is awaited in, and its `Symbol.dispose` / `Symbol.asyncDispose` runs at scope exit.
+
 In expression position (non-declaration), `..=` is disambiguated by the RHS shape: a call / `new` / `await` expression keeps the await-assign meaning (`x ..= fetch()` → `x = await fetch()`), anything else is an inclusive range literal (see next section). Await-assign reassignment with a non-call RHS is no longer supported — write `x = await promiseVar` directly.
 
 ### `..` / `..=` (range literals)

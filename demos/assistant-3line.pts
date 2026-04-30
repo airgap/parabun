@@ -26,7 +26,7 @@ for (const [name, path] of Object.entries({ ASSISTANT_LLM: llm, ASSISTANT_STT: s
   }
 }
 
-await using bot = await assistant.create({
+await using bot ..= assistant.create({
   llm: llm!,
   stt: stt!,
   tts: tts!,

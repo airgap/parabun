@@ -33,6 +33,25 @@ describe("Parabun ..= await elision", () => {
       const out = transpiler.transformSync('async function f() { const x ..= fetch("/"); }');
       expect(out).toContain('from "bun:wrap"');
     });
+
+    it("`using x ..= expr` desugars to `using x = await expr`", () => {
+      const out = transpiler.transformSync('async function f() { using x ..= fetch("/"); }');
+      // explicit-resource-management lowers `using` into __using helpers; verify
+      // (a) the dispose-machinery is present and (b) the elision shim peeks the
+      // promise — both await-elision behaviour and using-disposal must carry.
+      expect(out).toContain("__using");
+      expect(out).toContain("__parabunPeek");
+      expect(out).toContain("await");
+    });
+
+    it("`await using x ..= expr` desugars to `await using x = await expr`", () => {
+      const out = transpiler.transformSync('async function f() { await using x ..= fetch("/"); }');
+      expect(out).toContain("__using");
+      expect(out).toContain("__parabunPeek");
+      // async dispose path → __callDispose result is awaited
+      expect(out).toContain("__callDispose");
+      expect(out).toContain("await");
+    });
   });
 
   describe("runtime behavior", () => {
@@ -181,6 +200,60 @@ describe("Parabun ..= await elision", () => {
       const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
 
       expect(stdout.trim()).toBe("top-level");
+      expect(exitCode).toBe(0);
+    });
+
+    it("`await using x ..= expr` runs the async disposer", async () => {
+      await using proc = Bun.spawn({
+        cmd: [
+          bunExe(),
+          "-e",
+          `
+          async function main() {
+            await using x ..= Promise.resolve({
+              n: 7,
+              async [Symbol.asyncDispose]() { console.log("disposed", this.n); },
+            });
+            console.log("body", x.n);
+          }
+          main();
+          `,
+        ],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+
+      expect(stdout.trim()).toBe("body 7\ndisposed 7");
+      expect(exitCode).toBe(0);
+    });
+
+    it("`using x ..= expr` runs the sync disposer", async () => {
+      await using proc = Bun.spawn({
+        cmd: [
+          bunExe(),
+          "-e",
+          `
+          async function main() {
+            using x ..= Promise.resolve({
+              n: 3,
+              [Symbol.dispose]() { console.log("disposed", this.n); },
+            });
+            console.log("body", x.n);
+          }
+          main();
+          `,
+        ],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+
+      expect(stdout.trim()).toBe("body 3\ndisposed 3");
       expect(exitCode).toBe(0);
     });
   });
