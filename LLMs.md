@@ -187,6 +187,26 @@ The RHS must be a callable target — an identifier, property access (`obj.metho
 
 When `A` reads signals, the bare-read sugar rewrites each to `.get()` inside the effect body so they enroll as tracked deps; `fn` is invoked with the resulting value as a single positional argument.
 
+### `when EXPR { … }` (edge-triggered block)
+
+Statement-level edge handler. `when EXPR { BODY }` desugars to `require("bun:signals").onRising(() => EXPR, () => { BODY })` — fires `BODY` once each time `EXPR` transitions falsy → truthy. `when not EXPR { BODY }` desugars to `onFalling(...)` — fires on the truthy → falsy edge. Reads inside `EXPR` are tracked the same way they would be inside `effect { … }`.
+
+```
+when motion.detected.get() && bot.state.get() === "idle" {
+  bot.say("Welcome back!");
+}
+
+when not bot.busy.get() {
+  flushQueuedNotifications();
+}
+```
+
+Block-form `when` is **distinct** from the suffix `when` clause used by `~>` / `->` (`A ~> B when C` and `A -> fn when C`): position disambiguates. The suffix form is an every-truthy guard — it re-fires whenever a tracked dep changes and `C` is currently truthy. The block form is edge-triggered — it fires once per false→true (or true→false) transition. Same word, two related but distinct semantics; pick by position.
+
+Initial state is treated as already-observed: a predicate that starts truthy does **not** fire on first run; only subsequent transitions do. Same convention as `signals.onRising`/`onFalling` used directly.
+
+`when` keeps its identifier reading when followed by `(`, `;`, `=`, `.`, `,`, `?.`, or end-of-line — `const when = ...; when(x);` and `import { when } from "..."` work unchanged. Block form requires the next token to start a predicate expression (identifier, `!`, string, etc.).
+
 ### `defer`
 
 Schedules an expression to run when the enclosing block exits — on normal fall-through, early return, or a thrown exception. Multiple defers dispose in LIFO order (reverse of declaration).

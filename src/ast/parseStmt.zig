@@ -1805,6 +1805,110 @@ pub fn ParseStmt(
             return p.s(S.SExpr{ .value = effect_call }, effect_range.loc);
         }
 
+        // Parabun: parse `when EXPR { body }` or `when not EXPR { body }`
+        // statement. Desugars to:
+        //   require("bun:signals").onRising(() => EXPR, () => { body });
+        //   require("bun:signals").onFalling(() => EXPR, () => { body });
+        //
+        // Edge-triggered handler — fires the body once on each rising
+        // (false→true) transition of the predicate, or each falling
+        // (true→false) transition for the `not` form. The two arrows
+        // mirror what callers would otherwise write by hand against
+        // `bun:signals.onRising`/`onFalling`.
+        //
+        // At entry: `when` has already been consumed; p.lexer is on the
+        // first token of the predicate (which may be `not`).
+        fn parseWhenBlockStmt(p: *P, when_range: logger.Range) anyerror!Stmt {
+            // Optional `not` for the falling form.
+            var negate = false;
+            if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
+                strings.eqlComptime(p.lexer.raw(), "not"))
+            {
+                try p.lexer.next();
+                negate = true;
+            }
+
+            const helper_name: []const u8 = if (negate) "onFalling" else "onRising";
+
+            // Parse the predicate at the outer scope. The expression-form
+            // arrow built around it later registers its scopes empty, the
+            // same way `~> ... when COND` does for the COND clause.
+            const pred_loc = p.lexer.loc();
+            const predicate = try p.parseExpr(.assign);
+
+            // Synthesize distinct locs for the predicate arrow's two scopes
+            // — same loc-bumping trick `parseDeferStmt` uses (line 1388) so
+            // function_args and function_body don't collide.
+            const pred_arrow_loc = when_range.loc;
+            const pred_body_loc = logger.Loc{ .start = when_range.loc.start + 1 };
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, pred_arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, pred_body_loc) catch bun.outOfMemory();
+            p.popScope();
+            p.popScope();
+
+            const pred_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            pred_stmts[0] = p.s(S.Return{ .value = predicate }, pred_loc);
+            const pred_arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = pred_body_loc, .stmts = pred_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, pred_arrow_loc);
+
+            // Body arrow — block-form, parsed inside its own scope pair.
+            // Use loc-bumping again so this arrow's two scopes are distinct
+            // and don't collide with the predicate arrow's scope locs.
+            const body_arrow_loc = logger.Loc{ .start = when_range.loc.start + 2 };
+            const body_loc = p.lexer.loc();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, body_arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            try p.lexer.expect(.t_open_brace);
+            var body_opts = ParseStatementOptions{};
+            const body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts);
+            try p.lexer.expect(.t_close_brace);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+            p.popScope();
+            p.popScope();
+
+            const body_arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, body_arrow_loc);
+
+            // require("bun:signals").<helper_name>(pred_arrow, body_arrow)
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "bun:signals" }, when_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, when_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, when_range.loc);
+            const helper_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = helper_name,
+                .name_loc = when_range.loc,
+            }, when_range.loc);
+            const helper_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+            helper_args[0] = pred_arrow;
+            helper_args[1] = body_arrow;
+            const helper_call = p.newExpr(E.Call{
+                .target = helper_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(helper_args),
+            }, when_range.loc);
+
+            return p.s(S.SExpr{ .value = helper_call }, when_range.loc);
+        }
+
         fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
             const is_identifier = p.lexer.token == .t_identifier;
             const name = p.lexer.identifier;
@@ -1917,6 +2021,35 @@ pub fn ParseStmt(
                 }
                 // Not a signal declaration — rewind so `signal` works as a
                 // plain identifier (`import { signal } from "bun:signals"; signal(0);`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising
+            // and falling edge handlers. Desugar to require("bun:signals").onRising
+            // (() => EXPR, () => { body }) and onFalling(...) respectively.
+            //
+            // Block-form `when` is distinct from the suffix `when` clause used in
+            // `A ~> B when C` and `A -> fn when C`: position disambiguates. The
+            // suffix form is an every-truthy guard; the block form is an
+            // edge-triggered handler.
+            //
+            // Dispatch: `when` at statement-start, followed by `not` OR by anything
+            // that can start an expression and is NOT `(` or `;` or end-of-line,
+            // is treated as block form. `when(x)` and bare `when;` keep the
+            // identifier reading.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "when")) {
+                const when_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                const is_block_form = !p.lexer.has_newline_before and switch (p.lexer.token) {
+                    // `when` as identifier reading: `when(x);`, `when;`, `when.foo`,
+                    // `when = ...`, etc. Any of these means it's a normal reference,
+                    // not the block form.
+                    .t_open_paren, .t_dot, .t_question_dot, .t_equals, .t_semicolon, .t_comma, .t_close_paren, .t_close_brace, .t_close_bracket, .t_end_of_file => false,
+                    else => true,
+                };
+                if (is_block_form) {
+                    return try parseWhenBlockStmt(p, when_range);
+                }
                 p.lexer.restore(&saved);
             }
             // Parabun: "effect { ...body... }" block statement — desugars to

@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -96,6 +96,7 @@ function transformLine(line: string): string {
   line = transformSignal(line);
   line = transformEffect(line);
   line = transformArena(line);
+  line = transformWhenBlock(line);
   line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
   line = transformRbind(line);
@@ -144,6 +145,23 @@ function transformEffect(line: string): string {
 // column-preserving trick as transformEffect.
 function transformArena(line: string): string {
   return line.replace(/\b(arena)\b(?=\s*\{)/g, "     ");
+}
+
+// `when EXPR { body }` → `if  (EXPR) { body }` and
+// `when not EXPR { body }` → `if      (!(EXPR)) { body }` — column-preserving
+// rewrites that give TS a normal `if` block. `when` is 4 chars, `if  ` is 4
+// (2 letters + 2 spaces); `when not ` is 9, `if      (!(` is also chosen to
+// keep the column of EXPR fixed. Body braces stay where they were so hover /
+// go-to-def land on the right span. The actual desugar is owned by Bun's
+// parser (→ require("bun:signals").onRising/onFalling); this transform exists
+// only to satisfy the embedded TypeScript checker.
+function transformWhenBlock(line: string): string {
+  // Negated form first — order matters because `when not` shares a prefix
+  // with `when`. Predicate is everything between `when not ` (or `when `)
+  // and the trailing `{` on the same line.
+  line = line.replace(/\bwhen\s+not\s+(.+?)(\s*\{)/g, (_m, expr, brace) => `if      (!(${expr}))${brace}`);
+  line = line.replace(/\bwhen\s+(.+?)(\s*\{)/g, (_m, expr, brace) => `if  (${expr})${brace}`);
+  return line;
 }
 
 function expandFun(line: string): string {
@@ -1561,6 +1579,32 @@ function getParabunHover(content: string, line: number, character: number): stri
       "```typescript",
       "data |> transform |> validate |> save",
       "// → save(validate(transform(data)))",
+      "```",
+    ].join("\n");
+  }
+  if (/\bwhen\b/.test(around) && /\{/.test(around)) {
+    return [
+      "### `when` — edge-triggered block (rising / falling)",
+      "",
+      "`when EXPR { BODY }` fires `BODY` once each time `EXPR` transitions",
+      "false→true. `when not EXPR { BODY }` fires on the true→false edge.",
+      "Reads inside `EXPR` are auto-tracked — every signal becomes a dep.",
+      "",
+      "Distinct from the suffix `when` clause used by `~>` / `->`: position",
+      "disambiguates. Suffix `when` is an every-truthy guard; the block form",
+      "is edge-triggered.",
+      "",
+      "Desugars to `require('bun:signals').onRising(() => EXPR, () => { BODY })`",
+      "(or `onFalling` for the `not` form).",
+      "",
+      "```typescript",
+      "when motion.detected.get() && bot.state.get() === 'idle' {",
+      "  bot.say('Welcome back!');",
+      "}",
+      "",
+      "when not motion.detected.get() {",
+      "  bot.dim();",
+      "}",
       "```",
     ].join("\n");
   }
