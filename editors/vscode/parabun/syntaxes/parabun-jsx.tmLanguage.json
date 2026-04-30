@@ -71,7 +71,7 @@
     "parabun-operators": {
       "patterns": [
         {
-          "name": "keyword.operator.await-assign.parabun",
+          "name": "keyword.operator.range-inclusive.parabun",
           "match": "\\.\\.="
         },
         {

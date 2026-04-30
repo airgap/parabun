@@ -122,18 +122,6 @@ describe("Parabun pipeline placeholder", () => {
   });
 
   describe("composition with existing extensions", () => {
-    it("composes with ..= (await-assign)", () => {
-      const out = transpiler.transformSync(
-        `async function f(res) {
-           const data ..= parse(_, { strict: true });
-         }`,
-      );
-      // `_` here is not in a pipeline RHS — it's just an identifier. Make
-      // sure placeholder substitution doesn't leak outside `|>`.
-      expect(out).toContain("await");
-      expect(out).toContain("parse(_,");
-    });
-
     it("composes with ..! (catch) downstream of a placeholder pipeline", () => {
       const out = transpiler.transformSync(`const v = payload |> parse(_, opts) ..! handler;`);
       expect(out).toContain("parse(payload, opts)");

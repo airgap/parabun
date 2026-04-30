@@ -123,12 +123,4 @@ describe("Parabun Pure Keyword", () => {
       expect(out).toContain("=>");
     });
   });
-
-  describe("combinations with other Parabun operators", () => {
-    it("pure function with ..= inside", () => {
-      const out = transpiler.transformSync("pure async function getData(p) { const result ..= p; return result; }");
-      expect(out).toContain("async function getData");
-      expect(out).toContain("__parabunPeek");
-    });
-  });
 });

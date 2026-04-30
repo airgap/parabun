@@ -107,15 +107,5 @@ describe("Parabun throw expression", () => {
       const out = transpiler.transformSync(`const y = x |> (v => v ?? throw new Error("nope"));`);
       expect(out).toContain("throw");
     });
-
-    it("composes inside an async function with ..=", () => {
-      const out = transpiler.transformSync(
-        `async function f(p) {
-           const v ..= p ?? throw new Error("no promise");
-         }`,
-      );
-      expect(out).toContain("throw");
-      expect(out).toContain("await");
-    });
   });
 });

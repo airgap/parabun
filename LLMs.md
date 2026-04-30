@@ -83,23 +83,6 @@ await fetchProfile.bypass("u1");    // hits db, cache still holds previous value
 fetchProfile.clear();               // drop all cached profiles
 ```
 
-### `..=` (await-assign)
-
-Desugars `const x ..= expr` to `const x = await expr`. Requires async context.
-
-Works on every declaration form that takes an initializer — `const`, `let`, `var`, `using`, and `await using`:
-
-```
-const data ..= fetch("/api").then(r => r.json());
-let temp ..= readSensor();
-using cam ..= camera.open("/dev/video0");           //   using cam = await camera.open(...)
-await using bot ..= assistant.create({ llm, tts }); //   await using bot = await assistant.create(...)
-```
-
-`using x ..= EXPR` collapses the doubled `await` in the very common `await using x = await resource.open()` shape — the resource handle is awaited in, and its `Symbol.dispose` / `Symbol.asyncDispose` runs at scope exit.
-
-In expression position (non-declaration), `..=` is disambiguated by the RHS shape: a call / `new` / `await` expression keeps the await-assign meaning (`x ..= fetch()` → `x = await fetch()`), anything else is an inclusive range literal (see next section). Await-assign reassignment with a non-call RHS is no longer supported — write `x = await promiseVar` directly.
-
 ### `..` / `..=` (range literals)
 
 Integer ranges, step 1.
@@ -283,7 +266,7 @@ Regular `throw E;` statements are unaffected. ASI still applies: a newline betwe
 Operators compose naturally:
 
 ```
-const result ..= fetch('/api') ..! console.error ..& cleanup;
+const result = await fetch('/api') ..! console.error ..& cleanup;
 // → const result = await fetch('/api').catch(console.error).finally(cleanup);
 
 const output = data |> transform ..! handler;
@@ -313,7 +296,7 @@ File extension registration: `src/options.zig` (loaders, extension orders, all 1
 Lightweight LSP that runs with the Parabun binary. Provides:
 
 - **Diagnostics** — Real parse errors from `Bun.Transpiler` (purity violations, syntax errors)
-- **Completions** — `pure`, `pure function`, `pure async function`, `memo`, `memo async`, `defer`, `defer await`, `..=`, `..!`, `..&`, `|>`, `~>`
+- **Completions** — `pure`, `pure function`, `pure async function`, `memo`, `memo async`, `defer`, `defer await`, `..!`, `..&`, `|>`, `~>`, `..` / `..=` (ranges)
 - **Hover** — Markdown docs for `pure` keyword and all operators
 - **Semantic tokens** — `pure` keyword tagged as `function` type with `pure` modifier
 
@@ -728,7 +711,7 @@ Edits to `src/js/bun/*.ts` need a runtime cache clear
 
 ## Browser compilation
 
-Parse-time syntax (`pure`, `memo`, `|>`, `..=`, `..!`, `..&`, range, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
+Parse-time syntax (`pure`, `memo`, `|>`, `..!`, `..&`, `..` / `..=` ranges, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
 
 [`packages/parabun-browser-shims`](packages/parabun-browser-shims) is the browser shim package. Applications targeting the browser alias the `bun:*` specifiers onto it via bundler config:
 

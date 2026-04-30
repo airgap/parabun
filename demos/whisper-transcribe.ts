@@ -3,8 +3,8 @@
 //   WHISPER_MODEL=/path/to/ggml-tiny.en.bin \
 //     bun run build:release demos/whisper-transcribe.ts <audio.wav>
 //
-// Same demo as whisper-transcribe.pts; `const text ..= expr` becomes
-// `const text = await expr`. Identical behavior.
+// Same demo as whisper-transcribe.pts; identical behavior, this version is
+// just plain TypeScript with no .pts-specific syntax.
 
 import speech from "para:speech";
 import audio from "para:audio";

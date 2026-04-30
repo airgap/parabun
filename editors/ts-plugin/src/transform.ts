@@ -36,7 +36,6 @@ function transformLine(line: string): string {
 
   line = expandFun(line);
   line = stripPure(line);
-  line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
   line = transformPipeline(line);
 
@@ -54,11 +53,6 @@ function stripPure(line: string): string {
     /\bpure(\s+)(?=function\b|async\s+function\b|<[\w\s,=]+>\s*\(|\(|\w+\s*=>)/g,
     (_m, space) => "    " + space,
   );
-}
-
-// `const x ..= expr;` → `const x = await (expr);`
-function transformAwaitAssign(line: string): string {
-  return line.replace(/(\.\.)=(\s*)/g, (_m, _dots, space) => `= await${space.length > 0 ? space : " "}`);
 }
 
 // `expr ..! handler` → `expr.catch(handler)`

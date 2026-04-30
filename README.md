@@ -481,7 +481,7 @@ curl -fsSL https://raw.githubusercontent.com/airgap/parabun/main/install-extensi
 
 Downloads the latest `.vsix` and installs it into every compatible editor found on the system (`code`, `cursor`, `kiro`).
 
-Features: syntax highlighting, snippets, LSP diagnostics, completions, hover docs with desugaring examples, code actions (convert `await`→`..=`, `.catch()`→`..!`, add `pure`, `f(x)`→`x |> f`), semantic tokens for `pure`, and a **TypeScript language service plugin** that lets you use Parabun syntax in `.ts` files with full TS tooling.
+Features: syntax highlighting, snippets, LSP diagnostics, completions, hover docs with desugaring examples, code actions (convert `.catch()`→`..!`, add `pure`, `f(x)`→`x |> f`), semantic tokens for `pure`, and a **TypeScript language service plugin** that lets you use Parabun syntax in `.ts` files with full TS tooling.
 
 To build from source instead:
 
@@ -500,7 +500,7 @@ The Parabun LSP server works with any LSP-compatible editor:
 parabun run editors/lsp/parabun-lsp.ts --stdio
 ```
 
-Provides: diagnostics, completions (`pure`, `..=`, `..!`, `..&`, `|>`), hover documentation, and semantic tokens with a `pure` modifier.
+Provides: diagnostics, completions (`pure`, `..!`, `..&`, `|>`, `..` / `..=` ranges), hover documentation, and semantic tokens with a `pure` modifier.
 
 ## Building
 
@@ -577,24 +577,12 @@ memo async fetchProfile(id: string) {
 
 The cache adapts to the function's arity: a 0-arg function becomes a singleton; a 1-arg function uses a `Map` keyed by the single argument; multi-arg and rest-arg functions use a nested `Map` chain. Async variants dedupe concurrent in-flight calls (one shared promise) and evict entries whose promises reject, so retries happen naturally. Recursive calls route through the memoized wrapper automatically — `fib(20)` above invokes the function body only 21 times, not 21,891.
 
-### Await-Assign (`..=`)
-
-Desugars `const x ..= expr` to `const x = await expr`. Requires an async context.
-
-```pts
-pure async function getData() {
-  const response ..= fetch('/api/data');
-  const json ..= response.json();
-  return json;
-}
-```
-
 ### Error Chaining (`..!` and `..&`)
 
 `..!` desugars to `.catch()`, `..&` desugars to `.finally()`. Chain them naturally:
 
 ```pts
-const result ..= fetch('/api')
+const result = await fetch('/api')
   ..! console.error
   ..& cleanup;
 
@@ -618,7 +606,7 @@ const output = rawData
 **Method shorthand.** When the RHS starts with `.`, the piped value becomes the receiver — call methods and access properties on it without the arrow-wrap tax:
 
 ```pts
-const data ..= (await fetch("/api")) |> .json();
+const data = (await fetch("/api")) |> .json();
 const tokens = csv |> .trim() |> .split(",");
 const name = user |> .profile.displayName;
 ```
@@ -649,9 +637,7 @@ const squares = [...(0..=10)].map(x => x * x);
 const sum = 1..=100 |> _.reduce((a, b) => a + b, 0);
 ```
 
-`a..b` is exclusive of `b`, `a..=b` is inclusive. Empty / inverted ranges produce `[]` rather than throw. Precedence sits between shift and comparison so `a+1..b-1` and `0..n < m` both parse the way you'd expect.
-
-Disambiguation with await-assign: `x ..= fetch()` (call / `new` / `await` RHS) is still await-assign; `x ..= 10` is a range. Ranges are integer + step-1 only; use a counter `for` loop for millions of iterations or stride != 1.
+`a..b` is exclusive of `b`, `a..=b` is inclusive. Empty / inverted ranges produce `[]` rather than throw. Precedence sits between shift and comparison so `a+1..b-1` and `0..n < m` both parse the way you'd expect. Ranges are integer + step-1 only; use a counter `for` loop for millions of iterations or stride != 1.
 
 > Note: Parabun deviates from baseline JS on one obscure idiom — `1..toString()`. It now parses as the range `1..toString` followed by a call, not `(1.).toString()`. Use `(1).toString()`.
 

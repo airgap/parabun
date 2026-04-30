@@ -26,7 +26,7 @@ const wav = audio.readWav(bytes);
 console.log(`wav: ${wav.samples.length} samples @ ${wav.sampleRate} Hz (${(wav.samples.length / wav.sampleRate).toFixed(2)}s)`);
 
 const t0 = Bun.nanoseconds();
-const text ..= speech.transcribe({ samples: wav.samples }, { engine: "whisper", model: modelPath });
+const text = await speech.transcribe({ samples: wav.samples }, { engine: "whisper", model: modelPath });
 const dtMs = (Bun.nanoseconds() - t0) / 1e6;
 
 console.log(`\ntranscribed in ${dtMs.toFixed(0)} ms:`);

@@ -2,7 +2,7 @@
 
 Real-world examples. Each demo ships in **two equivalent forms** — pick whichever you prefer:
 
-- `<demo>.pts` — uses parabun's syntax sugar (`effect { }`, `signal X = …`, `~>`, `\|>`, `..=`, `pure function`). Shorter.
+- `<demo>.pts` — uses parabun's syntax sugar (`effect { }`, `signal X = …`, `~>`, `\|>`, `pure function`). Shorter.
 - `<demo>.ts` — plain TypeScript with the desugared runtime calls (`signals.effect(() => …)`, `signals.signal(…)`, etc.). Identical behavior.
 
 Not everyone wants to leave TypeScript and that's 100% ok — every demo runs with whichever extension you pick.
@@ -20,7 +20,7 @@ Not everyone wants to leave TypeScript and that's 100% ok — every demo runs wi
 | `image-batch-resize` ([.pts](image-batch-resize.pts) / [.ts](image-batch-resize.ts)) | Decode → resize → encode a directory of images via `parallel.pmap` worker pool | None — pass `<inDir> <outDir> <maxEdge>`. |
 | `audio-meter` ([.pts](audio-meter.pts) / [.ts](audio-meter.ts)) | Live mic peak meter — `effect` over `mic.peakLevel` | ALSA / CoreAudio / WASAPI input. |
 | `llm-chat` ([.pts](llm-chat.pts) / [.ts](llm-chat.ts)) | Stream tokens from a GGUF Llama checkpoint, report tokens-per-second | `LLM_FIXTURE=<path>.gguf`. |
-| `whisper-transcribe` ([.pts](whisper-transcribe.pts) / [.ts](whisper-transcribe.ts)) | Transcribe a WAV via `para:speech` (Whisper backend). `.pts` uses `..=`; `.ts` uses `await` | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
+| `whisper-transcribe` ([.pts](whisper-transcribe.pts) / [.ts](whisper-transcribe.ts)) | Transcribe a WAV via `para:speech` (Whisper backend). | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
 | `assistant-3line` ([.pts](assistant-3line.pts) / [.ts](assistant-3line.ts)) | Voice assistant with tools dispatch (mic → STT → LLM → TTS → speaker) | LLM gguf + Whisper bin + Piper onnx. |
 
 Four of the demos (`gpio-blink`, `i2c-scan`, `llm-chat`, `image-batch-resize`) use no parabun-specific sugar at all, so the `.pts` and `.ts` files are byte-identical apart from the extension — the dual listing is just so you can pick either one without breaking convention.
@@ -65,7 +65,6 @@ bun bd run demos/<demo>.pts [args]
 - `A -> fn [when C]` — reactive **call** binding. Re-evaluates `A` and re-calls `fn(A)` whenever the deps change. Same precedence and `when` shape as `~>`. (`iot-button-led.pts`, `iot-bank-mirror.pts`, `assistant-3line.pts`)
 - `pure function …` — parse-time purity check (`csv-pipeline.pts`)
 - `|>` pipeline — `csv-pipeline.pts`
-- `..=` await-in-declaration — `whisper-transcribe.pts`
 - `await using` — every demo holding a kernel resource (gpio chip / i2c bus / LLM model)
 - `for await (… of …)` — token streams (`llm-chat.pts`), edge events (`gpio-blink.pts`), audio frames (`audio-meter.pts`)
 

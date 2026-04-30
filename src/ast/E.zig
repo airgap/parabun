@@ -1420,7 +1420,6 @@ pub const RegExp = struct {
 
 pub const Await = struct {
     value: ExprNodeIndex,
-    can_elide: bool = false,
 };
 
 pub const Yield = struct {

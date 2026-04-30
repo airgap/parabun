@@ -3,6 +3,6 @@ pure function add(a: number, b: number): number {
 }
 
 const cleanup = () => console.log('done');
-const result ..= fetch('/api') ..! console.error ..& cleanup;
+const result = await fetch('/api') ..! console.error ..& cleanup;
 
 export const doubled = [1, 2, 3] |> JSON.stringify;

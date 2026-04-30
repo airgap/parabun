@@ -100,16 +100,6 @@ describe("Parabun pipeline method shorthand", () => {
   });
 
   describe("composition with existing extensions", () => {
-    it("composes with ..= (await-assign)", () => {
-      const out = transpiler.transformSync(
-        `async function f(res) {
-           const data ..= (await res) |> .json();
-         }`,
-      );
-      expect(out).toContain("await");
-      expect(out).toContain(".json()");
-    });
-
     it("composes with ..! (catch)", () => {
       const out = transpiler.transformSync(`const v = promise |> .then(next) ..! handler;`);
       expect(out).toContain(".then(next)");

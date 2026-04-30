@@ -24,11 +24,6 @@
     "body": "${1:value} |> ${2:fn1} |> ${0:fn2}",
     "description": "Pipeline operator chain: value |> f |> g"
   },
-  "Await Assign": {
-    "prefix": "awas",
-    "body": "const ${1:result} ..= ${0:promise};",
-    "description": "Await-assign: desugars to const result = await promise"
-  },
   "Error Catch": {
     "prefix": "errc",
     "body": "${1:promise} ..! ${0:errorHandler}",

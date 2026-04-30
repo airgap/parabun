@@ -1033,16 +1033,17 @@ pub fn Parse(
                     try p.lexer.next();
                     value = try p.parseExpr(.comma);
                 } else if (p.lexer.token == .t_dot_dot_equals) {
-                    // Parabun: `const x ..= expr` desugars to `const x = await expr`
-                    const dot_dot_eq_range = p.lexer.range();
+                    // Parabun: `..=` in declaration init position used to mean
+                    // await-assign (`const x ..= fetch()` → `const x = await fetch()`).
+                    // Removed 2026-04 — `..=` now exclusively means inclusive range.
+                    // Use `const x = await EXPR` directly.
+                    p.log.addRangeError(
+                        p.source,
+                        p.lexer.range(),
+                        "\"..=\" is no longer await-assign; use `= await EXPR` instead. (`..=` between two expressions is still an inclusive range.)",
+                    ) catch unreachable;
                     try p.lexer.next();
-                    const rhs = try p.parseExpr(.comma);
-                    if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
-                        p.log.addRangeError(p.source, dot_dot_eq_range, "\"..=\" can only be used inside an async function or at the top level") catch unreachable;
-                    } else if (p.fn_or_arrow_data_parse.is_top_level) {
-                        p.top_level_await_keyword = dot_dot_eq_range;
-                    }
-                    value = p.newExpr(E.Await{ .value = rhs, .can_elide = true }, dot_dot_eq_range.loc);
+                    value = try p.parseExpr(.comma);
                 }
 
                 decls.append(G.Decl{

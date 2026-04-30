@@ -97,7 +97,6 @@ function transformLine(line: string): string {
   line = transformEffect(line);
   line = transformArena(line);
   line = transformWhenBlock(line);
-  line = transformAwaitAssign(line);
   line = transformCatchFinally(line);
   line = transformRbind(line);
   line = transformCallBind(line);
@@ -197,10 +196,6 @@ function stripMemo(line: string): string {
     (_m, s) => `    ${s}`,
   );
   return line;
-}
-
-function transformAwaitAssign(line: string): string {
-  return line.replace(/(\.\.)=(\s*)/g, (_m, _dots, space) => `= await${space.length > 0 ? space : " "}`);
 }
 
 function transformCatchFinally(line: string): string {
@@ -641,9 +636,6 @@ function validate(uri: string, content: string) {
         const origEnd = mapPositionFromTransformed(content, transformed, endPos.line, endPos.character);
 
         const message = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
-
-        // Skip false positives from the transform (..= → await in non-async)
-        if (message.includes("'await' expressions are only allowed")) continue;
 
         diagnostics.push({
           range: { start: origStart, end: origEnd },
@@ -1495,13 +1487,14 @@ function getParabunHover(content: string, line: number, character: number): stri
 
   if (around.includes("..=")) {
     return [
-      "### `..=` — await-assign operator",
+      "### `..=` — inclusive range",
       "",
-      "Synchronously resolves settled promises without a microtask tick.",
+      "`a..=b` is the inclusive integer range from `a` to `b`. `a..b` is exclusive.",
+      "Empty / inverted ranges produce `[]` (no throw).",
       "",
       "```typescript",
-      "const data ..= fetchUser(id);",
-      "// → const data = await fetchUser(id);",
+      "for (const i of 0..=5) work(i);   // 0,1,2,3,4,5",
+      "const evens = 0..=20 |> filter(i => i % 2 === 0);",
       "```",
     ].join("\n");
   }
@@ -1773,7 +1766,7 @@ const parabunCompletions = [
   {
     label: "..=",
     kind: 24,
-    detail: "Parabun: await-assign operator",
+    detail: "Parabun: inclusive range (`a..=b` includes b)",
     insertText: "..= ",
   },
   {
@@ -1873,37 +1866,6 @@ function getCodeActions(uri: string, content: string, range: LspRange, params?: 
 
   for (let i = startLine; i <= endLine; i++) {
     const line = lines[i];
-
-    const awaitMatch = line.match(/\bawait\s+/);
-    if (awaitMatch && awaitMatch.index !== undefined) {
-      const col = awaitMatch.index;
-      const prefix = line.slice(0, col);
-      const assignMatch = prefix.match(/(const|let|var)\s+(\w+)\s*=\s*$/);
-      if (assignMatch) {
-        const keyword = assignMatch[1];
-        const varName = assignMatch[2];
-        const exprStart = col + awaitMatch[0].length;
-        const expr = line.slice(exprStart).replace(/;?\s*$/, "");
-        const lineStart = col - assignMatch[0].length;
-        actions.push({
-          title: `Convert to ${keyword} ${varName} ..= ${expr}`,
-          kind: "refactor.rewrite",
-          edit: {
-            changes: {
-              [uri]: [
-                {
-                  range: {
-                    start: { line: i, character: lineStart },
-                    end: { line: i, character: line.length },
-                  },
-                  newText: `${keyword} ${varName} ..= ${expr};`,
-                },
-              ],
-            },
-          },
-        });
-      }
-    }
 
     const catchMatch = line.match(/\.catch\(([^)]+)\)/);
     if (catchMatch && catchMatch.index !== undefined) {

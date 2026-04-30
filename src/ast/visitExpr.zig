@@ -1116,46 +1116,6 @@ pub fn VisitExpr(
                 const e_ = expr.data.e_await;
                 p.await_target = e_.value.data;
                 e_.value = p.visitExpr(e_.value);
-
-                // Parabun: ..= await elision — skip microtask queue for settled promises
-                if (e_.can_elide) {
-                    const loc = expr.loc;
-                    const tmp_ref = p.generateTempRef("__pb");
-
-                    // Emit `var __pb;` via nearest_stmt_list
-                    if (p.nearest_stmt_list) |stmt_list| {
-                        const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
-                        decls[0] = .{
-                            .binding = p.b(B.Identifier{ .ref = tmp_ref }, loc),
-                        };
-                        stmt_list.append(p.s(S.Local{
-                            .decls = G.Decl.List.fromOwnedSlice(decls),
-                        }, loc)) catch unreachable;
-                    }
-
-                    // __parabunPeek(value) → [elided, result_or_promise]
-                    const peek_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                    peek_args[0] = e_.value;
-                    const peek_call = p.callRuntime(loc, "__parabunPeek", peek_args);
-
-                    // __pb = __parabunPeek(value)
-                    const tmp_id = p.newExpr(E.Identifier{ .ref = tmp_ref }, loc);
-                    const assign = p.newExpr(E.Binary{ .op = .bin_assign, .left = tmp_id, .right = peek_call }, loc);
-
-                    // __pb[0]
-                    const idx0 = p.newExpr(E.Index{ .target = p.newExpr(E.Identifier{ .ref = tmp_ref }, loc), .index = p.newExpr(E.Number{ .value = 0 }, loc) }, loc);
-                    // __pb[1]
-                    const idx1 = p.newExpr(E.Index{ .target = p.newExpr(E.Identifier{ .ref = tmp_ref }, loc), .index = p.newExpr(E.Number{ .value = 1 }, loc) }, loc);
-                    // await __pb[1]
-                    const await_idx1 = p.newExpr(E.Await{ .value = p.newExpr(E.Index{ .target = p.newExpr(E.Identifier{ .ref = tmp_ref }, loc), .index = p.newExpr(E.Number{ .value = 1 }, loc) }, loc) }, loc);
-
-                    // __pb[0] ? __pb[1] : await __pb[1]
-                    const cond = p.newExpr(E.If{ .test_ = idx0, .yes = idx1, .no = await_idx1 }, loc);
-
-                    // (__pb = __parabunPeek(value), cond)
-                    return p.newExpr(E.Binary{ .op = .bin_comma, .left = assign, .right = cond }, loc);
-                }
-
                 return expr;
             }
             pub fn e_yield(p: *P, expr: Expr, _: ExprIn) Expr {

@@ -16,13 +16,6 @@ export var __using = (stack, value, async) => {
   return value;
 };
 
-// Parabun: peek a promise for ..= await elision.
-// Returns [1, result] if fulfilled or non-promise, [0, value] otherwise.
-export var __parabunPeek = v => {
-  var s = Bun.peek.status(v);
-  return s === "fulfilled" ? [1, Bun.peek(v)] : [0, v];
-};
-
 // Parabun: defer disposers. `defer expr;` desugars to
 //   using __parabun_defer_N$ = __parabunDefer0(() => expr);
 // and `defer await expr;` to

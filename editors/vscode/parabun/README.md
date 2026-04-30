@@ -6,7 +6,7 @@ Language support for **Parabun** (`.pts` / `.pjs`) files — a Bun fork with pur
 
 - Syntax highlighting for `.pts` (Parabun TypeScript) and `.pjs` (Parabun JavaScript)
 - `pure` keyword highlighted as a storage modifier
-- Parabun operators: `..=` (await-assign), `..!` (catch), `..&` (finally), `|>` (pipeline)
+- Parabun operators: `..!` (catch), `..&` (finally), `|>` (pipeline), `..` / `..=` (ranges)
 - Full TypeScript/JavaScript grammar support (Parabun is a superset)
 
 ## Parabun Syntax
@@ -17,11 +17,8 @@ pure function add(a: number, b: number): number {
   return a + b;
 }
 
-// Await-assign: desugars to await
-const data ..= fetch('/api');
-
 // Error chaining: desugars to .catch() / .finally()
-const result ..= fetch('/api') ..! console.error ..& cleanup;
+const result = await fetch('/api') ..! console.error ..& cleanup;
 
 // Pipeline: desugars to function application
 const doubled = [1, 2, 3] |> JSON.stringify;

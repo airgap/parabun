@@ -9,7 +9,7 @@
 
 import audio from "para:audio";
 
-await using mic ..= audio.capture({
+await using mic = await audio.capture({
   device: "default",
   sampleRate: 16000,
   channels: 1,

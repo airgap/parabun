@@ -5,11 +5,9 @@ import { bunEnv, bunExe, tempDir } from "harness";
 //   a..b   →  __parabunRange(a, b)            (exclusive)
 //   a..=b  →  __parabunRangeInclusive(a, b)   (inclusive)
 //
-// `..=` keeps its existing declaration-init / await-assign meaning when the
-// RHS is a call / new / await expression; any other RHS is a range. This
-// disambiguation is intentional — the call/new/await shapes cover every use
-// of await-assign reassignment in the existing test suite and real code, and
-// numeric range literals dominate the other shapes.
+// `..=` used to be overloaded with await-assign (`x ..= fetch()` ≡
+// `x = await fetch()`). That meaning was removed 2026-04 — `..=` is now
+// exclusively the inclusive-range pair to `..`.
 async function runFixture(prefix, source) {
   using dir = tempDir(prefix, { "index.pjs": source.trimStart() });
   await using proc = Bun.spawn({
@@ -38,17 +36,14 @@ describe("Parabun range literals", () => {
       expect(out).toContain("__parabunRangeInclusive");
     });
 
-    it("leaves await-assign alone when RHS is a call", () => {
+    it("treats call RHS as a range now (was await-assign before)", () => {
+      // Sanity: `..=` no longer means await-assign. Even with a call on the
+      // RHS, it lowers to __parabunRangeInclusive(left, right). Runtime will
+      // produce nonsense (range from `x` to `fetch(...)`), but the parse is
+      // unambiguous.
       const out = transpiler.transformSync(`async function f() { let x; x ..= fetch('/'); }`);
-      expect(out).toContain("await");
-      expect(out).toContain("fetch");
-      expect(out).not.toContain("__parabunRangeInclusive");
-    });
-
-    it("leaves await-assign alone when RHS is new Promise(...)", () => {
-      const out = transpiler.transformSync(`async function f() { let x; x ..= new Promise(r => r(1)); }`);
-      expect(out).toContain("await");
-      expect(out).not.toContain("__parabunRangeInclusive");
+      expect(out).toContain("__parabunRangeInclusive");
+      expect(out).not.toMatch(/=\s*await/);
     });
 
     it("does NOT swallow `.` when lexing `1..10`", () => {
@@ -171,25 +166,6 @@ describe("Parabun range literals", () => {
       );
       // sum 0..9999 = 9999*10000/2 = 49995000
       expect(stdout).toBe("49995000");
-      expect(exitCode).toBe(0);
-    });
-
-    it("await-assign still works in expression position", async () => {
-      const { stdout, exitCode } = await runFixture(
-        "parabun-range-await-assign",
-        `
-          async function main() {
-            let x;
-            x ..= Promise.resolve(7);
-            console.log(x);
-            let y;
-            y ..= new Promise(r => r(9));
-            console.log(y);
-          }
-          main();
-        `,
-      );
-      expect(stdout).toBe("7\n9");
       expect(exitCode).toBe(0);
     });
   });

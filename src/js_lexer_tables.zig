@@ -36,7 +36,7 @@ pub const T = enum(u8) {
     t_dot_dot_dot,
     // Parabun operators
     t_dot_dot, // .. (exclusive range)
-    t_dot_dot_equals, // ..= (inclusive range OR await-assign initializer; disambiguated by parser)
+    t_dot_dot_equals, // ..= (inclusive range)
     t_dot_dot_exclamation, // ..!
     t_dot_dot_ampersand, // ..&
     t_bar_greater_than, // |>

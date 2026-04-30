@@ -2,7 +2,7 @@
  * Parabun TypeScript Language Service Plugin
  *
  * Intercepts source text before the TS type checker sees it,
- * desugaring Parabun syntax (pure, |>, ..=, ..!, ..&) into
+ * desugaring Parabun syntax (pure, |>, ..!, ..&) into
  * valid TypeScript.  All TS features (go-to-def, completions,
  * hover types, diagnostics) work on the desugared code.
  */

@@ -6,7 +6,7 @@ describe("Parabun Lexer", () => {
   });
 
   // Helper: transpile and check it doesn't throw a parse error
-  const expectNoLexError = (code) => {
+  const expectNoLexError = code => {
     // We just need to verify the lexer tokenizes without error.
     // The parser may reject these until parser support is added,
     // but we can test via scan() which only lexes.
@@ -18,28 +18,12 @@ describe("Parabun Lexer", () => {
     }
   };
 
-  describe("..= (await assignment)", () => {
-    it("should tokenize ..= without lexer error", () => {
-      // Until parser support is added, we verify the token is recognized
-      // by checking that the error is a parse error, not a lexer/syntax error
-      // about unexpected characters
-      try {
-        transpiler.transformSync("async function f() { const x ..= fetch('/'); }");
-      } catch (e) {
-        // Should NOT be "unexpected '.'" — that would mean the lexer didn't recognize ..=
-        expect(e.message).not.toContain("Expected \";\"");
-        // It may fail with a parser error about ..= not being supported yet,
-        // but the token itself should be recognized
-      }
-    });
-  });
-
   describe("..! (catch operator)", () => {
     it("should tokenize ..! without lexer error", () => {
       try {
         transpiler.transformSync("const x = promise ..! handler;");
       } catch (e) {
-        expect(e.message).not.toContain("Expected \";\"");
+        expect(e.message).not.toContain('Expected ";"');
       }
     });
   });
@@ -49,7 +33,7 @@ describe("Parabun Lexer", () => {
       try {
         transpiler.transformSync("const x = promise ..& cleanup;");
       } catch (e) {
-        expect(e.message).not.toContain("Expected \";\"");
+        expect(e.message).not.toContain('Expected ";"');
       }
     });
   });
@@ -59,7 +43,7 @@ describe("Parabun Lexer", () => {
       try {
         transpiler.transformSync("const x = value |> transform;");
       } catch (e) {
-        expect(e.message).not.toContain("Expected \";\"");
+        expect(e.message).not.toContain('Expected ";"');
       }
     });
   });
