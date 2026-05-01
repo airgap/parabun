@@ -7,6 +7,7 @@
 // Bare-read sugar (rewriting `x` to `x.get()` inside tracked contexts)
 // requires real scope tracking and lands in v0.2; until then user code
 // must call `.get()` / `.set()` explicitly.
+import { transformBareRead } from "./transforms/bare-read";
 import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
 import { transformDefer } from "./transforms/defer";
@@ -37,6 +38,11 @@ export function transpile(src, _options = {}) {
     out = transformPipeline(out);
     out = transformErrorChain(out);
     out = transformRanges(out);
+    // Bare-read sugar runs LAST — it parses the fully-desugared output as
+    // JS via Babel, identifies signal bindings + tracked contexts, and
+    // rewrites bare reads/writes inside them. Auto-promotes signal()
+    // initializers that read other signals into derived().
+    out = transformBareRead(out);
     return out;
 }
-export { transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };
+export { transformBareRead, transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };

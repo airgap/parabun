@@ -1,3 +1,4 @@
+import { transformBareRead } from "./transforms/bare-read";
 import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
 import { transformDefer } from "./transforms/defer";
@@ -11,5 +12,5 @@ export type TranspileOptions = {
     filename?: string;
 };
 export declare function transpile(src: string, _options?: TranspileOptions): string;
-export { transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };
+export { transformBareRead, transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };
 //# sourceMappingURL=index.d.ts.map
