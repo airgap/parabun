@@ -4,24 +4,25 @@ Standalone transpiler for [ParaScript](https://para.script.dev) — turns `.pts`
 
 The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.script.dev) fork of Bun (Zig). This package is a TypeScript reimplementation, intended for projects that don't (or can't) install Parabun on their build host: browsers, Lambda, Cloudflare Workers, Deno, Node, the [ParaScript playground](https://para.script.dev/play).
 
-## Status — v0.0.1
+## Status — IN DEVELOPMENT, not yet released
 
-Early. Covers the structural desugarings; **does not yet implement the bare-read sugar** (rewriting `count` to `count.get()` inside tracked contexts), so user code must call `.get()` / `.set()` explicitly until v0.2.
+`package.json` is `private: true` and version `0.0.0-dev`. We don't ship a partial transpiler — the npm publish gate stays closed until every ParaScript desugaring listed below works end-to-end and matches the canonical Zig parser's output.
 
 | Feature | Status |
 | --- | --- |
 | `..!` / `..&` (catch / finally chain operators) | ✅ |
-| `\|>` pipeline operator | planned (v0.0.2) |
-| `..` / `..=` ranges | planned (v0.0.2) |
-| `pure` keyword strip | planned (v0.0.2) |
-| `signal NAME = EXPR;` declaration | planned (v0.0.3) |
-| `effect { … }` block | planned (v0.0.3) |
-| `when EXPR { … }` / paired form | planned (v0.0.3) |
-| `~>` / `->` reactive bindings | planned (v0.0.3) |
-| `defer` / `defer await` | planned (v0.0.4) |
-| `memo` declarator | planned (v0.0.4) |
-| `arena { … }` block | planned (v0.0.4) |
-| **bare-read sugar** (`x` → `x.get()`) | needs scope analysis — v0.2 |
+| `\|>` pipeline operator | not started |
+| `..` / `..=` ranges | not started |
+| `pure` keyword strip | not started |
+| `signal NAME = EXPR;` declaration | not started |
+| `effect { … }` block | not started |
+| `when EXPR { … }` / paired form | not started |
+| `~>` / `->` reactive bindings | not started |
+| `defer` / `defer await` | not started |
+| `memo` declarator | not started |
+| `arena { … }` block | not started |
+| **bare-read sugar** (`x` → `x.get()`) | not started — needs scope analysis |
+| Parity test against canonical Zig parser output | not started |
 
 ## Install
 
