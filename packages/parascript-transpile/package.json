@@ -1,0 +1,40 @@
+{
+  "name": "@parascript/transpile",
+  "version": "0.0.1",
+  "description": "Standalone transpiler for ParaScript (.pts) — turns ParaScript source into standard JavaScript that runs anywhere via parabun-browser-shims. No Parabun runtime required.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/airgap/parabun",
+    "directory": "packages/parascript-transpile"
+  },
+  "license": "MIT",
+  "type": "module",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "parascript": "./dist/cli.js"
+  },
+  "scripts": {
+    "check:types": "tsc --noEmit",
+    "build": "tsc",
+    "test": "USE_SYSTEM_BUN=1 bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "*",
+    "typescript": "^5.0.0"
+  },
+  "files": [
+    "README.md",
+    "src",
+    "dist"
+  ]
+}
