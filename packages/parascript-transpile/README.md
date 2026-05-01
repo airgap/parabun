@@ -21,8 +21,8 @@ The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.s
 | `defer` / `defer await` | ✅ |
 | `memo` declarator | ✅ |
 | `arena { … }` block | ✅ |
-| **bare-read sugar** (`x` → `x.get()`) | not started — needs scope analysis |
-| `signal x = expr-with-signals` auto-promotes to derived | not started — needs scope analysis |
+| **bare-read sugar** (`x` → `x.get()`) | ✅ |
+| `signal x = expr-with-signals` auto-promotes to derived | ✅ |
 | Parity test against canonical Zig parser output | not started |
 
 ## Install
