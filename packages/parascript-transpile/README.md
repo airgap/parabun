@@ -23,29 +23,20 @@ The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.s
 | `arena { … }` block | ✅ |
 | **bare-read sugar** (`x` → `x.get()`) | ✅ |
 | `signal x = expr-with-signals` auto-promotes to derived | ✅ |
-| Parity test against canonical Zig parser output | ✅ (11/12 fixtures byte-equivalent after normalization) |
+| Parity test against canonical Zig parser output | ✅ (12/12 fixtures byte-equivalent after normalization) |
 | `bun:wrap` import injection for runtime helpers | ✅ |
-| `defer` byte-parity to canonical `using` polyfill | intentional divergence — see below |
+| `using` / `await using` polyfill (ES2022 target) | ✅ |
 
-### Intentional divergence: `defer` lowering
+### `using` polyfill
 
-For `defer EXPR;` and `defer await EXPR;`, this transpiler emits ES2024
-`using` / `await using` declarations directly:
-
-```js
-using __paraDefer0 = __parabunDefer0(() => cleanup());
-await using __paraDefer1 = __parabunAsyncDefer0(async () => flush());
-```
-
-The canonical Zig parser inlines the `using` polyfill (try/catch/finally
-wrappers + `__using` helper calls) so the output runs on ES2018+. The
-runtime semantics are identical; the lowering shape differs.
-
-Modern hosts handle ES2024 `using` natively (Bun, Node 22+, current
-browsers), and every mainstream bundler (esbuild, swc, Babel,
-TypeScript) downlevels `using` for older targets. The standalone
-trusts the host bundler/runtime to handle the polyfill; this is the
-Parity skip-list entry for `defer.pts`.
+`defer EXPR;` and `defer await EXPR;` lower to ES2024 `using` /
+`await using` declarations, then a final pass rewrites those into a
+TS-style try/catch/finally block with `__addDisposableResource` and
+`__disposeResources` calls. The helper definitions are inlined at the
+top of any file that needs them, keeping the output self-contained
+without requiring a runtime import. Final output runs on Node 18 / 20
+and every modern browser without requiring an additional downlevel
+pass from the host bundler.
 
 ## Install
 

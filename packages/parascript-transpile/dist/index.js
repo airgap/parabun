@@ -12,10 +12,12 @@ import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
 import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
+import { injectUsingHelpers } from "./transforms/inject-helpers";
 import { transformMemo } from "./transforms/memo";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
 import { transformRanges } from "./transforms/ranges";
+import { transformUsingPolyfill } from "./transforms/using-polyfill";
 import { injectWrapImports } from "./transforms/wrap-imports";
 // Pass order matters:
 //   1. `pure` strip — turns the keyword into whitespace before any operator
@@ -44,6 +46,15 @@ export function transpile(src, _options = {}) {
     // and rewrites bare reads/writes universally. Auto-promotes signal()
     // initializers that read other signals into derived().
     out = transformBareRead(out);
+    // ES2024 `using` / `await using` polyfill — the defer transform emits
+    // these, and most downstream targets (Node 18/20, pre-2024 browsers,
+    // Workers) don't support them yet. Lower to TS-style try/catch/finally
+    // with __addDisposableResource / __disposeResources calls.
+    out = transformUsingPolyfill(out);
+    // Inline the using-polyfill helpers (if referenced) BEFORE wrap imports
+    // so the final order is: imports → helpers → code. Helpers are pure
+    // function decls with no module dependencies of their own.
+    out = injectUsingHelpers(out);
     // Final pass: prepend `import { __parabunRange, … } from "bun:wrap"`
     // for any runtime helpers the previous transforms emitted, so the
     // output is runnable on a host that resolves `bun:wrap` (Parabun
@@ -51,4 +62,4 @@ export function transpile(src, _options = {}) {
     out = injectWrapImports(out);
     return out;
 }
-export { injectWrapImports, transformBareRead, transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };
+export { injectUsingHelpers, injectWrapImports, transformBareRead, transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, transformUsingPolyfill, };

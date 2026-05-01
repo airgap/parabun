@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { transpileBare as transpile } from "./_helpers";
-import { _resetDeferCounter } from "../src/transforms/defer";
+import { _resetDeferCounter, transformDefer } from "../src/transforms/defer";
 
 beforeEach(() => _resetDeferCounter());
+
+// Tests target transformDefer() in isolation — the full transpile()
+// pipeline runs the using-polyfill afterwards which rewrites these raw
+// `using` declarations into try/catch/finally blocks. The polyfill has
+// its own dedicated tests; here we want to verify the defer lowering
+// itself.
+const transpile = transformDefer;
 
 describe("defer", () => {
   test("simple sync defer", () => {

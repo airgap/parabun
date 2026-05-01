@@ -73,6 +73,14 @@ export function normalize(src: string): string {
   // emit) and `a; b;` (canonical's two-statement emit).
   splitTopLevelCommaStatements(ast);
 
+  // Step 4b: unwind the ES2024 `using` polyfill on both sides back to
+  // raw `using` declarations. Canonical and standalone use different
+  // helper shapes (canonical: __using + array-stack env; standalone:
+  // __addDisposableResource + object env), so reducing both to the raw
+  // declaration shape lets the comparison focus on the user-visible
+  // semantics rather than helper plumbing.
+  unwindUsingPolyfill(ast);
+
   // Step 5: rename gensym'd identifiers to stable per-kind indices based
   // on first-binding order.
   renameGensyms(ast);
@@ -177,6 +185,122 @@ function splitTopLevelCommaStatements(ast: t.File) {
         } else {
           out.push(stmt);
         }
+      }
+      (path.node as any).body = out;
+    },
+  });
+}
+
+// Recognize the env-decl that the canonical / standalone polyfills emit
+// just before their try/catch/finally block. Two shapes:
+//   canonical: `let __X = [];` (array stack, error vars are siblings)
+//   standalone: `const __X = { stack: [], error: undefined, hasError: false };`
+function envDeclName(stmt: t.Statement): string | null {
+  if (!t.isVariableDeclaration(stmt)) return null;
+  if (stmt.declarations.length !== 1) return null;
+  const d = stmt.declarations[0]!;
+  if (!t.isIdentifier(d.id)) return null;
+  if (!d.init) return null;
+  // Canonical shape: `let __X = []`
+  if (t.isArrayExpression(d.init) && d.init.elements.length === 0) {
+    return d.id.name;
+  }
+  // Standalone shape: `const __X = { stack: [], error: undefined, hasError: false }`
+  if (t.isObjectExpression(d.init)) {
+    const hasStack = d.init.properties.some(
+      p => t.isObjectProperty(p) && t.isIdentifier(p.key) && p.key.name === "stack",
+    );
+    if (hasStack) return d.id.name;
+  }
+  return null;
+}
+
+// Match a `const X = HELPER(envIdent, EXPR, FLAG)` declaration where
+// HELPER is `__using` (canonical) or `__addDisposableResource` (standalone).
+// Returns { id, init: EXPR, async: bool } if matched, else null.
+function matchUsingResourceDecl(
+  stmt: t.Statement,
+  envName: string,
+): { id: t.LVal; init: t.Expression; async: boolean } | null {
+  if (!t.isVariableDeclaration(stmt)) return null;
+  if (stmt.declarations.length !== 1) return null;
+  const d = stmt.declarations[0]!;
+  if (!d.init || !t.isCallExpression(d.init)) return null;
+  const call = d.init;
+  if (!t.isIdentifier(call.callee)) return null;
+  const name = call.callee.name;
+  if (name !== "__using" && name !== "__addDisposableResource") return null;
+  if (call.arguments.length !== 3) return null;
+  const [envArg, valueArg, flagArg] = call.arguments;
+  if (!t.isIdentifier(envArg) || envArg.name !== envName) return null;
+  if (!t.isExpression(valueArg)) return null;
+  // Async flag: canonical emits 0/1, standalone emits true/false.
+  let isAsync = false;
+  if (t.isBooleanLiteral(flagArg)) isAsync = flagArg.value;
+  else if (t.isNumericLiteral(flagArg)) isAsync = flagArg.value !== 0;
+  return { id: d.id, init: valueArg, async: isAsync };
+}
+
+// Drop the standalone's inline helper preamble: function definitions for
+// __addDisposableResource and __disposeResources. Canonical imports the
+// equivalents (__using / __callDispose) from "bun:wrap" and those are
+// stripped by normalizeWrapImports. Symmetric removal puts both outputs
+// on the same footing before structural comparison.
+const POLYFILL_HELPER_FN_NAMES = new Set(["__addDisposableResource", "__disposeResources"]);
+
+function dropInlineUsingHelpers(ast: t.File) {
+  ast.program.body = ast.program.body.filter(stmt => {
+    if (t.isFunctionDeclaration(stmt) && stmt.id && POLYFILL_HELPER_FN_NAMES.has(stmt.id.name)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function unwindUsingPolyfill(ast: t.File) {
+  dropInlineUsingHelpers(ast);
+  traverse(ast, {
+    "Program|BlockStatement"(path) {
+      const body = (path.node as any).body as t.Statement[];
+      const out: t.Statement[] = [];
+      let i = 0;
+      while (i < body.length) {
+        const stmt = body[i]!;
+        const envName = envDeclName(stmt);
+        const next = body[i + 1];
+        if (envName && next && t.isTryStatement(next)) {
+          // Verify the try body contains at least one `using` resource decl
+          // tied to this env — otherwise this is some unrelated env-shaped
+          // decl and we leave it alone.
+          const tryBody = next.block.body;
+          const hasMatch = tryBody.some(s => matchUsingResourceDecl(s, envName) !== null);
+          if (hasMatch) {
+            // Walk the try body: convert resource decls to `using`/`await using`
+            // declarations, keep everything else verbatim. Drop catch + finally.
+            for (const s of tryBody) {
+              const m = matchUsingResourceDecl(s, envName);
+              if (m) {
+                const decl = t.variableDeclaration("const", [t.variableDeclarator(m.id, m.init)]);
+                // Babel doesn't model `using` as a kind on the AST in older
+                // versions — but @babel/types ≥7.21 does. Set via cast.
+                (decl as any).kind = m.async ? "await using" : "using";
+                out.push(decl);
+              } else {
+                out.push(s);
+              }
+            }
+            i += 2;
+            continue;
+          }
+        }
+        // Drop trailing scaffolding: canonical emits sibling
+        // `var __bun_temp_ref_3$, __bun_temp_ref_4$` AFTER the try block
+        // for the catch's error/hasError tracking. Those are dead in our
+        // normalization once the try is unwound — but we already advanced
+        // past the try, so they remain as-is. Most of the time renameGensyms
+        // collapses them; for safety we just leave them.
+        out.push(stmt);
+        i++;
       }
       (path.node as any).body = out;
     },

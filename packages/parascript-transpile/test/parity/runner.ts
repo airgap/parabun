@@ -68,10 +68,9 @@ function diffLines(a: string, b: string): string {
 // Zig parser does work the standalone deliberately delegates to the host.
 // The behavior is equivalent at runtime; we just don't reproduce the
 // canonical's lowering shape.
-const KNOWN_DIVERGENCES: Record<string, string> = {
-  "defer.pts":
-    "canonical inlines the ES2024 `using` polyfill (try/catch + __using helper); standalone emits raw `using` and trusts the user's bundler / runtime to handle it. Semantically equivalent on hosts that support `using` natively or have a downlevel pass.",
-};
+//
+// Currently empty: every fixture parity-matches after normalization.
+const KNOWN_DIVERGENCES: Record<string, string> = {};
 
 const fixtures = readdirSync(FIXTURES_DIR)
   .filter(f => f.endsWith(".pts"))
