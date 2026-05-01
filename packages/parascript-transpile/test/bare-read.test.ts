@@ -25,14 +25,26 @@ describe("bare-read inside effect block", () => {
     expect(out).toContain("n.set(n.get() + 3)");
   });
 
-  test("post-increment (++) lowers to set + get + 1", () => {
+  test("post-increment (++) lowers to set + value-recovery comma expression", () => {
+    // Post-inc: `n++` evaluates to the OLD value. Canonical emits
+    // `(n.set(n.get() + 1), n.get() - 1)` — the right side recovers the
+    // pre-increment value. We match.
     const out = transpile(`signal n = 0;\neffect { n++; }`);
     expect(out).toContain("n.set(n.get() + 1)");
+    expect(out).toContain("n.get() - 1");
   });
 
-  test("post-decrement (--) lowers to set + get - 1", () => {
+  test("post-decrement (--) lowers to set + value-recovery comma expression", () => {
     const out = transpile(`signal n = 5;\neffect { n--; }`);
     expect(out).toContain("n.set(n.get() - 1)");
+    expect(out).toContain("n.get() + 1");
+  });
+
+  test("pre-increment (++) returns new value via .get()", () => {
+    const out = transpile(`signal n = 0;\nconst v = ++n;`);
+    expect(out).toContain("n.set(n.get() + 1)");
+    // Pre-inc recovered value is just `n.get()` (no offset).
+    expect(out).toMatch(/n\.set\(n\.get\(\) \+ 1\), n\.get\(\)\)/);
   });
 
   test("multi-signal expression — each gets .get()", () => {
@@ -79,13 +91,15 @@ describe("auto-promotion: signal initializer that reads other signals", () => {
     expect(out).not.toContain("derived");
   });
 
-  test("self-reference does NOT promote (initializer can't see its own binding)", () => {
-    // `signal x = x` is a temporal-dead-zone error in TS, but our scanner
-    // shouldn't claim it reads a signal. The result stays `.signal(x)`
-    // (which the runtime will throw on, but the transpile shouldn't lie).
+  test("self-reference does NOT auto-promote to derived", () => {
+    // The auto-promotion scan excludes the binding currently being
+    // declared, so `signal x = x;` doesn't get .signal() → .derived()
+    // promotion. (The bare-read pass DOES still rewrite the inner `x`
+    // to `x.get()` per canonical's universal rule — TDZ-erroring at
+    // runtime, same as base JS, but transpile is consistent.)
     const out = transpile(`signal x = x;`);
-    expect(out).toContain(".signal(x)");
     expect(out).not.toContain("derived");
+    expect(out).toContain(".signal(x.get())");
   });
 });
 
@@ -105,11 +119,12 @@ describe("bare-read scope rules", () => {
     expect(out).toMatch(/return x[;)]?/);
   });
 
-  test("identifier outside any tracked context is NOT rewritten", () => {
+  test("signal read outside any tracked context is also rewritten", () => {
+    // Canonical Parabun rewrites EVERY signal-binding reference to .get(),
+    // not just those inside effect/when/derived bodies. Tracked contexts
+    // are about WHAT re-fires, not about whether to insert .get().
     const out = transpile(`signal x = 0;\nconsole.log(x);`);
-    // Outside an effect/when/derived — bare read stays bare.
-    expect(out).toContain("console.log(x)");
-    expect(out).not.toContain("x.get()");
+    expect(out).toContain("x.get()");
   });
 });
 

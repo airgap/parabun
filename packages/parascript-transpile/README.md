@@ -23,7 +23,7 @@ The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.s
 | `arena { … }` block | ✅ |
 | **bare-read sugar** (`x` → `x.get()`) | ✅ |
 | `signal x = expr-with-signals` auto-promotes to derived | ✅ |
-| Parity test against canonical Zig parser output | not started |
+| Parity test against canonical Zig parser output | ✅ (11/12 fixtures byte-equivalent after normalization; `defer` is a documented divergence — canonical inlines the ES2024 `using` polyfill, standalone emits raw `using` and trusts the host) |
 
 ## Install
 

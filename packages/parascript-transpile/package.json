@@ -27,7 +27,8 @@
   "scripts": {
     "check:types": "tsc --noEmit",
     "build": "tsc",
-    "test": "USE_SYSTEM_BUN=1 bun test"
+    "test": "USE_SYSTEM_BUN=1 bun test",
+    "parity": "USE_SYSTEM_BUN=1 bun test/parity/runner.ts"
   },
   "devDependencies": {
     "@types/bun": "*",

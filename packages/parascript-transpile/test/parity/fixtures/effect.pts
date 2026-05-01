@@ -1,0 +1,6 @@
+signal n = 0;
+effect { console.log(n); }
+effect {
+  if (n > 5) console.log("big");
+  else console.log("small");
+}
