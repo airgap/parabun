@@ -248,3 +248,42 @@ export function rewriteCodeRegions(src: string, mapper: (code: string) => string
   }
   return out;
 }
+
+/**
+ * Find the position of the `}` that matches the `{` at `openPos`, walking
+ * through nested braces. Skips braces inside strings, comments, and regex
+ * literals using the same scanner as `scanRegions`. Returns -1 if no match.
+ *
+ * Caller passes `src` (the full source) and the position of an opening `{`.
+ * The returned position points at the matching `}`.
+ */
+export function findMatchingBrace(src: string, openPos: number): number {
+  if (src[openPos] !== "{") return -1;
+  const spans = scanRegions(src);
+  // Index spans by start for fast lookup of which region a position is in.
+  const regionAt = (pos: number): Region => {
+    // Binary search would be faster; linear is fine for our sizes.
+    for (const span of spans) {
+      if (pos >= span.start && pos < span.end) return span.region;
+    }
+    return "code";
+  };
+  let depth = 1;
+  let i = openPos + 1;
+  while (i < src.length) {
+    if (regionAt(i) !== "code") {
+      // Skip to the end of the non-code region.
+      const span = spans.find(s => i >= s.start && i < s.end)!;
+      i = span.end;
+      continue;
+    }
+    const c = src[i]!;
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
