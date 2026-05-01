@@ -1,11 +1,11 @@
-// Live mic peak meter — para:audio capture + signals.effect. (TypeScript form.)
+// Live mic peak meter — parabun:audio capture + signals.effect. (TypeScript form.)
 //
 //   bun run build:release demos/audio-meter.ts
 //
 // Same demo as audio-meter.pts; `effect { ... }` becomes
 // `signals.effect(() => { ... })`. Identical behavior.
 
-import audio from "para:audio";
+import audio from "parabun:audio";
 import signals from "para:signals";
 
 await using mic = await audio.capture({

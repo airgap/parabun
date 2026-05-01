@@ -55,29 +55,38 @@ const { moduleList, nativeModuleIds, nativeModuleEnumToId, nativeModuleEnums, re
   createInternalModuleRegistry(BASE);
 globalThis.requireTransformer = requireTransformer;
 
-// Parabun-added modules under src/js/bun/ are exposed under the `para:`
-// namespace; upstream Bun built-ins (ffi, sqlite, sql, jsc, app, main, wrap,
-// test, internal-for-testing) keep `bun:`. Used by idToPublicSpecifierOrEnumName
-// below — declared up here because the bundling loop calls that function before
-// the function declaration's lexical position.
-const PARASCRIPT_MODULES: ReadonlySet<string> = new Set([
+// Parabun-added modules under src/js/bun/ split across two namespaces:
+//
+//   - `para:*`     — cross-runtime Lib modules. Pure JS / Wasm. Also
+//                    distributed as parabun-browser-shims for non-ParaBun
+//                    hosts (Node, Deno, browsers, Workers).
+//   - `parabun:*`  — Runtime-only modules. Native bindings ($cpp, bun:ffi)
+//                    that can't run outside the ParaBun runtime.
+//
+// Upstream Bun built-ins (ffi, sqlite, sql, jsc, app, main, wrap, test,
+// internal-for-testing) keep `bun:`. Used by idToPublicSpecifierOrEnumName
+// below — declared up here because the bundling loop calls that function
+// before the function declaration's lexical position.
+const PARA_LIB_MODULES: ReadonlySet<string> = new Set([
   "arena",
   "arrow",
-  "assistant",
-  "audio",
-  "camera",
   "csv",
-  "gpio",
-  "gpu",
-  "i2c",
-  "image",
-  "llm",
   "mcp",
   "parallel",
   "pipeline",
   "rtp",
   "signals",
   "simd",
+]);
+const PARABUN_RUNTIME_MODULES: ReadonlySet<string> = new Set([
+  "assistant",
+  "audio",
+  "camera",
+  "gpio",
+  "gpu",
+  "i2c",
+  "image",
+  "llm",
   "speech",
   "spi",
   "video",
@@ -304,11 +313,11 @@ for (const entrypoint of bundledEntryPoints) {
       (usesDebug
         ? createLogClientJS(
             file_path.replace(".js", ""),
-            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:/, ""),
+            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:|^parabun:/, ""),
           )
         : "") +
       (usesAssert
-        ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:/, ""))
+        ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:|^parabun:/, ""))
         : ""),
   );
   const errors = [...captured.matchAll(/@bundleError\((.*)\)/g)];
@@ -341,7 +350,8 @@ function idToPublicSpecifierOrEnumName(id: string) {
   } else if (id.startsWith("bun/")) {
     const rest = id.slice(4).replaceAll(".", "/");
     const top = rest.split("/")[0];
-    return (PARASCRIPT_MODULES.has(top) ? "para:" : "bun:") + rest;
+    const prefix = PARA_LIB_MODULES.has(top) ? "para:" : PARABUN_RUNTIME_MODULES.has(top) ? "parabun:" : "bun:";
+    return prefix + rest;
   } else if (id.startsWith("internal/")) {
     return "internal:" + id.slice(9).replaceAll(".", "/");
   } else if (id.startsWith("thirdparty/")) {

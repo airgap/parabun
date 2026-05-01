@@ -1,4 +1,4 @@
-// Live GPIO state over HTTP — `para:gpio` + `Bun.serve` + signals. (TypeScript form.)
+// Live GPIO state over HTTP — `parabun:gpio` + `Bun.serve` + signals. (TypeScript form.)
 //
 //   bun run build:release demos/iot-http-state.ts [--port 3000]
 //
@@ -6,7 +6,7 @@
 // `signals.signal(Y)` and `effect { ... }` becomes
 // `signals.effect(() => { ... })`. Identical behavior.
 
-import gpio from "para:gpio";
+import gpio from "parabun:gpio";
 import signals from "para:signals";
 
 const args = process.argv.slice(2);

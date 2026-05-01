@@ -1,4 +1,4 @@
-// para:gpu simdMap round-trip wallclock vs para:simd, across a size sweep.
+// parabun:gpu simdMap round-trip wallclock vs para:simd, across a size sweep.
 //
 // Target: Apple Silicon (unified memory + shared-storage MTLBuffers) to
 // validate LYK-709's 2-4x claim. On discrete GPU or non-darwin hosts the
@@ -13,7 +13,7 @@
 //
 // Usage: bun bd bench/parabun-gpu-simdmap-roundtrip/run.pjs
 
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 import simd from "para:simd";
 
 const SIZES = [1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24];

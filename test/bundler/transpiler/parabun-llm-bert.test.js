@@ -17,12 +17,12 @@ function cos(a, b) {
   return s;
 }
 
-describe.if(HAS_FIXTURE)("para:llm BGE encoder", () => {
+describe.if(HAS_FIXTURE)("parabun:llm BGE encoder", () => {
   let llm;
   let enc;
 
   beforeAll(async () => {
-    llm = (await import("para:llm")).default;
+    llm = (await import("parabun:llm")).default;
     enc = await llm.Encoder.load(FIXTURE);
   }, 120_000);
 
@@ -121,6 +121,6 @@ describe.if(HAS_FIXTURE)("para:llm BGE encoder", () => {
   });
 });
 
-describe.if(!HAS_FIXTURE)("para:llm BGE encoder", () => {
+describe.if(!HAS_FIXTURE)("parabun:llm BGE encoder", () => {
   it.skip(`skipped: fixture missing (${FIXTURE})`, () => {});
 });

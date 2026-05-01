@@ -2,7 +2,7 @@
 //
 // Tier 2 — in-memory columnar tables and a few compute primitives. Built
 // to pair with para:csv (CSV → typed columns → analytical work) and to
-// share buffers with para:simd / para:gpu when those land.
+// share buffers with para:simd / parabun:gpu when those land.
 //
 //   import arrow from "para:arrow";
 //
@@ -25,9 +25,9 @@
 //     vendoring or hand-rolling a FlatBuffers decoder. Tracked as the
 //     v2 ship of this module.
 //   - Parquet read/write — its own format, separate from IPC; v3.
-//   - Filter / aggregation pushdown to para:gpu. Today the computes are
+//   - Filter / aggregation pushdown to parabun:gpu. Today the computes are
 //     scalar JS loops; once IPC is in, the SIMD / GPU paths pair with
-//     buffer-residency the same way para:image's filters do.
+//     buffer-residency the same way parabun:image's filters do.
 //
 // The in-memory object model matches Arrow's enough that swapping in a
 // real IPC reader later doesn't change the public API: a Column is a
@@ -721,7 +721,7 @@ function mean(col: Column): number {
 /**
  * Min / max over a numeric column. NaN propagates (matching JS Math.min /
  * Math.max). Null rows are skipped. Empty / all-null inputs return +Inf for
- * min, -Inf for max — same conventions as para:gpu.reduce.
+ * min, -Inf for max — same conventions as parabun:gpu.reduce.
  */
 function min(col: Column): number | bigint {
   requireNumeric(col, "min");
@@ -767,7 +767,7 @@ function max(col: Column): number | bigint {
 
 /**
  * Row index of the minimum value in a numeric column. Skips null rows;
- * NaN propagates (returns NaN — matches `para:gpu.reduce("min")`'s NaN
+ * NaN propagates (returns NaN — matches `parabun:gpu.reduce("min")`'s NaN
  * semantics, just with the index reported in the value's place). Empty
  * or all-null columns throw — there's no meaningful argmin.
  *

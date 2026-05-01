@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "harness";
 
-// Persistent memory for para:assistant (LYK-760 step 4).
+// Persistent memory for parabun:assistant (LYK-760 step 4).
 //
 // Two layers covered:
 //   1. The MemoryStore plumbing — open + append + count + close, no LLM
@@ -19,10 +19,10 @@ const llmCandidates = [
 const llmFixture = llmCandidates.find(p => existsSync(p));
 const haveLLM = Boolean(llmFixture);
 
-describe("para:assistant memory", () => {
+describe("parabun:assistant memory", () => {
   test("memory option is optional — no store when unset", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture! });
     try {
       expect(bot.memory).toBeNull();
@@ -36,7 +36,7 @@ describe("para:assistant memory", () => {
     using dir = tempDir("assistant-memory-", {});
     const dbPath = join(String(dir), "memory.sqlite");
 
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
 
     // First session — establish a turn, then close.
     {
@@ -91,7 +91,7 @@ describe("para:assistant memory", () => {
     using dir = tempDir("assistant-memory-clear-", {});
     const dbPath = join(String(dir), "memory.sqlite");
 
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       chatOpts: { maxTokens: 8, temperature: 0 },
@@ -112,7 +112,7 @@ describe("para:assistant memory", () => {
     using dir = tempDir("assistant-memory-opt-", {});
     const dbPath = join(String(dir), "memory.sqlite");
 
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture!, memory: { path: dbPath } });
     try {
       expect(bot.memory).not.toBeNull();

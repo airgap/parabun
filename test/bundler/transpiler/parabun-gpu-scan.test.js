@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("para:gpu — scan (inclusive prefix sum)", () => {
+describe("parabun:gpu — scan (inclusive prefix sum)", () => {
   it("ones produce the natural numbers 1..n", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-ones",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array(8).fill(1);
         const out = gpu.scan(input);
@@ -34,7 +34,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-pi",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([3, 1, 4, 1, 5, 9, 2, 6]);
         const out = gpu.scan(input);
@@ -49,7 +49,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-negatives",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, -1, 2, -3, 5]);
         const out = gpu.scan(input);
@@ -65,7 +65,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-shape",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const empty = gpu.scan(new Float32Array(0));
         const single = gpu.scan(new Float32Array([42]));
@@ -85,7 +85,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-kahan",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const N = 1_000_000;
         const input = new Float32Array(N);
@@ -107,7 +107,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-type",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.scan(new Float64Array([1, 2, 3]));
@@ -125,7 +125,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-u32",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([3, 1, 4, 1, 5, 9, 2, 6]);
         const out = gpu.scan(input);
@@ -144,7 +144,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-compaction",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const data = new Float32Array([5, 12, 3, 8, 17, 2, 11, 6]);
         const keep = new Uint32Array(data.length);
@@ -170,7 +170,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-u32-wrap",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([0x80000000, 0x80000000, 7]);
         const out = gpu.scan(input);
@@ -187,7 +187,7 @@ describe("para:gpu — scan (inclusive prefix sum)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-scan-handle",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         using held = new gpu.GpuFloat32Array(new Float32Array([2, 4, 6, 8]));
         const out = gpu.scan(held);

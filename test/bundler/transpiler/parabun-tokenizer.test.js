@@ -17,7 +17,7 @@ describe.if(HAS_FIXTURE)("Llama-3 BPE tokenizer", () => {
   let tok;
 
   beforeAll(async () => {
-    const llm = (await import("para:llm")).default;
+    const llm = (await import("parabun:llm")).default;
     const f = await llm.loadGGUF(FIXTURE);
     tok = llm.tokenizerFromGGUF(f);
   }, 60_000);

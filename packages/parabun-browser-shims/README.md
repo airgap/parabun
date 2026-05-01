@@ -10,9 +10,9 @@ parse-time desugarings import:
 | `bun:wrap` | Real implementation. Carries the `__parabunMemo` / `__parabunDefer0` / `__parabunRange` runtime, including `.forget()` / `.clear()` / `.bypass()` cache invalidation. |
 | `para:parallel` | **Web Worker pool** (`navigator.hardwareConcurrency` workers). `pmap` / `preduce` dispatch across workers; transparent sequential fallback under CSP or non-browser hosts. |
 | `para:simd` | **WebAssembly SIMD kernels** (v128 f32x4). `mulScalar` / `addScalar` / `add` / `mul` / `sum` / `dot` dispatch to WASM; scalar JS fallback when WASM SIMD is unavailable. `alloc(n, "f32")` returns a `Float32Array` backed by the WASM linear memory for zero-copy calls. |
-| `para:gpu` | **WebGPU compute shaders** for `matVecAsync` (workgroup reduction), `matmulAsync` (16×16 tiled), `dotAsync` (tree reduction). `holdQ4K` / `holdQ6K` dequantize at hold-time so matVec consumes quantized weights transparently. Opt-in via `await gpu.initWebGPU()`; sync surface stays CPU for drop-in compatibility. |
-| `para:llm` | Throws on load with a clear message — a WebGPU GGUF / Llama port is substantial future work. |
-| *(sub-module)* `parabun-browser-shims/quant` | Pure-JS dequantizers for **Q4_K**, **Q6_K**, **Q8_0** (the ggml block formats Parabun's native `para:llm` uses). Consumed by `para:gpu`'s `holdQ4K` / `holdQ6K`; also exported directly for callers writing their own GGUF loader. |
+| `parabun:gpu` | **WebGPU compute shaders** for `matVecAsync` (workgroup reduction), `matmulAsync` (16×16 tiled), `dotAsync` (tree reduction). `holdQ4K` / `holdQ6K` dequantize at hold-time so matVec consumes quantized weights transparently. Opt-in via `await gpu.initWebGPU()`; sync surface stays CPU for drop-in compatibility. |
+| `parabun:llm` | Throws on load with a clear message — a WebGPU GGUF / Llama port is substantial future work. |
+| *(sub-module)* `parabun-browser-shims/quant` | Pure-JS dequantizers for **Q4_K**, **Q6_K**, **Q8_0** (the ggml block formats Parabun's native `parabun:llm` uses). Consumed by `parabun:gpu`'s `holdQ4K` / `holdQ6K`; also exported directly for callers writing their own GGUF loader. |
 
 Language surface that *doesn't* need a shim — all of these desugar to
 plain JS: `pure`, `memo` (statement and arrow forms, including
@@ -80,7 +80,7 @@ The sync `gpu.matVec(...)` path stays CPU so `.pts` code that uses it
 compiles unchanged. Opt into the GPU backend at startup:
 
 ```ts
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 
 await gpu.initWebGPU();                      // once per app
 const mat = gpu.hold(weights);               // uploads to GPU buffer

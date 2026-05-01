@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import llm from "para:llm";
+import llm from "parabun:llm";
 
 // Correctness tests for `llm.quantMatVec` (LYK-755). Each test constructs
 // a synthetic GGML block matching the on-disk format, computes matVec
@@ -66,7 +66,7 @@ function makeVec(cols: number, seed: number): Float32Array {
   return v;
 }
 
-describe("para:llm quantMatVec — Q8_0", () => {
+describe("parabun:llm quantMatVec — Q8_0", () => {
   test("matches dequant + naive matVec exactly", () => {
     const rows = 5;
     const cols = 64; // 2 blocks per row
@@ -101,7 +101,7 @@ describe("para:llm quantMatVec — Q8_0", () => {
   });
 });
 
-describe("para:llm quantMatVec — Q4_0", () => {
+describe("parabun:llm quantMatVec — Q4_0", () => {
   test("matches dequant + naive matVec", () => {
     const rows = 4;
     const cols = 64;
@@ -137,7 +137,7 @@ describe("para:llm quantMatVec — Q4_0", () => {
   });
 });
 
-describe("para:llm quantMatVec — Q5_0", () => {
+describe("parabun:llm quantMatVec — Q5_0", () => {
   test("matches dequant + naive matVec", () => {
     const rows = 3;
     const cols = 32;
@@ -182,7 +182,7 @@ describe("para:llm quantMatVec — Q5_0", () => {
   });
 });
 
-describe("para:llm quantMatVec — Q5_1", () => {
+describe("parabun:llm quantMatVec — Q5_1", () => {
   test("matches dequant + naive matVec", () => {
     const rows = 3;
     const cols = 32;
@@ -232,7 +232,7 @@ describe("para:llm quantMatVec — Q5_1", () => {
   });
 });
 
-describe("para:llm quantMatVec — error paths", () => {
+describe("parabun:llm quantMatVec — error paths", () => {
   test("dim mismatch throws", () => {
     const w = { ftype: 8, data: new Uint8Array(34), blocksPerRow: 1, cols: 32, rows: 1 };
     expect(() => llm.quantMatVec(w, new Float32Array(31))).toThrow(/dim mismatch/);

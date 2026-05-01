@@ -1,4 +1,4 @@
-// Parabun: native audio-codec bindings for `para:audio`.
+// Parabun: native audio-codec bindings for `parabun:audio`.
 //
 // v1: Opus encode + decode (libopus 1.6.x). Voice + music in a single
 // low-latency codec; used by every WebRTC client and the obvious choice
@@ -13,7 +13,7 @@
 //   destroyOpusDecoder(handle)
 //   opusDecode(handle, packet: Uint8Array, frameSize) → Float32Array
 //
-// JS class wrappers in para:audio.ts handle lifecycle (FinalizationRegistry
+// JS class wrappers in parabun:audio.ts handle lifecycle (FinalizationRegistry
 // to close handles on GC) and offer a more pleasant API on top.
 
 #include "root.h"

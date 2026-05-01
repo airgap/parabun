@@ -1,13 +1,13 @@
 # parabun-llm
 
-Native LLM inference via `para:llm`. This isn't a microbenchmark — it's
+Native LLM inference via `parabun:llm`. This isn't a microbenchmark — it's
 a showcase that the whole stack (GGUF loader → tokenizer → Llama
 forward pass → CUDA matmul) works end-to-end inside a single Parabun
 process, with no Python and no `llama.cpp` binary in the loop.
 
-`para:llm` is built on the other Parabun runtime modules:
+`parabun:llm` is built on the other Parabun runtime modules:
 
-- `para:gpu` — every matmul in the forward pass goes through
+- `parabun:gpu` — every matmul in the forward pass goes through
   `gpu.matVec`, which dispatches a CUDA PTX kernel when a device is
   present and falls back to `para:simd.matVec` otherwise.
 - `para:simd` — CPU fallback for matVec, plus softmax / activation
@@ -64,7 +64,7 @@ checkpoint still passes.
 ## Writing your own
 
 ```js
-import { LLM } from "para:llm";
+import { LLM } from "parabun:llm";
 
 using llm = await LLM.load("/path/to/model.gguf");
 
@@ -86,7 +86,7 @@ Low-level pieces are exposed under the default export for callers that
 want to hand-roll the pipeline:
 
 ```js
-import llm from "para:llm";
+import llm from "parabun:llm";
 const f = await llm.loadGGUF(path);
 const model = llm.llamaFromGGUF(f);
 const tok = llm.tokenizerFromGGUF(f);

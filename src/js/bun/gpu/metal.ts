@@ -1,4 +1,4 @@
-// Parabun Metal backend for para:gpu.
+// Parabun Metal backend for parabun:gpu.
 //
 // Loaded by src/js/bun/gpu.ts — exposes a `Backend`-conforming object that
 // drives Apple Silicon (and Intel Mac) GPUs via Metal. We reach Metal
@@ -57,7 +57,7 @@ function isGpuHandle(x: unknown): x is GpuHandle {
 // not just matVec.
 function unwrapHandle<T extends FArray>(x: T | GpuHandle): T {
   if (isGpuHandle(x)) {
-    if (x.released) throw new Error("para:gpu: op called on released handle");
+    if (x.released) throw new Error("parabun:gpu: op called on released handle");
     return x.view as T;
   }
   return x;
@@ -132,7 +132,7 @@ kernel void matVecF32(
 // tile per thread for the same 32x32 output tile; Metal's simdgroup width
 // is 32 and register files are larger per-thread, but 1024 threads/TG is
 // the hard cap, so we use one-thread-per-cell here. Same output shape,
-// different work-per-thread. For the shapes para:gpu targets (Q @ E^T in
+// different work-per-thread. For the shapes parabun:gpu targets (Q @ E^T in
 // retrieval workloads: M=Q≈64, K=D=384, N=100k) the bottleneck is the
 // 9.6 GB SMEM + register fill, not the FMA rate — the simpler kernel
 // should hit the same memory ceiling.
@@ -201,7 +201,7 @@ kernel void conv2d_f32(
 }
 
 // ── Fused RGBA-uint8 Gaussian blur ────────────────────────────────────────
-// Mirror of cuda.ts's gaussian_blur_rgba_u8. Used by para:image's
+// Mirror of cuda.ts's gaussian_blur_rgba_u8. Used by parabun:image's
 // image.blur(img, gpu: true) path so the entire op happens in
 // one kernel invocation, sidestepping the JS-side per-channel
 // deinterleave that would dominate a per-channel conv2D dispatch.
@@ -401,10 +401,10 @@ kernel void matVecQ6KF32(
 // in MSL. Each is 1 thread per element (or per row) with no shared
 // state — simple to verify, same shape as the CUDA originals.
 //
-// para:llm's forward pass requires the full devOps surface (~19 kernels);
+// parabun:llm's forward pass requires the full devOps surface (~19 kernels);
 // getDevOps() below returns null until every kernel in the list is
 // present, so incremental session-by-session ports don't accidentally
-// flip para:llm to a half-wired Metal path.
+// flip parabun:llm to a half-wired Metal path.
 
 // Embedding table lookup: out[i] = embd[tokenId * dModel + i].
 // Launch: ⌈dModel / 256⌉ TGs × 256 threads.
@@ -431,7 +431,7 @@ kernel void accum_f32(
 }
 
 // x[i] += b[i]. Same shape as accum_f32; kept as a distinct kernel so
-// the para:llm dispatch surface lines up with CUDA's.
+// the parabun:llm dispatch surface lines up with CUDA's.
 kernel void bias_add_f32(
     device       float *x         [[buffer(0)]],
     device const float *b         [[buffer(1)]],
@@ -1069,7 +1069,7 @@ let matVecQ6KPipeline: bigint = 0n;
 // Map of kernel name → { fn, pipe } for each kernel compiled at probe
 // time. `devOpsComplete` flips to true only once every kernel in the
 // canonical list has compiled successfully — guards getDevOps() so
-// para:llm doesn't flip to a partial Metal path.
+// parabun:llm doesn't flip to a partial Metal path.
 const devOpsPipes: Record<string, { fn: bigint; pipe: bigint }> = {};
 let devOpsComplete = false;
 
@@ -1345,7 +1345,7 @@ function probe(): boolean {
 
   // devOps kernels. Each is optional at the probe layer — partial
   // compilation is fine, getDevOps() enforces the all-or-nothing
-  // rule that para:llm needs.
+  // rule that parabun:llm needs.
   let devOpsCount = 0;
   for (const [name, mslName] of DEV_OPS_KERNELS) {
     const k = compileKernel(lib, mslName);
@@ -1453,20 +1453,20 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
     bytes,
     BigInt(MTL_STORAGE_MODE_SHARED),
   );
-  if (inBuf === 0n) throw new Error("para:gpu metal: newBufferWithBytes failed");
+  if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithBytes failed");
 
   let outBuf: bigint = 0n;
   let cmdBuf: bigint = 0n;
   let encoder: bigint = 0n;
   try {
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     // setComputePipelineState:
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), simdMapPipeline);
@@ -1496,7 +1496,7 @@ function launchAffineF32(a: Float32Array, k1: number, k0: number): Float32Array 
 
     // Copy out: [outBuf contents] → void*, then read n*4 bytes.
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: outBuf contents is null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: outBuf contents is null");
     const out = new Float32Array(n);
     const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, n * 4));
     out.set(view);
@@ -1565,13 +1565,13 @@ function alloc(length: number, type: "f32" | "f64", _opts?: { pinned?: boolean }
   // `pinned: true` on Metal is subsumed by page-aligned unified memory (the
   // NOCOPY dispatch path alloc already takes). Accept the flag for API
   // uniformity with CUDA; no behavior difference.
-  if (!probe()) throw new Error("para:gpu metal: backend unavailable");
+  if (!probe()) throw new Error("parabun:gpu metal: backend unavailable");
   const elemBytes = type === "f32" ? 4 : 8;
   const byteLen = length * elemBytes;
   if (byteLen === 0) return type === "f32" ? new Float32Array(0) : new Float64Array(0);
   const outPtr = new BigUint64Array(1);
   const rc = libc!.symbols.posix_memalign(ffiPtr!(outPtr), BigInt(pageSize), BigInt(byteLen));
-  if (rc !== 0) throw new Error(`para:gpu metal: posix_memalign failed (rc=${rc})`);
+  if (rc !== 0) throw new Error(`parabun:gpu metal: posix_memalign failed (rc=${rc})`);
   const addr = Number(outPtr[0]);
   const ab = ffiToArrayBuffer!(addr, 0, byteLen);
   return type === "f32" ? new Float32Array(ab) : new Float64Array(ab);
@@ -1605,12 +1605,12 @@ function hold(arr: FArray): GpuHandle {
       `hold requires Float32Array or Float64Array; got ${(arr as any)?.constructor?.name ?? typeof arr}`,
     );
   }
-  if (!probe()) throw new Error("para:gpu metal: backend unavailable");
+  if (!probe()) throw new Error("parabun:gpu metal: backend unavailable");
   const type: "f32" | "f64" = arr instanceof Float32Array ? "f32" : "f64";
   let buffer: bigint = 0n;
   if (arr instanceof Float32Array && arr.byteLength > 0) {
     buffer = newBufferFromF32(arr, BigInt(arr.byteLength));
-    if (buffer === 0n) throw new Error("para:gpu metal: newBuffer failed in hold");
+    if (buffer === 0n) throw new Error("parabun:gpu metal: newBuffer failed in hold");
   }
   return {
     __bunGpuHandle: true,
@@ -1659,13 +1659,13 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
   let matBuf: bigint;
   let matBufOwned: boolean;
   if (isGpuHandle(mat)) {
-    if (mat.released) throw new Error("para:gpu: matVec called on released handle");
-    if (mat.buffer === 0n) throw new Error("para:gpu metal: handle has no MTLBuffer (f64?)");
+    if (mat.released) throw new Error("parabun:gpu: matVec called on released handle");
+    if (mat.buffer === 0n) throw new Error("parabun:gpu metal: handle has no MTLBuffer (f64?)");
     matBuf = mat.buffer;
     matBufOwned = false;
   } else {
     matBuf = newBufferFromF32(mat, matBytes);
-    if (matBuf === 0n) throw new Error("para:gpu metal: newBuffer (mat) failed");
+    if (matBuf === 0n) throw new Error("parabun:gpu metal: newBuffer (mat) failed");
     matBufOwned = true;
   }
 
@@ -1675,16 +1675,16 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
   let encoder: bigint = 0n;
   try {
     vecBuf = newBufferFromF32(vec, vecBytes);
-    if (vecBuf === 0n) throw new Error("para:gpu metal: newBuffer (vec) failed");
+    if (vecBuf === 0n) throw new Error("parabun:gpu metal: newBuffer (vec) failed");
 
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength (out) failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength (out) failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), matVecPipeline);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), matBuf, 0n, 0n);
@@ -1714,7 +1714,7 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
     msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
 
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: outBuf contents is null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: outBuf contents is null");
     const out = new Float32Array(m);
     const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, m * 4));
     out.set(view);
@@ -1747,28 +1747,28 @@ function launchMatmulF32(
   let aBuf: bigint;
   let aBufOwned: boolean;
   if (isGpuHandle(a)) {
-    if (a.released) throw new Error("para:gpu: matmul called on released handle");
-    if (a.buffer === 0n) throw new Error("para:gpu metal: handle has no MTLBuffer (f64?)");
+    if (a.released) throw new Error("parabun:gpu: matmul called on released handle");
+    if (a.buffer === 0n) throw new Error("parabun:gpu metal: handle has no MTLBuffer (f64?)");
     aBuf = a.buffer;
     aBufOwned = false;
   } else {
     aBuf = newBufferFromF32(a, aBytes);
-    if (aBuf === 0n) throw new Error("para:gpu metal: newBuffer (A) failed");
+    if (aBuf === 0n) throw new Error("parabun:gpu metal: newBuffer (A) failed");
     aBufOwned = true;
   }
 
   let bBuf: bigint;
   let bBufOwned: boolean;
   if (isGpuHandle(b)) {
-    if (b.released) throw new Error("para:gpu: matmul called on released handle");
-    if (b.buffer === 0n) throw new Error("para:gpu metal: handle has no MTLBuffer (f64?)");
+    if (b.released) throw new Error("parabun:gpu: matmul called on released handle");
+    if (b.buffer === 0n) throw new Error("parabun:gpu metal: handle has no MTLBuffer (f64?)");
     bBuf = b.buffer;
     bBufOwned = false;
   } else {
     bBuf = newBufferFromF32(b, bBytes);
     if (bBuf === 0n) {
       if (aBufOwned) objcRelease(aBuf);
-      throw new Error("para:gpu metal: newBuffer (B) failed");
+      throw new Error("parabun:gpu metal: newBuffer (B) failed");
     }
     bBufOwned = true;
   }
@@ -1778,13 +1778,13 @@ function launchMatmulF32(
   let encoder: bigint = 0n;
   try {
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), cBytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength (C) failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength (C) failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), matmulPipeline);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), aBuf, 0n, 0n);
@@ -1814,7 +1814,7 @@ function launchMatmulF32(
     msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
 
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: outBuf contents is null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: outBuf contents is null");
     const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, m * n * 4));
     // Copy into caller-provided buffer when present (including SAB-backed).
     // Metal shared-storage buffers can't alias a JS SharedArrayBuffer, so we
@@ -1852,28 +1852,28 @@ function launchConv2D(
   let inBuf: bigint;
   let inBufOwned: boolean;
   if (isGpuHandle(input)) {
-    if (input.released) throw new Error("para:gpu: conv2D called on released handle");
-    if (input.buffer === 0n) throw new Error("para:gpu metal: handle has no MTLBuffer (f64?)");
+    if (input.released) throw new Error("parabun:gpu: conv2D called on released handle");
+    if (input.buffer === 0n) throw new Error("parabun:gpu metal: handle has no MTLBuffer (f64?)");
     inBuf = input.buffer;
     inBufOwned = false;
   } else {
     inBuf = newBufferFromF32(input, inBytes);
-    if (inBuf === 0n) throw new Error("para:gpu metal: newBuffer (input) failed");
+    if (inBuf === 0n) throw new Error("parabun:gpu metal: newBuffer (input) failed");
     inBufOwned = true;
   }
 
   let kBuf: bigint;
   let kBufOwned: boolean;
   if (isGpuHandle(kernel)) {
-    if (kernel.released) throw new Error("para:gpu: conv2D called on released handle");
-    if (kernel.buffer === 0n) throw new Error("para:gpu metal: kernel handle has no MTLBuffer");
+    if (kernel.released) throw new Error("parabun:gpu: conv2D called on released handle");
+    if (kernel.buffer === 0n) throw new Error("parabun:gpu metal: kernel handle has no MTLBuffer");
     kBuf = kernel.buffer;
     kBufOwned = false;
   } else {
     kBuf = newBufferFromF32(kernel, kBytes);
     if (kBuf === 0n) {
       if (inBufOwned) objcRelease(inBuf);
-      throw new Error("para:gpu metal: newBuffer (kernel) failed");
+      throw new Error("parabun:gpu metal: newBuffer (kernel) failed");
     }
     kBufOwned = true;
   }
@@ -1883,13 +1883,13 @@ function launchConv2D(
   let encoder: bigint = 0n;
   try {
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength (output) failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength (output) failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), conv2DPipeline);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
@@ -1917,7 +1917,7 @@ function launchConv2D(
     msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
 
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: outBuf contents is null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: outBuf contents is null");
     const out = new Float32Array(oW * oH);
     const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, oW * oH * 4));
     out.set(view);
@@ -1971,10 +1971,10 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
       bytes,
       BigInt(MTL_STORAGE_MODE_SHARED),
     );
-    if (inBuf === 0n) throw new Error("para:gpu metal: newBufferWithBytes (input) failed");
+    if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithBytes (input) failed");
 
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength (output) failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength (output) failed");
 
     kBuf = msgSend_5_ptr_u64_u64_ret!(
       device,
@@ -1983,13 +1983,13 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
       kBytes,
       BigInt(MTL_STORAGE_MODE_SHARED),
     );
-    if (kBuf === 0n) throw new Error("para:gpu metal: newBufferWithBytes (kern) failed");
+    if (kBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithBytes (kern) failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), gaussianBlurRGBAu8Pipeline);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
@@ -2012,7 +2012,7 @@ function launchGaussianBlurRGBAu8(input: Uint8Array, w: number, h: number, radiu
     msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
 
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: outBuf contents is null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: outBuf contents is null");
     const out = new Uint8Array(input.length);
     const view = new Uint8Array(ffiToArrayBuffer!(Number(contents), 0, input.length));
     out.set(view);
@@ -2036,7 +2036,7 @@ const MIN_SIMDMAP_ELEMS = 1 << 18;
 //     benchmarks exercise the real GPU path, not just the simd fallback.
 //   - MIN_MATVEC_WINS_ELEMS:     above this, `winsForSize("matVec", ...)`
 //     returns true. This is what pipeline-style callers use to decide
-//     whether to route the op to para:gpu in the first place.
+//     whether to route the op to parabun:gpu in the first place.
 //
 // The naive newBufferWithBytes: path was a wash with CPU at all sizes
 // because its internal memcpy dominated. The NOCOPY path (bytes-no-copy
@@ -2083,10 +2083,10 @@ function holdQBytes(blocks: Uint8Array, nElems: number, blockBytes: number, qFor
       `hold${qFormat === "q4_K" ? "Q4K" : "Q6K"}: expected ${expectedBytes} bytes for ${nElems} elements; got ${blocks.byteLength}`,
     );
   }
-  if (!probe()) throw new Error("para:gpu metal: backend unavailable");
+  if (!probe()) throw new Error("parabun:gpu metal: backend unavailable");
   const kernelReady = qFormat === "q4_K" ? matVecQ4KPipeline !== 0n : matVecQ6KPipeline !== 0n;
   if (!kernelReady) {
-    throw new Error(`para:gpu metal: ${qFormat} kernel failed to compile at probe time`);
+    throw new Error(`parabun:gpu metal: ${qFormat} kernel failed to compile at probe time`);
   }
 
   // Copy the packed bytes into an MTLBuffer. We cannot NOCOPY this as
@@ -2101,7 +2101,7 @@ function holdQBytes(blocks: Uint8Array, nElems: number, blockBytes: number, qFor
     bytes,
     BigInt(MTL_STORAGE_MODE_SHARED),
   );
-  if (buf === 0n) throw new Error(`para:gpu metal: newBufferWithBytes failed for ${qFormat}`);
+  if (buf === 0n) throw new Error(`parabun:gpu metal: newBufferWithBytes failed for ${qFormat}`);
 
   return {
     __bunGpuHandle: true,
@@ -2136,9 +2136,9 @@ function launchMatVecQ(
   pipeline: bigint,
   qFormat: "q4_K" | "q6_K",
 ): Float32Array {
-  if (mat.buffer === 0n) throw new Error(`para:gpu metal: ${qFormat} handle has no MTLBuffer`);
+  if (mat.buffer === 0n) throw new Error(`parabun:gpu metal: ${qFormat} handle has no MTLBuffer`);
   if ((k & 255) !== 0) {
-    throw new RangeError(`para:gpu metal: ${qFormat} matVec requires k % 256 == 0; got k=${k}`);
+    throw new RangeError(`parabun:gpu metal: ${qFormat} matVec requires k % 256 == 0; got k=${k}`);
   }
   const kSblocks = k >>> 8;
   const vecBytes = BigInt(k * 4);
@@ -2150,16 +2150,16 @@ function launchMatVecQ(
   let encoder: bigint = 0n;
   try {
     vecBuf = newBufferFromF32(vec, vecBytes);
-    if (vecBuf === 0n) throw new Error("para:gpu metal: newBuffer (vec) failed");
+    if (vecBuf === 0n) throw new Error("parabun:gpu metal: newBuffer (vec) failed");
 
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength (out) failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength (out) failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipeline);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), mat.buffer, 0n, 0n);
@@ -2187,7 +2187,7 @@ function launchMatVecQ(
     msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
 
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: outBuf contents is null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: outBuf contents is null");
     const out = new Float32Array(m);
     const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, m * 4));
     out.set(view);
@@ -2208,7 +2208,7 @@ function launchMatVecQ6K(mat: GpuHandle, vec: Float32Array, m: number, k: number
 
 // ─── GpuScratch: device-only buffer ─────────────────────────────────────
 // Mirror of the cuda.ts GpuScratch — a pure MTLBuffer with no host view,
-// used by para:llm as residency for the KV cache, residual stream, and
+// used by parabun:llm as residency for the KV cache, residual stream, and
 // all intermediate activations. Separate from GpuHandle because
 // GpuScratch has no user-supplied typed array backing.
 
@@ -2234,12 +2234,12 @@ function allocScratch(length: number, type: "f32" | "i32" = "f32"): GpuScratch {
   if (!Number.isInteger(length) || length < 0) {
     throw new RangeError(`length must be a non-negative integer; got ${length}`);
   }
-  if (!probe()) throw new Error("para:gpu metal: backend unavailable");
+  if (!probe()) throw new Error("parabun:gpu metal: backend unavailable");
   const bytes = BigInt(length * 4);
   let buffer: bigint = 0n;
   if (length > 0) {
     buffer = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (buffer === 0n) throw new Error("para:gpu metal: newBufferWithLength(scratch) failed");
+    if (buffer === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(scratch) failed");
   }
   return {
     __bunGpuScratch: true,
@@ -2252,7 +2252,7 @@ function allocScratch(length: number, type: "f32" | "i32" = "f32"): GpuScratch {
 }
 
 function scratchSlice(s: GpuScratch, elemOffset: number, length: number): GpuScratch {
-  if (s.released) throw new Error("para:gpu metal: slice on released scratch");
+  if (s.released) throw new Error("parabun:gpu metal: slice on released scratch");
   if (elemOffset < 0 || length < 0 || elemOffset + length > s.length) {
     throw new RangeError(`slice out of bounds: offset=${elemOffset}, length=${length}, total=${s.length}`);
   }
@@ -2282,13 +2282,13 @@ function freeScratch(s: GpuScratch): void {
 }
 
 function uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOffset = 0): void {
-  if (s.released) throw new Error("para:gpu metal: uploadScratch on released");
+  if (s.released) throw new Error("parabun:gpu metal: uploadScratch on released");
   if (dstElemOffset + src.length > s.length) {
     throw new RangeError(`uploadScratch: ${dstElemOffset} + ${src.length} > ${s.length}`);
   }
   if (s.buffer === 0n) return;
   const contents = msgSend_2!(s.buffer, sel("contents"));
-  if (contents === 0n) throw new Error("para:gpu metal: scratch contents null");
+  if (contents === 0n) throw new Error("parabun:gpu metal: scratch contents null");
   const baseOffset = Number(s.sliceOffsetBytes ?? 0n);
   const dstBytes = baseOffset + dstElemOffset * 4;
   const view =
@@ -2299,13 +2299,13 @@ function uploadScratch(src: Float32Array | Int32Array, s: GpuScratch, dstElemOff
 }
 
 function downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemOffset = 0): void {
-  if (s.released) throw new Error("para:gpu metal: downloadScratch on released");
+  if (s.released) throw new Error("parabun:gpu metal: downloadScratch on released");
   if (srcElemOffset + dst.length > s.length) {
     throw new RangeError(`downloadScratch: ${srcElemOffset} + ${dst.length} > ${s.length}`);
   }
   if (s.buffer === 0n) return;
   const contents = msgSend_2!(s.buffer, sel("contents"));
-  if (contents === 0n) throw new Error("para:gpu metal: scratch contents null");
+  if (contents === 0n) throw new Error("parabun:gpu metal: scratch contents null");
   const baseOffset = Number(s.sliceOffsetBytes ?? 0n);
   const srcBytes = baseOffset + srcElemOffset * 4;
   const view =
@@ -2319,12 +2319,12 @@ function downloadScratch(s: GpuScratch, dst: Float32Array | Int32Array, srcElemO
 // Unified encoder/dispatch for the 1-thread-per-element kernels. Each
 // takes 2 GpuScratch args (for kernels of that shape) plus an optional
 // uint constant. Commits + waits synchronously — same shape as
-// launchMatVecQ so para:llm's call sites block until the kernel finishes.
+// launchMatVecQ so parabun:llm's call sites block until the kernel finishes.
 function encodeWith(fn: (encoder: bigint, cmdBuf: bigint) => void): void {
   const cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-  if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+  if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
   const encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-  if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+  if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
   try {
     fn(encoder, cmdBuf);
     msgSend_2!(encoder, sel("endEncoding"));
@@ -2337,7 +2337,7 @@ function encodeWith(fn: (encoder: bigint, cmdBuf: bigint) => void): void {
 }
 
 function scratchBufferAndOffset(s: GpuScratch): { buf: bigint; offset: bigint } {
-  if (s.released) throw new Error("para:gpu metal: op on released scratch");
+  if (s.released) throw new Error("parabun:gpu metal: op on released scratch");
   return { buf: s.buffer, offset: s.sliceOffsetBytes ?? 0n };
 }
 
@@ -2346,8 +2346,8 @@ function scratchBufferAndOffset(s: GpuScratch): { buf: bigint; offset: bigint } 
 function bufferAndOffsetFor(h: GpuHandle | GpuScratch): { buf: bigint; offset: bigint } {
   if ((h as any).__bunGpuHandle === true) {
     const handle = h as GpuHandle;
-    if (handle.released) throw new Error("para:gpu metal: op on released handle");
-    if (handle.buffer === 0n) throw new Error("para:gpu metal: handle has no MTLBuffer");
+    if (handle.released) throw new Error("parabun:gpu metal: op on released handle");
+    if (handle.buffer === 0n) throw new Error("parabun:gpu metal: handle has no MTLBuffer");
     return { buf: handle.buffer, offset: 0n };
   }
   return scratchBufferAndOffset(h as GpuScratch);
@@ -2363,9 +2363,9 @@ function launchEmbedLookup(embd: GpuScratch | GpuHandle, x: GpuScratch, tokenId:
   const qFormat = isHandle ? (embd as GpuHandle).qFormat : undefined;
 
   if (qFormat === "q4_K" || qFormat === "q6_K") {
-    if ((dModel & 0xff) !== 0) throw new Error("para:gpu metal: quantized embedLookup requires dModel % 256 == 0");
+    if ((dModel & 0xff) !== 0) throw new Error("parabun:gpu metal: quantized embedLookup requires dModel % 256 == 0");
     const pipeSlot = qFormat === "q4_K" ? devOpsPipes.embedLookupQ4K : devOpsPipes.embedLookupQ6K;
-    if (!pipeSlot) throw new Error(`para:gpu metal: ${qFormat} embedLookup kernel missing`);
+    if (!pipeSlot) throw new Error(`parabun:gpu metal: ${qFormat} embedLookup kernel missing`);
     const { buf: eBuf, offset: eOff } = bufferAndOffsetFor(embd);
     encodeWith(encoder => {
       msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipeSlot.pipe);
@@ -2387,7 +2387,7 @@ function launchEmbedLookup(embd: GpuScratch | GpuHandle, x: GpuScratch, tokenId:
     return;
   }
 
-  if (!devOpsPipes.embedLookup) throw new Error("para:gpu metal: embedLookup kernel missing");
+  if (!devOpsPipes.embedLookup) throw new Error("parabun:gpu metal: embedLookup kernel missing");
   const { buf: eBuf, offset: eOff } = bufferAndOffsetFor(embd);
   encodeWith(encoder => {
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.embedLookup.pipe);
@@ -2421,15 +2421,15 @@ function launchElementwise2(pipe: bigint, a: GpuScratch, b: GpuScratch, n: numbe
 }
 
 function launchAccum(x: GpuScratch, d: GpuScratch, n: number): void {
-  if (!devOpsPipes.accum) throw new Error("para:gpu metal: accum kernel missing");
+  if (!devOpsPipes.accum) throw new Error("parabun:gpu metal: accum kernel missing");
   launchElementwise2(devOpsPipes.accum.pipe, x, d, n);
 }
 
 // biasAdd accepts the bias as either a GpuScratch or a GpuHandle. In
-// para:llm's forward pass biases are device-resident weights (handles);
+// parabun:llm's forward pass biases are device-resident weights (handles);
 // tests pass scratches for convenience.
 function launchBiasAdd(x: GpuScratch, b: GpuScratch | GpuHandle, n: number): void {
-  if (!devOpsPipes.biasAdd) throw new Error("para:gpu metal: biasAdd kernel missing");
+  if (!devOpsPipes.biasAdd) throw new Error("parabun:gpu metal: biasAdd kernel missing");
   const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
   const { buf: bBuf, offset: bOff } = bufferAndOffsetFor(b);
   encodeWith(encoder => {
@@ -2445,13 +2445,13 @@ function launchBiasAdd(x: GpuScratch, b: GpuScratch | GpuHandle, n: number): voi
 }
 
 function launchSiluMul(gate: GpuScratch, up: GpuScratch, n: number): void {
-  if (!devOpsPipes.siluMul) throw new Error("para:gpu metal: siluMul kernel missing");
+  if (!devOpsPipes.siluMul) throw new Error("parabun:gpu metal: siluMul kernel missing");
   launchElementwise2(devOpsPipes.siluMul.pipe, gate, up, n);
 }
 
 // y[i] = a[i] + b[i]. 3 buffers.
 function launchAdd(a: GpuScratch, b: GpuScratch, y: GpuScratch, n: number): void {
-  if (!devOpsPipes.add) throw new Error("para:gpu metal: add kernel missing");
+  if (!devOpsPipes.add) throw new Error("parabun:gpu metal: add kernel missing");
   const { buf: aBuf, offset: aOff } = scratchBufferAndOffset(a);
   const { buf: bBuf, offset: bOff } = scratchBufferAndOffset(b);
   const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
@@ -2470,7 +2470,7 @@ function launchAdd(a: GpuScratch, b: GpuScratch, y: GpuScratch, n: number): void
 
 // cache[pos * kvRowSize + i] = src[i].
 function launchKvStore(src: GpuScratch, cache: GpuScratch, pos: number, kvRowSize: number): void {
-  if (!devOpsPipes.kvStore) throw new Error("para:gpu metal: kvStore kernel missing");
+  if (!devOpsPipes.kvStore) throw new Error("parabun:gpu metal: kvStore kernel missing");
   const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(src);
   const { buf: cBuf, offset: cOff } = scratchBufferAndOffset(cache);
   encodeWith(encoder => {
@@ -2491,7 +2491,7 @@ function launchKvStore(src: GpuScratch, cache: GpuScratch, pos: number, kvRowSiz
 // 256 threads covers any typical Llama hidden dim strided (n up to
 // ~65k is fine; beyond that bump bs via a future re-issued kernel).
 function launchRmsnorm(x: GpuScratch, w: GpuScratch | GpuHandle, y: GpuScratch, n: number, eps: number): void {
-  if (!devOpsPipes.rmsnorm) throw new Error("para:gpu metal: rmsnorm kernel missing");
+  if (!devOpsPipes.rmsnorm) throw new Error("parabun:gpu metal: rmsnorm kernel missing");
   const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
   const { buf: wBuf, offset: wOff } = bufferAndOffsetFor(w);
   const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
@@ -2517,7 +2517,7 @@ function launchRmsnorm(x: GpuScratch, w: GpuScratch | GpuHandle, y: GpuScratch, 
 
 // argmax(logits) → outIdx (single int32). 1 threadgroup, 256 threads.
 function launchArgmax(logits: GpuScratch, outIdx: GpuScratch, n: number): void {
-  if (!devOpsPipes.argmax) throw new Error("para:gpu metal: argmax kernel missing");
+  if (!devOpsPipes.argmax) throw new Error("parabun:gpu metal: argmax kernel missing");
   if (outIdx.type !== "i32") throw new TypeError("argmax outIdx must be an i32 scratch");
   const { buf: lBuf, offset: lOff } = scratchBufferAndOffset(logits);
   const { buf: oBuf, offset: oOff } = scratchBufferAndOffset(outIdx);
@@ -2551,7 +2551,7 @@ function launchRope(
   mode: "norm" | "neox",
 ): void {
   const slot = mode === "neox" ? devOpsPipes.ropeNeox : devOpsPipes.ropeNorm;
-  if (!slot) throw new Error(`para:gpu metal: rope${mode === "neox" ? "Neox" : "Norm"} kernel missing`);
+  if (!slot) throw new Error(`parabun:gpu metal: rope${mode === "neox" ? "Neox" : "Norm"} kernel missing`);
   const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
   const { buf: fBuf, offset: fOff } = scratchBufferAndOffset(invFreq);
   encodeWith(encoder => {
@@ -2580,7 +2580,7 @@ function launchRopeNeox(x: GpuScratch, invFreq: GpuScratch, nHeads: number, head
   launchRope(x, invFreq, nHeads, headDim, pos, "neox");
 }
 
-// Unified rope entry matching para:llm's devOps signature. mode is
+// Unified rope entry matching parabun:llm's devOps signature. mode is
 // "norm" (interleaved) or "neox" (split halves).
 function launchRopeDispatch(
   x: GpuScratch,
@@ -2607,7 +2607,7 @@ function launchAttnScores(
   ctxLen: number,
   scale: number,
 ): void {
-  if (!devOpsPipes.attnScores) throw new Error("para:gpu metal: attnScores kernel missing");
+  if (!devOpsPipes.attnScores) throw new Error("parabun:gpu metal: attnScores kernel missing");
   const { buf: qBuf, offset: qOff } = scratchBufferAndOffset(q);
   const { buf: kBuf, offset: kOff } = scratchBufferAndOffset(kCache);
   const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(scores);
@@ -2640,7 +2640,7 @@ function launchAttnScores(
 // Row-wise softmax in place. Dispatch: rows tgs, bs threads, where bs is
 // next-pow-2 ≥ cols clamped to [32, 1024].
 function launchSoftmaxRow(scores: GpuScratch, rows: number, cols: number, stride: number): void {
-  if (!devOpsPipes.softmaxRow) throw new Error("para:gpu metal: softmaxRow kernel missing");
+  if (!devOpsPipes.softmaxRow) throw new Error("parabun:gpu metal: softmaxRow kernel missing");
   const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(scores);
   // bs: next pow-2 ≥ cols, clamped to [32, 1024].
   const target = Math.max(32, Math.min(1024, cols));
@@ -2667,14 +2667,14 @@ function launchSoftmaxRow(scores: GpuScratch, rows: number, cols: number, stride
 // k is a multiple of 4, or to the quantized pipelines when mat has a
 // qFormat tag. Writes result into `y` scratch — no host roundtrip.
 function launchMatVecDev(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number, k: number): void {
-  if (mat.released) throw new Error("para:gpu metal: matVec called on released handle");
-  if (mat.buffer === 0n) throw new Error("para:gpu metal: handle has no MTLBuffer");
+  if (mat.released) throw new Error("parabun:gpu metal: matVec called on released handle");
+  if (mat.buffer === 0n) throw new Error("parabun:gpu metal: handle has no MTLBuffer");
   const { buf: xBuf, offset: xOff } = scratchBufferAndOffset(x);
   const { buf: yBuf, offset: yOff } = scratchBufferAndOffset(y);
 
   if (mat.qFormat === "q4_K") {
-    if (matVecQ4KPipeline === 0n) throw new Error("para:gpu metal: matVecQ4K pipeline missing");
-    if ((k & 0xff) !== 0) throw new Error("para:gpu metal: q4_K matVec requires k % 256 == 0");
+    if (matVecQ4KPipeline === 0n) throw new Error("parabun:gpu metal: matVecQ4K pipeline missing");
+    if ((k & 0xff) !== 0) throw new Error("parabun:gpu metal: q4_K matVec requires k % 256 == 0");
     const kSblocks = k >>> 8;
     encodeWith(encoder => {
       msgSend_3_id!(encoder, sel("setComputePipelineState:"), matVecQ4KPipeline);
@@ -2698,8 +2698,8 @@ function launchMatVecDev(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number
   }
 
   if (mat.qFormat === "q6_K") {
-    if (matVecQ6KPipeline === 0n) throw new Error("para:gpu metal: matVecQ6K pipeline missing");
-    if ((k & 0xff) !== 0) throw new Error("para:gpu metal: q6_K matVec requires k % 256 == 0");
+    if (matVecQ6KPipeline === 0n) throw new Error("parabun:gpu metal: matVecQ6K pipeline missing");
+    if ((k & 0xff) !== 0) throw new Error("parabun:gpu metal: q6_K matVec requires k % 256 == 0");
     const kSblocks = k >>> 8;
     encodeWith(encoder => {
       msgSend_3_id!(encoder, sel("setComputePipelineState:"), matVecQ6KPipeline);
@@ -2724,8 +2724,8 @@ function launchMatVecDev(mat: GpuHandle, x: GpuScratch, y: GpuScratch, m: number
 
   // f32 path. k must be a multiple of 4 for the float4 kernel. The
   // llama/qwen projection dims we target always satisfy this.
-  if (!devOpsPipes.matVec) throw new Error("para:gpu metal: matVec kernel missing");
-  if ((k & 3) !== 0) throw new Error("para:gpu metal: devOps matVec requires k % 4 == 0");
+  if (!devOpsPipes.matVec) throw new Error("parabun:gpu metal: matVec kernel missing");
+  if ((k & 3) !== 0) throw new Error("parabun:gpu metal: devOps matVec requires k % 4 == 0");
   const k_div4 = k >>> 2;
   encodeWith(encoder => {
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), devOpsPipes.matVec.pipe);
@@ -2760,7 +2760,7 @@ function launchAttnOutput(
   ctxLen: number,
   scoreStride: number,
 ): void {
-  if (!devOpsPipes.attnOutput) throw new Error("para:gpu metal: attnOutput kernel missing");
+  if (!devOpsPipes.attnOutput) throw new Error("parabun:gpu metal: attnOutput kernel missing");
   const { buf: sBuf, offset: sOff } = scratchBufferAndOffset(scores);
   const { buf: vBuf, offset: vOff } = scratchBufferAndOffset(vCache);
   const { buf: oBuf, offset: oOff } = scratchBufferAndOffset(out);
@@ -2804,8 +2804,8 @@ function launchFlashAttn(
   ctxLen: number,
   scale: number,
 ): void {
-  if (!devOpsPipes.flashAttn) throw new Error("para:gpu metal: flashAttn kernel missing");
-  if (headDim > 256) throw new Error(`para:gpu metal: flashAttn headDim ${headDim} exceeds 256`);
+  if (!devOpsPipes.flashAttn) throw new Error("parabun:gpu metal: flashAttn kernel missing");
+  if (headDim > 256) throw new Error(`parabun:gpu metal: flashAttn headDim ${headDim} exceeds 256`);
   const { buf: qBuf, offset: qOff } = scratchBufferAndOffset(q);
   const { buf: kBuf, offset: kOff } = scratchBufferAndOffset(kCache);
   const { buf: vBuf, offset: vOff } = scratchBufferAndOffset(vCache);
@@ -2840,12 +2840,12 @@ function launchFlashAttn(
 
 // No-op on Metal: every encodeWith() call ends in waitUntilCompleted,
 // so there's nothing outstanding by the time control returns to JS.
-// Kept as a method for para:llm surface parity with the CUDA backend,
+// Kept as a method for parabun:llm surface parity with the CUDA backend,
 // where cuCtxSynchronize() is needed after async launches.
 function syncNoop(): void {}
 
 // Public devOps table. Returns null until every kernel in the canonical
-// list is compiled AND the full port is flagged complete — para:llm's
+// list is compiled AND the full port is flagged complete — parabun:llm's
 // forward pass is all-or-nothing, so partial tables would mean silent
 // runtime crashes on kernels we haven't ported yet.
 function getDevOps(): any | null {
@@ -2879,7 +2879,7 @@ function getDevOps(): any | null {
 
 // Partial devOps accessor for tests / incremental validation. Exposes
 // whichever kernel wrappers have been wired, regardless of
-// devOpsComplete. para:llm does NOT call this; it's only for
+// devOpsComplete. parabun:llm does NOT call this; it's only for
 // test/bench harnesses.
 function _getPartialDevOps(): any {
   if (!probe()) return null;
@@ -2928,7 +2928,7 @@ function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
 function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
   const matIsHandle = isGpuHandle(matrix);
   if (matIsHandle && matrix.released) {
-    throw new Error("para:gpu: matVec called on released handle");
+    throw new Error("parabun:gpu: matVec called on released handle");
   }
   // Quantized residency: dispatch to the Q-aware kernel without
   // materializing f32 weights. Threshold checks don't apply — hold()
@@ -2936,19 +2936,19 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
   // for raw super-block bytes.
   if (matIsHandle && matrix.qFormat === "q4_K") {
     if (!(vector instanceof Float32Array)) {
-      throw new TypeError("para:gpu metal: q4_K matVec requires a Float32Array vector");
+      throw new TypeError("parabun:gpu metal: q4_K matVec requires a Float32Array vector");
     }
     if (matVecQ4KPipeline === 0n || !probe()) {
-      throw new Error("para:gpu metal: q4_K kernel unavailable on this device");
+      throw new Error("parabun:gpu metal: q4_K kernel unavailable on this device");
     }
     return launchMatVecQ4K(matrix, vector, nRows, nCols);
   }
   if (matIsHandle && matrix.qFormat === "q6_K") {
     if (!(vector instanceof Float32Array)) {
-      throw new TypeError("para:gpu metal: q6_K matVec requires a Float32Array vector");
+      throw new TypeError("parabun:gpu metal: q6_K matVec requires a Float32Array vector");
     }
     if (matVecQ6KPipeline === 0n || !probe()) {
-      throw new Error("para:gpu metal: q6_K kernel unavailable on this device");
+      throw new Error("parabun:gpu metal: q6_K kernel unavailable on this device");
     }
     return launchMatVecQ6K(matrix, vector, nRows, nCols);
   }
@@ -2969,8 +2969,8 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
 function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray {
   const aIsHandle = isGpuHandle(a);
   const bIsHandle = isGpuHandle(b);
-  if (aIsHandle && a.released) throw new Error("para:gpu: matmul called on released handle");
-  if (bIsHandle && b.released) throw new Error("para:gpu: matmul called on released handle");
+  if (aIsHandle && a.released) throw new Error("parabun:gpu: matmul called on released handle");
+  if (bIsHandle && b.released) throw new Error("parabun:gpu: matmul called on released handle");
   const av = aIsHandle ? a.view : (a as FArray);
   const bv = bIsHandle ? b.view : (b as FArray);
   if (av.constructor !== bv.constructor) {
@@ -3173,20 +3173,20 @@ function launchCustomMSLF32(a: Float32Array, kernel: CachedMSLKernel): Float32Ar
     bytes,
     BigInt(MTL_STORAGE_MODE_SHARED),
   );
-  if (inBuf === 0n) throw new Error("para:gpu metal: newBufferWithBytes failed");
+  if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithBytes failed");
 
   let outBuf: bigint = 0n;
   let cmdBuf: bigint = 0n;
   let encoder: bigint = 0n;
   try {
     outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
-    if (outBuf === 0n) throw new Error("para:gpu metal: newBufferWithLength failed");
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength failed");
 
     cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
-    if (cmdBuf === 0n) throw new Error("para:gpu metal: commandBuffer failed");
+    if (cmdBuf === 0n) throw new Error("parabun:gpu metal: commandBuffer failed");
 
     encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
-    if (encoder === 0n) throw new Error("para:gpu metal: computeCommandEncoder failed");
+    if (encoder === 0n) throw new Error("parabun:gpu metal: computeCommandEncoder failed");
 
     msgSend_3_id!(encoder, sel("setComputePipelineState:"), kernel.pipeline);
     msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
@@ -3205,7 +3205,7 @@ function launchCustomMSLF32(a: Float32Array, kernel: CachedMSLKernel): Float32Ar
     msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
 
     const contents = msgSend_2!(outBuf, sel("contents"));
-    if (contents === 0n) throw new Error("para:gpu metal: contents returned null");
+    if (contents === 0n) throw new Error("parabun:gpu metal: contents returned null");
     const out = new Float32Array(n);
     out.set(new Float32Array(ffiToArrayBuffer!(contents, 0, n * 4)));
     return out;

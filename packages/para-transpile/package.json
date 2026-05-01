@@ -1,12 +1,12 @@
 {
-  "name": "@parascript/transpile",
+  "name": "@para/transpile",
   "version": "0.0.0-dev",
   "private": true,
-  "description": "Standalone transpiler for ParaScript (.pts) — turns ParaScript source into standard JavaScript that runs anywhere via parabun-browser-shims. No Parabun runtime required. NOT YET RELEASED — `private: true` and `0.0.0-dev` until every desugaring lands.",
+  "description": "Standalone transpiler for Para (.pts) — turns Para source into standard JavaScript that runs anywhere via parabun-browser-shims. No Parabun runtime required. NOT YET RELEASED — `private: true` and `0.0.0-dev` until every desugaring lands.",
   "repository": {
     "type": "git",
     "url": "https://github.com/airgap/parabun",
-    "directory": "packages/parascript-transpile"
+    "directory": "packages/para-transpile"
   },
   "license": "MIT",
   "type": "module",
@@ -22,7 +22,7 @@
     }
   },
   "bin": {
-    "parascript": "./dist/cli.js"
+    "para": "./dist/cli.js"
   },
   "scripts": {
     "check:types": "tsc --noEmit",

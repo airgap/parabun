@@ -1,4 +1,4 @@
-// Live GPIO state over HTTP — `para:gpio` + `Bun.serve` + signals.
+// Live GPIO state over HTTP — `parabun:gpio` + `Bun.serve` + signals.
 //
 //   bun run build:release demos/iot-http-state.pts [--port 3000]
 //
@@ -14,7 +14,7 @@
 // pushes new state into the SSE stream. Adding a sensor or another
 // output is one more line in the effect.
 
-import gpio from "para:gpio";
+import gpio from "parabun:gpio";
 import signals from "para:signals";
 
 const args = process.argv.slice(2);

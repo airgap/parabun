@@ -395,7 +395,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-opus-integration",
       `
-        import audio from "para:audio";
+        import audio from "parabun:audio";
         import rtp from "para:rtp";
 
         const enc = new audio.OpusEncoder({ sampleRate: 16000, channels: 1, bitrate: 32000 });

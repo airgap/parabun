@@ -1,4 +1,4 @@
-// Block-form ParaScript constructs:
+// Block-form Para constructs:
 //
 //   signal NAME = EXPR;             → const NAME = require("para:signals").signal(EXPR);
 //   effect { BODY }                 → require("para:signals").effect(() => { BODY });

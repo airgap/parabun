@@ -20,6 +20,6 @@ export const bunAliases = {
   "bun:wrap": new URL("./wrap.js", import.meta.url).pathname,
   "para:parallel": new URL("./parallel.js", import.meta.url).pathname,
   "para:simd": new URL("./simd.js", import.meta.url).pathname,
-  "para:gpu": new URL("./gpu.js", import.meta.url).pathname,
-  "para:llm": new URL("./llm.js", import.meta.url).pathname,
+  "parabun:gpu": new URL("./gpu.js", import.meta.url).pathname,
+  "parabun:llm": new URL("./llm.js", import.meta.url).pathname,
 };

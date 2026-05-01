@@ -1,4 +1,4 @@
-// Parabun: native I2C bindings for `para:i2c` (LYK-771 / PLAN-bun-hal).
+// Parabun: native I2C bindings for `parabun:i2c` (LYK-771 / PLAN-bun-hal).
 //
 // Linux i2c-dev character device wrapper. Combined-message transactions
 // via I2C_RDWR + SMBus shortcuts via I2C_SMBUS. Same shape on RPi 4/5,
@@ -21,7 +21,7 @@
 //   smbusReadBlock(fd, addr, cmd)            → Uint8Array
 //   smbusWriteBlock(fd, addr, cmd, bytes)    → void
 //
-// On non-Linux every entry point throws "para:i2c not yet implemented on
+// On non-Linux every entry point throws "parabun:i2c not yet implemented on
 // this platform".
 
 #include "root.h"
@@ -154,7 +154,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBusInfo,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 1) {
@@ -199,7 +199,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpenBus,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 1) {
@@ -271,7 +271,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRead,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -319,7 +319,7 @@ JSC_DEFINE_HOST_FUNCTION(functionWrite,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -374,7 +374,7 @@ JSC_DEFINE_HOST_FUNCTION(functionTransact,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -501,7 +501,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusQuick,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -529,7 +529,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadByte,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -554,7 +554,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadWord,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -579,7 +579,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteByte,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -611,7 +611,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteWord,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -644,7 +644,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadBlock,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;
@@ -677,7 +677,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteBlock,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:i2c not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
     int fd; uint16_t addr;

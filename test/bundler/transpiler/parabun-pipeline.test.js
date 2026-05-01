@@ -267,7 +267,7 @@ describe("para:pipeline", () => {
   });
 
   it("fusion: large f32 affine chain matches para:simd (GPU tier)", async () => {
-    // Covers the pipeline → para:gpu promotion path. When the fused chain
+    // Covers the pipeline → parabun:gpu promotion path. When the fused chain
     // collapses to `x*K + C` over a Float32Array big enough for the GPU
     // to win (>= 1<<18 elems), `realizeChain` dispatches to `gpu.simdMap`
     // instead of stacking `simd.mulScalar` + `simd.addScalar`. On mac

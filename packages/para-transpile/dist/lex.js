@@ -1,7 +1,7 @@
 // Tiny tokenizer that's just enough to recognize string / template-literal /
 // comment regions so the rewriters don't fire inside them. Not a real JS
 // parser — operates on raw character sequences and tracks state with a
-// simple finite-state machine. Covers the cases that matter for ParaScript
+// simple finite-state machine. Covers the cases that matter for Para
 // surface-level rewrites.
 /**
  * Scan source and return the list of contiguous spans by region. Adjacent
@@ -24,7 +24,7 @@ export function scanRegions(src) {
     // a regex literal or is the division operator. Conservative: regex is only
     // recognized after a clearly-non-value-producing token; otherwise `/` is
     // division. Misclassification is OK as long as we don't false-positive
-    // ParaScript rewrites inside a regex (the regex region brackets it).
+    // Para rewrites inside a regex (the regex region brackets it).
     let prevNonWs = "";
     const couldStartRegex = () => {
         const c = prevNonWs;

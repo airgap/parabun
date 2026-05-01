@@ -565,7 +565,7 @@ and JSC can't inline the kernel; the F64 fallback still wins over inline
 because the underlying `out[i] = fn(a[i], i)` form survives auto-vectorization
 better than the `Math.sqrt(x*x+1)` tight loop in JS source.
 
-### `para:gpu` — GPU compute for vector/matrix primitives
+### `parabun:gpu` — GPU compute for vector/matrix primitives
 
 Compute-only GPU surface (no graphics) that mirrors a subset of `para:simd`.
 Probes a backend chain — Metal on darwin, CUDA on Linux/Windows, always
@@ -574,7 +574,7 @@ see the same contract regardless of host; the kernel that runs underneath
 is the host's fastest option.
 
 ```
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 gpu.describe();           // { active: "metal", available: ["metal","cpu"], platform: "darwin" }
 gpu.dot(a, b);            // number
 gpu.matVec(mat, vec, M, K); // Float32Array of length M
@@ -617,7 +617,7 @@ Two thresholds, not one:
 - **Dispatch threshold** — above this size, the op hits the real GPU
   kernel. Exists so the kernel gets exercised in tests.
 - **Wins threshold** (`winsForSize`) — above this size, *callers* should
-  route to `para:gpu` rather than `para:simd`. `para:pipeline`'s fusion tier
+  route to `parabun:gpu` rather than `para:simd`. `para:pipeline`'s fusion tier
   reads this when deciding whether to promote a fused affine chain.
 
 They're decoupled because a compiled-and-correct kernel isn't always a
@@ -684,23 +684,23 @@ primitives above. They aren't reproduced here — see the README for
 the user-facing surface, and `src/js/bun/*.ts` for the source:
 
 - **Tier 1** (codecs + capture + inference + peripheral I/O):
-  `para:image`, `para:audio` (codecs + DSP + ALSA capture/playback;
+  `parabun:image`, `parabun:audio` (codecs + DSP + ALSA capture/playback;
   `audio.devices` is a callable signal — `.subscribe(cb)` for
-  inotify-driven hotplug events on `/dev/snd`), `para:camera` (V4L2;
+  inotify-driven hotplug events on `/dev/snd`), `parabun:camera` (V4L2;
   `camera.devices` is a callable signal — 2 s polling because
   Bun's fs.watch on `/dev` recurses into permission-restricted
-  entries), `para:csv`, `para:llm` (GGUF Llama/Qwen2 + BERT
+  entries), `para:csv`, `parabun:llm` (GGUF Llama/Qwen2 + BERT
   embeddings + Whisper STT, with `m.busy` / `m.device` reactive
   signals; `m.chatJSON([...], { schema })` is the single-shot
   grammar-constrained convenience that drains and parses
   for tool dispatch), `para:rtp` (with `JitterBuffer.pendingSignal` /
   `lossCountSignal` / `lossRateSignal`), `para:mcp` (Model Context
-  Protocol client — stdio + WebSocket transports), `para:gpio` /
-  `para:i2c` / `para:spi` (userspace peripheral access on Linux SBCs
+  Protocol client — stdio + WebSocket transports), `parabun:gpio` /
+  `parabun:i2c` / `parabun:spi` (userspace peripheral access on Linux SBCs
   via `/dev/gpiochipN`, `/dev/i2c-N`, `/dev/spidevN.M` — same surface
-  across Pi 4/5, Jetson, any Linux SBC; `para:gpio` exposes both
+  across Pi 4/5, Jetson, any Linux SBC; `parabun:gpio` exposes both
   single-line `chip.line(...)` and atomic multi-line `chip.bank(...)`).
-- **Tier 2** (applications): `para:speech` (`listen` / `transcribe` /
+- **Tier 2** (applications): `parabun:speech` (`listen` / `transcribe` /
   `say` / `speak` / `wakeWord` / `matchWakePhrase`, with reactive
   `active` / `noiseFloor` / `lastUtterance` signals on listen and
   `active` / `lastTrigger` on wakeWord; `say(text, { model })` is the
@@ -708,13 +708,13 @@ the user-facing surface, and `src/js/bun/*.ts` for the source:
   process-wide PlaybackStream cache; `speak()` returns raw PCM for
   callers that need it. Backed by a long-running per-voice piper
   subprocess cached for the process lifetime),
-  `para:assistant` (the 3-line voice-assistant facade — composes
-  `para:audio` + `para:speech` + `para:llm` / `para:mcp`, ships
+  `parabun:assistant` (the 3-line voice-assistant facade — composes
+  `parabun:audio` + `parabun:speech` + `parabun:llm` / `para:mcp`, ships
   sqlite-backed persistent memory, tool dispatch (inline + MCP),
   VAD-driven barge-in + `bot.interrupt()`, wake-word gate, cron-driven
   scheduled prompts, and RAG over a local doc directory; exposes
   `state` / `history` / `lastTurn` / `interrupted` / `toolsActive`
-  signals), `para:vision` (motion detection ships with `detected` /
+  signals), `parabun:vision` (motion detection ships with `detected` /
   `score` signals on the returned iterator; detector / OCR engines
   stubbed), `para:arrow` (in-memory tables + computes + IPC streaming
   wire-compatible with apache-arrow 21.x).
@@ -744,8 +744,8 @@ Module fidelity:
 - **`bun:wrap`** — full implementation of `__parabunMemo` (with `.forget` / `.clear` / `.bypass`), `__parabunDefer0`, `__parabunAsyncDefer0`, `__parabunRange`, `__parabunRangeInclusive`.
 - **`para:parallel`** — sequential fallback. `pmap` / `preduce` run on the main thread; Web-Worker-backed implementation is future work.
 - **`para:simd`** — scalar JS loops. Correct output; ~5–20× slower than v128 on large TypedArrays. WebAssembly SIMD swap-in is future work.
-- **`para:gpu`** — CPU fallback via `para:simd`. WebGPU / WebGL2 compute-shader backend is future work.
-- **`para:llm`** — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
+- **`parabun:gpu`** — CPU fallback via `para:simd`. WebGPU / WebGL2 compute-shader backend is future work.
+- **`parabun:llm`** — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
 
 ## Real-world benchmark: SQLite analytical workload
 
@@ -805,7 +805,7 @@ breakdown and the sweep curve.
 
 ## Pending Work
 
-- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `para:gpu`
+- **Auto-accel dispatch, Tier 3 (pure-fn → GPU shader)** — `parabun:gpu`
   ships both the affine special case (GPU kernel for `x*K + C` on
   Float32Array; pipeline fusion promotes matching chains automatically)
   and **dynamic kernel compilation** for arbitrary non-affine pure

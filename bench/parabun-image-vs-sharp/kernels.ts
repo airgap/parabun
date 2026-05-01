@@ -8,11 +8,11 @@
 // happens in a typical decode-do-thing-encode call site". For now Sharp
 // wins end-to-end because of its pipelined buffer sharing across ops;
 // the path to closing that is a chained image.pipeline() API in
-// para:image, not more kernel tuning.
+// parabun:image, not more kernel tuning.
 //
 //   bun run build:release --asan=off bench/parabun-image-vs-sharp/kernels.ts
 
-import image from "para:image";
+import image from "parabun:image";
 import sharp from "./node_modules/sharp/lib/index.js";
 
 const N = 4096;

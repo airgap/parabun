@@ -1,10 +1,10 @@
-// Hardcoded module "para:image"
+// Hardcoded module "parabun:image"
 //
 // Parabun: image decode / encode / resize / filter — a Sharp-class module
 // baked into the runtime so apps don't need to npm-install a binary
 // distribution that drifts with Node ABI versions.
 //
-//   import image from "para:image";
+//   import image from "parabun:image";
 //   const img = await image.decode(bytes);
 //   // img: { data: Uint8Array, width, height, channels, format }
 //
@@ -14,13 +14,13 @@
 // Both libs are statically linked into the Parabun binary; no external
 // install needed. Format is auto-detected from the magic-byte prefix.
 //
-// Encode + WebP/AVIF + resize (via para:gpu conv2D) follow in subsequent
+// Encode + WebP/AVIF + resize (via parabun:gpu conv2D) follow in subsequent
 // commits — tracks LYK-723.
 
 const native = $cpp("parabun_image_codecs.cpp", "createParabunImageCodecs");
 
 const NOT_IMPLEMENTED_MSG =
-  "para:image is scaffolded but not yet implemented — see https://linear.app/lyku/issue/LYK-723";
+  "parabun:image is scaffolded but not yet implemented — see https://linear.app/lyku/issue/LYK-723";
 
 function todo(): never {
   throw new Error(NOT_IMPLEMENTED_MSG);
@@ -58,7 +58,7 @@ type BlurOptions = {
   /** Blur radius in pixels. 0 = passthrough, 100 = max. */
   radius: number;
   /**
-   * Opt-in to GPU dispatch. Routes through para:gpu's conv2D primitive,
+   * Opt-in to GPU dispatch. Routes through parabun:gpu's conv2D primitive,
    * which uses CUDA on Linux/Windows and Metal on macOS when available
    * and falls back to CPU (the same kernel as the default path) when no
    * GPU backend is active. Worth flipping on for ≥ 1 MP images on
@@ -116,27 +116,27 @@ type SharpenOptions = {
 
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
-    throw new TypeError("para:image.decode: expected Uint8Array");
+    throw new TypeError("parabun:image.decode: expected Uint8Array");
   }
   return native.decode(bytes);
 }
 
 function encode(img: DecodedImage, opts: EncodeOptions): Uint8Array {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.encode: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.encode: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null || typeof opts.format !== "string") {
-    throw new TypeError('para:image.encode: opts must be { format: "jpeg" | "png", quality? }');
+    throw new TypeError('parabun:image.encode: opts must be { format: "jpeg" | "png", quality? }');
   }
   return native.encode(img, opts);
 }
 
 function resize(img: DecodedImage, opts: ResizeOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.resize: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.resize: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("para:image.resize: opts must be { width, height }");
+    throw new TypeError("parabun:image.resize: opts must be { width, height }");
   }
   return native.resize(img, opts);
 }
@@ -159,20 +159,20 @@ type BoxBlurOptions = {
 // content has 2× more headroom.
 function boxBlur(img: DecodedImage, opts: BoxBlurOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.boxBlur: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.boxBlur: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("para:image.boxBlur: opts must be { radius }");
+    throw new TypeError("parabun:image.boxBlur: opts must be { radius }");
   }
   return native.boxBlur(img, opts);
 }
 
 function blur(img: DecodedImage, opts: BlurOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.blur: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.blur: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("para:image.blur: opts must be { radius }");
+    throw new TypeError("parabun:image.blur: opts must be { radius }");
   }
   if (opts.gpu === true) {
     return blurGpu(img, opts.radius);
@@ -180,7 +180,7 @@ function blur(img: DecodedImage, opts: BlurOptions): DecodedImage {
   return native.blur(img, opts);
 }
 
-// GPU blur dispatch path. Calls para:gpu's fused single-launch
+// GPU blur dispatch path. Calls parabun:gpu's fused single-launch
 // `imageBlurRGBA` kernel that handles uint8 RGBA → uint8 RGBA in one
 // CUDA / Metal pass. Per-channel deinterleave is done on-device, so
 // the JS layer only ships the packed bytes — no JS-side loop over
@@ -193,7 +193,7 @@ function blur(img: DecodedImage, opts: BlurOptions): DecodedImage {
 //     today; 1- and 3-channel inputs use the optimized CPU SIMD path.
 function blurGpu(img: DecodedImage, radius: number): DecodedImage {
   if (!Number.isInteger(radius) || radius < 0 || radius > 100) {
-    throw new RangeError(`para:image.blur: radius must be in [0, 100]; got ${radius}`);
+    throw new RangeError(`parabun:image.blur: radius must be in [0, 100]; got ${radius}`);
   }
   if (img.channels !== 4) {
     return native.blur(img, { radius });
@@ -217,58 +217,58 @@ function blurGpu(img: DecodedImage, radius: number): DecodedImage {
 
 function sharpen(img: DecodedImage, opts?: SharpenOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.sharpen: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.sharpen: img must be the object returned from decode()");
   }
   return native.sharpen(img, opts ?? {});
 }
 
 function edgeDetect(img: DecodedImage): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.edgeDetect: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.edgeDetect: img must be the object returned from decode()");
   }
   return native.edgeDetect(img);
 }
 
 function rotate(img: DecodedImage, opts: RotateOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.rotate: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.rotate: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("para:image.rotate: opts must be { degrees }");
+    throw new TypeError("parabun:image.rotate: opts must be { degrees }");
   }
   return native.rotate(img, opts);
 }
 
 function flip(img: DecodedImage, opts: FlipOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.flip: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.flip: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("para:image.flip: opts must be { axis }");
+    throw new TypeError("parabun:image.flip: opts must be { axis }");
   }
   return native.flip(img, opts);
 }
 
 function crop(img: DecodedImage, opts: CropOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.crop: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.crop: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null) {
-    throw new TypeError("para:image.crop: opts must be { x, y, width, height }");
+    throw new TypeError("parabun:image.crop: opts must be { x, y, width, height }");
   }
   return native.crop(img, opts);
 }
 
 function toGrayscale(img: DecodedImage): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.toGrayscale: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.toGrayscale: img must be the object returned from decode()");
   }
   return native.toGrayscale(img);
 }
 
 function adjust(img: DecodedImage, opts?: AdjustOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.adjust: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.adjust: img must be the object returned from decode()");
   }
   return native.adjust(img, opts ?? {});
 }
@@ -282,41 +282,41 @@ function adjust(img: DecodedImage, opts?: AdjustOptions): DecodedImage {
  */
 function hueShift(img: DecodedImage, degrees: number): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.hueShift: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.hueShift: img must be the object returned from decode()");
   }
   if (typeof degrees !== "number" || !Number.isFinite(degrees)) {
-    throw new TypeError("para:image.hueShift: degrees must be a finite number");
+    throw new TypeError("parabun:image.hueShift: degrees must be a finite number");
   }
   return native.hueShift(img, degrees);
 }
 
 function histogram(img: DecodedImage): Uint32Array[] {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.histogram: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.histogram: img must be the object returned from decode()");
   }
   return native.histogram(img);
 }
 
 function composite(base: DecodedImage, overlay: DecodedImage, opts?: CompositeOptions): DecodedImage {
   if (typeof base !== "object" || base === null) {
-    throw new TypeError("para:image.composite: base must be the object returned from decode()");
+    throw new TypeError("parabun:image.composite: base must be the object returned from decode()");
   }
   if (typeof overlay !== "object" || overlay === null) {
-    throw new TypeError("para:image.composite: overlay must be the object returned from decode()");
+    throw new TypeError("parabun:image.composite: overlay must be the object returned from decode()");
   }
   return native.composite(base, overlay, opts ?? {});
 }
 
 function invert(img: DecodedImage): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.invert: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.invert: img must be the object returned from decode()");
   }
   return native.invert(img);
 }
 
 function threshold(img: DecodedImage, opts?: ThresholdOptions): DecodedImage {
   if (typeof img !== "object" || img === null) {
-    throw new TypeError("para:image.threshold: img must be the object returned from decode()");
+    throw new TypeError("parabun:image.threshold: img must be the object returned from decode()");
   }
   return native.threshold(img, opts ?? {});
 }
@@ -363,7 +363,7 @@ class Pipeline {
 
   constructor(bytes: Uint8Array) {
     if (!(bytes instanceof Uint8Array)) {
-      throw new TypeError("para:image.pipeline: input must be a Uint8Array");
+      throw new TypeError("parabun:image.pipeline: input must be a Uint8Array");
     }
     this.#bytes = bytes;
     this.#ops = [];
@@ -422,7 +422,7 @@ class Pipeline {
   /** Materialize the pipeline. Returns the encoded bytes. */
   toBytes(opts: EncodeOutOptions): Uint8Array {
     if (typeof opts !== "object" || opts === null || typeof opts.format !== "string") {
-      throw new TypeError("para:image.pipeline.toBytes: opts must be { format, quality?, lossless? }");
+      throw new TypeError("parabun:image.pipeline.toBytes: opts must be { format, quality?, lossless? }");
     }
     return native.runPipeline(this.#bytes, this.#ops, opts);
   }

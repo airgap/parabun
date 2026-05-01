@@ -1,10 +1,10 @@
-// Hardcoded module "para:camera"
+// Hardcoded module "parabun:camera"
 //
 // Parabun: zero-dependency camera capture for the embedded edge runtime.
 // V4L2 on Linux today; AVFoundation (macOS) and Media Foundation (Windows)
 // follow on top of the same JS surface.
 //
-//   import camera from "para:camera";
+//   import camera from "parabun:camera";
 //
 //   // Enumerate cameras
 //   const devs = await camera.devices();
@@ -320,7 +320,7 @@ async function open(path: string, opts: OpenOptions): Promise<Camera> {
 
 /**
  * Convert a captured frame into RGBA8 (length = width × height × 4). Routed
- * through para:image for "mjpg" (JPEG decode) and a scalar YUV→RGB matrix
+ * through parabun:image for "mjpg" (JPEG decode) and a scalar YUV→RGB matrix
  * for "yuyv" / "nv12". A native fast path lands once the kernel-residency
  * tail of the pipeline is shaped.
  */
@@ -342,7 +342,7 @@ function toRgba(frame: Frame, _opts?: { gpu?: boolean }): Uint8Array {
   }
   if (frame.format === "yuyv") {
     // YUYV → RGBA. Two source pixels per 4-byte block (Y0 U Y1 V) → two
-    // RGBA pixels. Scalar reference; para:image's SIMD shuffle path can
+    // RGBA pixels. Scalar reference; parabun:image's SIMD shuffle path can
     // be plugged in once it's externally callable.
     const w = frame.width,
       h = frame.height;
@@ -378,13 +378,13 @@ function toRgba(frame: Frame, _opts?: { gpu?: boolean }): Uint8Array {
     return out;
   }
   if (frame.format === "mjpg") {
-    // MJPEG frames are complete JPEG bitstreams — decode via para:image:
-    //   import image from "para:image";
+    // MJPEG frames are complete JPEG bitstreams — decode via parabun:image:
+    //   import image from "parabun:image";
     //   const decoded = await image.decode(frame.data);
-    // We don't import para:image here because cross-module imports between
+    // We don't import parabun:image here because cross-module imports between
     // bun:* builtins aren't supported by the internal bundler.
     throw new Error(
-      'para:camera.toRgba: for "mjpg" frames, decode the JPEG with para:image: `await image.decode(frame.data)`',
+      'parabun:camera.toRgba: for "mjpg" frames, decode the JPEG with parabun:image: `await image.decode(frame.data)`',
     );
   }
   if (frame.format === "nv12") {
@@ -415,7 +415,7 @@ function toRgba(frame: Frame, _opts?: { gpu?: boolean }): Uint8Array {
     }
     return out;
   }
-  throw new Error(`para:camera: toRgba does not yet support format "${frame.format}"`);
+  throw new Error(`parabun:camera: toRgba does not yet support format "${frame.format}"`);
 }
 
 export default {

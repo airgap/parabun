@@ -1,10 +1,10 @@
-// Hardcoded module "para:i2c"
+// Hardcoded module "parabun:i2c"
 //
 // Linux i2c-dev character device wrapper. Combined-message transactions
 // via I2C_RDWR + SMBus shortcuts via I2C_SMBUS. Same shape on RPi 4/5,
 // Jetson, NUC + breakout — character device, no vendored libi2c.
 //
-//   import i2c from "para:i2c";
+//   import i2c from "parabun:i2c";
 //
 //   const buses = i2c.buses();   // sync — [{ path, name, capabilities }]
 //
@@ -121,7 +121,7 @@ interface Bus extends AsyncDisposable {
 }
 
 // FinalizationRegistry backstop — if a Bus drops without close(), the kernel
-// fd is freed at GC time rather than leaking. Same pattern as para:gpio.
+// fd is freed at GC time rather than leaking. Same pattern as parabun:gpio.
 const busRegistry = new FinalizationRegistry<bigint>(fd => {
   if (fd !== 0n) native.closeBus(fd);
 });
@@ -210,7 +210,7 @@ class BusImpl implements Bus {
   }
 
   assertOpen(): void {
-    if (this.#closed) throw new Error("para:i2c: bus is closed");
+    if (this.#closed) throw new Error("parabun:i2c: bus is closed");
   }
 
   async scan(): Promise<number[]> {
@@ -234,7 +234,7 @@ class BusImpl implements Bus {
   device(addr: number): Device {
     this.assertOpen();
     if (typeof addr !== "number" || !Number.isInteger(addr) || addr < 0 || addr > 0x7f) {
-      throw new RangeError(`para:i2c: addr must be a 7-bit integer in [0x00, 0x7f], got ${addr}`);
+      throw new RangeError(`parabun:i2c: addr must be a 7-bit integer in [0x00, 0x7f], got ${addr}`);
     }
     return new DeviceImpl(this, addr);
   }
@@ -259,7 +259,7 @@ class BusImpl implements Bus {
 /** Open an i2c bus by absolute /dev path. */
 function open(path: string): Bus {
   if (typeof path !== "string" || path.length === 0) {
-    throw new TypeError("para:i2c.open: path must be a non-empty string");
+    throw new TypeError("parabun:i2c.open: path must be a non-empty string");
   }
   // Ask the native side for bus info first so path/name/capabilities are
   // available before we hand back the bus — and we get a clear error if

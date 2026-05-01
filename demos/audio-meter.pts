@@ -1,4 +1,4 @@
-// Live mic peak meter — para:audio capture + parabun `effect { }` block.
+// Live mic peak meter — parabun:audio capture + parabun `effect { }` block.
 //
 //   bun run build:release demos/audio-meter.pts
 //
@@ -7,7 +7,7 @@
 // redraw a one-line VU bar. The signal is rate-limited to ~10 Hz at the
 // source, so this is the redraw rate too. Stops with Ctrl-C.
 
-import audio from "para:audio";
+import audio from "parabun:audio";
 
 await using mic = await audio.capture({
   device: "default",
@@ -31,5 +31,5 @@ effect {
 // Drain frames so the capture loop keeps producing peakLevel updates.
 for await (const _frame of mic.frames()) {
   // The frame data isn't needed for the meter — peakLevel updates as
-  // each frame is processed inside para:audio.
+  // each frame is processed inside parabun:audio.
 }

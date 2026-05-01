@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("para:gpu — variance / stddev", () => {
+describe("parabun:gpu — variance / stddev", () => {
   it("variance and stddev of [1, 2, 3, 4, 5] match the analytical answer", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-basic",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3, 4, 5]);
         // mean = 3. squared deviations: 4 + 1 + 0 + 1 + 4 = 10.
@@ -36,7 +36,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-sample",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3, 4, 5]);
         // sample variance = sumSq / (n - 1) = 10 / 4 = 2.5
@@ -52,7 +52,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-constant",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([7, 7, 7, 7, 7, 7]);
         console.log("var",    gpu.variance(input));
@@ -70,7 +70,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-large-offset",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         // Six values clustered around 1e6 with dev ±1, ±2, ±3.
         const input = new Float32Array([1e6 - 3, 1e6 - 2, 1e6 - 1, 1e6 + 1, 1e6 + 2, 1e6 + 3]);
@@ -87,7 +87,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-u32",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([1, 2, 3, 4, 5]);
         console.log("var", gpu.variance(input));
@@ -103,7 +103,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-cov",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([100, 102, 98, 101, 99, 103, 97, 100]);
         const mean = gpu.reduce(input, "sum") / input.length;
@@ -120,7 +120,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-empty",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const empty = new Float32Array(0);
         console.log("var", gpu.variance(empty));
@@ -135,7 +135,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-ddof-too-big",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3]);
         console.log("ddof3", gpu.variance(input, { ddof: 3 }));
@@ -152,7 +152,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-bad-ddof",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3]);
         let threw = 0;
@@ -170,7 +170,7 @@ describe("para:gpu — variance / stddev", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-variance-immutable",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([5, 2, 8, 1, 7]);
         const before = Array.from(input).join(",");

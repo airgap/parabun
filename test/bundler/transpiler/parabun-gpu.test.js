@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("para:gpu scaffold", () => {
+describe("parabun:gpu scaffold", () => {
   it("module resolves and exposes expected surface", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-surface",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         console.log(JSON.stringify({
           dot: typeof gpu.dot,
           matVec: typeof gpu.matVec,
@@ -65,7 +65,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-cpu-available",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         console.log(gpu.hasBackend("cpu"));
       `,
     );
@@ -81,7 +81,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-active",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         console.log(gpu.activeBackend());
       `,
     );
@@ -96,7 +96,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wins-false",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const results = [
           gpu.winsForSize("matmul", 1_000_000, 4),
           gpu.winsForSize("dot", 1_000_000, 8),
@@ -118,7 +118,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matvec-large",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         import simd from "para:simd";
         const M = 1024;
         const K = 1024; // M*K = 1<<20, exactly the threshold
@@ -170,7 +170,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-dot-f32",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         import simd from "para:simd";
         const a = new Float32Array([1, 2, 3, 4, 5]);
         const b = new Float32Array([10, 20, 30, 40, 50]);
@@ -187,7 +187,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matvec-f32",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         import simd from "para:simd";
         // 3x4 matrix times a 4-vector
         const m = new Float32Array([1,2,3,4, 5,6,7,8, 9,10,11,12]);
@@ -207,7 +207,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matmul-identity",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         // 2x3 times 3x2 = 2x2
         // A = [[1,2,3],[4,5,6]]
         // B = [[7,8],[9,10],[11,12]]
@@ -229,7 +229,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-setbackend-auto",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const before = gpu.activeBackend();
         gpu.setBackend("auto");
@@ -251,7 +251,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-setbackend-error",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         try {
           gpu.setBackend(${JSON.stringify(unavailable)});
           console.log("ERR: should have thrown");
@@ -271,7 +271,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-alloc-shape",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = gpu.alloc(128, "f32");
         const b = gpu.alloc(64, "f64");
         const e = gpu.alloc(0, "f32");
@@ -304,7 +304,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-alloc-invalid",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const cases = [
           () => gpu.alloc(-1, "f32"),
           () => gpu.alloc(1.5, "f32"),
@@ -338,7 +338,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-isaligned",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const allocd = gpu.alloc(1024, "f32");
         console.log(JSON.stringify({
           allocd: gpu.isAligned(allocd),
@@ -369,7 +369,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matvec-alloc",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const M = 1024, K = 1024; // M*K = 1<<20, at threshold
         const plainMat = new Float32Array(M * K);
         const plainVec = new Float32Array(K);
@@ -403,7 +403,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-shape",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const h = gpu.hold(a);
         const beforeRelease = {
@@ -434,7 +434,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-invalid",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const results = [];
         for (const fn of [
           () => gpu.hold([1, 2, 3]),
@@ -460,7 +460,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-use-after-release",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const mat = new Float32Array(3 * 4);
         for (let i = 0; i < mat.length; i++) mat[i] = i + 1;
         const vec = new Float32Array([1, 1, 1, 1]);
@@ -496,7 +496,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-matvec-equiv",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const M = 1024, K = 1024;
         const mat = gpu.alloc(M * K, "f32"); // alloc so the non-held path takes NOCOPY too
         const vec = new Float32Array(K);
@@ -533,7 +533,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-dot-equiv",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4, 5]);
         const b = new Float32Array([10, 20, 30, 40, 50]);
         const plain = gpu.dot(a, b);
@@ -554,7 +554,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-matmul-equiv",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1,2,3, 4,5,6]);
         const b = new Float32Array([7,8, 9,10, 11,12]);
         const plain = gpu.matmul(a, b, 2, 3, 2);
@@ -577,7 +577,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-simdmap-equiv",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const plain = gpu.simdMap(x => x * x, a);
         const h = gpu.hold(a);
@@ -597,7 +597,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-use-after-release-ops",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         const ha = gpu.hold(a);
@@ -619,7 +619,7 @@ describe("para:gpu scaffold", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-describe",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const d = gpu.describe();
         console.log(JSON.stringify({
           active: d.active,
@@ -641,12 +641,12 @@ describe("para:gpu scaffold", () => {
   });
 });
 
-describe("para:gpu GpuFloat32Array wrapper", () => {
+describe("parabun:gpu GpuFloat32Array wrapper", () => {
   it("constructs from an existing Float32Array and exposes the same view", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-from-array",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const src = new Float32Array([1, 2, 3, 4]);
         const w = new gpu.GpuFloat32Array(src);
         const sameView = w.view === src;
@@ -663,7 +663,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-from-length",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const w = new gpu.GpuFloat32Array(8);
         const view = w.view;
         const isF32 = view instanceof Float32Array;
@@ -681,7 +681,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-bad-arg",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         let threw = false;
         let msg = "";
         try {
@@ -701,7 +701,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-matmul",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         const wa = new gpu.GpuFloat32Array(a);
@@ -720,7 +720,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-dot-simdmap",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         const wa = new gpu.GpuFloat32Array(a);
@@ -740,7 +740,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-release",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const w = new gpu.GpuFloat32Array(new Float32Array([1, 2, 3, 4]));
         w.release();
         let viewThrew = false, viewMsg = "";
@@ -770,7 +770,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matmul-out",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         const out = new Float32Array(4);
@@ -789,7 +789,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matmul-out-sab",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         const sab = new SharedArrayBuffer(4 * 4);
@@ -814,7 +814,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matmul-out-reject",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         let tooSmall = false, wrongType = false;
@@ -839,7 +839,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matmul-out-reuse",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array([1, 2, 3, 4]);
         const b = new Float32Array([5, 6, 7, 8]);
         const out = new Float32Array(4);
@@ -856,7 +856,7 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wrapper-using",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         let after;
         {
           using w = new gpu.GpuFloat32Array(new Float32Array([9, 9, 9, 9]));
@@ -877,12 +877,12 @@ describe("para:gpu GpuFloat32Array wrapper", () => {
   });
 });
 
-describe("para:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
+describe("parabun:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
   it("releasePinned is part of the public surface", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-pinned-surface",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         console.log(typeof gpu.releasePinned);
       `,
     );
@@ -897,7 +897,7 @@ describe("para:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-pinned-alloc",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = gpu.alloc(8, "f32", { pinned: true });
         for (let i = 0; i < 8; i++) a[i] = i + 1;
         let s = 0;
@@ -929,7 +929,7 @@ describe("para:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-pinned-nonpinned",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = new Float32Array(4);
         console.log(gpu.releasePinned(a));
       `,
@@ -942,7 +942,7 @@ describe("para:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-pinned-f64",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         const a = gpu.alloc(16, "f64", { pinned: true });
         for (let i = 0; i < 16; i++) a[i] = (i + 1) * 0.5;
         let s = 0;
@@ -969,7 +969,7 @@ describe("para:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
   });
 });
 
-describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
+describe("parabun:gpu per-host calibration (CUDA simdMap crossover)", () => {
   // `calibrate()` sweeps the real PTX kernel vs para:simd and persists a
   // crossover under $XDG_CACHE_HOME/parabun/. We point XDG_CACHE_HOME at a
   // tempDir so the test doesn't touch the user's real cache, and the
@@ -979,7 +979,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-calibrate-surface",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         console.log(typeof gpu.calibrate);
       `,
     );
@@ -991,7 +991,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-calibrate-cpu",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.calibrate();
@@ -1008,7 +1008,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
   it("writes a cache file and reports the measured crossover", async () => {
     using dir = tempDir("parabun-gpu-calibrate-persist", {
       "index.pjs": `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         import fs from "node:fs";
         if (gpu.activeBackend() !== "cuda") {
           console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
@@ -1064,7 +1064,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
     // static default (1 << 18) instead.
     using dir = tempDir("parabun-gpu-calibrate-rehydrate", {
       "index.pjs": `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         if (gpu.activeBackend() !== "cuda") {
           console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
           process.exit(0);
@@ -1087,7 +1087,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
       cmd: [
         bunExe(),
         "-e",
-        `import gpu from "para:gpu";
+        `import gpu from "parabun:gpu";
          import fs from "node:fs";
          if (gpu.activeBackend() !== "cuda") { console.log(JSON.stringify({ skipped: true })); process.exit(0); }
          const r = gpu.calibrate();
@@ -1135,7 +1135,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
     // (1 << 18 = 262144).
     using dir = tempDir("parabun-gpu-calibrate-skip", {
       "index.pjs": `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         if (gpu.activeBackend() !== "cuda") {
           console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
           process.exit(0);
@@ -1155,7 +1155,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
       cmd: [
         bunExe(),
         "-e",
-        `import gpu from "para:gpu";
+        `import gpu from "parabun:gpu";
          import fs from "node:fs";
          if (gpu.activeBackend() !== "cuda") { console.log(JSON.stringify({ skipped: true })); process.exit(0); }
          const r = gpu.calibrate();
@@ -1196,7 +1196,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
     // different GPU, we must discard it and fall back to the static default.
     using dir = tempDir("parabun-gpu-calibrate-invalidate", {
       "index.pjs": `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         if (gpu.activeBackend() !== "cuda") {
           console.log(JSON.stringify({ skipped: true, backend: gpu.activeBackend() }));
           process.exit(0);
@@ -1214,7 +1214,7 @@ describe("para:gpu per-host calibration (CUDA simdMap crossover)", () => {
       cmd: [
         bunExe(),
         "-e",
-        `import gpu from "para:gpu";
+        `import gpu from "parabun:gpu";
          import fs from "node:fs";
          if (gpu.activeBackend() !== "cuda") { console.log(JSON.stringify({ skipped: true })); process.exit(0); }
          const r = gpu.calibrate();

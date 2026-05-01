@@ -20,17 +20,17 @@ Parabun closes those gaps inside one statically-linked binary:
 | Module | What it gives you |
 |---|---|
 | [`para:parallel`](#parallel-execution-paraparallel) | Persistent worker pool with `pmap` / `preduce`, SAB-shared state via `para:arena` |
-| [`para:gpu`](#gpu-compute-paragpu) | Raw CUDA + Metal kernels in TypeScript template strings, NVRTC at runtime, fallback chain |
+| [`parabun:gpu`](#gpu-compute-paragpu) | Raw CUDA + Metal kernels in TypeScript template strings, NVRTC at runtime, fallback chain |
 | [`para:simd`](#simd-primitives-parasimd) | Typed-array SIMD primitives without WASM gymnastics |
 | [`para:pipeline`](#pipeline-fusion-parapipeline) | Typed-array pipeline fusion that promotes to GPU when inputs are large enough |
 | [`para:arena`](#buffer-pooling-paraarena) | Buffer pooling so worker boundaries don't cost a `Uint8Array` allocation per chunk |
-| [`para:camera`](#camera-paracamera) / [`para:audio`](#audio-codecs--dsp-paraaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
-| `para:gpio` / `para:i2c` / `para:spi` | Userspace peripheral access on Linux SBCs — character-device wrappers (uAPI v2 GPIO, i2c-dev, spidev). Same surface across Pi 4/5, Jetson, NUC + breakout. |
-| [`para:image`](#image-codecs--filters-paraimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
-| [`para:llm`](#llm-inference-parallm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + Whisper STT + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
-| [`para:speech`](#speech-paraspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `say()` (mic → speaker in one call) and `speak()` (returns raw PCM), whisper-backed `wakeWord()` — voice in / voice out / hands-free trigger from one module. |
-| [`para:mcp`](https://parabun.script.dev/docs/mcp/) | Model Context Protocol client — stdio + WebSocket transports. Composes structurally with `para:assistant`'s `tools:` option. |
-| [`para:assistant`](#voice-assistant-paraassistant) | Three-line voice assistant: mic + STT + LLM + TTS + speaker, fully local. Tool dispatch (inline + MCP), barge-in, wake word, scheduled prompts, RAG, sqlite-backed persistent memory, reactive signals. |
+| [`parabun:camera`](#camera-paracamera) / [`parabun:audio`](#audio-codecs--dsp-paraaudio) | Direct V4L2 / ALSA from TypeScript, no `ffmpeg` subprocess, no node-gyp |
+| `parabun:gpio` / `parabun:i2c` / `parabun:spi` | Userspace peripheral access on Linux SBCs — character-device wrappers (uAPI v2 GPIO, i2c-dev, spidev). Same surface across Pi 4/5, Jetson, NUC + breakout. |
+| [`parabun:image`](#image-codecs--filters-paraimage) | JPEG/PNG/WebP codecs + the full Sharp-class pixel pipeline, all statically vendored |
+| [`parabun:llm`](#llm-inference-parallm) | GGUF runtime — Llama / Qwen2 transformer + BERT embeddings + Whisper STT + GPU residency, plus `llm.serve()` for an OpenAI-compatible HTTP API. ~340 tok/s on RTX 4070 Ti, at ollama parity. |
+| [`parabun:speech`](#speech-paraspeech) | VAD-gated `listen()`, Whisper `transcribe()`, Piper `say()` (mic → speaker in one call) and `speak()` (returns raw PCM), whisper-backed `wakeWord()` — voice in / voice out / hands-free trigger from one module. |
+| [`para:mcp`](https://parabun.script.dev/docs/mcp/) | Model Context Protocol client — stdio + WebSocket transports. Composes structurally with `parabun:assistant`'s `tools:` option. |
+| [`parabun:assistant`](#voice-assistant-paraassistant) | Three-line voice assistant: mic + STT + LLM + TTS + speaker, fully local. Tool dispatch (inline + MCP), barge-in, wake word, scheduled prompts, RAG, sqlite-backed persistent memory, reactive signals. |
 
 If you've ever spawned a Python subprocess from your Node server because Node couldn't keep up — or written an N-API module because there was no other way to touch your camera / GPU / SIMD lanes — Parabun is the runtime that deletes the subprocess and the binding both.
 
@@ -40,26 +40,26 @@ import parallel from "para:parallel";
 const scores = await parallel.pmap(scoreChunk, chunks, { concurrency: 8 });
 
 // Raw CUDA kernel from TypeScript — no WebGPU shader, no .cu file
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 gpu.setBackend("cuda");
 const result = gpu.matVec(matrix, vector, M, N);
 
 // On-device LLM — GGUF mmap, residency-held weights, single-process
-import llm from "para:llm";
+import llm from "parabun:llm";
 using m = await llm.LLM.load("./Llama-3.2-1B-Instruct-Q4_K_M.gguf");
 for await (const piece of m.chat([{ role: "user", content: "..." }])) {
   process.stdout.write(piece);
 }
 
 // Live camera + microphone — kernel-direct V4L2 / ALSA
-import camera from "para:camera";
-import audio  from "para:audio";
+import camera from "parabun:camera";
+import audio  from "parabun:audio";
 await using cam = await camera.open("/dev/video0", { format: "mjpg", width: 1280, height: 720 });
 await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
 for await (const frame of cam.frames()) { /* ... */ }
 
 // Three-line voice assistant — local STT + LLM + TTS, no cloud round-trip
-import assistant from "para:assistant";
+import assistant from "parabun:assistant";
 await using bot = await assistant.create({
   llm: "/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
   stt: "/models/ggml-tiny.en.bin",
@@ -72,12 +72,12 @@ Parabun is a drop-in replacement for Bun — your existing `.ts` / `.js` files r
 
 > **What this isn't:** a numerical-Python replacement. NumPy, JAX, PyTorch, and CuPy are deeply ahead in scientific computing and ML training, and Parabun won't catch them. The pitch is *for the developer who'd otherwise leave TypeScript* — to spawn a Python sidecar, to write an N-API module, or to put a perf-critical service in Rust. Parabun keeps that developer in TypeScript.
 
-### LLM Inference (`para:llm`)
+### LLM Inference (`parabun:llm`)
 
-`para:llm` is a from-scratch GGUF runtime — file loader, byte-level BPE tokenizer, Llama/Qwen2 transformer forward pass, BERT-family encoder for embeddings, greedy and nucleus sampling, constrained decoding (GBNF + JSON schema), KV prefix caching, and speculative decoding — behind a small `load`/`generate`/`chat`/`embed` surface. Weights stream off disk via `mmap`; the residual stream, KV cache, and all matmuls stay on-device. Only the 4-byte argmax crosses PCIe per token.
+`parabun:llm` is a from-scratch GGUF runtime — file loader, byte-level BPE tokenizer, Llama/Qwen2 transformer forward pass, BERT-family encoder for embeddings, greedy and nucleus sampling, constrained decoding (GBNF + JSON schema), KV prefix caching, and speculative decoding — behind a small `load`/`generate`/`chat`/`embed` surface. Weights stream off disk via `mmap`; the residual stream, KV cache, and all matmuls stay on-device. Only the 4-byte argmax crosses PCIe per token.
 
 ```ts
-import llm from "para:llm";
+import llm from "parabun:llm";
 
 using m = await llm.LLM.load("./Llama-3.2-1B-Instruct-Q4_K_M.gguf");
 
@@ -96,7 +96,7 @@ for await (const piece of m.chat([
 - **Constrained decoding**: GBNF grammars or a JSON schema mask tokens that would take the parse off-accept before sampling — output is guaranteed to conform.
 - **Speculative decoding**: pass a smaller `draft` model and `speculativeK` to skip target forwards when the draft agrees, with exact Leviathan et al. accept-reject math.
 - **Prefix caching**: `LLM.prefix(sharedPreamble)` snapshots KV + logits once; subsequent `generate()` / `chat()` calls that start with the same tokens skip prefill entirely.
-- **Backends**: CUDA on Linux/Windows (via `para:gpu`'s driver + NVRTC path), CPU fallback on any host. Metal kernels not yet wired.
+- **Backends**: CUDA on Linux/Windows (via `parabun:gpu`'s driver + NVRTC path), CPU fallback on any host. Metal kernels not yet wired.
 - **Speech recognition**: `llm.WhisperModel.load(path)` loads a `ggml-*.bin` Whisper checkpoint (tiny.en / base.en) and exposes `transcribe(samples)` / `transcribeMel(mel, T)`. Encoder-decoder forward pass shares the matVec / KV-cache machinery with the Llama path; CUDA on, CPU fallback otherwise. Decoder QKV is fused at load time. A reactive `m.busy` signal flips while a transcription is in flight.
 - **Reactive surface**: `m.busy` (writable, refcounted across nested calls) and `m.device` (`"cuda"` / `"metal"` / `"cpu"`) are exposed as signals — pair with `para:signals` to drive UI without polling.
 
@@ -110,25 +110,25 @@ Llama-3.2-1B-Instruct Q4_K_M on RTX 4070 Ti (release build, best-of-5):
 
 At ollama parity on this model/hardware. `bench/llm-tps.ts` reproduces the numbers; `bench/parabun-llm/run.pjs` is the end-user-style harness.
 
-### GPU Compute (`para:gpu`)
+### GPU Compute (`parabun:gpu`)
 
-`para:gpu` is a compute-only GPU surface (not graphics) that mirrors the hot parts of `para:simd`. It probes a backend chain — Metal on darwin, CUDA on Linux/Windows, CPU fallback always available — and picks the first one whose runtime loads.
+`parabun:gpu` is a compute-only GPU surface (not graphics) that mirrors the hot parts of `para:simd`. It probes a backend chain — Metal on darwin, CUDA on Linux/Windows, CPU fallback always available — and picks the first one whose runtime loads.
 
 ```ts
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 
 gpu.describe();              // { active: "metal", available: ["metal","cpu"], ... }
 const scores = gpu.matVec(embeddings, query, N, D);  // MSL kernel on Apple Silicon
 const out    = gpu.simdMap(x => x * 3 + 7, big);     // affine — dispatched to GPU if large enough
 ```
 
-Two thresholds, not one: a **dispatch** threshold lets the GPU kernel run (so tests exercise the real path), and a **wins** threshold (`gpu.winsForSize(op, n, elemBytes)`) tells callers when routing through `para:gpu` actually beats `para:simd`. Today `simdMap` wins at ≥ 1<<18 f32 elements; `matVec` is compiled and correct but not yet winning (the naive MSL kernel is bandwidth-bound on M1/M2).
+Two thresholds, not one: a **dispatch** threshold lets the GPU kernel run (so tests exercise the real path), and a **wins** threshold (`gpu.winsForSize(op, n, elemBytes)`) tells callers when routing through `parabun:gpu` actually beats `para:simd`. Today `simdMap` wins at ≥ 1<<18 f32 elements; `matVec` is compiled and correct but not yet winning (the naive MSL kernel is bandwidth-bound on M1/M2).
 
 `para:pipeline`'s fusion tier reads `winsForSize` automatically — a fused affine chain over a large enough `Float32Array` promotes from stacked `simd.mulScalar`+`simd.addScalar` to `gpu.simdMap` without user code changes.
 
 Beyond `dot` / `matVec` / `matmul` / `simdMap`, the module exposes a growing set of data-parallel primitives that backends can override but otherwise ship with a CPU reference:
 
-- **`conv2D(input, kernel, iW, iH, kW, kH)`** — 2D valid-mode convolution. Used by `para:image` resize / blur / sharpen and as a general 2D-correlation primitive.
+- **`conv2D(input, kernel, iW, iH, kW, kH)`** — 2D valid-mode convolution. Used by `parabun:image` resize / blur / sharpen and as a general 2D-correlation primitive.
 - **`scan(input)`** — inclusive prefix sum. `Float32Array` (Kahan-compensated) or `Uint32Array` (u32-wrapping); the latter is the standard parallel-compaction primitive.
 - **`reduce(input, op)`** — `"sum"` / `"min"` / `"max"`. Empty inputs follow JS conventions (sum=0, min=+∞, max=-∞).
 - **`argMin(input)` / `argMax(input)`** — index of the extremum, first-occurrence tie-break, NaN-propagating, throws on empty.
@@ -219,12 +219,12 @@ parabun (para:arena Pool)    248.8 ms      → 2.85×
 
 This is a microbench by design — it isolates the allocator/zero-init/GC-tracking cost. If your handler spends 10 ms of real CPU per request and 20 µs on allocation, pooling won't move the needle. The win shows up where allocation is a measurable fraction of the workload (binary protocol gateways, columnar pre-processing, tight encode/decode loops). Pass `clear: true` if recycled buffers must not carry old bytes — defaults to off, since skipping the zero-init is the point of a pool.
 
-### Image Codecs + Filters (`para:image`)
+### Image Codecs + Filters (`parabun:image`)
 
-`para:image` is a Sharp-class image module baked into the runtime — JPEG / PNG / WebP decode and encode, plus a CPU pixel-pipeline of resize / blur / sharpen / edge-detect / rotate / flip / crop / compose / tone-correction / histogram / threshold / invert / grayscale. Codecs are vendored statically (libjpeg-turbo, libpng, libwebp + libsharpyuv), so there's no `npm install sharp` and no Node-ABI-versioned binary distribution.
+`parabun:image` is a Sharp-class image module baked into the runtime — JPEG / PNG / WebP decode and encode, plus a CPU pixel-pipeline of resize / blur / sharpen / edge-detect / rotate / flip / crop / compose / tone-correction / histogram / threshold / invert / grayscale. Codecs are vendored statically (libjpeg-turbo, libpng, libwebp + libsharpyuv), so there's no `npm install sharp` and no Node-ABI-versioned binary distribution.
 
 ```ts
-import image from "para:image";
+import image from "parabun:image";
 
 const bytes = await Bun.file("photo.jpg").bytes();
 const img = image.decode(bytes);                                // { data, width, height, channels, format }
@@ -243,12 +243,12 @@ await Bun.write("photo.webp", out);
 - **Analysis**: `histogram(img)` returns one `Uint32Array(256)` per channel.
 - **Composite**: `composite(base, overlay, { x?, y? })` — Porter-Duff source-over alpha blending; clipping handles out-of-bounds overlay regions silently.
 
-### Camera (`para:camera`)
+### Camera (`parabun:camera`)
 
-`para:camera` is a zero-dependency capture surface for V4L2 cameras on Linux — UVC webcams, CSI cameras, anything that exposes itself as `/dev/video*`. AVFoundation (macOS) and Media Foundation (Windows) backends mount on the same JS surface in follow-ups. No `ffmpeg` subprocess, no `node-gyp` binding, no shipping a separate native module per platform.
+`parabun:camera` is a zero-dependency capture surface for V4L2 cameras on Linux — UVC webcams, CSI cameras, anything that exposes itself as `/dev/video*`. AVFoundation (macOS) and Media Foundation (Windows) backends mount on the same JS surface in follow-ups. No `ffmpeg` subprocess, no `node-gyp` binding, no shipping a separate native module per platform.
 
 ```ts
-import camera from "para:camera";
+import camera from "parabun:camera";
 
 const devs = await camera.devices();
 //   [{ path: "/dev/video0", name: "C920 HD Pro Webcam", driver: "uvcvideo",
@@ -270,15 +270,15 @@ for await (const frame of cam.frames()) {
 - **Enumerate**: `devices()` walks `/sys/class/video4linux` and filters to true capture devices via `VIDIOC_QUERYCAP`.
 - **Probe**: `formats(path)` enumerates every supported `(format, width, height, fps)` tuple via `VIDIOC_ENUM_FMT` / `FRAMESIZES` / `FRAMEINTERVALS`.
 - **Capture**: `open(...)` configures the format, mmaps the kernel ring buffer, and starts the stream; `cam.frames()` yields frames as an async iterator with kernel timestamps + sequence numbers; `cam.grab()` does a single one-shot.
-- **Convert**: `toRgba(frame)` does a scalar BT.601 YUV→RGB shuffle for `yuyv` / `nv12` (and an alpha pad for `rgb24`); for `mjpg` you compose with `para:image.decode()`.
+- **Convert**: `toRgba(frame)` does a scalar BT.601 YUV→RGB shuffle for `yuyv` / `nv12` (and an alpha pad for `rgb24`); for `mjpg` you compose with `parabun:image.decode()`.
 - **Lifecycle**: `await using` for streaming captures; a `FinalizationRegistry` backstops forgotten `.close()` calls so the kernel fd doesn't leak on a dropped reference.
 
-### Audio Codecs + DSP (`para:audio`)
+### Audio Codecs + DSP (`parabun:audio`)
 
-`para:audio` is a from-scratch audio toolkit: WAV / MP3 decode, Opus encode and decode (libopus 1.6.1), rnnoise-based denoising, FFT, RBJ biquad filters, resampling, spectrograms, voice-activity detection, and the level / leveling primitives a voice-call capture pipeline needs. Like `para:image`, the heavy codecs (libopus, minimp3, rnnoise) are vendored statically.
+`parabun:audio` is a from-scratch audio toolkit: WAV / MP3 decode, Opus encode and decode (libopus 1.6.1), rnnoise-based denoising, FFT, RBJ biquad filters, resampling, spectrograms, voice-activity detection, and the level / leveling primitives a voice-call capture pipeline needs. Like `parabun:image`, the heavy codecs (libopus, minimp3, rnnoise) are vendored statically.
 
 ```ts
-import audio from "para:audio";
+import audio from "parabun:audio";
 import rtp from "para:rtp";
 
 const enc = new audio.OpusEncoder({ sampleRate: 48000, channels: 1, application: "voip" });
@@ -305,13 +305,13 @@ for (const i16Frame of micFrames) {
 - **Layout**: `interleave` / `deinterleave` for planar ⇄ frame-major typed-array conversions, `i16ToF32` / `f32ToI16` for OS-audio ⇄ DSP-space PCM.
 - **OS audio I/O (Linux today)**: `audio.devices()` enumerates capture + playback devices via ALSA; `audio.capture({ device, sampleRate, channels })` returns a stream whose `.frames()` async-iterator yields `Float32Array` PCM chunks straight from `snd_pcm_readi`; `audio.play({ ... }).write(samples)` pushes PCM through `snd_pcm_writei`. Format on the wire is S16_LE; conversion to/from `Float32` happens in C++. CoreAudio + WASAPI backends mount on the same surface in follow-ups.
 
-### Speech (`para:speech`)
+### Speech (`parabun:speech`)
 
-`para:speech` is the voice-IO leg of the on-device AI stack — VAD-gated utterance segmentation, Whisper-based speech-to-text, and Piper text-to-speech. Composes `para:audio`'s mic / DSP primitives with `para:llm`'s Whisper runtime; no cloud round-trip, no Python sidecar.
+`parabun:speech` is the voice-IO leg of the on-device AI stack — VAD-gated utterance segmentation, Whisper-based speech-to-text, and Piper text-to-speech. Composes `parabun:audio`'s mic / DSP primitives with `parabun:llm`'s Whisper runtime; no cloud round-trip, no Python sidecar.
 
 ```ts
-import audio  from "para:audio";
-import speech from "para:speech";
+import audio  from "parabun:audio";
+import speech from "parabun:speech";
 
 await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
 
@@ -334,17 +334,17 @@ for await (const utt of utterances) {
 ```
 
 - **`listen(stream, { sampleRate })`** — async-iterator wrapper over any `Float32Array` chunk source. Tracks an adaptive noise floor, gates on energy + hangover, emits `{ samples, startMs, endMs }` per utterance. The returned stream exposes reactive signals: `active` (true while a phrase is in progress), `noiseFloor` (current dB estimate), and `lastUtterance` (most recent emitted phrase).
-- **`transcribe(utt, { engine: "whisper", model })`** — loads a Whisper `ggml-*.bin` via `para:llm.WhisperModel` and runs the encoder-decoder forward pass. Both `tiny.en` and `base.en` work cleanly.
+- **`transcribe(utt, { engine: "whisper", model })`** — loads a Whisper `ggml-*.bin` via `parabun:llm.WhisperModel` and runs the encoder-decoder forward pass. Both `tiny.en` and `base.en` work cleanly.
 - **`speak(text, { engine: "piper", model })`** — runs the Piper voice synthesizer. The first call for a given voice loads the model into a long-running `piper --json-input` subprocess; subsequent calls reuse the same process via stdin / stdout (~30-50 ms inference per sentence on the lessac-low voice). Returns `{ samples, sampleRate, channels }` ready for `audio.play().write()`. `speech.closePiperSessions()` tears the cache down explicitly. Direct libpiper FFI is the long-term v2.
 
 `speech.listen` works as a standalone primitive — pass it any iterable of `Float32Array` (file-backed, network, synthetic) and it'll emit utterances.
 
-### Voice Assistant (`para:assistant`)
+### Voice Assistant (`parabun:assistant`)
 
-`para:assistant` is a Tier 2 facade that composes `para:audio` + `para:speech` + `para:llm` into a complete edge AI assistant. The 3-line case stays 3 lines; new fields unlock new capabilities.
+`parabun:assistant` is a Tier 2 facade that composes `parabun:audio` + `parabun:speech` + `parabun:llm` into a complete edge AI assistant. The 3-line case stays 3 lines; new fields unlock new capabilities.
 
 ```ts
-import assistant from "para:assistant";
+import assistant from "parabun:assistant";
 
 await using bot = await assistant.create({
   llm: "/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
@@ -364,7 +364,7 @@ await bot.run();   // for await (const _ of bot.turns()) {}
 - **Scheduled prompts**: pass `schedule: [{ cron, prompt }]` and the bot fires `bot.ask(prompt)` on each cron match (5-field syntax, local time). Resulting `Turn` carries `scheduled: true`. Skipped if the bot is mid-turn; next minute retries.
 - **RAG**: pass `knowledge: { dir, encoder, topK? }` and the bot indexes the directory at create time. Each user message retrieves the top-K most-relevant chunks (cosine over a flat `Float32Array` matrix, sentence-embedding GGUF) and injects them as a synthetic system message into the LLM working copy — canonical history stays clean. Auto-reindexes on `fs.watch`.
 - **Persistent memory** (opt-in): pass `memory: "/path/to/memory.sqlite"` and conversation turns persist across process restarts. `bot.memory` is exposed for direct inspection; the underlying schema is a single `turns(role, content, ts)` table.
-- **Power users keep their seat**: `bot.llm` exposes the underlying `LLM` instance so anything reachable directly via `para:llm` / `para:speech` / `para:audio` is reachable through `bot` too.
+- **Power users keep their seat**: `bot.llm` exposes the underlying `LLM` instance so anything reachable directly via `parabun:llm` / `parabun:speech` / `parabun:audio` is reachable through `bot` too.
 - **Disposal is deterministic**: `await using` for the common path, explicit `bot.close()` for the rest. All composed resources (mic, speaker, models, sqlite) close in lockstep; idempotent.
 
 What v1 ships (per `PLAN-bun-assistant.md` build order): `assistant.create`, `bot.run` / `turns` / `ask` / `say` / `interrupt`, the five signals (`state` / `history` / `lastTurn` / `interrupted` / `toolsActive`), in-memory transcript, sqlite-backed persistent memory, tool dispatch + MCP, barge-in, wake word, scheduled prompts, and RAG. Deferred follow-up (tracked under LYK-760): vision (VLM) turns.
@@ -443,33 +443,33 @@ See [`bench/parabun-benches.md`](./bench/parabun-benches.md) for the full portfo
 
 Parabun's positioning is to open typical JS performance bottlenecks via multithreading + GPU + direct hardware. Modules stack in three tiers:
 
-- **Tier 0 — primitives** (shipped): `para:simd`, `para:gpu`, `para:parallel`, `para:arena`, `para:pipeline`, `para:signals`, `para:rtp`. These are the building blocks that reach hardware directly.
-- **Tier 1 — composed** (shipped, plus `para:video` in progress): `para:image`, `para:audio`, `para:camera`, `para:csv`, `para:llm`, `para:gpio`, `para:i2c`, `para:spi`. Codecs, capture devices, on-device LLM inference, and userspace peripheral access for SBCs — built on Tier 0.
-- **Tier 2 — applications** (`para:speech` ships full STT + TTS, `para:assistant` ships the edge voice-assistant facade, `para:arrow` ships the in-memory model + computes + IPC reader/writer with Parquet pending; `para:vision` ships orchestration with detector / OCR engines stubbed): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `para:llm` as `llm.serve()`.)
+- **Tier 0 — primitives** (shipped): `para:simd`, `parabun:gpu`, `para:parallel`, `para:arena`, `para:pipeline`, `para:signals`, `para:rtp`. These are the building blocks that reach hardware directly.
+- **Tier 1 — composed** (shipped, plus `parabun:video` in progress): `parabun:image`, `parabun:audio`, `parabun:camera`, `para:csv`, `parabun:llm`, `parabun:gpio`, `parabun:i2c`, `parabun:spi`. Codecs, capture devices, on-device LLM inference, and userspace peripheral access for SBCs — built on Tier 0.
+- **Tier 2 — applications** (`parabun:speech` ships full STT + TTS, `parabun:assistant` ships the edge voice-assistant facade, `para:arrow` ships the in-memory model + computes + IPC reader/writer with Parquet pending; `parabun:vision` ships orchestration with detector / OCR engines stubbed): application-shaped modules that compose Tier 1 into voice assistants, vision pipelines, and analytical queries. (HTTP serving lives inside `parabun:llm` as `llm.serve()`.)
 
 Each module ships behind a compile-time feature flag. The CLI configurator at [parabun.script.dev/configure](https://parabun.script.dev/configure) generates a `bun build --compile` invocation with only the modules you check — production builds slim to whatever your app actually imports.
 
 | Status      | Module                | What it does                                                                                          |
 |-------------|-----------------------|-------------------------------------------------------------------------------------------------------|
-| shipped     | `para:image`           | JPEG / PNG / WebP decode + encode, resize (bilinear / Lanczos), blur / sharpen / edge-detect, rotate / flip / crop, adjust / threshold / invert / grayscale, histogram, alpha composite. |
-| shipped     | `para:audio`           | WAV / MP3 / Opus codecs, RBJ biquads, FFT, resample, spectrogram, VAD, denoiser (rnnoise), AGC, mix / normalize / envelope, planar ⇄ frame-major + i16 ⇄ f32 PCM helpers. |
-| shipped     | `para:camera`          | V4L2 capture on Linux — `devices()` (callable signal — hotplug-aware via `.subscribe(cb)` / `.get()`), `formats(path)`, `open(...)` with async-iterator `frames()` over kernel-mmapped buffers. AVFoundation + Media Foundation follow. |
-| shipped     | OS audio I/O          | Live ALSA capture + playback on `para:audio` (`devices()` callable signal, `capture()` / `play()`). Float32 PCM streams; CoreAudio + WASAPI follow. |
+| shipped     | `parabun:image`           | JPEG / PNG / WebP decode + encode, resize (bilinear / Lanczos), blur / sharpen / edge-detect, rotate / flip / crop, adjust / threshold / invert / grayscale, histogram, alpha composite. |
+| shipped     | `parabun:audio`           | WAV / MP3 / Opus codecs, RBJ biquads, FFT, resample, spectrogram, VAD, denoiser (rnnoise), AGC, mix / normalize / envelope, planar ⇄ frame-major + i16 ⇄ f32 PCM helpers. |
+| shipped     | `parabun:camera`          | V4L2 capture on Linux — `devices()` (callable signal — hotplug-aware via `.subscribe(cb)` / `.get()`), `formats(path)`, `open(...)` with async-iterator `frames()` over kernel-mmapped buffers. AVFoundation + Media Foundation follow. |
+| shipped     | OS audio I/O          | Live ALSA capture + playback on `parabun:audio` (`devices()` callable signal, `capture()` / `play()`). Float32 PCM streams; CoreAudio + WASAPI follow. |
 | shipped     | `para:csv`             | Streaming RFC 4180 parser with header / inference / quote handling. `parallel: true` is "off-the-main-thread" — see the inline disclaimer above. |
 | shipped     | `para:rtp`             | RFC 3550 packet pack/parse + jitter-buffer for the Opus path; transport for the codec stack.          |
-| shipped     | `para:gpio`            | Linux GPIO uAPI v2 — `chips()` / `open()` with single-line `read()` / `write()` / `toggle()` / `edges()` async iterator + reactive `value` signal, plus atomic multi-line `chip.bank(offsets, opts)`. Both `line` and `bank` accept `{ pollHz: N }` so `line.value` / `bank.value` update on hardware change without manual `setInterval`. Same surface across RPi 4, RPi 5 (pinctrl-rp1), Jetson, any Linux SBC. |
-| shipped     | `para:i2c`             | Linux i2c-dev — `buses()` / `open()`, `bus.scan()`, `device(addr).write()` / `read()` / `transact()` (combined I2C_RDWR), full SMBus shortcuts (`smbus.readByte` / `readWord` / `writeByte` / `writeWord` / `readBlock` / `writeBlock`). |
-| shipped     | `para:spi`             | Linux spidev — `devices()` / `open()` with mode/bitsPerWord/speedHz, full-duplex `transfer()` + half-duplex `read()` / `write()` + multi-segment `transactSegments()` with CS held across segments. |
-| partial     | `para:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
-| partial     | `para:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
-| shipped     | `para:speech` (Tier 2) | VAD-gated `listen()` (returns reactive utterance stream with `active` / `noiseFloor` / `lastUtterance` signals), Whisper `transcribe()` via `para:llm.WhisperModel`, Piper `speak()` via subprocess (libpiper FFI v2 tracked under LYK-758). |
-| shipped     | `para:assistant` (Tier 2) | Three-line voice-assistant facade composing `para:audio` + `para:speech` + `para:llm` + `para:mcp`. `bot.run` / `turns` / `ask` / `say` + reactive `state` / `history` / `lastTurn` / `interrupted` / `toolsActive` signals + sqlite-backed persistent memory + tool dispatch (inline + MCP) + VAD-driven barge-in (`bot.interrupt()`) + wake word (`wakeWord: "hey jetson"`) + scheduled prompts (`schedule: [{ cron, prompt }]`) + RAG (`knowledge: { dir, encoder, topK }`). VLM turns deferred to follow-up. |
+| shipped     | `parabun:gpio`            | Linux GPIO uAPI v2 — `chips()` / `open()` with single-line `read()` / `write()` / `toggle()` / `edges()` async iterator + reactive `value` signal, plus atomic multi-line `chip.bank(offsets, opts)`. Both `line` and `bank` accept `{ pollHz: N }` so `line.value` / `bank.value` update on hardware change without manual `setInterval`. Same surface across RPi 4, RPi 5 (pinctrl-rp1), Jetson, any Linux SBC. |
+| shipped     | `parabun:i2c`             | Linux i2c-dev — `buses()` / `open()`, `bus.scan()`, `device(addr).write()` / `read()` / `transact()` (combined I2C_RDWR), full SMBus shortcuts (`smbus.readByte` / `readWord` / `writeByte` / `writeWord` / `readBlock` / `writeBlock`). |
+| shipped     | `parabun:spi`             | Linux spidev — `devices()` / `open()` with mode/bitsPerWord/speedHz, full-duplex `transfer()` + half-duplex `read()` / `write()` + multi-segment `transactSegments()` with CS held across segments. |
+| partial     | `parabun:gpu` device-side | CUDA `reduce` (sum / min / max) + atomic-privatized `histogram` shipped. Scan, Metal mirror, and the rest of the secondary primitives still on CPU until wired. |
+| partial     | `parabun:vision` (Tier 2) | Frame stream + frame-diff motion detection ship today (`vision.frames` / `vision.detectMotion`). Detector (`detect`) and OCR (`recognize`) engines stub with documented messages — they land once ONNX runtime is vendored. |
+| shipped     | `parabun:speech` (Tier 2) | VAD-gated `listen()` (returns reactive utterance stream with `active` / `noiseFloor` / `lastUtterance` signals), Whisper `transcribe()` via `parabun:llm.WhisperModel`, Piper `speak()` via subprocess (libpiper FFI v2 tracked under LYK-758). |
+| shipped     | `parabun:assistant` (Tier 2) | Three-line voice-assistant facade composing `parabun:audio` + `parabun:speech` + `parabun:llm` + `para:mcp`. `bot.run` / `turns` / `ask` / `say` + reactive `state` / `history` / `lastTurn` / `interrupted` / `toolsActive` signals + sqlite-backed persistent memory + tool dispatch (inline + MCP) + VAD-driven barge-in (`bot.interrupt()`) + wake word (`wakeWord: "hey jetson"`) + scheduled prompts (`schedule: [{ cron, prompt }]`) + RAG (`knowledge: { dir, encoder, topK }`). VLM turns deferred to follow-up. |
 | partial     | `para:arrow` (Tier 2)  | In-memory columnar tables (`RecordBatch`, `Table`, `Column`), type inference from typed arrays, validity bitmaps, computes (`sum` / `mean` / `min` / `max` / `count` / `variance` / `stddev` / `quantile` / `median` / `distinct` / `filter` / `groupBy`), `fromRows` / `toRows` for the row ↔ columnar bridge, and Arrow IPC streaming format (`fromIPC` / `toIPC` with dictionary-batch decode — reads apache-arrow / pyarrow / arrow-rs / polars / duckdb output for the six supported logical types, both plain and Dictionary<Utf8>). Wire compat verified against apache-arrow 21.1.0 (see `bench/parabun-arrow-ipc-interop/`). Parquet pending. |
-| in progress | `para:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
+| in progress | `parabun:video`           | JS surface scaffolded; libavcodec / V4L2 M2M / NVDEC native binding lands with hardware bring-up. Decode + encode + container muxing. |
 | next        | `para:parallel` v2     | Closure-aware persistent worker pool + `SharedArrayBuffer` channels. Lifts today's `pmap` ceiling.    |
-| planned     | `para:image` AVIF      | AVIF decode + encode (libavif + AOM / dav1d vendor add). Rounds out the codec coverage matrix.        |
+| planned     | `parabun:image` AVIF      | AVIF decode + encode (libavif + AOM / dav1d vendor add). Rounds out the codec coverage matrix.        |
 
-`para:llm` becomes the proof-of-concept for the stack — "we built llama inference using `para:gpu` + `para:simd` + `para:parallel`; you can build similar things with the same building blocks" — rather than the headline product. Parabun is positioned as a perf runtime, not an AI runtime.
+`parabun:llm` becomes the proof-of-concept for the stack — "we built llama inference using `parabun:gpu` + `para:simd` + `para:parallel`; you can build similar things with the same building blocks" — rather than the headline product. Parabun is positioned as a perf runtime, not an AI runtime.
 
 ## Editor Support
 

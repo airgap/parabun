@@ -1,9 +1,9 @@
-// para:camera + para:audio compose demo
+// parabun:camera + parabun:audio compose demo
 //
 // Captures 2 seconds of video frames + microphone audio from the first
 // available device on each side, saves:
-//   - frame_<N>.jpg — first / middle / last frame as JPEG via para:image
-//   - audio.wav     — full capture as WAV via para:audio.writeWav
+//   - frame_<N>.jpg — first / middle / last frame as JPEG via parabun:image
+//   - audio.wav     — full capture as WAV via parabun:audio.writeWav
 //
 // Run with:
 //   bun bd bench/parabun-embedded-capture/run.ts
@@ -13,9 +13,9 @@
 
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import audio from "para:audio";
-import camera from "para:camera";
-import image from "para:image";
+import audio from "parabun:audio";
+import camera from "parabun:camera";
+import image from "parabun:image";
 
 const OUT_DIR = new URL("./out", import.meta.url).pathname;
 const DURATION_MS = 2000;
@@ -23,7 +23,7 @@ const DURATION_MS = 2000;
 rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(OUT_DIR, { recursive: true });
 
-console.log("=== para:camera + para:audio compose demo ===");
+console.log("=== parabun:camera + parabun:audio compose demo ===");
 console.log(`output dir: ${OUT_DIR}\n`);
 
 // 1. Pick a camera + mic
@@ -110,7 +110,7 @@ console.log(`  wrote audio.wav: ${wavBytes.byteLength} bytes (${(totalSamples / 
 
 // 7. Save first / middle / last frame as JPEG. MJPG frames are already
 //    JPEG bitstreams — so just write them straight to disk. Demonstrate
-//    the para:image round-trip path on the middle frame: decode → re-encode
+//    the parabun:image round-trip path on the middle frame: decode → re-encode
 //    at q=85 (slightly different size than the camera's q).
 if (frames.length === 0) {
   console.log("  WARN: no frames captured");
@@ -122,13 +122,13 @@ if (frames.length === 0) {
   }
   console.log(`  wrote frame_0/1/2.jpg straight from the camera (MJPG bitstreams)`);
 
-  // Round-trip the middle frame through para:image to prove the codec stack composes.
+  // Round-trip the middle frame through parabun:image to prove the codec stack composes.
   const mid = frames[Math.floor(frames.length / 2)];
   const decoded = image.decode(mid.data);
   console.log(`  decoded middle frame: ${decoded.width}×${decoded.height} ch=${decoded.channels}`);
   const reEncoded = image.encode(decoded, { format: "jpeg", quality: 85 });
   writeFileSync(join(OUT_DIR, "frame_mid_q85.jpg"), reEncoded);
-  console.log(`  wrote frame_mid_q85.jpg: ${reEncoded.byteLength} bytes (re-encoded via para:image)`);
+  console.log(`  wrote frame_mid_q85.jpg: ${reEncoded.byteLength} bytes (re-encoded via parabun:image)`);
 }
 
 // 8. Compute audio stats for sanity

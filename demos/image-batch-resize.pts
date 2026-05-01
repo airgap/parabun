@@ -1,4 +1,4 @@
-// Batch-resize a directory of images via para:image + para:parallel.
+// Batch-resize a directory of images via parabun:image + para:parallel.
 //
 //   bun run build:release demos/image-batch-resize.pts <inDir> <outDir> <maxEdge>
 //
@@ -38,7 +38,7 @@ const jobs: Job[] = files.map(name => ({
 
 const t0 = Bun.nanoseconds();
 const results = await parallel.pmap(async (job: Job) => {
-  const image = (await import("para:image")).default;
+  const image = (await import("parabun:image")).default;
   const bytes = new Uint8Array(await Bun.file(job.inPath).arrayBuffer());
   const decoded = await image.decode(bytes);
   const longEdge = Math.max(decoded.width, decoded.height);

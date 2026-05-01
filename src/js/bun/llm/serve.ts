@@ -1,11 +1,11 @@
-// para:llm — HTTP serving subsurface (`llm.serve(opts)`).
+// parabun:llm — HTTP serving subsurface (`llm.serve(opts)`).
 //
 // OpenAI-compatible HTTP API for any object with .chat() / .generate() /
 // .embed() methods. Built on Bun.serve, no native deps. Lets existing
 // OpenAI client SDKs (openai-node, langchain, llama-index) talk to a
 // Parabun process running a local GGUF model.
 //
-//   import llm from "para:llm";
+//   import llm from "parabun:llm";
 //
 //   using m = await llm.LLM.load("./Llama-3.2-1B-Instruct-Q4_K_M.gguf");
 //
@@ -73,7 +73,7 @@ type EmbeddingRequest = {
 };
 
 /**
- * The engine interface. A para:llm instance satisfies this naturally; users
+ * The engine interface. A parabun:llm instance satisfies this naturally; users
  * can implement their own (mocks, alternate inference engines) by matching
  * the shape.
  */
@@ -112,7 +112,7 @@ type ServeOptions = {
    */
   apiKey?: string;
   /**
-   * Maximum concurrent generations. Most local engines (llama.cpp, para:llm)
+   * Maximum concurrent generations. Most local engines (llama.cpp, parabun:llm)
    * aren't internally batched, so the right answer for low-end hosts is 1.
    * Higher values queue requests and serialize them. Default 1.
    */

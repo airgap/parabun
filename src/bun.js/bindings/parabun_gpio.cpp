@@ -1,4 +1,4 @@
-// Parabun: native GPIO bindings for `para:gpio` (LYK-768 / PLAN-bun-hal).
+// Parabun: native GPIO bindings for `parabun:gpio` (LYK-768 / PLAN-bun-hal).
 //
 // Linux GPIO character device, uAPI v2 (/dev/gpiochipN). Works unchanged
 // across RPi 4, RPi 5 (pinctrl-rp1), Jetson, and any other Linux SBC.
@@ -17,7 +17,7 @@
 //                                  // blocks on a read() of the line fd.
 //   closeLine(lineFd)              → void
 //
-// On non-Linux every entry point throws "para:gpio not yet implemented on
+// On non-Linux every entry point throws "parabun:gpio not yet implemented on
 // this platform". macOS / Windows backends are out of scope.
 
 #include "root.h"
@@ -133,7 +133,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpenChip,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 1) {
@@ -170,7 +170,7 @@ JSC_DEFINE_HOST_FUNCTION(functionChipInfo,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 1) {
@@ -221,7 +221,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLine,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 7) {
@@ -307,7 +307,7 @@ JSC_DEFINE_HOST_FUNCTION(functionReadLine,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     JSValue lineFdVal = callFrame->argument(0);
@@ -336,7 +336,7 @@ JSC_DEFINE_HOST_FUNCTION(functionWriteLine,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     JSValue lineFdVal = callFrame->argument(0);
@@ -373,7 +373,7 @@ JSC_DEFINE_HOST_FUNCTION(functionReadEvent,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     JSValue lineFdVal = callFrame->argument(0);
@@ -430,7 +430,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLines,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 7) {
@@ -526,7 +526,7 @@ JSC_DEFINE_HOST_FUNCTION(functionReadLines,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     JSValue lineFdVal = callFrame->argument(0);
@@ -560,7 +560,7 @@ JSC_DEFINE_HOST_FUNCTION(functionWriteLines,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 3) {
@@ -600,7 +600,7 @@ JSC_DEFINE_HOST_FUNCTION(functionWriteLines,
 static JSValue closeFdShared(JSGlobalObject* globalObject, ThrowScope& scope, JSValue v)
 {
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:gpio not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:gpio not yet implemented on this platform"_s);
     return {};
 #else
     (void)scope;

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Tiny CLI: `parascript transpile FILE` or `parascript transpile < stdin`.
+// Tiny CLI: `para transpile FILE` or `para transpile < stdin`.
 // Output goes to stdout. Exit code 1 on error.
 
 import { readFileSync } from "node:fs";
@@ -16,7 +16,7 @@ function readStdin(): Promise<string> {
 }
 
 function usage(): never {
-  console.error("usage: parascript transpile [FILE]    (reads stdin if FILE omitted)");
+  console.error("usage: para transpile [FILE]    (reads stdin if FILE omitted)");
   process.exit(1);
 }
 
@@ -38,7 +38,7 @@ async function main() {
   try {
     process.stdout.write(transpile(src, { filename }));
   } catch (err) {
-    console.error(`parascript: ${err instanceof Error ? err.message : err}`);
+    console.error(`para: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
   }
 }

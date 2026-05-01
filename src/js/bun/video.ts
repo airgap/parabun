@@ -1,11 +1,11 @@
-// Hardcoded module "para:video"
+// Hardcoded module "parabun:video"
 //
 // Parabun: video file decode + encode for the embedded edge runtime.
-// Pairs with para:camera (live capture) and para:image (still frames):
+// Pairs with parabun:camera (live capture) and parabun:image (still frames):
 //
-//   import camera from "para:camera";
-//   import video  from "para:video";
-//   import image  from "para:image";
+//   import camera from "parabun:camera";
+//   import video  from "parabun:video";
+//   import image  from "parabun:image";
 //
 //   await using cam = await camera.open("/dev/video0", {
 //     format: "mjpg", width: 1280, height: 720,
@@ -21,7 +21,7 @@
 //   await enc.finalize();
 //
 // Codec coverage targets (in priority order):
-//   - decode: H.264, H.265/HEVC, VP9, AV1, MJPEG (the last via para:image)
+//   - decode: H.264, H.265/HEVC, VP9, AV1, MJPEG (the last via parabun:image)
 //   - encode: H.264 (libx264), HEVC, VP9, AV1
 //   - container: MP4 (read+write), Matroska/WebM (read+write), MPEG-TS (read)
 //
@@ -35,7 +35,7 @@
 // Status: scaffolded — JS surface contracted. Native libavcodec / V4L2 M2M /
 // NVDEC backings land alongside the Pi 5 / Jetson bring-up.
 
-const NOT_IMPLEMENTED_MSG = "para:video is scaffolded — libavcodec native binding lands with hardware bring-up";
+const NOT_IMPLEMENTED_MSG = "parabun:video is scaffolded — libavcodec native binding lands with hardware bring-up";
 
 function todo(): never {
   throw new Error(NOT_IMPLEMENTED_MSG);
@@ -110,7 +110,7 @@ type DecodeOptions = {
   endMs?: number;
   /**
    * Per-frame JPEG decoder. Required for MJPEG-encoded inputs. Pass
-   * `image.decode` from `para:image` (cross-builtin imports between bun:*
+   * `image.decode` from `parabun:image` (cross-builtin imports between bun:*
    * modules aren't supported, so the dep is injected here).
    */
   decodeMjpg?: (bytes: Uint8Array) => { data: Uint8Array; width: number; height: number; channels?: number };
@@ -158,7 +158,7 @@ type EncodeOptions = {
   path?: string;
   /**
    * Per-frame JPEG encoder. Required for the MJPEG codec (the only one
-   * unstubbed today). Pass `image.encode` from `para:image` (cross-builtin
+   * unstubbed today). Pass `image.encode` from `parabun:image` (cross-builtin
    * imports between bun:* modules aren't supported, so the dep is injected
    * here). The provided function should encode an `{ data, width, height,
    * channels }` to JPEG bytes.
@@ -177,8 +177,8 @@ interface VideoEncoder extends AsyncDisposable {
   /** Stream duration in ms based on frames pushed and configured fps. */
   readonly duration: number;
   /**
-   * Push a frame for encoding. Accepts a para:camera Frame ({ data, format }),
-   * a para:image DecodedImage ({ data, channels, ... }), or a raw object with
+   * Push a frame for encoding. Accepts a parabun:camera Frame ({ data, format }),
+   * a parabun:image DecodedImage ({ data, channels, ... }), or a raw object with
    * { data: Uint8Array, width, height, pixelFormat }.
    */
   pushFrame(
@@ -391,7 +391,7 @@ function parseMp4AudioStsd(
 async function probeMp4(bytes: Uint8Array): Promise<ProbeInfo> {
   // Walk top-level boxes and find moov.
   const moov = findMp4Box(bytes, 0, bytes.length, "moov");
-  if (!moov) throw new Error("para:video.probe: MP4 has no moov box (truncated or moov-at-end?)");
+  if (!moov) throw new Error("parabun:video.probe: MP4 has no moov box (truncated or moov-at-end?)");
 
   // Movie header (mvhd) — fallback timescale when a track's mdhd is missing.
   const mvhd = findMp4Box(bytes, moov.start, moov.end, "mvhd");
@@ -662,7 +662,7 @@ async function probeMatroska(bytes: Uint8Array): Promise<ProbeInfo> {
       segEnd = pe;
     }
   });
-  if (segStart < 0) throw new Error("para:video.probe: no Segment in Matroska");
+  if (segStart < 0) throw new Error("parabun:video.probe: no Segment in Matroska");
 
   // Walk Segment for Info + Tracks.
   let timecodeScale = 1_000_000; // ns per tick — default 1ms tick
@@ -754,7 +754,7 @@ async function probeMatroska(bytes: Uint8Array): Promise<ProbeInfo> {
 async function probe(input: Uint8Array | ArrayBuffer): Promise<ProbeInfo> {
   const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
   if (bytes.length < 8) {
-    throw new Error("para:video.probe: input too short to identify container");
+    throw new Error("parabun:video.probe: input too short to identify container");
   }
 
   // MP4 / ISOBMFF: bytes 4..8 spell "ftyp" (or sometimes "styp", "moov" first).
@@ -767,7 +767,7 @@ async function probe(input: Uint8Array | ArrayBuffer): Promise<ProbeInfo> {
 
   if (isMp4) return probeMp4(bytes);
   if (isMatroska) return probeMatroska(bytes);
-  throw new Error("para:video.probe: container not recognized (supports MP4 / ISOBMFF and Matroska / WebM)");
+  throw new Error("parabun:video.probe: container not recognized (supports MP4 / ISOBMFF and Matroska / WebM)");
 }
 
 /**
@@ -778,10 +778,10 @@ async function probe(input: Uint8Array | ArrayBuffer): Promise<ProbeInfo> {
  */
 async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOptions): Promise<VideoDecoder> {
   if (typeof input === "string") {
-    throw new Error("para:video.decode: streaming-from-path not yet supported (pass a Uint8Array / ArrayBuffer)");
+    throw new Error("parabun:video.decode: streaming-from-path not yet supported (pass a Uint8Array / ArrayBuffer)");
   }
   const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
-  if (bytes.length < 8) throw new Error("para:video.decode: input too short to identify container");
+  if (bytes.length < 8) throw new Error("parabun:video.decode: input too short to identify container");
 
   const isMp4 =
     (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) ||
@@ -791,7 +791,7 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
 
   // Find the moov + the first video trak.
   const moov = findMp4Box(bytes, 0, bytes.length, "moov");
-  if (!moov) throw new Error("para:video.decode: MP4 has no moov box");
+  if (!moov) throw new Error("parabun:video.decode: MP4 has no moov box");
 
   let videoTrak: Mp4Box | null = null;
   let videoCodec: Codec = "auto";
@@ -821,15 +821,15 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
     mediaDuration = m.duration;
     break;
   }
-  if (!videoTrak) throw new Error("para:video.decode: no video track in MP4");
+  if (!videoTrak) throw new Error("parabun:video.decode: no video track in MP4");
 
   if (videoCodec !== "mjpeg") {
     throw new Error(
-      `para:video.decode: codec "${videoCodec}" needs the libavcodec native binding (only MJPEG-in-MP4 is unstubbed today)`,
+      `parabun:video.decode: codec "${videoCodec}" needs the libavcodec native binding (only MJPEG-in-MP4 is unstubbed today)`,
     );
   }
   if (!opts?.decodeMjpg) {
-    throw new Error("para:video.decode: MJPEG inputs require opts.decodeMjpg — pass `image.decode` from para:image");
+    throw new Error("parabun:video.decode: MJPEG inputs require opts.decodeMjpg — pass `image.decode` from parabun:image");
   }
   const decodeMjpg = opts.decodeMjpg;
 
@@ -843,7 +843,7 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
   const stsc = findMp4Box(bytes, stbl.start, stbl.end, "stsc");
   const stts = findMp4Box(bytes, stbl.start, stbl.end, "stts");
   if (!stsz || (!stco && !co64) || !stsc || !stts) {
-    throw new Error("para:video.decode: required sample tables missing");
+    throw new Error("parabun:video.decode: required sample tables missing");
   }
 
   // stsz: { sample_size:u32, sample_count:u32, [size:u32 × sample_count if sample_size==0] }
@@ -900,7 +900,7 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
     }
   }
   if (sampleIdx !== stszSampleCount) {
-    throw new Error(`para:video.decode: sample count mismatch (${sampleIdx} mapped vs ${stszSampleCount} expected)`);
+    throw new Error(`parabun:video.decode: sample count mismatch (${sampleIdx} mapped vs ${stszSampleCount} expected)`);
   }
 
   // stts: per-sample decode timing.
@@ -940,7 +940,7 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
         const size = sampleSizes[i];
         const jpegBytes = bytes.subarray(offset, offset + size);
         const decoded = decodeMjpg(jpegBytes);
-        // para:image returns RGB or RGBA depending on the source. Promote
+        // parabun:image returns RGB or RGBA depending on the source. Promote
         // to RGBA so consumers don't have to branch.
         let rgba: Uint8Array;
         const ch = decoded.channels ?? 3;
@@ -955,7 +955,7 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
             rgba[p * 4 + 3] = 0xff;
           }
         } else {
-          throw new Error(`para:video.decode: unexpected channel count ${ch} from JPEG decoder`);
+          throw new Error(`parabun:video.decode: unexpected channel count ${ch} from JPEG decoder`);
         }
         yield {
           data: rgba,
@@ -972,7 +972,7 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
       // MJPEG is all keyframes, so seek would just skip ahead — but the
       // current frames() iterator doesn't support resuming; documented as a
       // follow-up.
-      throw new Error("para:video.decode: seek() on the MJPEG path is pending");
+      throw new Error("parabun:video.decode: seek() on the MJPEG path is pending");
     },
     async close(): Promise<void> {
       /* no resources to release for the in-memory MJPEG path */
@@ -992,17 +992,17 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
 async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
   if (opts.codec !== "mjpeg") {
     throw new Error(
-      `para:video.encode: codec "${opts.codec}" needs the libavcodec native binding (only "mjpeg" is unstubbed today)`,
+      `parabun:video.encode: codec "${opts.codec}" needs the libavcodec native binding (only "mjpeg" is unstubbed today)`,
     );
   }
   if (opts.container !== "mp4") {
-    throw new Error(`para:video.encode: container "${opts.container}" not supported on the MJPEG path (only "mp4")`);
+    throw new Error(`parabun:video.encode: container "${opts.container}" not supported on the MJPEG path (only "mp4")`);
   }
   if (!opts.encodeJpg) {
-    throw new Error("para:video.encode: MJPEG outputs require opts.encodeJpg — pass `image.encode` from para:image");
+    throw new Error("parabun:video.encode: MJPEG outputs require opts.encodeJpg — pass `image.encode` from parabun:image");
   }
-  if (!opts.fps || opts.fps <= 0) throw new RangeError("para:video.encode: fps must be > 0");
-  if (!opts.width || !opts.height) throw new RangeError("para:video.encode: width and height required");
+  if (!opts.fps || opts.fps <= 0) throw new RangeError("parabun:video.encode: fps must be > 0");
+  if (!opts.width || !opts.height) throw new RangeError("parabun:video.encode: width and height required");
 
   const encodeJpg = opts.encodeJpg;
   const quality = opts.jpegQuality ?? 85;
@@ -1022,7 +1022,7 @@ async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
       return Math.round((samples.length / fps) * 1000);
     },
     async pushFrame(frame): Promise<void> {
-      if (closed) throw new Error("para:video.encode: pushFrame after close()");
+      if (closed) throw new Error("parabun:video.encode: pushFrame after close()");
       // Normalize the input to { data, width, height, channels } that
       // image.encode expects.
       let data: Uint8Array;
@@ -1040,28 +1040,28 @@ async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
           data = frame.data;
           channels = 3;
         } else {
-          throw new Error(`para:video.encode: pixelFormat "${frame.pixelFormat}" needs YUV→RGB conversion (pending)`);
+          throw new Error(`parabun:video.encode: pixelFormat "${frame.pixelFormat}" needs YUV→RGB conversion (pending)`);
         }
       } else if ("format" in frame) {
-        // para:camera RawFrame — only rgb24 / rgba pass through directly.
+        // parabun:camera RawFrame — only rgb24 / rgba pass through directly.
         if (frame.format === "rgba" || frame.format === "rgb") {
           data = frame.data;
           channels = frame.format === "rgba" ? 4 : 3;
         } else {
-          throw new Error(`para:video.encode: camera format "${frame.format}" needs YUV→RGB conversion (pending)`);
+          throw new Error(`parabun:video.encode: camera format "${frame.format}" needs YUV→RGB conversion (pending)`);
         }
       } else {
-        throw new Error("para:video.encode: unrecognized frame shape");
+        throw new Error("parabun:video.encode: unrecognized frame shape");
       }
       if (frameW !== width || frameH !== height) {
-        throw new Error(`para:video.encode: frame ${frameW}x${frameH} doesn't match encoder ${width}x${height}`);
+        throw new Error(`parabun:video.encode: frame ${frameW}x${frameH} doesn't match encoder ${width}x${height}`);
       }
       const jpeg = encodeJpg({ data, width: frameW, height: frameH, channels }, { format: "jpeg", quality });
       samples.push(jpeg);
       bytesQueued += jpeg.byteLength;
     },
     async finalize(): Promise<Uint8Array | void> {
-      if (closed) throw new Error("para:video.encode: finalize after close()");
+      if (closed) throw new Error("parabun:video.encode: finalize after close()");
       closed = true;
       const bytes = muxMjpegMp4(samples, width, height, fps);
       if (opts.path) {
@@ -1341,7 +1341,7 @@ function muxMjpegMp4(samples: Uint8Array[], width: number, height: number, fps: 
   if (realMoov.byteLength !== moovLen) {
     // Sanity check — placeholder size invariance is the whole reason we
     // can do offset-based muxing in a single pass.
-    throw new Error("para:video.encode: moov-size invariance broke (encoder bug)");
+    throw new Error("parabun:video.encode: moov-size invariance broke (encoder bug)");
   }
 
   const mdatHeader = (() => {

@@ -1,12 +1,12 @@
-# @parascript/transpile
+# @para/transpile
 
-Standalone transpiler for [ParaScript](https://para.script.dev) — turns `.pts` source into standard JavaScript that runs anywhere via [`parabun-browser-shims`](https://www.npmjs.com/package/parabun-browser-shims). No Parabun runtime required at build time.
+Standalone transpiler for [Para](https://para.script.dev) — turns `.pts` source into standard JavaScript that runs anywhere via [`parabun-browser-shims`](https://www.npmjs.com/package/parabun-browser-shims). No Parabun runtime required at build time.
 
-The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.script.dev) fork of Bun (Zig). This package is a TypeScript reimplementation, intended for projects that don't (or can't) install Parabun on their build host: browsers, Lambda, Cloudflare Workers, Deno, Node, the [ParaScript playground](https://para.script.dev/play).
+The canonical Para transpiler lives inside the [Parabun](https://parabun.script.dev) fork of Bun (Zig). This package is a TypeScript reimplementation, intended for projects that don't (or can't) install Parabun on their build host: browsers, Lambda, Cloudflare Workers, Deno, Node, the [Para playground](https://para.script.dev/play).
 
 ## Status — IN DEVELOPMENT, not yet released
 
-`package.json` is `private: true` and version `0.0.0-dev`. We don't ship a partial transpiler — the npm publish gate stays closed until every ParaScript desugaring listed below works end-to-end and matches the canonical Zig parser's output.
+`package.json` is `private: true` and version `0.0.0-dev`. We don't ship a partial transpiler — the npm publish gate stays closed until every Para desugaring listed below works end-to-end and matches the canonical Zig parser's output.
 
 | Feature | Status |
 | --- | --- |
@@ -41,13 +41,13 @@ pass from the host bundler.
 ## Install
 
 ```bash
-npm install @parascript/transpile parabun-browser-shims
+npm install @para/transpile parabun-browser-shims
 ```
 
 ## Use
 
 ```ts
-import { transpile } from "@parascript/transpile";
+import { transpile } from "@para/transpile";
 
 const js = transpile(`
   const handler = err => console.error(err);
@@ -62,8 +62,8 @@ const js = transpile(`
 ## CLI
 
 ```bash
-parascript transpile src/main.pts > dist/main.js
-parascript transpile < src/main.pts > dist/main.js
+para transpile src/main.pts > dist/main.js
+para transpile < src/main.pts > dist/main.js
 ```
 
 ## License

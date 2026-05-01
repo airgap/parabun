@@ -7,7 +7,7 @@
 //
 // Lexer note: `1..2` is the obscure-idiom break — baseline JS would
 // tokenize `1.` as a numeric literal then `.2` as a property/number, but
-// ParaScript-aware tokenization treats `..` as the range operator. The
+// Para-aware tokenization treats `..` as the range operator. The
 // canonical Zig parser handles this in js_lexer.zig; this text-level
 // rewriter just needs to be careful about `1..method()` (range form: 1
 // through `method()` reference, then call) vs `1.0..2` (number then

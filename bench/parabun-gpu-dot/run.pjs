@@ -13,7 +13,7 @@
 //   gpu-held   : ha=hold(a), hb=hold(b); loop: gpu.dot(ha, hb)
 
 import simd from "para:simd";
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 
 const desc = gpu.describe();
 console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}\n`);

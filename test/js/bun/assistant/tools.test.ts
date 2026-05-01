@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { bunExe } from "harness";
 
-// para:assistant tool dispatch + MCP integration (LYK-734).
+// parabun:assistant tool dispatch + MCP integration (LYK-734).
 //
 // Two paths covered:
 //   1. Inline `{ name, schema, run }` tools — the dispatch happens in
@@ -32,10 +32,10 @@ const haveLLMAndCanRun = haveLLM && runLlmTests;
 
 const mcpFixture = join(import.meta.dir, "..", "mcp", "fixture-server.ts");
 
-describe("para:assistant tools (LYK-734)", () => {
+describe("parabun:assistant tools (LYK-734)", () => {
   test("inline tools register, expose schema, surface via bot.tools", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       tools: [
@@ -61,7 +61,7 @@ describe("para:assistant tools (LYK-734)", () => {
 
   test("addTool / removeTool mutate the live list", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture! });
     try {
       expect(bot.tools.length).toBe(0);
@@ -84,7 +84,7 @@ describe("para:assistant tools (LYK-734)", () => {
   test("MCP connection flattens into the assistant's tool list", async () => {
     if (!haveLLM) return;
     const mcp = (await import("para:mcp")).default;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
 
     await using conn = await mcp.connect("stdio", bunExe(), { args: [mcpFixture] });
     expect(conn.tools.map(t => t.name).sort()).toEqual(["add", "echo"]);
@@ -100,7 +100,7 @@ describe("para:assistant tools (LYK-734)", () => {
 
   test("ask() dispatches an inline tool end-to-end", async () => {
     if (!haveLLMAndCanRun) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     let callsSeen = 0;
     const bot = await assistant.create({
       llm: llmFixture!,
@@ -142,7 +142,7 @@ describe("para:assistant tools (LYK-734)", () => {
 
   test("toolsActive signal flips during dispatch", async () => {
     if (!haveLLMAndCanRun) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const trace: number[] = [];
     let inFlight = false;
     const bot = await assistant.create({

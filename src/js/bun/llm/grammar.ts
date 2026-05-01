@@ -175,12 +175,12 @@ function compileGrammar(rules: RuleSet, rootName = "root"): { startClosure: Set<
   function compileRuleInline(name: string): Compiled {
     if (onStack.has(name)) {
       throw new Error(
-        `para:llm: grammar: rule "${name}" is recursive — the NFA engine is right-regular only. ` +
+        `parabun:llm: grammar: rule "${name}" is recursive — the NFA engine is right-regular only. ` +
           `Rewrite the grammar or remove the cycle.`,
       );
     }
     const alts = rules.get(name);
-    if (!alts) throw new Error(`para:llm: grammar rule "${name}" not defined`);
+    if (!alts) throw new Error(`parabun:llm: grammar rule "${name}" not defined`);
     onStack.add(name);
     const start = newState();
     const end = newState();
@@ -334,12 +334,12 @@ class Grammar {
   accept(tokenId: number): void {
     if (tokenId === this.#eos || this.#stopIds.has(tokenId)) return;
     const bytes = this.tokenBytes[tokenId];
-    if (!bytes) throw new Error(`para:llm: grammar: token id ${tokenId} has no byte sequence`);
+    if (!bytes) throw new Error(`parabun:llm: grammar: token id ${tokenId} has no byte sequence`);
     let cur = this.#states;
     for (let i = 0; i < bytes.length; i++) {
       cur = advanceByte(cur, bytes[i]);
       if (cur.size === 0) {
-        throw new Error(`para:llm: grammar: cannot accept token ${tokenId} (off-grammar byte at offset ${i})`);
+        throw new Error(`parabun:llm: grammar: cannot accept token ${tokenId} (off-grammar byte at offset ${i})`);
       }
     }
     this.#states = cur;
@@ -381,7 +381,7 @@ function parseGBNF(src: string): RuleSet {
   function expectOp(op: string): void {
     skipSpaces();
     if (src.slice(pos, pos + op.length) !== op) {
-      throw new Error(`para:llm: grammar: expected "${op}" at offset ${pos}, got "${src.slice(pos, pos + 10)}"`);
+      throw new Error(`parabun:llm: grammar: expected "${op}" at offset ${pos}, got "${src.slice(pos, pos + 10)}"`);
     }
     pos += op.length;
   }
@@ -397,7 +397,7 @@ function parseGBNF(src: string): RuleSet {
       if (!isAllowed) break;
       pos++;
     }
-    if (pos === start) throw new Error(`para:llm: grammar: expected identifier at offset ${pos}`);
+    if (pos === start) throw new Error(`parabun:llm: grammar: expected identifier at offset ${pos}`);
     return src.slice(start, pos);
   }
 
@@ -429,17 +429,17 @@ function parseGBNF(src: string): RuleSet {
         return 0x27;
       case "x": {
         const h = src.slice(pos, pos + 2);
-        if (!/^[0-9a-fA-F]{2}$/.test(h)) throw new Error(`para:llm: grammar: bad \\xHH escape at offset ${pos}`);
+        if (!/^[0-9a-fA-F]{2}$/.test(h)) throw new Error(`parabun:llm: grammar: bad \\xHH escape at offset ${pos}`);
         pos += 2;
         return parseInt(h, 16);
       }
       default:
-        throw new Error(`para:llm: grammar: unknown escape \\${c} at offset ${pos - 2} (closer "${closer}")`);
+        throw new Error(`parabun:llm: grammar: unknown escape \\${c} at offset ${pos - 2} (closer "${closer}")`);
     }
   }
 
   function parseLiteral(): Symbol {
-    if (src[pos] !== '"') throw new Error(`para:llm: grammar: expected '"' at offset ${pos}`);
+    if (src[pos] !== '"') throw new Error(`parabun:llm: grammar: expected '"' at offset ${pos}`);
     pos++;
     const bytes: number[] = [];
     while (pos < src.length && src[pos] !== '"') {
@@ -453,13 +453,13 @@ function parseGBNF(src: string): RuleSet {
         pos += cp > 0xffff ? 2 : 1;
       }
     }
-    if (src[pos] !== '"') throw new Error(`para:llm: grammar: unterminated literal at offset ${pos}`);
+    if (src[pos] !== '"') throw new Error(`parabun:llm: grammar: unterminated literal at offset ${pos}`);
     pos++;
     return { kind: "literal", bytes: Uint8Array.from(bytes) };
   }
 
   function parseCharclass(): Symbol {
-    if (src[pos] !== "[") throw new Error(`para:llm: grammar: expected '[' at offset ${pos}`);
+    if (src[pos] !== "[") throw new Error(`parabun:llm: grammar: expected '[' at offset ${pos}`);
     pos++;
     let negated = false;
     if (src[pos] === "^") {
@@ -476,7 +476,7 @@ function parseGBNF(src: string): RuleSet {
       }
       ranges.push([lo, hi]);
     }
-    if (src[pos] !== "]") throw new Error(`para:llm: grammar: unterminated char class at offset ${pos}`);
+    if (src[pos] !== "]") throw new Error(`parabun:llm: grammar: unterminated char class at offset ${pos}`);
     pos++;
     return { kind: "charclass", ranges, negated };
   }
@@ -490,7 +490,7 @@ function parseGBNF(src: string): RuleSet {
       pos++;
       const alts = parseAlternation();
       skipSpaces();
-      if (src[pos] !== ")") throw new Error(`para:llm: grammar: expected ')' at offset ${pos}`);
+      if (src[pos] !== ")") throw new Error(`parabun:llm: grammar: expected ')' at offset ${pos}`);
       pos++;
       return { kind: "group", alts };
     }
@@ -560,7 +560,7 @@ function parseGBNF(src: string): RuleSet {
     rules.set(name, alts);
   }
   if (!rules.has("root")) {
-    throw new Error("para:llm: grammar: no root rule defined");
+    throw new Error("parabun:llm: grammar: no root rule defined");
   }
   return rules;
 }

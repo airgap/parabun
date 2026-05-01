@@ -1,4 +1,4 @@
-// GGUF v3 loader for Parabun's para:llm module.
+// GGUF v3 loader for Parabun's parabun:llm module.
 //
 // Parses: magic + version, metadata KV table, tensor-info table; then exposes
 // named tensors as Float32Array views. Q8_0 dequant is done lazily on first
@@ -112,11 +112,11 @@ class GGUFFile {
     const r = new Reader(this.#view, bytes);
     const magic = r.u32();
     if (magic !== 0x46554747) {
-      throw new Error(`para:llm: not a GGUF file (magic ${magic.toString(16)}, expected 46554747)`);
+      throw new Error(`parabun:llm: not a GGUF file (magic ${magic.toString(16)}, expected 46554747)`);
     }
     this.version = r.u32();
     if (this.version !== 3) {
-      throw new Error(`para:llm: unsupported GGUF version ${this.version} (only v3 is implemented)`);
+      throw new Error(`parabun:llm: unsupported GGUF version ${this.version} (only v3 is implemented)`);
     }
 
     const tensorCount = Number(r.u64());
@@ -170,7 +170,7 @@ class GGUFFile {
     if (cached) return cached;
 
     const info = this.tensors.get(name);
-    if (!info) throw new Error(`para:llm: GGUF tensor "${name}" not found`);
+    if (!info) throw new Error(`parabun:llm: GGUF tensor "${name}" not found`);
 
     const absOffset = this.#tensorDataStart + info.offset;
     const nElems = info.dims.reduce((a, b) => a * b, 1);
@@ -189,7 +189,7 @@ class GGUFFile {
       }
       case GGML_TYPE_Q8_0: {
         if (nElems % QK8_0 !== 0) {
-          throw new Error(`para:llm: Q8_0 tensor "${name}" element count ${nElems} not a multiple of ${QK8_0}`);
+          throw new Error(`parabun:llm: Q8_0 tensor "${name}" element count ${nElems} not a multiple of ${QK8_0}`);
         }
         const nBlocks = nElems / QK8_0;
         out = new Float32Array(nElems);
@@ -212,55 +212,55 @@ class GGUFFile {
       }
       case GGML_TYPE_Q2_K: {
         if (nElems % QK_K !== 0) {
-          throw new Error(`para:llm: Q2_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
+          throw new Error(`parabun:llm: Q2_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
         }
         out = dequantQ2K(this.#bytes, this.#bytes.byteOffset + absOffset, nElems);
         break;
       }
       case GGML_TYPE_Q3_K: {
         if (nElems % QK_K !== 0) {
-          throw new Error(`para:llm: Q3_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
+          throw new Error(`parabun:llm: Q3_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
         }
         out = dequantQ3K(this.#bytes, this.#bytes.byteOffset + absOffset, nElems);
         break;
       }
       case GGML_TYPE_Q4_K: {
         if (nElems % QK_K !== 0) {
-          throw new Error(`para:llm: Q4_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
+          throw new Error(`parabun:llm: Q4_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
         }
         out = dequantQ4K(this.#bytes, this.#bytes.byteOffset + absOffset, nElems);
         break;
       }
       case GGML_TYPE_Q5_K: {
         if (nElems % QK_K !== 0) {
-          throw new Error(`para:llm: Q5_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
+          throw new Error(`parabun:llm: Q5_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
         }
         out = dequantQ5K(this.#bytes, this.#bytes.byteOffset + absOffset, nElems);
         break;
       }
       case GGML_TYPE_Q6_K: {
         if (nElems % QK_K !== 0) {
-          throw new Error(`para:llm: Q6_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
+          throw new Error(`parabun:llm: Q6_K tensor "${name}" element count ${nElems} not a multiple of ${QK_K}`);
         }
         out = dequantQ6K(this.#bytes, this.#bytes.byteOffset + absOffset, nElems);
         break;
       }
       default:
-        throw new Error(`para:llm: unsupported GGML type ${info.type} for tensor "${name}"`);
+        throw new Error(`parabun:llm: unsupported GGML type ${info.type} for tensor "${name}"`);
     }
 
     this.#dequantCache.set(name, out);
     return out;
   }
 
-  // Raw byte view of a tensor's data region — no dequant. Used by para:llm's
+  // Raw byte view of a tensor's data region — no dequant. Used by parabun:llm's
   // GPU residency path for quantized tensors: we upload the raw blocks to the
   // device and dequantize on-chip per matVec step, skipping the ~1GB load-time
   // fp32 materialization. The returned Uint8Array is a view over the mmap'd
   // GGUF bytes (same lifetime as the file); do not mutate.
   tensorRaw(name: string): { type: number; bytes: Uint8Array; nElems: number; dims: number[] } {
     const info = this.tensors.get(name);
-    if (!info) throw new Error(`para:llm: GGUF tensor "${name}" not found`);
+    if (!info) throw new Error(`parabun:llm: GGUF tensor "${name}" not found`);
     const absOffset = this.#tensorDataStart + info.offset;
     const nElems = info.dims.reduce((a, b) => a * b, 1);
     const bytes = new Uint8Array(this.#bytes.buffer, this.#bytes.byteOffset + absOffset, info.byteLength);
@@ -273,7 +273,7 @@ class GGUFFile {
   string(key: string): string {
     const v = this.metadata.get(key);
     if (typeof v !== "string") {
-      throw new Error(`para:llm: metadata "${key}" is ${typeof v}, want string`);
+      throw new Error(`parabun:llm: metadata "${key}" is ${typeof v}, want string`);
     }
     return v;
   }
@@ -281,12 +281,12 @@ class GGUFFile {
     const v = this.metadata.get(key);
     if (typeof v === "number") return v;
     if (typeof v === "bigint") return Number(v);
-    throw new Error(`para:llm: metadata "${key}" is ${typeof v}, want number`);
+    throw new Error(`parabun:llm: metadata "${key}" is ${typeof v}, want number`);
   }
   array(key: string): GGUFValue[] {
     const v = this.metadata.get(key);
     if (!Array.isArray(v)) {
-      throw new Error(`para:llm: metadata "${key}" is ${typeof v}, want array`);
+      throw new Error(`parabun:llm: metadata "${key}" is ${typeof v}, want array`);
     }
     return v;
   }
@@ -411,7 +411,7 @@ class Reader {
         return arr;
       }
       default:
-        throw new Error(`para:llm: unknown GGUF value tag ${tag} at byte ${this.pos - 4}`);
+        throw new Error(`parabun:llm: unknown GGUF value tag ${tag} at byte ${this.pos - 4}`);
     }
   }
 }
@@ -443,7 +443,7 @@ function tensorByteLength(type: number, dims: number[]): number {
       // 210 bytes per 256 elements.
       return (n / QK_K) * Q6_K_BLOCK_BYTES;
     default:
-      throw new Error(`para:llm: unsupported GGML type ${type} in tensor-info`);
+      throw new Error(`parabun:llm: unsupported GGML type ${type} in tensor-info`);
   }
 }
 

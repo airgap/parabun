@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("para:gpu — median / quantile", () => {
+describe("parabun:gpu — median / quantile", () => {
   it("median of an odd-length input is the middle element", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-median-odd",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([3, 1, 4, 1, 5]);  // sorted: 1, 1, 3, 4, 5
         console.log("median", gpu.median(input));
@@ -33,7 +33,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-median-even",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3, 4]);  // sorted: 1, 2, 3, 4
         // q*(n-1) = 0.5 * 3 = 1.5 → between sorted[1]=2 and sorted[2]=3 → 2.5
@@ -48,7 +48,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-quantile-extremes",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([3, 1, 4, 1, 5, 9, 2, 6]);
         console.log("min", gpu.quantile(input, 0));
@@ -63,7 +63,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-quantile-quartiles",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         // Sorted: 1, 2, 3, 4, 5. n-1 = 4.
         // q=0.25 → pos=1.0 → sorted[1]=2
@@ -81,7 +81,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-quantile-interp",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         // n=4, so q*(n-1) = q*3.
         // Sorted: 10, 20, 30, 40.
@@ -102,7 +102,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-median-robust",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const clean = new Float32Array([10, 11, 12, 13, 14, 15]);
         const dirty = new Float32Array([10, 11, 12, 13, 14, 15, 1000, 2000]);
@@ -123,7 +123,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-median-u32",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Uint32Array([1, 2, 3, 4]);
         console.log("median", gpu.median(input));
@@ -139,7 +139,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-median-empty",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const empty = new Float32Array(0);
         console.log("median", gpu.median(empty));
@@ -154,7 +154,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-quantile-bad-q",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3]);
         let threw = 0;
@@ -172,7 +172,7 @@ describe("para:gpu — median / quantile", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-quantile-immutable",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([5, 2, 8, 1, 7]);
         const before = Array.from(input).join(",");

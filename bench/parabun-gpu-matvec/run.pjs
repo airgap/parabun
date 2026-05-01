@@ -1,4 +1,4 @@
-// Microbenchmark: para:simd.matVec vs para:gpu.matVec across sizes.
+// Microbenchmark: para:simd.matVec vs parabun:gpu.matVec across sizes.
 //
 //   bun run build:release bench/parabun-gpu-matvec/run.pjs
 //
@@ -9,7 +9,7 @@
 // still measured to show why the threshold is set where it is.
 
 import simd from "para:simd";
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 
 const desc = gpu.describe();
 console.log(`gpu backend: ${desc.active}  available=[${desc.available.join(",")}]  platform=${desc.platform}\n`);

@@ -263,7 +263,7 @@ function dot(a, b) {
 
 function matVec(mat, vec, M, K) {
   // Straight scalar for now — a v128 matVec with workgroup-style
-  // per-row reduction is a future upgrade. WebGPU path in para:gpu
+  // per-row reduction is a future upgrade. WebGPU path in parabun:gpu
   // covers the large-matrix case.
   const out = new vec.constructor(M);
   for (let i = 0; i < M; i++) {

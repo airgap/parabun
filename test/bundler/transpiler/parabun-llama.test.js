@@ -23,7 +23,7 @@ describe.if(HAS_FIXTURE)("Llama-3.2-1B forward pass", () => {
   let argmax;
 
   beforeAll(async () => {
-    const llm = (await import("para:llm")).default;
+    const llm = (await import("parabun:llm")).default;
     const f = await llm.loadGGUF(FIXTURE);
     model = llm.llamaFromGGUF(f);
     tok = llm.tokenizerFromGGUF(f);

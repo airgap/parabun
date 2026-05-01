@@ -21,7 +21,7 @@
 //
 //   bun run build:release --asan=off bench/parabun-image-vs-sharp/gpu-warm.ts
 
-import image from "para:image";
+import image from "parabun:image";
 
 const N = 4096;
 const data = new Uint8Array(N * N * 4);

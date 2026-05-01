@@ -7,11 +7,11 @@ import { existsSync } from "node:fs";
 const FIXTURE = "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q8_0.gguf";
 const HAS_FIXTURE = existsSync(FIXTURE);
 
-describe("para:llm Sampler (synthetic)", () => {
+describe("parabun:llm Sampler (synthetic)", () => {
   let llm;
 
   beforeAll(async () => {
-    llm = (await import("para:llm")).default;
+    llm = (await import("parabun:llm")).default;
   });
 
   it("temperature=0 is deterministic argmax", () => {
@@ -83,11 +83,11 @@ describe("para:llm Sampler (synthetic)", () => {
   });
 });
 
-describe.if(HAS_FIXTURE)("para:llm sampling end-to-end", () => {
+describe.if(HAS_FIXTURE)("parabun:llm sampling end-to-end", () => {
   let model;
 
   beforeAll(async () => {
-    const llm = (await import("para:llm")).default;
+    const llm = (await import("parabun:llm")).default;
     model = await llm.LLM.load(FIXTURE);
   }, 180_000);
 
@@ -117,6 +117,6 @@ describe.if(HAS_FIXTURE)("para:llm sampling end-to-end", () => {
   }, 240_000);
 });
 
-describe.if(!HAS_FIXTURE)("para:llm sampling end-to-end", () => {
+describe.if(!HAS_FIXTURE)("parabun:llm sampling end-to-end", () => {
   it.skip(`skipped: fixture missing (${FIXTURE})`, () => {});
 });

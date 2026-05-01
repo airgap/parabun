@@ -82,7 +82,7 @@ measurements in `bench/parabun-metal-zerocopy` covered Apple Silicon,
 and CUDA had no residency path (its `hold` was a stub). With
 `cuMemAlloc + cuMemcpyHtoD` in `hold()` and a held-aware
 `launchMatVecF32`, the CUDA backend is now the first place in
-`para:gpu` where a dedicated GPU can credibly beat SIMD — it just needs
+`parabun:gpu` where a dedicated GPU can credibly beat SIMD — it just needs
 the caller to say "this matrix is hot" via `gpu.hold`.
 
 Pending per Tier 4:

@@ -1,4 +1,4 @@
-// Hardcoded module "para:llm"
+// Hardcoded module "parabun:llm"
 //
 // Parabun: native LLM inference. v0 targets Llama-3.2 1B Q8_0 GGUF on a CUDA
 // host (falls back to para:simd on CPU). The low-level layers — GGUF file
@@ -6,7 +6,7 @@
 // are exposed directly so callers can inspect intermediate state; the
 // high-level `LLM` class wraps them into the usual load-then-generate shape.
 //
-//   import { LLM } from "para:llm";
+//   import { LLM } from "parabun:llm";
 //   using llm = await LLM.load("/path/to/Llama-3.2-1B-Q8_0.gguf");
 //   for await (const piece of llm.generate("Hello,", { maxTokens: 20 })) {
 //     process.stdout.write(piece);
@@ -211,7 +211,7 @@ class LLM {
   #tokenBytes: Uint8Array[] | null = null;
   #specialIds: Set<number> | null = null;
   // Reactive surface (PLAN-module-signals item 2). Tracks active
-  // generations + the active gpu backend. `para:assistant` reads
+  // generations + the active gpu backend. `parabun:assistant` reads
   // `m.busy` to dim its UI during generation.
   #busyCount = 0;
   #busy: WritableSignal<boolean>;
@@ -308,7 +308,7 @@ class LLM {
   // own framing in that case. Same sampling/stop options as generate().
   async *chat(messages: ChatMessage[], opts?: GenerateOptions): AsyncGenerator<string, void, void> {
     if (this.chatTemplate === null) {
-      throw new Error("para:llm: no chat template detected for this model; use generate() with explicit framing");
+      throw new Error("parabun:llm: no chat template detected for this model; use generate() with explicit framing");
     }
     let promptIds = this.encodeChat(messages);
     if (opts?.prefix) {
@@ -320,7 +320,7 @@ class LLM {
       const pre = opts.prefix.tokens;
       if (promptIds.length < pre.length) {
         throw new Error(
-          `para:llm: chat prompt (${promptIds.length} tokens) is shorter than prefix (${pre.length}) — was the prefix built from a superset of these messages?`,
+          `parabun:llm: chat prompt (${promptIds.length} tokens) is shorter than prefix (${pre.length}) — was the prefix built from a superset of these messages?`,
         );
       }
     }
@@ -348,7 +348,7 @@ class LLM {
   // sampled distribution, which is a bug in the caller's schema.
   async chatJSON<T = unknown>(messages: ChatMessage[], opts: GenerateOptions): Promise<T> {
     if (!opts || (opts.schema === undefined && opts.grammar === undefined)) {
-      throw new TypeError("para:llm.chatJSON: opts.schema or opts.grammar is required");
+      throw new TypeError("parabun:llm.chatJSON: opts.schema or opts.grammar is required");
     }
     let out = "";
     for await (const chunk of this.chat(messages, opts)) out += chunk;
@@ -373,7 +373,7 @@ class LLM {
   // many user turns.
   async prefixChat(messages: ChatMessage[]): Promise<PrefixCache> {
     if (this.chatTemplate === null) {
-      throw new Error("para:llm: no chat template detected for this model; use prefix() with explicit framing");
+      throw new Error("parabun:llm: no chat template detected for this model; use prefix() with explicit framing");
     }
     // Don't emit the assistant-turn opener — follow-up chat() calls will
     // add more user/assistant turns before that opener, so including it
@@ -383,13 +383,13 @@ class LLM {
   }
 
   async #buildPrefix(ids: number[]): Promise<PrefixCache> {
-    if (this.#disposed) throw new Error("para:llm: LLM already disposed");
-    if (ids.length === 0) throw new Error("para:llm: cannot build prefix from empty token sequence");
+    if (this.#disposed) throw new Error("parabun:llm: LLM already disposed");
+    if (ids.length === 0) throw new Error("parabun:llm: cannot build prefix from empty token sequence");
     this.#beginBusy();
     const kv = this.model.newKVCache();
     try {
       if (ids.length >= kv.maxContext()) {
-        throw new Error(`para:llm: prefix of ${ids.length} tokens exceeds maxContext=${kv.maxContext()}`);
+        throw new Error(`parabun:llm: prefix of ${ids.length} tokens exceeds maxContext=${kv.maxContext()}`);
       }
       let logits: Float32Array | undefined;
       for (let p = 0; p < ids.length; p++) {
@@ -412,18 +412,18 @@ class LLM {
   // length dModel; L2-normalized by default so cosine similarity = dot
   // product.
   async embed(text: string, opts?: { pool?: "last" | "mean"; normalize?: boolean }): Promise<Float32Array> {
-    if (this.#disposed) throw new Error("para:llm: LLM already disposed");
+    if (this.#disposed) throw new Error("parabun:llm: LLM already disposed");
     const pool = opts?.pool ?? "last";
     const normalize = opts?.normalize ?? true;
     const ids = this.tokenizer.encode(text);
-    if (ids.length === 0) throw new Error("para:llm: cannot embed empty text");
+    if (ids.length === 0) throw new Error("parabun:llm: cannot embed empty text");
 
     const dModel = this.model.cfg.dModel;
     this.#beginBusy();
     const kv = this.model.newKVCache();
     try {
       if (ids.length > kv.maxContext()) {
-        throw new Error(`para:llm: text has ${ids.length} tokens, exceeds maxContext=${kv.maxContext()}`);
+        throw new Error(`parabun:llm: text has ${ids.length} tokens, exceeds maxContext=${kv.maxContext()}`);
       }
 
       const out = new Float32Array(dModel);
@@ -465,14 +465,14 @@ class LLM {
   // doesn't belong there.
   encodeChat(messages: ChatMessage[], opts?: { openAssistant?: boolean }): number[] {
     if (this.chatTemplate === null) {
-      throw new Error("para:llm: no chat template detected for this model");
+      throw new Error("parabun:llm: no chat template detected for this model");
     }
     const openAssistant = opts?.openAssistant ?? true;
     const tok = this.tokenizer;
     const ids: number[] = [];
     const pushPiece = (piece: string): void => {
       const id = tok.vocabId.get(piece);
-      if (id === undefined) throw new Error(`para:llm: template piece "${piece}" not in tokenizer vocab`);
+      if (id === undefined) throw new Error(`parabun:llm: template piece "${piece}" not in tokenizer vocab`);
       ids.push(id);
     };
     const pushText = (text: string): void => {
@@ -566,7 +566,7 @@ class LLM {
   }
 
   async *#generateFromIds(promptIds: number[], opts?: GenerateOptions): AsyncGenerator<string, void, void> {
-    if (this.#disposed) throw new Error("para:llm: LLM already disposed");
+    if (this.#disposed) throw new Error("parabun:llm: LLM already disposed");
 
     // busy refcount for the reactive `m.busy` signal — covers every
     // path through generate() / chat() / their *Complete shims since
@@ -594,7 +594,7 @@ class LLM {
     const logitBias = opts?.logitBias;
 
     if (opts?.grammar !== undefined && opts?.schema !== undefined) {
-      throw new Error("para:llm: pass either `grammar` or `schema`, not both");
+      throw new Error("parabun:llm: pass either `grammar` or `schema`, not both");
     }
     let grammar: InstanceType<typeof grammarModule.Grammar> | null = null;
     if (opts?.grammar !== undefined || opts?.schema !== undefined) {
@@ -622,7 +622,7 @@ class LLM {
     const maxCtx = kv.maxContext();
 
     if (promptIds.length >= maxCtx) {
-      throw new Error(`para:llm: prompt of ${promptIds.length} tokens exceeds maxContext=${maxCtx}`);
+      throw new Error(`parabun:llm: prompt of ${promptIds.length} tokens exceeds maxContext=${maxCtx}`);
     }
 
     // Restore prefix KV if one was supplied. The prompt must begin with
@@ -634,14 +634,14 @@ class LLM {
     if (opts?.prefix) {
       const p = opts.prefix;
       if (!p.__matches(this.model)) {
-        throw new Error("para:llm: prefix was built for a different model instance");
+        throw new Error("parabun:llm: prefix was built for a different model instance");
       }
       if (p.tokens.length > promptIds.length) {
-        throw new Error(`para:llm: prompt of ${promptIds.length} tokens is shorter than prefix of ${p.tokens.length}`);
+        throw new Error(`parabun:llm: prompt of ${promptIds.length} tokens is shorter than prefix of ${p.tokens.length}`);
       }
       for (let i = 0; i < p.tokens.length; i++) {
         if (promptIds[i] !== p.tokens[i]) {
-          throw new Error(`para:llm: prompt does not start with prefix tokens (diverges at index ${i})`);
+          throw new Error(`parabun:llm: prompt does not start with prefix tokens (diverges at index ${i})`);
         }
       }
       kv.restore(p.snapshot);
@@ -709,25 +709,25 @@ class LLM {
     draft: LLM,
     opts: GenerateOptions,
   ): AsyncGenerator<string, void, void> {
-    if (draft.#disposed) throw new Error("para:llm: draft model already disposed");
+    if (draft.#disposed) throw new Error("parabun:llm: draft model already disposed");
     if (draft.tokenizer.vocab.length !== this.tokenizer.vocab.length) {
       throw new Error(
-        `para:llm: draft vocab size ${draft.tokenizer.vocab.length} doesn't match target ${this.tokenizer.vocab.length}`,
+        `parabun:llm: draft vocab size ${draft.tokenizer.vocab.length} doesn't match target ${this.tokenizer.vocab.length}`,
       );
     }
     if (opts.grammar !== undefined || opts.schema !== undefined || opts.logitBias !== undefined) {
-      throw new Error("para:llm: grammar/schema/logitBias not yet supported with speculative decoding");
+      throw new Error("parabun:llm: grammar/schema/logitBias not yet supported with speculative decoding");
     }
     if ((opts.topK ?? 0) > 0 || (opts.topP ?? 0) > 0) {
-      throw new Error("para:llm: topK/topP not yet supported with speculative decoding");
+      throw new Error("parabun:llm: topK/topP not yet supported with speculative decoding");
     }
     if (opts.prefix !== undefined) {
-      throw new Error("para:llm: prefix caching not yet supported with speculative decoding");
+      throw new Error("parabun:llm: prefix caching not yet supported with speculative decoding");
     }
 
     const k = opts.speculativeK ?? 4;
     if (!Number.isInteger(k) || k < 1) {
-      throw new Error(`para:llm: speculativeK must be a positive integer, got ${k}`);
+      throw new Error(`parabun:llm: speculativeK must be a positive integer, got ${k}`);
     }
     const maxTokens = opts.maxTokens ?? 256;
     const temperature = opts.temperature ?? 0;
@@ -746,7 +746,7 @@ class LLM {
 
     try {
       if (promptIds.length >= maxCtx) {
-        throw new Error(`para:llm: prompt of ${promptIds.length} tokens exceeds maxContext=${maxCtx}`);
+        throw new Error(`parabun:llm: prompt of ${promptIds.length} tokens exceeds maxContext=${maxCtx}`);
       }
 
       // Prefill both models in lockstep. We need the last-position logits

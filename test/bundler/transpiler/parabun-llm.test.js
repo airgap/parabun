@@ -1,19 +1,19 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 
-// High-level `para:llm` surface test. Validates that LLM.load + generate /
+// High-level `parabun:llm` surface test. Validates that LLM.load + generate /
 // complete round-trip a known factual prompt. Lower-level pieces (GGUF
 // loader, tokenizer, forward pass) have their own tests — this one only
 // exercises the wrapping surface.
 const FIXTURE = "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q8_0.gguf";
 const HAS_FIXTURE = existsSync(FIXTURE);
 
-describe.if(HAS_FIXTURE)("para:llm high-level surface", () => {
+describe.if(HAS_FIXTURE)("parabun:llm high-level surface", () => {
   let LLM;
   let model;
 
   beforeAll(async () => {
-    const llm = (await import("para:llm")).default;
+    const llm = (await import("parabun:llm")).default;
     LLM = llm.LLM;
     model = await LLM.load(FIXTURE);
   }, 180_000);
@@ -53,6 +53,6 @@ describe.if(HAS_FIXTURE)("para:llm high-level surface", () => {
   }, 120_000);
 });
 
-describe.if(!HAS_FIXTURE)("para:llm high-level surface", () => {
+describe.if(!HAS_FIXTURE)("parabun:llm high-level surface", () => {
   it.skip(`skipped: fixture missing (${FIXTURE})`, () => {});
 });

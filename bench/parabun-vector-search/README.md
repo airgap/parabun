@@ -7,7 +7,7 @@ primitive fail or succeed in isolation.
 
 This bench is what motivated the `para:simd` reduce-op threshold, the
 `para:simd.matVec` bulk kernel, `para:parallel`'s persistent worker
-pool, `para:gpu`'s Tier-4 residency, and the `para:simd.topK` selection
+pool, `parabun:gpu`'s Tier-4 residency, and the `para:simd.topK` selection
 primitive. Every tier that looked like an obvious win on paper lost
 to something — memory bandwidth, copy-in cost, structured-clone
 overhead, or idiomatic top-K sort — until the last variant lined up
@@ -38,7 +38,7 @@ The pmap variants do per-chunk fixed-size-heap top-K inside each worker
 | pmap-cold (fresh worker pool)           | 438.3 / 441.7 / 454.1     |      0.10×  |
 | pmap-warm (persistent pool, no SAB)     | 404.6 / 406.8 / 412.1     |      0.11×  |
 | pmap-shared (pool + SAB embeddings)     |  16.8 /  20.2 /  24.5     |      2.12×  |
-| **gpu (`para:gpu.matVec`, held)**        |   3.9 /   4.2 /   7.4     |   **10.19×**|
+| **gpu (`parabun:gpu.matVec`, held)**        |   3.9 /   4.2 /   7.4     |   **10.19×**|
 
 Top-K indices verified bit-identical across all seven variants.
 
@@ -120,7 +120,7 @@ The harness runs each variant 5 times, prints min/med/max for
 gen/score/total phases, and asserts the top-K set matches across all
 seven variants. Release build is required — debug-build WASM is ~3×
 slower and inverts several of these rankings. The GPU row degrades to
-`para:simd.matVec` behavior if CUDA/Metal isn't available — `para:gpu`
+`para:simd.matVec` behavior if CUDA/Metal isn't available — `parabun:gpu`
 routes through the CPU backend transparently.
 
 ## Files
@@ -134,7 +134,7 @@ routes through the CPU backend transparently.
 - `variant-pmap-warm.pjs` — `pmap × 8` with the persistent pool pre-warmed.
 - `variant-pmap-shared.pjs` — `pmap × 8` with the persistent pool *and* SAB
   embeddings. First variant to beat baseline.
-- `variant-gpu.pjs` — `para:gpu.matVec` with the embedding matrix held on
+- `variant-gpu.pjs` — `parabun:gpu.matVec` with the embedding matrix held on
   device. Score phase runs CUDA PTX when available, falls through to
   `para:simd.matVec` otherwise.
 - `run.ts` — best-of-5 harness, top-K cross-check.

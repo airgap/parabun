@@ -7,7 +7,7 @@
 // If CUDA isn't available, gpu.matVec falls through to para:simd.matVec
 // and the row degenerates to the same numbers as variant-matvec.
 
-import { GpuFloat32Array, matVec } from "para:gpu";
+import { GpuFloat32Array, matVec } from "parabun:gpu";
 import { topK as simdTopK } from "para:simd";
 import { generate, N, D, K } from "./gen.js";
 

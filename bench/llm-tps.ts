@@ -1,6 +1,6 @@
-// Decode-TPS benchmark for para:llm vs ollama on the same Q4_K_M fixture.
+// Decode-TPS benchmark for parabun:llm vs ollama on the same Q4_K_M fixture.
 // Prints prompt-prefill-tps and decode-tps after a warmup pass. Greedy-only.
-import llm from "para:llm";
+import llm from "parabun:llm";
 
 const FIXTURE = "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 const PROMPT = "Once upon a time, in a quiet village nestled between green hills,";

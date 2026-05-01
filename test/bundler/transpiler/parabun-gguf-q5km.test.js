@@ -13,7 +13,7 @@ describe.if(HAS_FIXTURE)("GGUF loader (Llama-3.2-1B Q5_K_M)", () => {
   let f;
 
   beforeAll(async () => {
-    llm = (await import("para:llm")).default;
+    llm = (await import("parabun:llm")).default;
     f = await llm.loadGGUF(FIXTURE);
   }, 60_000);
 
@@ -58,7 +58,7 @@ describe.if(HAS_FIXTURE)("Q5_K_M end-to-end (Llama-3.2-1B)", () => {
   let model;
 
   beforeAll(async () => {
-    const llm = (await import("para:llm")).default;
+    const llm = (await import("parabun:llm")).default;
     model = await llm.LLM.load(FIXTURE);
   }, 180_000);
 

@@ -1,4 +1,4 @@
-// @parascript/transpile — standalone ParaScript transpiler.
+// @para/transpile — standalone Para transpiler.
 //
 // Public surface:
 //   transpile(src, options?) → JS string

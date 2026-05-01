@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import i2c from "para:i2c";
+import i2c from "parabun:i2c";
 
-// API-surface tests for para:i2c (LYK-771). Real-bus interactions are
+// API-surface tests for parabun:i2c (LYK-771). Real-bus interactions are
 // validated on Pi 5 in the embedded smoke suite (scan() vs i2cdetect,
 // transact / SMBus); here we exercise the JS wrapper logic + capability
 // decoding + error paths.
 
 const haveBus = existsSync("/dev/i2c-1") || existsSync("/dev/i2c-11");
 
-describe("para:i2c API surface", () => {
+describe("parabun:i2c API surface", () => {
   test("exports default object with buses + open", () => {
     expect(typeof i2c).toBe("object");
     expect(typeof i2c.buses).toBe("function");

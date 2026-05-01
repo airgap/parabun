@@ -9,12 +9,12 @@ import { existsSync } from "node:fs";
 const FIXTURE = "/rigil/parabun-fixtures/llm/Llama-3.2-1B-Instruct-Q8_0.gguf";
 const HAS_FIXTURE = existsSync(FIXTURE);
 
-describe.if(HAS_FIXTURE)("para:llm KV prefix cache", () => {
+describe.if(HAS_FIXTURE)("parabun:llm KV prefix cache", () => {
   let llm;
   let model;
 
   beforeAll(async () => {
-    llm = (await import("para:llm")).default;
+    llm = (await import("parabun:llm")).default;
     model = await llm.LLM.load(FIXTURE);
   }, 180_000);
 
@@ -98,6 +98,6 @@ describe.if(HAS_FIXTURE)("para:llm KV prefix cache", () => {
   }, 180_000);
 });
 
-describe.if(!HAS_FIXTURE)("para:llm KV prefix cache", () => {
+describe.if(!HAS_FIXTURE)("parabun:llm KV prefix cache", () => {
   it.skip(`skipped: fixture missing (${FIXTURE})`, () => {});
 });

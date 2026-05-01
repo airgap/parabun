@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import audio from "para:audio";
+import audio from "parabun:audio";
 
 // audio.devices is a callable signal (LYK-745). Calling it returns a
 // Promise<DeviceList> for backwards compat; .get / .peek / .subscribe are
 // the reactive surface backed by /dev/snd inotify on Linux.
 
-describe("para:audio.devices callable signal (LYK-745)", () => {
+describe("parabun:audio.devices callable signal (LYK-745)", () => {
   test("call form returns a Promise<DeviceList>", async () => {
     const result = audio.devices();
     expect(result).toBeInstanceOf(Promise);

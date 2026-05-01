@@ -1,6 +1,6 @@
 # parabun-gpu-matvec
 
-Microbenchmark: `para:simd.matVec` vs `para:gpu.matVec` across a grid of
+Microbenchmark: `para:simd.matVec` vs `parabun:gpu.matVec` across a grid of
 M × K sizes, plus bit-exactness cross-check.
 
 Answers one question: does the GPU kernel beat the tight `f32x4` SIMD
@@ -48,7 +48,7 @@ synchronize dwarf it. Residency (`cuMemAlloc` once + reuse) is the
 unlock here, not kernel tuning.
 
 On a Linux host without CUDA (or with ASAN-disabled `cuInit`), both
-`para:gpu.matVec` and `para:simd.matVec` resolve to the same tight SIMD
+`parabun:gpu.matVec` and `para:simd.matVec` resolve to the same tight SIMD
 path, so the reported speedup is ~1.0× and `wins?` is `no` for every
 row.
 
@@ -119,5 +119,5 @@ Columns:
   vec-in-shared-memory reuse, reduction-per-threadgroup) to actually
   beat `para:simd`, drop `MIN_MATVEC_WINS_ELEMS` back down to a concrete
   number and these two constants collapse into one.
-- `para:gpu.matVec` on hosts with no real GPU backend (cpu backend) just
+- `parabun:gpu.matVec` on hosts with no real GPU backend (cpu backend) just
   forwards to `para:simd`, so there's no harm in calling it regardless.

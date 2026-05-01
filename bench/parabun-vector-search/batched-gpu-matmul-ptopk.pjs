@@ -12,7 +12,7 @@
 // With the copy-to-SAB gone, this path should finally pay off.
 
 import parallel from "para:parallel";
-import { GpuFloat32Array, matmul } from "para:gpu";
+import { GpuFloat32Array, matmul } from "parabun:gpu";
 import { generateBatch, N, D, K } from "./gen.js";
 
 const { pmap } = parallel;

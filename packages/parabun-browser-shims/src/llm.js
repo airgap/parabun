@@ -1,15 +1,15 @@
-// Browser shim for `para:llm`. The upstream is a from-scratch GGUF +
+// Browser shim for `parabun:llm`. The upstream is a from-scratch GGUF +
 // Llama runtime with CUDA kernels. Browser-side inference is doable —
 // WebGPU compute shaders can run the matVec/attention kernels, but
 // that's a substantial port. V1 of this shim throws on load with a
-// clear explanation; applications should import `para:llm` lazily and
+// clear explanation; applications should import `parabun:llm` lazily and
 // degrade to an API-hosted inference path.
 //
 // TODO: a `ParabunWebLLM` module that ports the Q4_K / Q6_K kernels
 // to WGSL and reuses the tokenizer / sampler code unchanged.
 
 const NOT_IMPL_MSG =
-  "parabun-browser-shims: para:llm has no browser backend wired yet. " +
+  "parabun-browser-shims: parabun:llm has no browser backend wired yet. " +
   "Use the CUDA/Metal native module via parabun in a server/Electron " +
   "context, or route requests to a remote inference endpoint.";
 

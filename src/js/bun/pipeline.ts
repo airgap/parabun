@@ -26,7 +26,7 @@ function simd(): any {
   return _simd;
 }
 
-// para:gpu is loaded lazily the first time we consider promoting a chain to
+// parabun:gpu is loaded lazily the first time we consider promoting a chain to
 // the GPU tier. Keeping it lazy means a pipeline that never grows a big
 // Float32Array never pays for backend probing / MSL compilation.
 let gpuMod: any = null;

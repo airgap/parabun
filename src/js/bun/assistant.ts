@@ -1,9 +1,9 @@
-// Hardcoded module "para:assistant"
+// Hardcoded module "parabun:assistant"
 //
-// Tier 2 facade that composes para:audio + para:speech + para:llm into a
+// Tier 2 facade that composes parabun:audio + parabun:speech + parabun:llm into a
 // complete edge AI assistant. Three-line case:
 //
-//   import assistant from "para:assistant";
+//   import assistant from "parabun:assistant";
 //
 //   await using bot = await assistant.create({
 //     llm: "/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
@@ -23,7 +23,7 @@
 //   4. No hidden state outside `bot`. Disposal is deterministic via
 //      `await using` / explicit close().
 //   5. Power users keep their seat. Anything bot does is reachable
-//      directly via para:llm / para:speech / para:audio.
+//      directly via parabun:llm / parabun:speech / parabun:audio.
 //
 // What v1 ships (per PLAN-bun-assistant.md "Build order" §208):
 //   - assistant.create + bot.run + bot.turns + bot.ask/say
@@ -122,7 +122,7 @@ type InlineTool = {
 /**
  * Anything with `.tools: ToolDescriptor[]` + `.call(name, args)` — `para:mcp`'s
  * `MCPConnection` is the canonical implementation. We deliberately don't
- * `require("./mcp.ts")` for the type so `para:assistant` doesn't pull MCP into
+ * `require("./mcp.ts")` for the type so `parabun:assistant` doesn't pull MCP into
  * every assistant binary; the MCP connection is identified structurally.
  */
 type MCPLike = {
@@ -172,10 +172,10 @@ function normalizeTool(tool: AssistantTool): NormalizedTool[] {
     }));
   }
   if (typeof tool.name !== "string" || !tool.name) {
-    throw new TypeError("para:assistant: inline tool must have a non-empty `name`");
+    throw new TypeError("parabun:assistant: inline tool must have a non-empty `name`");
   }
   if (typeof (tool as InlineTool).run !== "function") {
-    throw new TypeError(`para:assistant: inline tool "${tool.name}" must define run()`);
+    throw new TypeError(`parabun:assistant: inline tool "${tool.name}" must define run()`);
   }
   const inline = tool as InlineTool;
   return [
@@ -264,7 +264,7 @@ type AssistantOptions = {
    * working copy — without persisting to canonical history or memory.
    *
    * `encoder` is either a path to a sentence-embedding GGUF (BGE / E5 /
-   * MiniLM-class) or a pre-loaded `para:llm.Encoder` instance. Re-indexes on
+   * MiniLM-class) or a pre-loaded `parabun:llm.Encoder` instance. Re-indexes on
    * filesystem change via `fs.watch` (debounced).
    */
   knowledge?: KnowledgeOptions;
@@ -283,7 +283,7 @@ type KnowledgeOptions = {
   /**
    * Sentence-embedding GGUF path, or a pre-loaded encoder instance with an
    * `embed(text, opts) -> Float32Array` method. The synchronous embed shape
-   * (matching `para:llm.Encoder`) is what we expect.
+   * (matching `parabun:llm.Encoder`) is what we expect.
    */
   encoder: string | { embed(text: string, opts?: { pool?: string; normalize?: boolean }): Float32Array };
   /** How many chunks to retrieve per query. Default 4. */
@@ -380,7 +380,7 @@ class SqliteMemoryStore implements MemoryStore {
   }
 
   load(): Message[] {
-    if (this.#disposed) throw new Error("para:assistant: memory store disposed");
+    if (this.#disposed) throw new Error("parabun:assistant: memory store disposed");
     const rows = this.#db.query("SELECT role, content FROM turns ORDER BY id ASC").all() as Array<{
       role: "user" | "assistant" | "system";
       content: string;
@@ -389,7 +389,7 @@ class SqliteMemoryStore implements MemoryStore {
   }
 
   append(msg: Message): void {
-    if (this.#disposed) throw new Error("para:assistant: memory store disposed");
+    if (this.#disposed) throw new Error("parabun:assistant: memory store disposed");
     this.#db.run("INSERT INTO turns (role, content, ts) VALUES (?, ?, ?)", [msg.role, msg.content, Date.now()]);
   }
 
@@ -453,7 +453,7 @@ function parseCronField(part: string, idx: number): Set<number> {
       rangeAndStep = piece.slice(0, slash);
       step = parseInt(piece.slice(slash + 1), 10);
       if (!Number.isFinite(step) || step <= 0) {
-        throw new Error(`para:assistant: invalid cron step "${piece}"`);
+        throw new Error(`parabun:assistant: invalid cron step "${piece}"`);
       }
     }
     let lo: number, hi: number;
@@ -468,7 +468,7 @@ function parseCronField(part: string, idx: number): Set<number> {
       lo = hi = parseInt(rangeAndStep, 10);
     }
     if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo < min || hi > max || lo > hi) {
-      throw new Error(`para:assistant: cron field "${piece}" out of range [${min}, ${max}]`);
+      throw new Error(`parabun:assistant: cron field "${piece}" out of range [${min}, ${max}]`);
     }
     for (let v = lo; v <= hi; v += step) out.add(v);
   }
@@ -478,7 +478,7 @@ function parseCronField(part: string, idx: number): Set<number> {
 function parseCron(expr: string): CronSpec {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) {
-    throw new Error(`para:assistant: cron expression must have 5 fields (got ${parts.length}): "${expr}"`);
+    throw new Error(`parabun:assistant: cron expression must have 5 fields (got ${parts.length}): "${expr}"`);
   }
   return {
     minute: parseCronField(parts[0], 0),
@@ -621,10 +621,10 @@ class KnowledgeStore {
   static async create(opts: KnowledgeOptions): Promise<KnowledgeStore> {
     const fs = require("node:fs");
     if (typeof opts.dir !== "string" || !opts.dir) {
-      throw new TypeError("para:assistant.knowledge: opts.dir is required");
+      throw new TypeError("parabun:assistant.knowledge: opts.dir is required");
     }
     if (!fs.existsSync(opts.dir)) {
-      throw new Error(`para:assistant.knowledge: directory not found at "${opts.dir}"`);
+      throw new Error(`parabun:assistant.knowledge: directory not found at "${opts.dir}"`);
     }
     let encoder: { embed(text: string, opts?: any): Float32Array };
     let owns = false;
@@ -634,7 +634,7 @@ class KnowledgeStore {
     } else if (opts.encoder && typeof (opts.encoder as any).embed === "function") {
       encoder = opts.encoder as any;
     } else {
-      throw new TypeError("para:assistant.knowledge: opts.encoder must be a path or an Encoder-like object");
+      throw new TypeError("parabun:assistant.knowledge: opts.encoder must be a path or an Encoder-like object");
     }
     const store = new KnowledgeStore(encoder, owns, opts);
     await store.reindex();
@@ -647,7 +647,7 @@ class KnowledgeStore {
 
   /** Walk the directory, chunk, embed, replace the index in one pass. */
   async reindex(): Promise<void> {
-    if (this.#disposed) throw new Error("para:assistant.knowledge: store disposed");
+    if (this.#disposed) throw new Error("parabun:assistant.knowledge: store disposed");
     // Serialize concurrent reindex calls — fs.watch can fire fast.
     if (this.#reindexInFlight) return this.#reindexInFlight;
     const run = (async () => {
@@ -667,7 +667,7 @@ class KnowledgeStore {
         const v = this.#encoder.embed(newChunks[i].text, { pool: "mean", normalize: true });
         if (v.length !== dim) {
           throw new Error(
-            `para:assistant.knowledge: encoder produced inconsistent dims (${dim} vs ${v.length}) at chunk ${i}`,
+            `parabun:assistant.knowledge: encoder produced inconsistent dims (${dim} vs ${v.length}) at chunk ${i}`,
           );
         }
         matrix.set(v, i * dim);
@@ -690,12 +690,12 @@ class KnowledgeStore {
    * normalization as the corpus.
    */
   search(text: string, n?: number): KnowledgeHit[] {
-    if (this.#disposed) throw new Error("para:assistant.knowledge: store disposed");
+    if (this.#disposed) throw new Error("parabun:assistant.knowledge: store disposed");
     if (this.#chunks.length === 0 || this.#dim === 0) return [];
     const k = Math.max(1, Math.min(this.#chunks.length, n ?? this.#topK));
     const q = this.#encoder.embed(text, { pool: "mean", normalize: true });
     if (q.length !== this.#dim) {
-      throw new Error(`para:assistant.knowledge: query dim ${q.length} doesn't match index dim ${this.#dim}`);
+      throw new Error(`parabun:assistant.knowledge: query dim ${q.length} doesn't match index dim ${this.#dim}`);
     }
     const dim = this.#dim;
     const n_chunks = this.#chunks.length;
@@ -827,10 +827,10 @@ class Assistant {
   #interrupted: WritableSignal<boolean>;
 
   // ─── Composed resources ───
-  #llm: any | null = null; // para:llm LLM instance
-  #whisper: any | null = null; // para:llm WhisperModel
-  #mic: any | null = null; // para:audio CaptureStream
-  #spk: any | null = null; // para:audio PlaybackStream
+  #llm: any | null = null; // parabun:llm LLM instance
+  #whisper: any | null = null; // parabun:llm WhisperModel
+  #mic: any | null = null; // parabun:audio CaptureStream
+  #spk: any | null = null; // parabun:audio PlaybackStream
   #ttsModel: string | null = null;
   #ttsBinPath: string | undefined;
   #micOpts: AssistantOptions["mic"];
@@ -938,7 +938,7 @@ class Assistant {
 
   /** Add an inline tool or MCP connection mid-session. Returns the new tool count. */
   addTool(tool: AssistantTool): number {
-    if (this.#disposed) throw new Error("para:assistant: already disposed");
+    if (this.#disposed) throw new Error("parabun:assistant: already disposed");
     for (const n of normalizeTool(tool)) this.#tools.push(n);
     return this.#tools.length;
   }
@@ -999,7 +999,7 @@ class Assistant {
     if (opts.schedule && opts.schedule.length > 0) {
       for (const s of opts.schedule) {
         if (typeof s.cron !== "string" || typeof s.prompt !== "string") {
-          throw new TypeError("para:assistant: schedule entries must have string `cron` and `prompt` fields");
+          throw new TypeError("parabun:assistant: schedule entries must have string `cron` and `prompt` fields");
         }
         // parseCron throws on invalid syntax; let it propagate so the user
         // gets the error at create() time, not silently inside a tick.
@@ -1027,7 +1027,7 @@ class Assistant {
 
   /** Load all models + open audio devices. Returns when ready to converse. */
   static async create(opts: AssistantOptions): Promise<Assistant> {
-    if (!opts.llm) throw new TypeError("para:assistant.create: opts.llm (path to GGUF) is required");
+    if (!opts.llm) throw new TypeError("parabun:assistant.create: opts.llm (path to GGUF) is required");
     const bot = new Assistant(opts);
 
     // Load LLM (always required).
@@ -1144,10 +1144,10 @@ class Assistant {
    * reply round-trip.
    */
   async *turns(): AsyncIterableIterator<Turn> {
-    if (this.#disposed) throw new Error("para:assistant: already disposed");
+    if (this.#disposed) throw new Error("parabun:assistant: already disposed");
     if (!this.#mic || !this.#whisper) {
       throw new Error(
-        "para:assistant.turns: voice loop requires both `stt` and `mic`. Use bot.ask(text) for text-only turns.",
+        "parabun:assistant.turns: voice loop requires both `stt` and `mic`. Use bot.ask(text) for text-only turns.",
       );
     }
     const sampleRate = this.#mic.sampleRate;
@@ -1214,9 +1214,9 @@ class Assistant {
    * configured. Useful for tests, CLI tools, scheduled prompts.
    */
   async ask(text: string): Promise<Turn> {
-    if (this.#disposed) throw new Error("para:assistant: already disposed");
+    if (this.#disposed) throw new Error("parabun:assistant: already disposed");
     if (!text || typeof text !== "string") {
-      throw new TypeError("para:assistant.ask: text must be a non-empty string");
+      throw new TypeError("parabun:assistant.ask: text must be a non-empty string");
     }
     this.#state.set("thinking");
     try {
@@ -1229,9 +1229,9 @@ class Assistant {
 
   /** Speak text without recording a user turn (for scheduled announcements). */
   async say(text: string): Promise<void> {
-    if (this.#disposed) throw new Error("para:assistant: already disposed");
+    if (this.#disposed) throw new Error("parabun:assistant: already disposed");
     if (!this.#ttsModel) {
-      throw new Error("para:assistant.say: TTS not configured (opts.tts is unset)");
+      throw new Error("parabun:assistant.say: TTS not configured (opts.tts is unset)");
     }
     this.#state.set("speaking");
     try {

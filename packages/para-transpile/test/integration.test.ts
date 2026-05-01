@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { transpile } from "../src/index";
 
 // Cross-cutting tests — transforms should compose cleanly when more than
-// one ParaScript operator appears in the same expression.
+// one Para operator appears in the same expression.
 
 describe("integration: pipeline + error-chain", () => {
   test("data |> transform ..! handler", () => {

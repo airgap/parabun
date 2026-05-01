@@ -10,7 +10,7 @@
 // overhead stays ~constant, so per-query latency drops until compute or
 // PCIe bandwidth dominates.
 
-import { GpuFloat32Array, matmul } from "para:gpu";
+import { GpuFloat32Array, matmul } from "parabun:gpu";
 import { topK as simdTopK } from "para:simd";
 import { generate, N, D, K } from "./gen.js";
 

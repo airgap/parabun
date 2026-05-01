@@ -1,4 +1,4 @@
-// Blink an LED + react to a button — para:gpio. (TypeScript form.)
+// Blink an LED + react to a button — parabun:gpio. (TypeScript form.)
 //
 //   bun run build:release demos/gpio-blink.ts [--seconds N]
 //
@@ -7,7 +7,7 @@
 // so readers who don't want to use the .pts extension have a working
 // starting point for every demo.
 
-import gpio from "para:gpio";
+import gpio from "parabun:gpio";
 
 const args = process.argv.slice(2);
 const secondsIdx = args.indexOf("--seconds");
@@ -17,7 +17,7 @@ const chips = gpio.chips();
 const rp1 = chips.find(c => c.label === "pinctrl-rp1");
 const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
 if (!chipPath) {
-  console.error("no /dev/gpiochip* found — para:gpio is Linux-only.");
+  console.error("no /dev/gpiochip* found — parabun:gpio is Linux-only.");
   process.exit(1);
 }
 

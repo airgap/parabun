@@ -1,7 +1,7 @@
 # Metal matVec input-staging microbench
 
 Standalone bun:ffi harness (stock Bun, no parabun extensions) that measures
-four candidate `para:gpu.matVec` paths against an auto-vectorized CPU tight
+four candidate `parabun:gpu.matVec` paths against an auto-vectorized CPU tight
 loop on Apple Silicon:
 
 - **(A) COPY** — `newBufferWithBytes:length:options:` (today's metal.ts)
@@ -47,6 +47,6 @@ Requires: Apple Silicon macOS, stock Bun 1.3+. No parabun.
 matrix into a page-aligned scratch and using NOCOPY is only ~30% faster
 than plain COPY, and at 16+ MiB it still loses to CPU. The win comes
 from the user's matrix *already being* page-aligned — i.e., allocated
-via a `para:gpu.allocMatrix(...)`-style API that returns page-aligned
+via a `parabun:gpu.allocMatrix(...)`-style API that returns page-aligned
 typed arrays. Opportunistic alignment detection of arbitrary user
 Float32Arrays would almost never fire.

@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("para:gpu — conv2D", () => {
+describe("parabun:gpu — conv2D", () => {
   it("identity kernel: 1×1 [1] returns input unchanged", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-conv2d-identity",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8, 9]);  // 3x3
         const k = new Float32Array([1]);                              // 1x1
@@ -35,7 +35,7 @@ describe("para:gpu — conv2D", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-conv2d-box",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         // Sum of 1..9 is 45; box blur uniform 1/9 → 45/9 = 5.
         const input = new Float32Array([1,2,3, 4,5,6, 7,8,9]);
@@ -60,7 +60,7 @@ describe("para:gpu — conv2D", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-conv2d-by-hand",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         const input = new Float32Array([1,2,3, 4,5,6, 7,8,9]);
         const k = new Float32Array([1, 0, 0, -1]);
@@ -76,7 +76,7 @@ describe("para:gpu — conv2D", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-conv2d-sobel",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         // 4-wide step from 0 to 100 at column 2. Sobel-X kernel finds the
         // vertical edge — interior columns light up where the gradient is.
@@ -103,7 +103,7 @@ describe("para:gpu — conv2D", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-conv2d-bad-len",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.conv2D(new Float32Array(8), new Float32Array(4), 3, 3, 2, 2);
@@ -121,7 +121,7 @@ describe("para:gpu — conv2D", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-conv2d-too-big",
       `
-        import gpu from "para:gpu";
+        import gpu from "parabun:gpu";
         gpu.setBackend("cpu");
         try {
           gpu.conv2D(new Float32Array(9), new Float32Array(16), 3, 3, 4, 4);

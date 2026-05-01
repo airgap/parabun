@@ -11,7 +11,7 @@
 // E_T: (D × N) row-major — a transposed view of the (N × D) embedding matrix
 // scores: (Q × N) row-major — per-query scores, all in one DtoH.
 
-import { GpuFloat32Array, matmul } from "para:gpu";
+import { GpuFloat32Array, matmul } from "parabun:gpu";
 import { topK as simdTopK } from "para:simd";
 import { generateBatch, N, D, K } from "./gen.js";
 

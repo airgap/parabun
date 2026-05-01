@@ -3,12 +3,12 @@
 //   LLM_FIXTURE=/path/to/Llama-3.2-1B-Instruct-Q8_0.gguf \
 //     bun run build:release demos/llm-chat.ts "What is the capital of France?"
 //
-// Routes through para:gpu when available (CUDA on dev / Jetson, Metal on
+// Routes through parabun:gpu when available (CUDA on dev / Jetson, Metal on
 // macOS); falls through to para:simd matVec on CPU-only hosts. Same
 // source on every target.
 
-import llm from "para:llm";
-import gpu from "para:gpu";
+import llm from "parabun:llm";
+import gpu from "parabun:gpu";
 import { existsSync } from "node:fs";
 
 const FIXTURE = process.env.LLM_FIXTURE;

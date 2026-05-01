@@ -1,4 +1,4 @@
-// Parabun: native audio I/O bindings for `para:audio` capture / playback.
+// Parabun: native audio I/O bindings for `parabun:audio` capture / playback.
 //
 // v1: ALSA on Linux. CoreAudio (macOS) and WASAPI (Windows) follow on top
 // of the same JS surface in subsequent commits. ALSA is the right first
@@ -280,7 +280,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpenCapture,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:audio capture not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:audio capture not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 5) {
@@ -315,7 +315,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpenPlayback,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:audio playback not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:audio playback not yet implemented on this platform"_s);
     return {};
 #else
     if (callFrame->argumentCount() < 5) {
@@ -351,7 +351,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCaptureRead,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:audio capture not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:audio capture not yet implemented on this platform"_s);
     return {};
 #else
     auto* p = asPCM(callFrame->argument(0));
@@ -415,7 +415,7 @@ JSC_DEFINE_HOST_FUNCTION(functionPlaybackWrite,
     auto scope = DECLARE_THROW_SCOPE(vm);
 
 #if !defined(__linux__)
-    throwTypeError(globalObject, scope, "para:audio playback not yet implemented on this platform"_s);
+    throwTypeError(globalObject, scope, "parabun:audio playback not yet implemented on this platform"_s);
     return {};
 #else
     auto* p = asPCM(callFrame->argument(0));

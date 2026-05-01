@@ -1,8 +1,8 @@
-// Llama-3 forward pass for para:llm.
+// Llama-3 forward pass for parabun:llm.
 //
 // Two paths, picked at model construction time:
 //
-//   - DEVICE path (para:gpu.getDevOps() != null): the whole forward pass
+//   - DEVICE path (parabun:gpu.getDevOps() != null): the whole forward pass
 //     runs on the GPU. Residual stream, Q/K/V, scores, KV cache, logits
 //     are device-resident; only the 4-byte argmax result crosses PCIe per
 //     token. Weights are held via gpu.hold (one HtoD at load time, zero
@@ -10,7 +10,7 @@
 //
 //   - HOST path (every other case — CPU backend, or CUDA without
 //     NVRTC): the classical host loop. matVecs still route through
-//     para:gpu so CUDA hosts with weights held get per-call device matVec,
+//     parabun:gpu so CUDA hosts with weights held get per-call device matVec,
 //     but every other op runs in JS and the residual stream ping-pongs
 //     across PCIe between ops. Correct but slow; kept for portability.
 //
@@ -171,9 +171,9 @@ class KVCache {
   // many reuses so even at ~MB/layer it's dramatically cheaper than
   // re-running prefill.
   snapshot(length: number): KVSnapshot {
-    if (this.#disposed) throw new Error("para:llm: KVCache already disposed");
+    if (this.#disposed) throw new Error("parabun:llm: KVCache already disposed");
     if (length < 0 || length > this.#maxContext) {
-      throw new RangeError(`para:llm: snapshot length ${length} out of range [0, ${this.#maxContext}]`);
+      throw new RangeError(`parabun:llm: snapshot length ${length} out of range [0, ${this.#maxContext}]`);
     }
     const rows = length * this.#rowSize;
     const nLayer = (this.k ?? this.kDev!).length;
@@ -200,16 +200,16 @@ class KVCache {
   // pos = snap.length; KV rows past that point are whatever this cache
   // held before and will be overwritten by forward() as it advances.
   restore(snap: KVSnapshot): void {
-    if (this.#disposed) throw new Error("para:llm: KVCache already disposed");
+    if (this.#disposed) throw new Error("parabun:llm: KVCache already disposed");
     if (snap.rowSize !== this.#rowSize) {
-      throw new Error(`para:llm: snapshot rowSize ${snap.rowSize} != cache rowSize ${this.#rowSize}`);
+      throw new Error(`parabun:llm: snapshot rowSize ${snap.rowSize} != cache rowSize ${this.#rowSize}`);
     }
     if (snap.length > this.#maxContext) {
-      throw new RangeError(`para:llm: snapshot length ${snap.length} > maxContext ${this.#maxContext}`);
+      throw new RangeError(`parabun:llm: snapshot length ${snap.length} > maxContext ${this.#maxContext}`);
     }
     const nLayer = (this.k ?? this.kDev!).length;
     if (snap.k.length !== nLayer || snap.v.length !== nLayer) {
-      throw new Error(`para:llm: snapshot layer count ${snap.k.length} != cache layer count ${nLayer}`);
+      throw new Error(`parabun:llm: snapshot layer count ${snap.k.length} != cache layer count ${nLayer}`);
     }
     const rows = snap.length * this.#rowSize;
     if (rows === 0) return;
@@ -452,13 +452,13 @@ class LlamaModel {
     const { dModel, nLayer, nHead, nKvHead, headDim, dFfn, rmsEps } = cfg;
 
     if (tokenId < 0 || tokenId >= cfg.vocabSize) {
-      throw new Error(`para:llm: token id ${tokenId} out of range [0, ${cfg.vocabSize})`);
+      throw new Error(`parabun:llm: token id ${tokenId} out of range [0, ${cfg.vocabSize})`);
     }
     if (pos < 0 || pos >= kv.maxContext()) {
-      throw new Error(`para:llm: position ${pos} out of range [0, ${kv.maxContext()})`);
+      throw new Error(`parabun:llm: position ${pos} out of range [0, ${kv.maxContext()})`);
     }
     if (!kv.k || !kv.v) {
-      throw new Error("para:llm: host forward called on device KVCache (backend mismatch)");
+      throw new Error("parabun:llm: host forward called on device KVCache (backend mismatch)");
     }
 
     const x = this.#xBuf;
@@ -603,13 +603,13 @@ class LlamaModel {
     const { cfg, weights } = this;
     const { dModel, nLayer, nHead, nKvHead, headDim, dFfn, rmsEps, maxContext } = cfg;
     if (tokenId < 0 || tokenId >= cfg.vocabSize) {
-      throw new Error(`para:llm: token id ${tokenId} out of range [0, ${cfg.vocabSize})`);
+      throw new Error(`parabun:llm: token id ${tokenId} out of range [0, ${cfg.vocabSize})`);
     }
     if (pos < 0 || pos >= kv.maxContext()) {
-      throw new Error(`para:llm: position ${pos} out of range [0, ${kv.maxContext()})`);
+      throw new Error(`parabun:llm: position ${pos} out of range [0, ${kv.maxContext()})`);
     }
     if (!kv.kDev || !kv.vDev) {
-      throw new Error("para:llm: device forward called on host KVCache (backend mismatch)");
+      throw new Error("parabun:llm: device forward called on host KVCache (backend mismatch)");
     }
     const d = this.#devOps;
 
@@ -743,7 +743,7 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): LlamaModel {
       isQwen2 = true;
       break;
     default:
-      throw new Error(`para:llm: unsupported architecture "${arch}" (want "llama", "mistral", or "qwen2")`);
+      throw new Error(`parabun:llm: unsupported architecture "${arch}" (want "llama", "mistral", or "qwen2")`);
   }
 
   const numOr = (key: string, fallback: number): number => {
@@ -774,17 +774,17 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): LlamaModel {
   };
 
   if (cfg.headDim * cfg.nHead !== cfg.dModel) {
-    throw new Error(`para:llm: head_dim*n_head (${cfg.headDim}*${cfg.nHead}) != d_model (${cfg.dModel})`);
+    throw new Error(`parabun:llm: head_dim*n_head (${cfg.headDim}*${cfg.nHead}) != d_model (${cfg.dModel})`);
   }
   if (cfg.nHead % cfg.nKvHead !== 0) {
-    throw new Error(`para:llm: n_head (${cfg.nHead}) not divisible by n_kv_head (${cfg.nKvHead})`);
+    throw new Error(`parabun:llm: n_head (${cfg.nHead}) not divisible by n_kv_head (${cfg.nKvHead})`);
   }
   if (cfg.ropeDim !== cfg.headDim) {
-    throw new Error(`para:llm: rope_dim (${cfg.ropeDim}) != head_dim (${cfg.headDim}) — partial RoPE not implemented`);
+    throw new Error(`parabun:llm: rope_dim (${cfg.ropeDim}) != head_dim (${cfg.headDim}) — partial RoPE not implemented`);
   }
   if (cfg.headDim % 32 !== 0 || cfg.headDim < 32) {
     // Device attention kernels use warp-reduce over headDim threads.
-    throw new Error(`para:llm: head_dim (${cfg.headDim}) must be a multiple of 32 and ≥32`);
+    throw new Error(`parabun:llm: head_dim (${cfg.headDim}) must be a multiple of 32 and ≥32`);
   }
 
   // hold() on CUDA HtoDs each tensor; on non-CUDA backends it's a view
@@ -803,7 +803,7 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): LlamaModel {
   const canQ6K = canQuant && typeof (gpu as any).holdQ6K === "function";
   const holdWeight = (name: string): Resident => {
     const info = gguf.tensors.get(name);
-    if (!info) throw new Error(`para:llm: GGUF tensor "${name}" not found`);
+    if (!info) throw new Error(`parabun:llm: GGUF tensor "${name}" not found`);
     // GGUF tensor dims are [ncols, nrows]. Inner (k) is dims[0]. K-quant
     // super-blocks span the inner axis, so k must be a multiple of 256.
     const k = info.dims[0];
@@ -883,7 +883,7 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): LlamaModel {
       const bkKey = `blk.${l}.attn_k.bias`;
       const bvKey = `blk.${l}.attn_v.bias`;
       if (!gguf.tensors.has(bqKey) || !gguf.tensors.has(bkKey) || !gguf.tensors.has(bvKey)) {
-        throw new Error(`para:llm: qwen2 layer ${l} missing attn_{q,k,v}.bias`);
+        throw new Error(`parabun:llm: qwen2 layer ${l} missing attn_{q,k,v}.bias`);
       }
       layer.bq = hold(bqKey);
       layer.bk = hold(bkKey);

@@ -1,4 +1,4 @@
-// End-to-end smoke test of the wired-up cuda backend via para:gpu.
+// End-to-end smoke test of the wired-up cuda backend via parabun:gpu.
 //
 // Run: bun bd --asan=off run scripts/gpu-verify/backend.ts
 //
@@ -7,7 +7,7 @@
 //   2. setBackend("cuda") succeeds and describe() reports it active
 //   3. gpu.simdMap(x => 3*x + 1, a) matches the CPU path bit-exactly
 //      on a large Float32Array (hits the PTX path via tryAffineKernel)
-import gpu from "para:gpu";
+import gpu from "parabun:gpu";
 
 console.log("describe:", JSON.stringify(gpu.describe()));
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 
-// para:assistant wake-word gate (LYK-739).
+// parabun:assistant wake-word gate (LYK-739).
 //
 // The gate is plumbing — accept the option, normalize the string shorthand,
 // configure the field. The real gating runs inside turns(), which needs a
@@ -15,10 +15,10 @@ const llmCandidates = [
 const llmFixture = llmCandidates.find(p => existsSync(p));
 const haveLLM = Boolean(llmFixture);
 
-describe("para:assistant wake word (LYK-739)", () => {
+describe("parabun:assistant wake word (LYK-739)", () => {
   test("string shorthand expands to { phrase }", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     // Just confirms the option is accepted at create-time. The gate
     // actually runs inside turns(); a hardware-free unit test on the gate
     // belongs in speech/wakeword.test.ts (which exercises the matcher).
@@ -32,7 +32,7 @@ describe("para:assistant wake word (LYK-739)", () => {
 
   test("object form also accepted", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({
       llm: llmFixture!,
       wakeWord: { phrase: ["hey jetson", "ok parabun"], match: "fuzzy", maxEdits: 2 },
@@ -46,7 +46,7 @@ describe("para:assistant wake word (LYK-739)", () => {
 
   test("turns() still rejects without mic + stt even with wakeWord set", async () => {
     if (!haveLLM) return;
-    const assistant = (await import("para:assistant")).default;
+    const assistant = (await import("parabun:assistant")).default;
     const bot = await assistant.create({ llm: llmFixture!, wakeWord: "hey jetson" });
     try {
       const it = bot.turns();
