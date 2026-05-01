@@ -16,4 +16,13 @@ export declare function scanRegions(src: string): Span[];
  * returns the rewritten chunk; lengths can differ.
  */
 export declare function rewriteCodeRegions(src: string, mapper: (code: string) => string): string;
+/**
+ * Find the position of the `}` that matches the `{` at `openPos`, walking
+ * through nested braces. Skips braces inside strings, comments, and regex
+ * literals using the same scanner as `scanRegions`. Returns -1 if no match.
+ *
+ * Caller passes `src` (the full source) and the position of an opening `{`.
+ * The returned position points at the matching `}`.
+ */
+export declare function findMatchingBrace(src: string, openPos: number): number;
 //# sourceMappingURL=lex.d.ts.map

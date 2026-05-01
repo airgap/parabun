@@ -7,6 +7,8 @@
 // Bare-read sugar (rewriting `x` to `x.get()` inside tracked contexts)
 // requires real scope tracking and lands in v0.2; until then user code
 // must call `.get()` / `.set()` explicitly.
+import { transformBindings } from "./transforms/bindings";
+import { transformBlocks } from "./transforms/blocks";
 import { transformErrorChain } from "./transforms/error-chain";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
@@ -14,18 +16,23 @@ import { transformRanges } from "./transforms/ranges";
 // Pass order matters:
 //   1. `pure` strip — turns the keyword into whitespace before any operator
 //      transform sees it, so `pure (x) => x` becomes a normal arrow.
-//   2. Pipeline `|>` — collapses pipeline chains. Runs before error-chain so
-//      `data |> transform ..! handler` lowers to `transform(data).catch(handler)`
-//      (the |> binds tighter; we resolve it first).
-//   3. Error-chain `..!` / `..&` — converts to .catch() / .finally() chains.
-//   4. Ranges `..` / `..=` — runs LAST among the dot-family rewrites so it
+//   2. Block forms (signal/effect/arena/when) — these emit `.when(...)` and
+//      `.effect(...)` calls whose bodies may then contain `|>` / `..!` /
+//      etc. that the operator passes need to see, so blocks lower first.
+//   3. Pipeline `|>` — collapses pipeline chains. Runs before error-chain
+//      so `data |> transform ..! handler` lowers to
+//      `transform(data).catch(handler)` (the |> binds tighter).
+//   4. Error-chain `..!` / `..&` — converts to .catch() / .finally() chains.
+//   5. Ranges `..` / `..=` — runs LAST among the dot-family rewrites so it
 //      doesn't consume `..!` / `..&` operands by mistake.
 export function transpile(src, _options = {}) {
     let out = src;
     out = transformPure(out);
+    out = transformBlocks(out);
+    out = transformBindings(out);
     out = transformPipeline(out);
     out = transformErrorChain(out);
     out = transformRanges(out);
     return out;
 }
-export { transformErrorChain, transformPipeline, transformPure, transformRanges };
+export { transformBindings, transformBlocks, transformErrorChain, transformPipeline, transformPure, transformRanges };

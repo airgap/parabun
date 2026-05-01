@@ -1,3 +1,5 @@
+import { transformBindings } from "./transforms/bindings";
+import { transformBlocks } from "./transforms/blocks";
 import { transformErrorChain } from "./transforms/error-chain";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
@@ -7,5 +9,5 @@ export type TranspileOptions = {
     filename?: string;
 };
 export declare function transpile(src: string, _options?: TranspileOptions): string;
-export { transformErrorChain, transformPipeline, transformPure, transformRanges };
+export { transformBindings, transformBlocks, transformErrorChain, transformPipeline, transformPure, transformRanges };
 //# sourceMappingURL=index.d.ts.map

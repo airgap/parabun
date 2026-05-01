@@ -8,6 +8,7 @@
 // requires real scope tracking and lands in v0.2; until then user code
 // must call `.get()` / `.set()` explicitly.
 
+import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
 import { transformErrorChain } from "./transforms/error-chain";
 import { transformPipeline } from "./transforms/pipeline";
@@ -35,10 +36,11 @@ export function transpile(src: string, _options: TranspileOptions = {}): string 
   let out = src;
   out = transformPure(out);
   out = transformBlocks(out);
+  out = transformBindings(out);
   out = transformPipeline(out);
   out = transformErrorChain(out);
   out = transformRanges(out);
   return out;
 }
 
-export { transformBlocks, transformErrorChain, transformPipeline, transformPure, transformRanges };
+export { transformBindings, transformBlocks, transformErrorChain, transformPipeline, transformPure, transformRanges };
