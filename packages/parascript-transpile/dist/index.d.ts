@@ -1,6 +1,8 @@
 import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
+import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
+import { transformMemo } from "./transforms/memo";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
 import { transformRanges } from "./transforms/ranges";
@@ -9,5 +11,5 @@ export type TranspileOptions = {
     filename?: string;
 };
 export declare function transpile(src: string, _options?: TranspileOptions): string;
-export { transformBindings, transformBlocks, transformErrorChain, transformPipeline, transformPure, transformRanges };
+export { transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };
 //# sourceMappingURL=index.d.ts.map

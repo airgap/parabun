@@ -9,7 +9,9 @@
 // must call `.get()` / `.set()` explicitly.
 import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
+import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
+import { transformMemo } from "./transforms/memo";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
 import { transformRanges } from "./transforms/ranges";
@@ -28,11 +30,13 @@ import { transformRanges } from "./transforms/ranges";
 export function transpile(src, _options = {}) {
     let out = src;
     out = transformPure(out);
+    out = transformMemo(out);
     out = transformBlocks(out);
     out = transformBindings(out);
+    out = transformDefer(out);
     out = transformPipeline(out);
     out = transformErrorChain(out);
     out = transformRanges(out);
     return out;
 }
-export { transformBindings, transformBlocks, transformErrorChain, transformPipeline, transformPure, transformRanges };
+export { transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, };

@@ -11,17 +11,18 @@ The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.s
 | Feature | Status |
 | --- | --- |
 | `..!` / `..&` (catch / finally chain operators) | ✅ |
-| `\|>` pipeline operator | not started |
-| `..` / `..=` ranges | not started |
-| `pure` keyword strip | not started |
-| `signal NAME = EXPR;` declaration | not started |
-| `effect { … }` block | not started |
-| `when EXPR { … }` / paired form | not started |
-| `~>` / `->` reactive bindings | not started |
-| `defer` / `defer await` | not started |
-| `memo` declarator | not started |
-| `arena { … }` block | not started |
+| `\|>` pipeline operator | ✅ |
+| `..` / `..=` ranges | ✅ |
+| `pure` keyword strip | ✅ |
+| `signal NAME = EXPR;` declaration | ✅ |
+| `effect { … }` block | ✅ |
+| `when EXPR { … }` / paired form | ✅ |
+| `~>` / `->` reactive bindings | ✅ |
+| `defer` / `defer await` | ✅ |
+| `memo` declarator | ✅ |
+| `arena { … }` block | ✅ |
 | **bare-read sugar** (`x` → `x.get()`) | not started — needs scope analysis |
+| `signal x = expr-with-signals` auto-promotes to derived | not started — needs scope analysis |
 | Parity test against canonical Zig parser output | not started |
 
 ## Install
