@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { transpile } from "../src/index";
+import { transpileBare as transpile } from "./_helpers";
 import { _resetDeferCounter } from "../src/transforms/defer";
 
 beforeEach(() => _resetDeferCounter());

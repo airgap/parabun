@@ -23,7 +23,29 @@ The canonical ParaScript transpiler lives inside the [Parabun](https://parabun.s
 | `arena { … }` block | ✅ |
 | **bare-read sugar** (`x` → `x.get()`) | ✅ |
 | `signal x = expr-with-signals` auto-promotes to derived | ✅ |
-| Parity test against canonical Zig parser output | ✅ (11/12 fixtures byte-equivalent after normalization; `defer` is a documented divergence — canonical inlines the ES2024 `using` polyfill, standalone emits raw `using` and trusts the host) |
+| Parity test against canonical Zig parser output | ✅ (11/12 fixtures byte-equivalent after normalization) |
+| `bun:wrap` import injection for runtime helpers | ✅ |
+| `defer` byte-parity to canonical `using` polyfill | intentional divergence — see below |
+
+### Intentional divergence: `defer` lowering
+
+For `defer EXPR;` and `defer await EXPR;`, this transpiler emits ES2024
+`using` / `await using` declarations directly:
+
+```js
+using __paraDefer0 = __parabunDefer0(() => cleanup());
+await using __paraDefer1 = __parabunAsyncDefer0(async () => flush());
+```
+
+The canonical Zig parser inlines the `using` polyfill (try/catch/finally
+wrappers + `__using` helper calls) so the output runs on ES2018+. The
+runtime semantics are identical; the lowering shape differs.
+
+Modern hosts handle ES2024 `using` natively (Bun, Node 22+, current
+browsers), and every mainstream bundler (esbuild, swc, Babel,
+TypeScript) downlevels `using` for older targets. The standalone
+trusts the host bundler/runtime to handle the polyfill; this is the
+Parity skip-list entry for `defer.pts`.
 
 ## Install
 

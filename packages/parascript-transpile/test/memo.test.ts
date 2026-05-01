@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { transpile } from "../src/index";
+import { transpileBare as transpile } from "./_helpers";
 
 describe("memo declaration form", () => {
   test("memo NAME(arg) { body } — single arg", () => {

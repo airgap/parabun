@@ -22,9 +22,9 @@ describe("integration: pipeline + error-chain", () => {
 
 describe("integration: pipeline + ranges", () => {
   test("range piped through filter via placeholder", () => {
-    expect(transpile("const evens = 0..=20 |> filter(_, even);")).toBe(
-      "const evens = filter(__parabunRangeInclusive(0, 20), even);",
-    );
+    const out = transpile("const evens = 0..=20 |> filter(_, even);");
+    expect(out).toContain('import { __parabunRangeInclusive } from "bun:wrap";');
+    expect(out).toContain("const evens = filter(__parabunRangeInclusive(0, 20), even);");
   });
 });
 

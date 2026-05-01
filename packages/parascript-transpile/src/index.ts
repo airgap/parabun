@@ -17,6 +17,7 @@ import { transformMemo } from "./transforms/memo";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
 import { transformRanges } from "./transforms/ranges";
+import { injectWrapImports } from "./transforms/wrap-imports";
 
 export type TranspileOptions = {
   /** Source filename — used in error messages only. Default `"<input>"`. */
@@ -45,15 +46,21 @@ export function transpile(src: string, _options: TranspileOptions = {}): string 
   out = transformPipeline(out);
   out = transformErrorChain(out);
   out = transformRanges(out);
-  // Bare-read sugar runs LAST — it parses the fully-desugared output as
-  // JS via Babel, identifies signal bindings + tracked contexts, and
-  // rewrites bare reads/writes inside them. Auto-promotes signal()
+  // Bare-read sugar runs after the structural transforms — parses the
+  // fully-desugared output as JS via Babel, identifies signal bindings,
+  // and rewrites bare reads/writes universally. Auto-promotes signal()
   // initializers that read other signals into derived().
   out = transformBareRead(out);
+  // Final pass: prepend `import { __parabunRange, … } from "bun:wrap"`
+  // for any runtime helpers the previous transforms emitted, so the
+  // output is runnable on a host that resolves `bun:wrap` (Parabun
+  // natively, or `parabun-browser-shims` aliased via the bundler).
+  out = injectWrapImports(out);
   return out;
 }
 
 export {
+  injectWrapImports,
   transformBareRead,
   transformBindings,
   transformBlocks,
