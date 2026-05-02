@@ -56,6 +56,14 @@
       "name": "@para/parallel",
       "version": "0.0.0-dev",
     },
+    "packages/para-pipeline": {
+      "name": "@para/pipeline",
+      "version": "0.0.0-dev",
+      "dependencies": {
+        "@para/parallel": "workspace:*",
+        "@para/simd": "workspace:*",
+      },
+    },
     "packages/para-rtp": {
       "name": "@para/rtp",
       "version": "0.0.0-dev",
@@ -204,6 +212,8 @@
     "@para/mcp": ["@para/mcp@workspace:packages/para-mcp"],
 
     "@para/parallel": ["@para/parallel@workspace:packages/para-parallel"],
+
+    "@para/pipeline": ["@para/pipeline@workspace:packages/para-pipeline"],
 
     "@para/rtp": ["@para/rtp@workspace:packages/para-rtp"],
 
