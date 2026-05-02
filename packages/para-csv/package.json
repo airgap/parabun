@@ -1,0 +1,31 @@
+{
+  "name": "@para/csv",
+  "version": "0.0.0-dev",
+  "private": true,
+  "description": "Streaming RFC 4180 CSV parser. Async iterator over rows; quoted fields; custom record separators. Optional parallel mode (off the main thread) backed by @para/parallel. NOT YET RELEASED — private:true / 0.0.0-dev pending the workspace split.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "dependencies": {
+    "@para/parallel": "workspace:*"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/airgap/parabun.git",
+    "directory": "packages/para-csv"
+  },
+  "keywords": [
+    "csv",
+    "rfc-4180",
+    "streaming",
+    "para"
+  ]
+}

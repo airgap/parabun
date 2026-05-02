@@ -37,6 +37,17 @@
       "name": "@para/arena",
       "version": "0.0.0-dev",
     },
+    "packages/para-arrow": {
+      "name": "@para/arrow",
+      "version": "0.0.0-dev",
+    },
+    "packages/para-csv": {
+      "name": "@para/csv",
+      "version": "0.0.0-dev",
+      "dependencies": {
+        "@para/parallel": "workspace:*",
+      },
+    },
     "packages/para-mcp": {
       "name": "@para/mcp",
       "version": "0.0.0-dev",
@@ -185,6 +196,10 @@
     "@octokit/webhooks-types": ["@octokit/webhooks-types@7.6.1", "", {}, "sha512-S8u2cJzklBC0FgTwWVLaM8tMrDuDMVE4xiTK4EYXM9GntyvrdbSoxqDQa+Fh57CCNApyIpyeqPhhFEmHPfrXgw=="],
 
     "@para/arena": ["@para/arena@workspace:packages/para-arena"],
+
+    "@para/arrow": ["@para/arrow@workspace:packages/para-arrow"],
+
+    "@para/csv": ["@para/csv@workspace:packages/para-csv"],
 
     "@para/mcp": ["@para/mcp@workspace:packages/para-mcp"],
 

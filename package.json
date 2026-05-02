@@ -9,6 +9,8 @@
     "./packages/para-parallel",
     "./packages/para-simd",
     "./packages/para-arena",
+    "./packages/para-arrow",
+    "./packages/para-csv",
     "./packages/para-rtp",
     "./packages/para-mcp",
     "./packages/parabun-browser-shims"
