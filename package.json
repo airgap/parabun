@@ -4,7 +4,11 @@
   "version": "1.3.13",
   "workspaces": [
     "./packages/bun-types",
-    "./packages/@types/bun"
+    "./packages/@types/bun",
+    "./packages/para-signals",
+    "./packages/para-parallel",
+    "./packages/para-simd",
+    "./packages/parabun-browser-shims"
   ],
   "devDependencies": {
     "@lezer/common": "^1.2.3",

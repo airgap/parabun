@@ -1,7 +1,17 @@
 # parabun-browser-shims
 
-Browser-compatible shims for the `bun:*` modules that Parabun's
-parse-time desugarings import:
+> **Deprecation notice:** this meta-package is being split into individual
+> `@para/*` packages. As of this version, `parabun-browser-shims/signals`,
+> `parabun-browser-shims/parallel`, and `parabun-browser-shims/simd`
+> forward to `@para/signals`, `@para/parallel`, and `@para/simd`
+> respectively — import those packages directly when possible. The
+> remaining sub-modules (`arena`, `wrap`, `gpu`, `llm`, `quant`) still
+> live here for now; they'll move out in subsequent releases. The
+> `parabun-browser-shims` package as a whole is slated for removal in
+> 0.4.x once every module has its own `@para/*` package.
+
+Browser-compatible shims for the `para:*` / `parabun:*` modules that
+Parabun's parse-time desugarings import:
 
 | Module | Browser fidelity |
 |---|---|

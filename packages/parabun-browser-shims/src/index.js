@@ -1,6 +1,12 @@
-// Aggregate entry point. Most integrations will import the individual
-// modules directly via bundler aliasing (see README); this file exists
-// for ad-hoc use (`import * as shims from "parabun-browser-shims"`).
+// Aggregate entry point. NOTE: this package is in deprecation as the
+// per-module split lands. New integrations should pull individual
+// `@para/<module>` packages directly (`@para/signals`, `@para/parallel`,
+// `@para/simd` so far). Subpath imports here forward to those packages.
+// Slated for removal in 0.4.x.
+//
+// Most integrations will import the individual modules directly via
+// bundler aliasing (see README); this file exists for ad-hoc use
+// (`import * as shims from "parabun-browser-shims"`).
 
 export * as arena from "./arena.js";
 export * as signals from "./signals.js";
