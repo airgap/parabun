@@ -38,6 +38,7 @@
     "polyfill"
   ],
   "dependencies": {
+    "@para/arena": "workspace:*",
     "@para/signals": "workspace:*",
     "@para/parallel": "workspace:*",
     "@para/simd": "workspace:*"

@@ -33,9 +33,24 @@
         "@types/node": "*",
       },
     },
+    "packages/para-arena": {
+      "name": "@para/arena",
+      "version": "0.0.0-dev",
+    },
+    "packages/para-mcp": {
+      "name": "@para/mcp",
+      "version": "0.0.0-dev",
+    },
     "packages/para-parallel": {
       "name": "@para/parallel",
       "version": "0.0.0-dev",
+    },
+    "packages/para-rtp": {
+      "name": "@para/rtp",
+      "version": "0.0.0-dev",
+      "dependencies": {
+        "@para/signals": "workspace:*",
+      },
     },
     "packages/para-signals": {
       "name": "@para/signals",
@@ -49,6 +64,7 @@
       "name": "parabun-browser-shims",
       "version": "0.3.0",
       "dependencies": {
+        "@para/arena": "workspace:*",
         "@para/parallel": "workspace:*",
         "@para/signals": "workspace:*",
         "@para/simd": "workspace:*",
@@ -168,7 +184,13 @@
 
     "@octokit/webhooks-types": ["@octokit/webhooks-types@7.6.1", "", {}, "sha512-S8u2cJzklBC0FgTwWVLaM8tMrDuDMVE4xiTK4EYXM9GntyvrdbSoxqDQa+Fh57CCNApyIpyeqPhhFEmHPfrXgw=="],
 
+    "@para/arena": ["@para/arena@workspace:packages/para-arena"],
+
+    "@para/mcp": ["@para/mcp@workspace:packages/para-mcp"],
+
     "@para/parallel": ["@para/parallel@workspace:packages/para-parallel"],
+
+    "@para/rtp": ["@para/rtp@workspace:packages/para-rtp"],
 
     "@para/signals": ["@para/signals@workspace:packages/para-signals"],
 
