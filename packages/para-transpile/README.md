@@ -1,6 +1,6 @@
 # @para/transpile
 
-Standalone transpiler for [Para](https://para.script.dev) — turns `.pts` source into standard JavaScript that runs anywhere via [`parabun-browser-shims`](https://www.npmjs.com/package/parabun-browser-shims). No Parabun runtime required at build time.
+Standalone transpiler for [Para](https://para.script.dev) — turns `.pts` source into standard JavaScript that imports from the matching `@para/*` npm packages. No Parabun runtime required at build time.
 
 The canonical Para transpiler lives inside the [Parabun](https://parabun.script.dev) fork of Bun (Zig). This package is a TypeScript reimplementation, intended for projects that don't (or can't) install Parabun on their build host: browsers, Lambda, Cloudflare Workers, Deno, Node, the [Para playground](https://para.script.dev/play).
 
@@ -41,7 +41,9 @@ pass from the host bundler.
 ## Install
 
 ```bash
-npm install @para/transpile parabun-browser-shims
+npm install @para/transpile
+# Plus the @para/* runtime packages your code uses, e.g.:
+npm install @para/signals @para/parallel @para/pipeline
 ```
 
 ## Use

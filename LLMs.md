@@ -728,24 +728,36 @@ Edits to `src/js/bun/*.ts` need a runtime cache clear
 
 Parse-time syntax (`pure`, `memo`, `|>`, `..!`, `..&`, `..` / `..=` ranges, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
 
-[`packages/parabun-browser-shims`](packages/parabun-browser-shims) is the browser shim package. Applications targeting the browser alias the `bun:*` specifiers onto it via bundler config:
+The cross-runtime Lib modules (`signals`, `parallel`, `pipeline`, `arena`, `simd`, `csv`, `arrow`, `rtp`, `mcp`) ship as individual `@para/*` npm packages. Applications targeting non-Parabun hosts alias the `para:*` specifiers onto them — typically with one regex rule:
 
 ```
 // vite.config.ts
 import { defineConfig } from "vite";
+
+export default defineConfig({
+  resolve: {
+    alias: [{ find: /^para:(.*)$/, replacement: "@para/$1" }],
+  },
+});
+```
+
+The few specifiers that aren't `@para/*` packages yet (`bun:wrap` for the wrap-macro runtime, `parabun:gpu` and `parabun:llm` for the WebGPU / Wasm shims) come from [`packages/parabun-browser-shims`](packages/parabun-browser-shims):
+
+```
 import { bunAliases } from "parabun-browser-shims";
-export default defineConfig({ resolve: { alias: bunAliases } });
+// expands to: { "bun:wrap": ..., "parabun:gpu": ..., "parabun:llm": ... }
 ```
 
 Module fidelity:
 
-- **`para:arena`** — no-op (browsers don't expose GC control; inline body is semantically correct).
-- **`para:signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`, plus `fromAsync(asyncIterable)` and `fromInterval(fn, periodMs)` — the latter the canonical "periodic source → reactive signal" helper for IoT sensor reads.
-- **`bun:wrap`** — full implementation of `__parabunMemo` (with `.forget` / `.clear` / `.bypass`), `__parabunDefer0`, `__parabunAsyncDefer0`, `__parabunRange`, `__parabunRangeInclusive`.
-- **`para:parallel`** — sequential fallback. `pmap` / `preduce` run on the main thread; Web-Worker-backed implementation is future work.
-- **`para:simd`** — scalar JS loops. Correct output; ~5–20× slower than v128 on large TypedArrays. WebAssembly SIMD swap-in is future work.
-- **`parabun:gpu`** — CPU fallback via `para:simd`. WebGPU / WebGL2 compute-shader backend is future work.
-- **`parabun:llm`** — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
+- **`@para/arena`** — `Pool` (typed-array free list) + no-op `scope()` (browsers don't expose GC control; inline body is semantically correct).
+- **`@para/signals`** — full implementation of `signal` / `derived` / `effect` / `batch` / `untrack`, plus `fromAsync(asyncIterable)` and `fromInterval(fn, periodMs)` — the latter the canonical "periodic source → reactive signal" helper for IoT sensor reads.
+- **`@para/parallel`** — Web Worker pool. `pmap` / `preduce` dispatch across workers; transparent sequential fallback under CSP or non-browser hosts.
+- **`@para/simd`** — WebAssembly v128 kernels with scalar JS fallback. Typical 3-20× speedup over scalar.
+- **`@para/pipeline`**, **`@para/csv`**, **`@para/arrow`**, **`@para/rtp`**, **`@para/mcp`** — full implementations.
+- **`bun:wrap`** (parabun-browser-shims) — full implementation of `__parabunMemo` (with `.forget` / `.clear` / `.bypass`), `__parabunDefer0`, `__parabunAsyncDefer0`, `__parabunRange`, `__parabunRangeInclusive`.
+- **`parabun:gpu`** (parabun-browser-shims) — CPU + WebGPU compute shaders for `matVecAsync` / `matmulAsync` / `dotAsync`. CPU fallback via `@para/simd`.
+- **`parabun:llm`** (parabun-browser-shims) — throws on load with a descriptive error. Browser inference (WebGPU port of the Q4_K / Q6_K kernels) is future work.
 
 ## Real-world benchmark: SQLite analytical workload
 

@@ -5,7 +5,8 @@
 // The transforms emit bare calls like `__parabunRange(0, 5)` for clarity
 // in their own logic; this pass adds the import so the output is valid /
 // runnable in a host that resolves `bun:wrap` (Parabun natively, or
-// `parabun-browser-shims` aliased via the bundler config).
+// `parabun-browser-shims/wrap` aliased via the bundler config — moves
+// into @para/transpile's runtime alongside the compiler in a follow-up).
 //
 // Mirrors what the canonical Zig parser does — though it generates per-
 // emit aliases (`__parabunRange as __parabunRange_HASH`) for Bun's

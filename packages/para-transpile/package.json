@@ -2,7 +2,7 @@
   "name": "@para/transpile",
   "version": "0.0.0-dev",
   "private": true,
-  "description": "Standalone transpiler for Para (.pts) — turns Para source into standard JavaScript that runs anywhere via parabun-browser-shims. No Parabun runtime required. NOT YET RELEASED — `private: true` and `0.0.0-dev` until every desugaring lands.",
+  "description": "Standalone transpiler for Para (.pts) — turns Para source into standard JavaScript that imports from the matching @para/* npm packages. No Parabun runtime required. NOT YET RELEASED — `private: true` and `0.0.0-dev` until every desugaring lands.",
   "repository": {
     "type": "git",
     "url": "https://github.com/airgap/parabun",

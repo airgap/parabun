@@ -1,18 +1,13 @@
 {
   "name": "parabun-browser-shims",
   "version": "0.3.0",
-  "description": "Browser-compatible shims for the para:* Lib modules Parabun parse-time desugaring pulls in (para:arena, para:signals, para:parallel, para:simd) plus best-effort fallbacks for a couple of parabun:* runtime modules (parabun:gpu has a CPU + WebGPU backend; parabun:llm currently throws a clear not-implemented error). Lets .pts / .pjs code compile and run in browsers — at varying fidelity per module.",
+  "description": "Browser-compatible shims for the few specifiers Parabun's parse-time desugarings emit that don't yet have @para/* packages: bun:wrap (the wrap-macro runtime), parabun:gpu (CPU + WebGPU backend), parabun:llm (throw-stub). The cross-runtime Lib modules (signals/parallel/simd/arena/etc.) have moved to individual @para/* npm packages — install those directly. This package is slated for removal in 0.4.x once the remaining shims migrate or get retired.",
   "type": "module",
   "main": "./src/index.js",
   "module": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./arena": "./src/arena.js",
-    "./signals": "./src/signals.js",
     "./wrap": "./src/wrap.js",
-    "./parallel": "./src/parallel.js",
-    "./simd": "./src/simd.js",
-    "./simd.wasm": "./src/simd.wasm",
     "./gpu": "./src/gpu.js",
     "./llm": "./src/llm.js",
     "./quant": "./src/quant.js"
@@ -38,9 +33,6 @@
     "polyfill"
   ],
   "dependencies": {
-    "@para/arena": "workspace:*",
-    "@para/signals": "workspace:*",
-    "@para/parallel": "workspace:*",
     "@para/simd": "workspace:*"
   },
   "devDependencies": {

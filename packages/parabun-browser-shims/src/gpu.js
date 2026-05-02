@@ -24,7 +24,7 @@
 // etc.) so it runs on any WebGPU implementation — Chromium, Firefox
 // Nightly, Safari 17.4+.
 
-import simd from "./simd.js";
+import simd from "@para/simd";
 import { dequantizeQ4K, dequantizeQ6K, Q4_K_BLOCK_SIZE, Q6_K_BLOCK_SIZE, QK_K } from "./quant.js";
 
 // ── Sync CPU path — always available ────────────────────────────────────

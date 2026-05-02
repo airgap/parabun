@@ -65,7 +65,9 @@ export function transpile(src: string, _options: TranspileOptions = {}): string 
   // Final pass: prepend `import { __parabunRange, … } from "bun:wrap"`
   // for any runtime helpers the previous transforms emitted, so the
   // output is runnable on a host that resolves `bun:wrap` (Parabun
-  // natively, or `parabun-browser-shims` aliased via the bundler).
+  // natively, or `parabun-browser-shims/wrap` aliased via the bundler
+  // — eventually moves into @para/transpile's runtime alongside the
+  // compiler).
   out = injectWrapImports(out);
   return out;
 }
