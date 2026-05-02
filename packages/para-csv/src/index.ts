@@ -640,7 +640,253 @@ async function parseColumnsImpl<S extends Schema>(
   return result as ColumnsResult<S>;
 }
 
+// ── Streaming RecordBatch + single-pass reduction ────────────────────
+//
+// parseBatches() yields fixed-size columnar chunks as the parser
+// reads rows. Lets a caller process arbitrarily large CSVs in O(N)
+// time and O(batchSize) memory without ever materializing the full
+// column buffers — the key thing the load-then-compute path can't do.
+//
+// reduceColumns() is the same pattern with the loop fused: per-column
+// running aggregates (sum / min / max / mean / variance / count)
+// updated in the parser's row loop, no buffer materialized at all.
+// O(1) memory per column. Welford's online algorithm for the
+// numerically-stable variance pass.
+
+type BatchResult<S extends Schema> = ColumnsResult<S>;
+
+type ParseBatchesOptions<S extends Schema> = ParseColumnsOptions<S> & {
+  /** Rows per emitted batch. Default 8192 — fits comfortably in L2 on
+   *  most consumer CPUs after columnwise expansion. */
+  batchSize?: number;
+};
+
+async function* parseBatchesImpl<S extends Schema>(
+  source: CsvSource,
+  options: ParseBatchesOptions<S>,
+): AsyncIterable<BatchResult<S>> {
+  const schema = options.schema;
+  const colNames = Object.keys(schema);
+  const colTypes = colNames.map(n => schema[n]);
+  const delimiter = options.delimiter ?? ",";
+  const quote = options.quote ?? '"';
+  const headersOpt = options.headers ?? true;
+  const batchSize = Math.max(1, options.batchSize ?? 8192);
+
+  const indices = new Array<number>(colNames.length);
+  let headerCells: string[] | null = null;
+  let headersResolved = false;
+
+  // One full-batch buffer set, reused per emit. After yielding we
+  // tight-fit the result if the final batch is short, otherwise we
+  // hand the full buffer over and allocate the next batch.
+  function makeBatch(rowCount: number) {
+    return colNames.map((_, i) => {
+      const t = colTypes[i];
+      return t === "string" ? new Array<string>(rowCount) : new TYPED_CTORS[t](rowCount);
+    });
+  }
+  let buffers = makeBatch(batchSize);
+  let length = 0;
+
+  for await (const row of tokenize(source, delimiter, quote)) {
+    if (!headersResolved) {
+      if (headersOpt === false) {
+        for (let i = 0; i < colNames.length; i++) indices[i] = i;
+      } else {
+        headerCells = Array.isArray(headersOpt) ? headersOpt : row;
+        for (let i = 0; i < colNames.length; i++) {
+          const idx = headerCells.indexOf(colNames[i]);
+          if (idx < 0) {
+            throw new Error(
+              `parseBatches: schema column "${colNames[i]}" not found in CSV headers [${headerCells.join(", ")}]`,
+            );
+          }
+          indices[i] = idx;
+        }
+      }
+      headersResolved = true;
+      // If headers came from the first row of the source, that row
+      // isn't data — skip writing it.
+      if (headersOpt !== false && !Array.isArray(headersOpt)) continue;
+    }
+
+    for (let i = 0; i < colNames.length; i++) {
+      const cell = row[indices[i]];
+      const t = colTypes[i];
+      if (t === "string") {
+        (buffers[i] as string[])[length] = cell ?? "";
+      } else if (t === "f32" || t === "f64") {
+        (buffers[i] as Float64Array)[length] = cell === undefined || cell === "" ? NaN : +cell;
+      } else {
+        (buffers[i] as Int32Array)[length] = cell === undefined || cell === "" ? 0 : parseInt(cell, 10) | 0;
+      }
+    }
+    length++;
+
+    if (length === batchSize) {
+      const out: any = {};
+      for (let i = 0; i < colNames.length; i++) out[colNames[i]] = buffers[i];
+      yield out as BatchResult<S>;
+      buffers = makeBatch(batchSize);
+      length = 0;
+    }
+  }
+
+  // Flush the final partial batch. Tight-fit instead of yielding the
+  // full buffer with trailing junk.
+  if (length > 0) {
+    const out: any = {};
+    for (let i = 0; i < colNames.length; i++) {
+      const t = colTypes[i];
+      if (t === "string") {
+        const arr = buffers[i] as string[];
+        arr.length = length;
+        out[colNames[i]] = arr;
+      } else {
+        const Ctor = TYPED_CTORS[t];
+        const tight = new Ctor(length);
+        tight.set((buffers[i] as Float32Array).subarray(0, length));
+        out[colNames[i]] = tight;
+      }
+    }
+    yield out as BatchResult<S>;
+  }
+}
+
+// ── reduceColumns: stream + reduce in one pass ────────────────────────
+
+type Reducer = "sum" | "min" | "max" | "mean" | "variance" | "stddev" | "count";
+type ReduceSpec<S extends Schema> = {
+  [K in keyof S]?: readonly Reducer[];
+};
+type ReduceResult<R extends Reducer> = number;
+type ColumnReduceResult<Rs extends readonly Reducer[]> = {
+  [K in Rs[number]]: ReduceResult<K>;
+};
+type ReduceColumnsResult<S extends Schema, R extends ReduceSpec<S>> = {
+  [K in keyof R]: R[K] extends readonly Reducer[] ? ColumnReduceResult<R[K]> : never;
+};
+
+type ReduceOptions<S extends Schema, R extends ReduceSpec<S>> = {
+  schema: S;
+  reducers: R;
+  headers?: boolean | string[];
+  delimiter?: string;
+  quote?: string;
+};
+
+async function reduceColumnsImpl<S extends Schema, R extends ReduceSpec<S>>(
+  source: CsvSource,
+  options: ReduceOptions<S, R>,
+): Promise<ReduceColumnsResult<S, R>> {
+  const schema = options.schema;
+  const reducers = options.reducers;
+  const colNames = Object.keys(reducers) as (keyof S)[];
+  const colTypes = colNames.map(n => schema[n as string]);
+  const delimiter = options.delimiter ?? ",";
+  const quote = options.quote ?? '"';
+  const headersOpt = options.headers ?? true;
+
+  const indices = new Array<number>(colNames.length);
+  let headerCells: string[] | null = null;
+  let headersResolved = false;
+
+  // Per-column running aggregates. Variance uses Welford for numerical
+  // stability over millions of rows.
+  type State = { count: number; sum: number; min: number; max: number; mean: number; m2: number };
+  const states: State[] = colNames.map(() => ({
+    count: 0,
+    sum: 0,
+    min: Infinity,
+    max: -Infinity,
+    mean: 0,
+    m2: 0,
+  }));
+
+  for await (const row of tokenize(source, delimiter, quote)) {
+    if (!headersResolved) {
+      if (headersOpt === false) {
+        for (let i = 0; i < colNames.length; i++) indices[i] = i;
+      } else {
+        headerCells = Array.isArray(headersOpt) ? headersOpt : row;
+        for (let i = 0; i < colNames.length; i++) {
+          const name = colNames[i] as string;
+          const idx = headerCells.indexOf(name);
+          if (idx < 0) {
+            throw new Error(`reduceColumns: column "${name}" not found in CSV headers [${headerCells.join(", ")}]`);
+          }
+          indices[i] = idx;
+        }
+      }
+      headersResolved = true;
+      if (headersOpt !== false && !Array.isArray(headersOpt)) continue;
+    }
+
+    for (let i = 0; i < colNames.length; i++) {
+      const cell = row[indices[i]];
+      const t = colTypes[i];
+      if (t === "string") {
+        // String columns can only meaningfully be `count`-reduced.
+        if (cell !== undefined && cell !== "") states[i].count++;
+        continue;
+      }
+      const x = cell === undefined || cell === "" ? NaN : +cell;
+      if (Number.isNaN(x)) continue;
+      const s = states[i];
+      s.count++;
+      s.sum += x;
+      if (x < s.min) s.min = x;
+      if (x > s.max) s.max = x;
+      // Welford's online variance update.
+      const delta = x - s.mean;
+      s.mean += delta / s.count;
+      s.m2 += delta * (x - s.mean);
+    }
+  }
+
+  const result: any = {};
+  for (let i = 0; i < colNames.length; i++) {
+    const name = colNames[i] as string;
+    const s = states[i];
+    const wanted = reducers[name as keyof R] as readonly Reducer[];
+    const out: any = {};
+    for (const r of wanted) {
+      switch (r) {
+        case "count":
+          out.count = s.count;
+          break;
+        case "sum":
+          out.sum = s.sum;
+          break;
+        case "min":
+          out.min = s.count > 0 ? s.min : NaN;
+          break;
+        case "max":
+          out.max = s.count > 0 ? s.max : NaN;
+          break;
+        case "mean":
+          out.mean = s.count > 0 ? s.mean : NaN;
+          break;
+        case "variance":
+          // Sample variance (n-1 divisor). For population variance
+          // divide by s.count instead — most stats consumers want
+          // sample variance, so that's the default.
+          out.variance = s.count > 1 ? s.m2 / (s.count - 1) : NaN;
+          break;
+        case "stddev":
+          out.stddev = s.count > 1 ? Math.sqrt(s.m2 / (s.count - 1)) : NaN;
+          break;
+      }
+    }
+    result[name] = out;
+  }
+  return result as ReduceColumnsResult<S, R>;
+}
+
 export default {
   parseCsv: parseCsvImpl,
   parseColumns: parseColumnsImpl,
+  parseBatches: parseBatchesImpl,
+  reduceColumns: reduceColumnsImpl,
 };
