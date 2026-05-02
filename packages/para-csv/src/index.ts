@@ -463,6 +463,184 @@ async function* parseCsvImpl(
   }
 }
 
+// ── Columnar / typed-array parsing ───────────────────────────────────
+//
+// parseColumns() streams a CSV directly into per-column typed-array
+// buffers — no per-row object allocation, no per-cell value boxing.
+// For numeric-heavy CSVs this is O(N) memory in the actual data, vs
+// the row-objects path which spends a JS Object header (~56 bytes)
+// + boxed Number per cell.
+//
+//   const cols = await parseColumns("./sensors.csv", {
+//     schema: { ts: "f64", value: "f32", sensorId: "i32", label: "string" },
+//   });
+//   // cols.ts is a Float64Array, cols.value a Float32Array, etc.
+//   //   → feed straight into @para/simd / @para/arrow with no copy.
+//
+// Allocation strategy: each column starts at INITIAL_CAPACITY rows and
+// doubles when full (amortized O(N) inserts). At end-of-stream each
+// numeric buffer is sliced down to the actual row count via subarray
+// — same backing buffer, no copy. String columns are plain Array<string>
+// since strings can't share storage in TypedArrays.
+
+type ColumnType = "f32" | "f64" | "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "string";
+type Schema = Record<string, ColumnType>;
+type ColumnsResult<S extends Schema> = {
+  [K in keyof S]: S[K] extends "string"
+    ? string[]
+    : S[K] extends "f32"
+      ? Float32Array
+      : S[K] extends "f64"
+        ? Float64Array
+        : S[K] extends "i8"
+          ? Int8Array
+          : S[K] extends "u8"
+            ? Uint8Array
+            : S[K] extends "i16"
+              ? Int16Array
+              : S[K] extends "u16"
+                ? Uint16Array
+                : S[K] extends "i32"
+                  ? Int32Array
+                  : S[K] extends "u32"
+                    ? Uint32Array
+                    : never;
+};
+
+type ParseColumnsOptions<S extends Schema> = {
+  schema: S;
+  /** Field delimiter. Default `,`. */
+  delimiter?: string;
+  /** Field quote character. Default `"`. */
+  quote?: string;
+  /**
+   * `true` (default) — first row is the header row, schema keys are
+   * matched against header cells. `false` — schema keys are taken in
+   * declaration order against column indices 0, 1, 2, …. Or pass an
+   * explicit array of header names.
+   */
+  headers?: boolean | string[];
+};
+
+const TYPED_CTORS: Record<Exclude<ColumnType, "string">, any> = {
+  f32: Float32Array,
+  f64: Float64Array,
+  i8: Int8Array,
+  u8: Uint8Array,
+  i16: Int16Array,
+  u16: Uint16Array,
+  i32: Int32Array,
+  u32: Uint32Array,
+};
+
+const INITIAL_CAPACITY = 1024;
+
+async function parseColumnsImpl<S extends Schema>(
+  source: CsvSource,
+  options: ParseColumnsOptions<S>,
+): Promise<ColumnsResult<S>> {
+  const schema = options.schema;
+  const colNames = Object.keys(schema);
+  const colTypes = colNames.map(n => schema[n]);
+  const delimiter = options.delimiter ?? ",";
+  const quote = options.quote ?? '"';
+  const headersOpt = options.headers ?? true;
+
+  // Map schema column names → CSV column indices. With headers, look
+  // up by name; without, indices match schema declaration order.
+  const indices = new Array<number>(colNames.length);
+  let headerCells: string[] | null = null;
+
+  // Initial buffer set. Numeric columns get a TypedArray; string
+  // columns stay as plain arrays (TypedArrays can't hold strings).
+  let capacity = INITIAL_CAPACITY;
+  let length = 0;
+  let buffers: any[] = colNames.map((_, i) => {
+    const t = colTypes[i];
+    return t === "string" ? ([] as string[]) : new TYPED_CTORS[t](capacity);
+  });
+
+  function grow() {
+    capacity *= 2;
+    for (let i = 0; i < buffers.length; i++) {
+      const t = colTypes[i];
+      if (t === "string") continue; // Array auto-grows
+      const next = new TYPED_CTORS[t](capacity);
+      next.set(buffers[i]);
+      buffers[i] = next;
+    }
+  }
+
+  let rowIndex = 0;
+  for await (const row of tokenize(source, delimiter, quote)) {
+    if (rowIndex === 0 && headersOpt !== false) {
+      headerCells = Array.isArray(headersOpt) ? headersOpt : row;
+      for (let i = 0; i < colNames.length; i++) {
+        const idx = headerCells.indexOf(colNames[i]);
+        if (idx < 0) {
+          throw new Error(
+            `parseColumns: schema column "${colNames[i]}" not found in CSV headers [${headerCells.join(", ")}]`,
+          );
+        }
+        indices[i] = idx;
+      }
+      // If headers came from a row in the CSV (not the explicit array
+      // override), don't write that row into the data buffers.
+      if (!Array.isArray(headersOpt)) {
+        rowIndex++;
+        continue;
+      }
+    } else if (rowIndex === 0) {
+      // headersOpt === false: schema column names map to column index
+      // 0..N-1 in declaration order.
+      for (let i = 0; i < colNames.length; i++) indices[i] = i;
+    }
+
+    if (length === capacity) grow();
+
+    for (let i = 0; i < colNames.length; i++) {
+      const cell = row[indices[i]];
+      const t = colTypes[i];
+      if (t === "string") {
+        (buffers[i] as string[])[length] = cell ?? "";
+      } else if (t === "f32" || t === "f64") {
+        const n = cell === undefined || cell === "" ? NaN : +cell;
+        (buffers[i] as Float64Array)[length] = n;
+      } else {
+        // Integer columns: parseInt with base 10. Empty / non-numeric
+        // cells become 0 — caller should validate inputs if 0 is a
+        // meaningful sentinel.
+        const n = cell === undefined || cell === "" ? 0 : parseInt(cell, 10) | 0;
+        (buffers[i] as Int32Array)[length] = n;
+      }
+    }
+    length++;
+    rowIndex++;
+  }
+
+  // Tight-fit each column. `subarray()` would zero-copy but keeps the
+  // doubled ArrayBuffer alive (up to ~50% wasted tail at worst), so
+  // allocate a new buffer of the exact length and copy across. One
+  // copy per column at end-of-stream beats holding 2× the memory
+  // forever for the typical case where the result outlives parsing.
+  const result: any = {};
+  for (let i = 0; i < colNames.length; i++) {
+    const t = colTypes[i];
+    if (t === "string") {
+      const arr = buffers[i] as string[];
+      arr.length = length;
+      result[colNames[i]] = arr;
+    } else {
+      const Ctor = TYPED_CTORS[t];
+      const tight = new Ctor(length);
+      tight.set((buffers[i] as Float32Array).subarray(0, length));
+      result[colNames[i]] = tight;
+    }
+  }
+  return result as ColumnsResult<S>;
+}
+
 export default {
   parseCsv: parseCsvImpl,
+  parseColumns: parseColumnsImpl,
 };
