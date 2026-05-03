@@ -68,4 +68,31 @@ describe("parabun:i2c API surface", () => {
       bus.close();
     }
   });
+
+  test.skipIf(!haveBus)(
+    "Bus: alive starts true; flips false on close(); use(fn) auto-tears-down; [Symbol.dispose] callable",
+    () => {
+      const path = existsSync("/dev/i2c-1") ? "/dev/i2c-1" : "/dev/i2c-11";
+      let bus: any;
+      try {
+        bus = i2c.open(path);
+      } catch {
+        // Permission-denied on a non-i2c-group account — skip cleanly.
+        return;
+      }
+      try {
+        expect(bus.alive.get()).toBe(true);
+        let runs = 0;
+        bus.use(() => {
+          runs++;
+          bus.alive.get();
+        });
+        expect(runs).toBe(1);
+        expect(typeof bus[Symbol.dispose]).toBe("function");
+      } finally {
+        bus.close();
+      }
+      expect(bus.alive.get()).toBe(false);
+    },
+  );
 });

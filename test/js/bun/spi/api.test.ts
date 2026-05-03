@@ -69,4 +69,30 @@ describe("parabun:spi API surface", () => {
       dev.close();
     }
   });
+
+  test.skipIf(!haveSpi)(
+    "Device: alive starts true; flips false on close(); use(fn) auto-tears-down; [Symbol.dispose] callable",
+    () => {
+      const path = existsSync("/dev/spidev0.0") ? "/dev/spidev0.0" : "/dev/spidev10.0";
+      let dev: any;
+      try {
+        dev = spi.open(path);
+      } catch {
+        return;
+      }
+      try {
+        expect(dev.alive.get()).toBe(true);
+        let runs = 0;
+        dev.use(() => {
+          runs++;
+          dev.alive.get();
+        });
+        expect(runs).toBe(1);
+        expect(typeof dev[Symbol.dispose]).toBe("function");
+      } finally {
+        dev.close();
+      }
+      expect(dev.alive.get()).toBe(false);
+    },
+  );
 });

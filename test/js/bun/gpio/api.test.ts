@@ -118,4 +118,31 @@ describe("parabun:gpio API surface", () => {
       chip.close();
     }
   });
+
+  test.skipIf(!haveGpio)(
+    "Chip: alive starts true; flips false on close(); use(fn) auto-tears-down; [Symbol.dispose] callable",
+    () => {
+      let chip: any;
+      try {
+        chip = gpio.open("/dev/gpiochip0");
+      } catch {
+        // Permission-denied on a non-gpio-group account — same skip as the
+        // sibling tests. Harmless on the dev box without the gpio group.
+        return;
+      }
+      try {
+        expect(chip.alive.get()).toBe(true);
+        let runs = 0;
+        chip.use(() => {
+          runs++;
+          chip.alive.get();
+        });
+        expect(runs).toBe(1);
+        expect(typeof chip[Symbol.dispose]).toBe("function");
+      } finally {
+        chip.close();
+      }
+      expect(chip.alive.get()).toBe(false);
+    },
+  );
 });

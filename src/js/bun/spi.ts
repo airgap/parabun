@@ -28,6 +28,16 @@
 // Devices are AsyncDisposable; `await using` releases the fd at scope exit.
 
 const native = $cpp("parabun_spi.cpp", "createParabunSpi");
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of para:signals's
+// class hierarchy. Same shape as audio.ts / camera.ts / gpio.ts / i2c.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -53,13 +63,15 @@ type TransactSegment =
   | { tx: Uint8Array; rx?: number; speedHz?: number; delayUs?: number; bitsPerWord?: number; csChange?: boolean }
   | { rx: number; speedHz?: number; delayUs?: number; bitsPerWord?: number; csChange?: boolean };
 
-interface Device extends AsyncDisposable {
+interface Device extends AsyncDisposable, Disposable {
   readonly path: string;
   readonly bus: number;
   readonly cs: number;
   readonly mode: 0 | 1 | 2 | 3;
   readonly bitsPerWord: number;
   readonly speedHz: number;
+  /** True from open() until close()/[Symbol.dispose]. */
+  readonly alive: Signal<boolean>;
   /** Full-duplex transfer. Returns the rx bytes captured during tx. */
   transfer(tx: Uint8Array, opts?: { speedHz?: number; delayUs?: number }): Promise<Uint8Array>;
   /** Half-duplex write. Equivalent to `transfer(tx)` but discards rx. */
@@ -72,8 +84,14 @@ interface Device extends AsyncDisposable {
    * tx-only segments get `undefined`.
    */
   transactSegments(segments: TransactSegment[]): Promise<Array<Uint8Array | undefined>>;
+  /**
+   * Run an effect bound to this device's lifetime. Auto-disposed on
+   * close() — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void;
   /** Release the device fd. Idempotent. */
   close(): void;
+  [Symbol.dispose](): void;
 }
 
 const deviceRegistry = new FinalizationRegistry<bigint>(fd => {
@@ -96,6 +114,8 @@ class DeviceImpl implements Device {
   readonly bitsPerWord: number;
   readonly speedHz: number;
   #closed = false;
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
 
   constructor(fd: bigint, info: DeviceInfo, opts: { mode: 0 | 1 | 2 | 3; bitsPerWord: number; speedHz: number }) {
     this.#fd = fd;
@@ -105,7 +125,18 @@ class DeviceImpl implements Device {
     this.mode = opts.mode;
     this.bitsPerWord = opts.bitsPerWord;
     this.speedHz = opts.speedHz;
+    this.#alive = signalsMod.signal(true);
     deviceRegistry.register(this, fd, this);
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   #assertOpen(): void {
@@ -152,6 +183,19 @@ class DeviceImpl implements Device {
       deviceRegistry.unregister(this);
       native.closeDevice(fd);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   [Symbol.asyncDispose](): Promise<void> {

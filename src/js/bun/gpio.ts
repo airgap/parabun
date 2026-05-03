@@ -90,11 +90,13 @@ type EdgeEvent = {
   value: 0 | 1;
 };
 
-interface Line extends AsyncDisposable {
+interface Line extends AsyncDisposable, Disposable {
   /** Chip-relative line number, 0..(chip.lines - 1). */
   readonly offset: number;
   /** Read-only signal of the most recent observed value. Updates on read() / edge events. */
   readonly value: Signal<0 | 1>;
+  /** True from acquisition until close()/[Symbol.dispose]. */
+  readonly alive: Signal<boolean>;
   /** Read the line. Returns 0 or 1. Throws on closed. */
   read(): 0 | 1;
   /** Write 0 or 1 to an output line. Throws on closed or if the line was acquired as input. */
@@ -103,11 +105,17 @@ interface Line extends AsyncDisposable {
   toggle(): 0 | 1;
   /** Async iterator of edge events. Only meaningful if the line was acquired with `edge: ...`. */
   edges(): AsyncIterableIterator<EdgeEvent>;
+  /**
+   * Run an effect bound to this line's lifetime. Auto-disposed on
+   * close() — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void;
   /** Release the line. Idempotent. */
   close(): void;
+  [Symbol.dispose](): void;
 }
 
-interface LineBank extends AsyncDisposable {
+interface LineBank extends AsyncDisposable, Disposable {
   /** Chip-relative offsets, in the order they were requested. */
   readonly offsets: readonly number[];
   /**
@@ -116,6 +124,8 @@ interface LineBank extends AsyncDisposable {
    * and on each pollHz tick (input banks only).
    */
   readonly value: Signal<bigint>;
+  /** True from acquisition until close()/[Symbol.dispose]. */
+  readonly alive: Signal<boolean>;
   /**
    * Atomic read of all lines. Returns a 64-bit bitmask: bit i is the
    * value of `offsets[i]` (NOT the chip-relative offset — bit 0 = first
@@ -130,14 +140,19 @@ interface LineBank extends AsyncDisposable {
    * the caller skip writing some bits.
    */
   write(values: bigint, mask?: bigint): void;
+  /** Run an effect bound to this bank's lifetime. */
+  use(fn: () => void | (() => void)): () => void;
   /** Release the bank. Idempotent. */
   close(): void;
+  [Symbol.dispose](): void;
 }
 
-interface Chip extends AsyncDisposable {
+interface Chip extends AsyncDisposable, Disposable {
   readonly path: string;
   readonly label: string;
   readonly lines: number;
+  /** True from open() until close()/[Symbol.dispose]. */
+  readonly alive: Signal<boolean>;
   /** Acquire a single line on this chip. */
   line(offset: number, opts: LineOptions): Line;
   /**
@@ -150,8 +165,11 @@ interface Chip extends AsyncDisposable {
    * Named `bank` because `lines` is already the chip's line count.
    */
   bank(offsets: number[], opts: Omit<LineOptions, "initial"> & { initial?: bigint | number }): LineBank;
+  /** Run an effect bound to this chip's lifetime. */
+  use(fn: () => void | (() => void)): () => void;
   /** Release the chip handle. Lines acquired through this chip stay open until they're individually closed. */
   close(): void;
+  [Symbol.dispose](): void;
 }
 
 // ─── Encoding maps for the native layer ────────────────────────────────────
@@ -184,6 +202,8 @@ class LineImpl implements Line {
   #mode: LineMode;
   #closed = false;
   #value: WritableSignal<0 | 1>;
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
   #pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(fd: bigint, offset: number, mode: LineMode, initial: 0 | 1, pollHz: number = 0) {
@@ -195,6 +215,7 @@ class LineImpl implements Line {
     // GET_VALUES here to avoid a syscall in the hot path. First read()
     // call will populate the signal accurately.
     this.#value = signalsMod.signal(mode === "out" ? initial : 0);
+    this.#alive = signalsMod.signal(true);
     lineRegistry.register(this, fd, this);
     if (mode === "in" && pollHz > 0) {
       // Auto-poll the input line at `pollHz` to drive the value signal so
@@ -216,6 +237,16 @@ class LineImpl implements Line {
 
   get value(): Signal<0 | 1> {
     return this.#value;
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   read(): 0 | 1 {
@@ -273,6 +304,19 @@ class LineImpl implements Line {
       lineRegistry.unregister(this);
       native.closeLine(fd);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   [Symbol.asyncDispose](): Promise<void> {
@@ -288,6 +332,8 @@ class LineBankImpl implements LineBank {
   #closed = false;
   #allMask: bigint;
   #value: WritableSignal<bigint>;
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
   #pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(fd: bigint, offsets: number[], mode: LineMode, initial: bigint, pollHz: number = 0) {
@@ -296,6 +342,7 @@ class LineBankImpl implements LineBank {
     this.#mode = mode;
     this.#allMask = offsets.length === 64 ? ~0n : (1n << BigInt(offsets.length)) - 1n;
     this.#value = signalsMod.signal(mode === "out" ? initial : 0n);
+    this.#alive = signalsMod.signal(true);
     lineRegistry.register(this, fd, this);
     if (mode === "in" && pollHz > 0) {
       const periodMs = Math.max(1, Math.round(1000 / pollHz));
@@ -311,6 +358,16 @@ class LineBankImpl implements LineBank {
 
   get value(): Signal<bigint> {
     return this.#value;
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   read(): bigint {
@@ -342,6 +399,19 @@ class LineBankImpl implements LineBank {
       lineRegistry.unregister(this);
       native.closeLine(fd);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   [Symbol.asyncDispose](): Promise<void> {
@@ -356,13 +426,26 @@ class ChipImpl implements Chip {
   readonly label: string;
   readonly lines: number;
   #closed = false;
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
 
   constructor(fd: bigint, info: ChipInfo) {
     this.#fd = fd;
     this.path = info.path;
     this.label = info.label;
     this.lines = info.lines;
+    this.#alive = signalsMod.signal(true);
     chipRegistry.register(this, fd, this);
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   line(offset: number, opts: LineOptions): Line {
@@ -446,6 +529,19 @@ class ChipImpl implements Chip {
       chipRegistry.unregister(this);
       native.closeChip(fd);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   [Symbol.asyncDispose](): Promise<void> {

@@ -28,6 +28,16 @@
 // Buses are AsyncDisposable; `await using` releases the fd at scope exit.
 
 const native = $cpp("parabun_i2c.cpp", "createParabunI2c");
+const signalsMod = require("./signals.ts");
+
+// Structural Signal types — keep this module agnostic of para:signals's
+// class hierarchy. Same shape as audio.ts / camera.ts / gpio.ts.
+type Signal<T> = {
+  get(): T;
+  peek(): T;
+  subscribe(cb: (v: T) => void): () => void;
+};
+type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
 // ─── Linux i2c-dev I2C_FUNCS bits (mirrors <linux/i2c.h>) ──────────────────
 // Used to surface human-readable capabilities on each bus. Kept here so JS
@@ -104,10 +114,12 @@ interface Device {
   };
 }
 
-interface Bus extends AsyncDisposable {
+interface Bus extends AsyncDisposable, Disposable {
   readonly path: string;
   readonly name: string;
   readonly capabilities: string[];
+  /** True from open() until close()/[Symbol.dispose]. */
+  readonly alive: Signal<boolean>;
   /**
    * Probe addresses 0x03..0x77 with an SMBus quick transaction; returns the
    * 7-bit addresses that ACK'd. Skips known-reserved ranges. This is the
@@ -116,8 +128,14 @@ interface Bus extends AsyncDisposable {
   scan(): Promise<number[]>;
   /** Bind to a 7-bit address. Devices share the bus fd; no syscall. */
   device(addr: number): Device;
+  /**
+   * Run an effect bound to this bus's lifetime. Auto-disposed on
+   * close() — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void;
   /** Release the bus fd. Idempotent. */
   close(): void;
+  [Symbol.dispose](): void;
 }
 
 // FinalizationRegistry backstop — if a Bus drops without close(), the kernel
@@ -200,13 +218,26 @@ class BusImpl implements Bus {
   readonly name: string;
   readonly capabilities: string[];
   #closed = false;
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
 
   constructor(fd: bigint, info: BusInfo) {
     this.fd = fd;
     this.path = info.path;
     this.name = info.name;
     this.capabilities = info.capabilities;
+    this.#alive = signalsMod.signal(true);
     busRegistry.register(this, fd, this);
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   assertOpen(): void {
@@ -248,6 +279,19 @@ class BusImpl implements Bus {
       busRegistry.unregister(this);
       native.closeBus(fd);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 
   [Symbol.asyncDispose](): Promise<void> {
