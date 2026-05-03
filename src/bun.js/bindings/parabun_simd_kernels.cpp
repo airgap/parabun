@@ -177,7 +177,7 @@ static bool extractTypedArray(JSGlobalObject* globalObject, ThrowScope& scope,
         throwTypeError(globalObject, scope, "typed-array shape mismatch"_s);
         return false;
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(cell);
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(cell);
     void* data = view->vector();
     if (!data) [[unlikely]] {
         throwTypeError(globalObject, scope, "typed array is detached"_s);

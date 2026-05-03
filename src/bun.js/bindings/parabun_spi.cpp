@@ -187,7 +187,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiCloseDevice,
 {
     JSValue v = callFrame->argument(0);
     if (!v.isBigInt()) return JSValue::encode(jsUndefined());
-    int fd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(v.asCell())));
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
 #if defined(__linux__)
     if (fd >= 0) ::close(fd);
 #endif
@@ -218,8 +218,8 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransfer,
         throwTypeError(globalObject, scope, "transfer: fd must be a BigInt"_s);
         return {};
     }
-    int fd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(fdVal.asCell())));
-    JSC::JSUint8Array* txArr = JSC::jsDynamicCast<JSC::JSUint8Array*>(callFrame->argument(1));
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(fdVal.asCell())));
+    JSC::JSUint8Array* txArr = dynamicDowncast<JSC::JSUint8Array>(callFrame->argument(1));
     if (!txArr) {
         throwTypeError(globalObject, scope, "transfer: tx must be a Uint8Array"_s);
         return {};
@@ -240,7 +240,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransfer,
         RETURN_IF_EXCEPTION(scope, {});
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* rx = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, length);
     RETURN_IF_EXCEPTION(scope, {});
@@ -290,8 +290,8 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransactSegments,
         throwTypeError(globalObject, scope, "transactSegments: fd must be a BigInt"_s);
         return {};
     }
-    int fd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(fdVal.asCell())));
-    JSArray* segments = JSC::jsDynamicCast<JSArray*>(callFrame->argument(1));
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(fdVal.asCell())));
+    JSArray* segments = dynamicDowncast<JSArray>(callFrame->argument(1));
     if (!segments) {
         throwTypeError(globalObject, scope, "transactSegments: segments must be an array"_s);
         return {};
@@ -302,7 +302,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransactSegments,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     std::vector<struct spi_ioc_transfer> xfers(len);
     std::vector<JSC::JSUint8Array*> rxSlots(len, nullptr);
@@ -316,7 +316,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransactSegments,
     for (unsigned i = 0; i < len; ++i) {
         JSValue segVal = segments->getIndex(globalObject, i);
         RETURN_IF_EXCEPTION(scope, {});
-        JSObject* seg = JSC::jsDynamicCast<JSObject*>(segVal);
+        JSObject* seg = dynamicDowncast<JSObject>(segVal);
         if (!seg) {
             throwTypeError(globalObject, scope, "transactSegments: each segment must be an object"_s);
             return {};
@@ -331,7 +331,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiTransactSegments,
         size_t length = 0;
         JSC::JSUint8Array* txArr = nullptr;
         if (!txVal.isUndefined() && !txVal.isNull()) {
-            txArr = JSC::jsDynamicCast<JSC::JSUint8Array*>(txVal);
+            txArr = dynamicDowncast<JSC::JSUint8Array>(txVal);
             if (!txArr) {
                 throwTypeError(globalObject, scope, "transactSegments: tx must be a Uint8Array"_s);
                 return {};

@@ -132,7 +132,7 @@ struct CameraSession {
 CameraSession* asSession(JSValue v)
 {
     if (!v.isBigInt() || !v.isCell()) return nullptr;
-    auto* big = jsCast<JSBigInt*>(v.asCell());
+    auto* big = dynamicDowncast<JSBigInt>(v.asCell());
     return reinterpret_cast<CameraSession*>(JSBigInt::toBigInt64(big));
 }
 
@@ -528,7 +528,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCaptureNext,
     // Copy out — frees the kernel buffer immediately so we can re-queue.
     // For 4K @ 30fps this is ~25 MB/s memcpy, well below memory bandwidth.
     size_t bytesUsed = b.bytesused > 0 ? static_cast<size_t>(b.bytesused) : sess->buffers[b.index].length;
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* u8 = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, bytesUsed);
     RETURN_IF_EXCEPTION(scope, {});

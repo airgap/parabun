@@ -75,21 +75,21 @@ constexpr size_t OPUS_MAX_PACKET = 4000;
 OpusEncoder* asOpusEncoder(JSValue v)
 {
     if (!v.isBigInt() || !v.isCell()) return nullptr;
-    auto* big = jsCast<JSBigInt*>(v.asCell());
+    auto* big = dynamicDowncast<JSBigInt>(v.asCell());
     return reinterpret_cast<OpusEncoder*>(JSBigInt::toBigInt64(big));
 }
 
 OpusDecoder* asOpusDecoder(JSValue v)
 {
     if (!v.isBigInt() || !v.isCell()) return nullptr;
-    auto* big = jsCast<JSBigInt*>(v.asCell());
+    auto* big = dynamicDowncast<JSBigInt>(v.asCell());
     return reinterpret_cast<OpusDecoder*>(JSBigInt::toBigInt64(big));
 }
 
 DenoiseState* asDenoiseState(JSValue v)
 {
     if (!v.isBigInt() || !v.isCell()) return nullptr;
-    auto* big = jsCast<JSBigInt*>(v.asCell());
+    auto* big = dynamicDowncast<JSBigInt>(v.asCell());
     return reinterpret_cast<DenoiseState*>(JSBigInt::toBigInt64(big));
 }
 
@@ -114,7 +114,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDecodeMp3,
         throwTypeError(globalObject, scope, "decodeMp3: expected Uint8Array"_s);
         return {};
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(arg.asCell());
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(arg.asCell());
     void* dataPtr = view->vector();
     if (!dataPtr) {
         throwTypeError(globalObject, scope, "decodeMp3: bytes is detached"_s);
@@ -230,7 +230,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpusEncode,
         throwTypeError(globalObject, scope, "opusEncode: samples must be a Float32Array"_s);
         return {};
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(framesArg.asCell());
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(framesArg.asCell());
     const float* samples = static_cast<const float*>(view->vector());
     if (!samples) {
         throwTypeError(globalObject, scope, "opusEncode: samples buffer is detached"_s);
@@ -249,7 +249,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpusEncode,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* result = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, static_cast<size_t>(written));
     RETURN_IF_EXCEPTION(scope, {});
@@ -323,7 +323,7 @@ JSC_DEFINE_HOST_FUNCTION(functionOpusDecode,
         throwTypeError(globalObject, scope, "opusDecode: packet must be a Uint8Array"_s);
         return {};
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(packetArg.asCell());
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(packetArg.asCell());
     const uint8_t* packet = static_cast<const uint8_t*>(view->vector());
     if (!packet) {
         throwTypeError(globalObject, scope, "opusDecode: packet buffer is detached"_s);
@@ -400,7 +400,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDenoise,
         throwTypeError(globalObject, scope, "denoise: samples must be a Float32Array"_s);
         return {};
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(framesArg.asCell());
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(framesArg.asCell());
     float* samples = static_cast<float*>(view->vector());
     if (!samples) {
         throwTypeError(globalObject, scope, "denoise: samples buffer is detached"_s);

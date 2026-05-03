@@ -1714,7 +1714,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
         throwTypeError(globalObject, scope, "parabun:image.decode: expected Uint8Array"_s);
         return {};
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(arg.asCell());
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(arg.asCell());
     void* dataPtr = view->vector();
     if (!dataPtr) {
         throwTypeError(globalObject, scope, "parabun:image.decode: typed array is detached"_s);
@@ -1749,7 +1749,7 @@ JSC_DEFINE_HOST_FUNCTION(functionDecode,
     // Build the result Uint8Array (Buffer subclass — JS sees it as Uint8Array,
     // and we get the well-trodden createUninitialized path that the SQL
     // bindings use for raw bytea).
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* dataArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, data.size());
     RETURN_IF_EXCEPTION(scope, {});
@@ -1820,7 +1820,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
     uint32_t width = widthVal.toUInt32(globalObject);
     uint32_t height = heightVal.toUInt32(globalObject);
     uint32_t channels = channelsVal.toUInt32(globalObject);
-    auto* dataView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* dataView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* pixelsRaw = dataView->vector();
     if (!pixelsRaw) {
         throwTypeError(globalObject, scope, "parabun:image.encode: img.data is detached"_s);
@@ -1858,7 +1858,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEncode,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* result = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes.size());
     RETURN_IF_EXCEPTION(scope, {});
@@ -1895,7 +1895,7 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
         throwTypeError(globalObject, scope, "parabun:image.resize: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.resize: img.data is detached"_s);
@@ -1945,7 +1945,7 @@ JSC_DEFINE_HOST_FUNCTION(functionResize,
         }
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(dw) * dh * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2000,7 +2000,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBlur,
         throwTypeError(globalObject, scope, "parabun:image.blur: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.blur: img.data is detached"_s);
@@ -2030,7 +2030,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBlur,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2079,7 +2079,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSharpen,
         throwTypeError(globalObject, scope, "parabun:image.sharpen: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.sharpen: img.data is detached"_s);
@@ -2116,7 +2116,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSharpen,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2163,7 +2163,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEdgeDetect,
         throwTypeError(globalObject, scope, "parabun:image.edgeDetect: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.edgeDetect: img.data is detached"_s);
@@ -2181,7 +2181,7 @@ JSC_DEFINE_HOST_FUNCTION(functionEdgeDetect,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h; // single channel
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2229,7 +2229,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRotate,
         throwTypeError(globalObject, scope, "parabun:image.rotate: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.rotate: img.data is detached"_s);
@@ -2261,7 +2261,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRotate,
 
     const uint32_t dw = (degrees == 180) ? w : h;
     const uint32_t dh = (degrees == 180) ? h : w;
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(dw) * dh * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2315,7 +2315,7 @@ JSC_DEFINE_HOST_FUNCTION(functionFlip,
         throwTypeError(globalObject, scope, "parabun:image.flip: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.flip: img.data is detached"_s);
@@ -2348,7 +2348,7 @@ JSC_DEFINE_HOST_FUNCTION(functionFlip,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2401,7 +2401,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
         throwTypeError(globalObject, scope, "parabun:image.crop: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.crop: img.data is detached"_s);
@@ -2455,7 +2455,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCrop,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(cw) * ch * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2502,7 +2502,7 @@ JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
         throwTypeError(globalObject, scope, "parabun:image.toGrayscale: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.toGrayscale: img.data is detached"_s);
@@ -2520,7 +2520,7 @@ JSC_DEFINE_HOST_FUNCTION(functionToGrayscale,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h; // single channel
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2567,7 +2567,7 @@ JSC_DEFINE_HOST_FUNCTION(functionHueShift,
         throwTypeError(globalObject, scope, "parabun:image.hueShift: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.hueShift: img.data is detached"_s);
@@ -2597,7 +2597,7 @@ JSC_DEFINE_HOST_FUNCTION(functionHueShift,
     // Wrap to [-360, 360] equivalent — full rotations cancel.
     const float radians = static_cast<float>(degrees * (M_PI / 180.0));
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2643,7 +2643,7 @@ JSC_DEFINE_HOST_FUNCTION(functionAdjust,
         throwTypeError(globalObject, scope, "parabun:image.adjust: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.adjust: img.data is detached"_s);
@@ -2679,7 +2679,7 @@ JSC_DEFINE_HOST_FUNCTION(functionAdjust,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2726,7 +2726,7 @@ JSC_DEFINE_HOST_FUNCTION(functionHistogram,
         throwTypeError(globalObject, scope, "parabun:image.histogram: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.histogram: img.data is detached"_s);
@@ -2795,7 +2795,7 @@ JSC_DEFINE_HOST_FUNCTION(functionComposite,
             throwTypeError(globalObject, scope, makeString(errPrefix, ".data must be a Uint8Array"_s));
             return false;
         }
-        auto* view = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+        auto* view = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
         void* raw = view->vector();
         if (!raw) {
             throwTypeError(globalObject, scope, makeString(errPrefix, ".data is detached"_s));
@@ -2836,7 +2836,7 @@ JSC_DEFINE_HOST_FUNCTION(functionComposite,
     JSValue formatVal = baseObj->get(globalObject, JSC::Identifier::fromString(vm, "format"_s));
     RETURN_IF_EXCEPTION(scope, {});
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(bw) * bh * bChannels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2883,7 +2883,7 @@ JSC_DEFINE_HOST_FUNCTION(functionInvert,
         throwTypeError(globalObject, scope, "parabun:image.invert: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.invert: img.data is detached"_s);
@@ -2901,7 +2901,7 @@ JSC_DEFINE_HOST_FUNCTION(functionInvert,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -2948,7 +2948,7 @@ JSC_DEFINE_HOST_FUNCTION(functionThreshold,
         throwTypeError(globalObject, scope, "parabun:image.threshold: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.threshold: img.data is detached"_s);
@@ -2977,7 +2977,7 @@ JSC_DEFINE_HOST_FUNCTION(functionThreshold,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h; // single channel
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -3025,7 +3025,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBoxBlur,
         throwTypeError(globalObject, scope, "parabun:image.boxBlur: img.data must be a Uint8Array"_s);
         return {};
     }
-    auto* srcView = jsCast<JSC::JSArrayBufferView*>(dataVal.asCell());
+    auto* srcView = dynamicDowncast<JSC::JSArrayBufferView>(dataVal.asCell());
     void* srcRaw = srcView->vector();
     if (!srcRaw) {
         throwTypeError(globalObject, scope, "parabun:image.boxBlur: img.data is detached"_s);
@@ -3055,7 +3055,7 @@ JSC_DEFINE_HOST_FUNCTION(functionBoxBlur,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     const size_t outBytes = static_cast<size_t>(w) * h * channels;
     auto* dstArr = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes);
@@ -3335,7 +3335,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
         throwTypeError(globalObject, scope, "parabun:image.pipeline: out opts must be an object"_s);
         return {};
     }
-    auto* inView = jsCast<JSC::JSArrayBufferView*>(inArg.asCell());
+    auto* inView = dynamicDowncast<JSC::JSArrayBufferView>(inArg.asCell());
     void* inRaw = inView->vector();
     if (!inRaw) {
         throwTypeError(globalObject, scope, "parabun:image.pipeline: input is detached"_s);
@@ -3424,7 +3424,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRunPipeline,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* result = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, outBytes.size());
     RETURN_IF_EXCEPTION(scope, {});

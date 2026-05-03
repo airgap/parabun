@@ -234,7 +234,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLine,
         throwTypeError(globalObject, scope, "requestLine: chipFd must be a BigInt"_s);
         return {};
     }
-    int chipFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(chipFdVal.asCell())));
+    int chipFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(chipFdVal.asCell())));
     if (chipFd < 0) {
         throwTypeError(globalObject, scope, "requestLine: invalid chipFd"_s);
         return {};
@@ -315,7 +315,7 @@ JSC_DEFINE_HOST_FUNCTION(functionReadLine,
         throwTypeError(globalObject, scope, "readLine: lineFd must be a BigInt"_s);
         return {};
     }
-    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(lineFdVal.asCell())));
 
     struct gpio_v2_line_values vals;
     std::memset(&vals, 0, sizeof(vals));
@@ -344,7 +344,7 @@ JSC_DEFINE_HOST_FUNCTION(functionWriteLine,
         throwTypeError(globalObject, scope, "writeLine: lineFd must be a BigInt"_s);
         return {};
     }
-    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(lineFdVal.asCell())));
     unsigned int v = callFrame->argument(1).toUInt32(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
 
@@ -381,7 +381,7 @@ JSC_DEFINE_HOST_FUNCTION(functionReadEvent,
         throwTypeError(globalObject, scope, "readEvent: lineFd must be a BigInt"_s);
         return {};
     }
-    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(lineFdVal.asCell())));
 
     struct gpio_v2_line_event ev;
     ssize_t n;
@@ -443,12 +443,12 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLines,
         throwTypeError(globalObject, scope, "requestLines: chipFd must be a BigInt"_s);
         return {};
     }
-    int chipFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(chipFdVal.asCell())));
+    int chipFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(chipFdVal.asCell())));
     if (chipFd < 0) {
         throwTypeError(globalObject, scope, "requestLines: invalid chipFd"_s);
         return {};
     }
-    JSC::JSUint32Array* offsetsArr = JSC::jsDynamicCast<JSC::JSUint32Array*>(callFrame->argument(1));
+    JSC::JSUint32Array* offsetsArr = dynamicDowncast<JSC::JSUint32Array>(callFrame->argument(1));
     if (!offsetsArr) {
         throwTypeError(globalObject, scope, "requestLines: offsets must be a Uint32Array"_s);
         return {};
@@ -473,7 +473,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLines,
         return {};
     }
     uint64_t initialMask = static_cast<uint64_t>(
-        JSBigInt::toBigInt64(jsCast<JSBigInt*>(initialMaskVal.asCell())));
+        JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(initialMaskVal.asCell())));
 
     struct gpio_v2_line_request req;
     std::memset(&req, 0, sizeof(req));
@@ -534,7 +534,7 @@ JSC_DEFINE_HOST_FUNCTION(functionReadLines,
         throwTypeError(globalObject, scope, "readLines: lineFd must be a BigInt"_s);
         return {};
     }
-    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(lineFdVal.asCell())));
     uint32_t n = callFrame->argument(1).toUInt32(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
     if (n == 0 || n > GPIO_V2_LINES_MAX) {
@@ -572,15 +572,15 @@ JSC_DEFINE_HOST_FUNCTION(functionWriteLines,
         throwTypeError(globalObject, scope, "writeLines: lineFd must be a BigInt"_s);
         return {};
     }
-    int lineFd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(lineFdVal.asCell())));
+    int lineFd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(lineFdVal.asCell())));
     JSValue valuesVal = callFrame->argument(1);
     JSValue maskVal = callFrame->argument(2);
     if (!valuesVal.isBigInt() || !maskVal.isBigInt()) {
         throwTypeError(globalObject, scope, "writeLines: values and mask must be BigInts"_s);
         return {};
     }
-    uint64_t values = static_cast<uint64_t>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(valuesVal.asCell())));
-    uint64_t mask = static_cast<uint64_t>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(maskVal.asCell())));
+    uint64_t values = static_cast<uint64_t>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(valuesVal.asCell())));
+    uint64_t mask = static_cast<uint64_t>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(maskVal.asCell())));
 
     struct gpio_v2_line_values vals;
     std::memset(&vals, 0, sizeof(vals));
@@ -605,7 +605,7 @@ static JSValue closeFdShared(JSGlobalObject* globalObject, ThrowScope& scope, JS
 #else
     (void)scope;
     if (!v.isBigInt()) return jsUndefined();
-    int fd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(v.asCell())));
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
     if (fd >= 0) ::close(fd);
     return jsUndefined();
 #endif

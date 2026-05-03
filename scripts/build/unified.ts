@@ -136,6 +136,19 @@ const noUnify: readonly string[] = [
   // keeping it out of unified bundles avoids the macro pollution (`min`/`max`
   // /`ERROR`/etc.) leaking into siblings.
   "src/bun.js/bindings/image_wic_shim.cpp",
+
+  // Para C++ host-function bindings — written assuming TU isolation. Use
+  // `using namespace JSC;` plus file-static helper names (`xioctl`, etc.)
+  // that collide when bundled. Each maps to a parabun:* runtime module
+  // and is independent enough that bundling buys nothing.
+  "src/bun.js/bindings/parabun_audio_codecs.cpp",
+  "src/bun.js/bindings/parabun_audio_io.cpp",
+  "src/bun.js/bindings/parabun_camera.cpp",
+  "src/bun.js/bindings/parabun_gpio.cpp",
+  "src/bun.js/bindings/parabun_i2c.cpp",
+  "src/bun.js/bindings/parabun_image_codecs.cpp",
+  "src/bun.js/bindings/parabun_simd_kernels.cpp",
+  "src/bun.js/bindings/parabun_spi.cpp",
 ];
 
 /**

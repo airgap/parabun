@@ -226,7 +226,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCloseBus,
     auto scope = DECLARE_THROW_SCOPE(vm);
     JSValue v = callFrame->argument(0);
     if (!v.isBigInt()) return JSValue::encode(jsUndefined());
-    int fd = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(v.asCell())));
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
 #if defined(__linux__)
     if (fd >= 0) ::close(fd);
 #endif
@@ -250,7 +250,7 @@ static bool extractFdAddr(JSGlobalObject* globalObject, ThrowScope& scope,
             makeString(String::fromUTF8(prefix), ": fd must be a BigInt"_s));
         return false;
     }
-    fdOut = static_cast<int>(JSBigInt::toBigInt64(jsCast<JSBigInt*>(fdVal.asCell())));
+    fdOut = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(fdVal.asCell())));
     uint32_t a = callFrame->argument(1).toUInt32(globalObject);
     if (scope.exception()) return false;
     if (a > 0x7F) {
@@ -287,7 +287,7 @@ JSC_DEFINE_HOST_FUNCTION(functionRead,
         return {};
     }
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* u8 = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, length);
     RETURN_IF_EXCEPTION(scope, {});
@@ -329,7 +329,7 @@ JSC_DEFINE_HOST_FUNCTION(functionWrite,
         return {};
     }
     JSValue bytesVal = callFrame->argument(2);
-    JSC::JSUint8Array* u8 = JSC::jsDynamicCast<JSC::JSUint8Array*>(bytesVal);
+    JSC::JSUint8Array* u8 = dynamicDowncast<JSC::JSUint8Array>(bytesVal);
     if (!u8) {
         throwTypeError(globalObject, scope, "write: bytes must be a Uint8Array"_s);
         return {};
@@ -384,7 +384,7 @@ JSC_DEFINE_HOST_FUNCTION(functionTransact,
         return {};
     }
     JSValue segmentsVal = callFrame->argument(2);
-    JSArray* segments = JSC::jsDynamicCast<JSArray*>(segmentsVal);
+    JSArray* segments = dynamicDowncast<JSArray>(segmentsVal);
     if (!segments) {
         throwTypeError(globalObject, scope, "transact: segments must be an array"_s);
         return {};
@@ -400,7 +400,7 @@ JSC_DEFINE_HOST_FUNCTION(functionTransact,
     // Allocate JS-side Uint8Arrays for reads up front; their vector() is the
     // buffer the kernel writes into. Write segments point at the input
     // Uint8Array's vector() directly.
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     std::vector<struct i2c_msg> msgs(len);
     std::vector<JSC::JSUint8Array*> readSlots(len, nullptr);
@@ -409,7 +409,7 @@ JSC_DEFINE_HOST_FUNCTION(functionTransact,
     for (unsigned i = 0; i < len; ++i) {
         JSValue segVal = segments->getIndex(globalObject, i);
         RETURN_IF_EXCEPTION(scope, {});
-        JSObject* segObj = JSC::jsDynamicCast<JSObject*>(segVal);
+        JSObject* segObj = dynamicDowncast<JSObject>(segVal);
         if (!segObj) {
             throwTypeError(globalObject, scope, "transact: each segment must be an object"_s);
             return {};
@@ -423,7 +423,7 @@ JSC_DEFINE_HOST_FUNCTION(functionTransact,
         msgs[i].addr = addr;
 
         if (!writeVal.isUndefined() && !writeVal.isNull()) {
-            JSC::JSUint8Array* u8 = JSC::jsDynamicCast<JSC::JSUint8Array*>(writeVal);
+            JSC::JSUint8Array* u8 = dynamicDowncast<JSC::JSUint8Array>(writeVal);
             if (!u8) {
                 throwTypeError(globalObject, scope, "transact: write must be a Uint8Array"_s);
                 return {};
@@ -660,7 +660,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadBlock,
     uint8_t blockLen = data.block[0];
     if (blockLen > I2C_SMBUS_BLOCK_MAX) blockLen = I2C_SMBUS_BLOCK_MAX;
 
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* subclassStructure = zigGlobal->JSBufferSubclassStructure();
     auto* u8 = JSC::JSUint8Array::createUninitialized(globalObject, subclassStructure, blockLen);
     RETURN_IF_EXCEPTION(scope, {});
@@ -688,7 +688,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteBlock,
     }
     uint32_t cmd = callFrame->argument(2).toUInt32(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
-    JSC::JSUint8Array* u8 = JSC::jsDynamicCast<JSC::JSUint8Array*>(callFrame->argument(3));
+    JSC::JSUint8Array* u8 = dynamicDowncast<JSC::JSUint8Array>(callFrame->argument(3));
     if (!u8) {
         throwTypeError(globalObject, scope, "smbusWriteBlock: bytes must be a Uint8Array"_s);
         return {};

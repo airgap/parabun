@@ -47,6 +47,35 @@ export const ZIG_COMMIT = "04e7f6ac1e009525bc00934f20199c68f04e0a24";
  *   - LTO: zig_llvm.cpp gates SplitModule on !lto, so cg>1 would emit one
  *     .o instead of N and the no_merge_shards path would expect missing files.
  *
+ * Local builds also memory-cap (parabun#57): each thread peaks ~1.5 GB RSS
+ * during JSC-heavy TUs, so oversubscribing gets the whole `zig` process
+ * SIGKILL'd by the kernel before any meaningful diagnostic. Cap = min(cores,
+ * max(1, floor((totalmem - 4 GB reserve) / 1.5 GB))). The 4 GB reserve covers
+ * the rest of the zig process, ninja, the OS, and the Bun/Node driver.
+ *
+ * `PARABUN_LLVM_CODEGEN_THREADS` (positive integer) is a manual override for
+ * agents sharing RAM with other jobs that need a tighter cap.
+ */
+function codegenThreads(cfg: Config): number {
+  if (cfg.windows) return 1;
+  if (cfg.lto) return 1;
+  if (cfg.ci) {
+    return cfg.asan ? CI_ASAN_CODEGEN_THREADS : 1;
+  }
+  // Local: env override, then memory-aware cap.
+  const override = Number(process.env.PARABUN_LLVM_CODEGEN_THREADS);
+  if (Number.isInteger(override) && override > 0) return override;
+  const cores = availableParallelism();
+  const GB = 1024 ** 3;
+  const reserveBytes = 4 * GB;
+  const perThreadBytes = 1.5 * GB;
+  const memoryBudget = Math.max(1, Math.floor(Math.max(0, totalmem() - reserveBytes) / perThreadBytes));
+  return Math.min(cores, memoryBudget);
+}
+
+/** Fixed shard count for CI ASAN builds. Matches getZigAgent's instance size. */
+export const CI_ASAN_CODEGEN_THREADS = 8;
+
 /**
  * Output object file names for the zig step, matching what build.zig emits.
  * Shared between emitZig (zig-only/full) and emitLinkOnly so both sides of
@@ -57,38 +86,6 @@ export function zigObjectPaths(cfg: Config): string[] {
   return cg > 1
     ? Array.from({ length: cg }, (_, i) => resolve(cfg.buildDir, `bun-zig.${i}.o`))
     : [resolve(cfg.buildDir, "bun-zig.o")];
-}
-
-/**
- * Pick the LLVM codegen thread count for `zig build obj`. Each thread compiles
- * an independent shard of bun-zig.o and can peak ~1.5 GB RSS during JSC-heavy
- * translation units, so oversubscribing memory here gets the whole `zig`
- * process SIGKILL'd by the kernel before it prints a meaningful error
- * (parabun#57 macOS: `terminated unexpectedly` with no diagnostic).
- *
- * Cap = min(cores, max(1, floor((totalmem - 4 GB reserve) / 1.5 GB))).
- * The 4 GB reserve covers the rest of the `zig` process, ninja, the OS, and
- * the Bun/Node driver itself. The 1.5 GB per-thread figure matches what we
- * observed on Linux (`MaxRSS: 8 GB` for the whole zig step).
- *
- * `PARABUN_LLVM_CODEGEN_THREADS` (positive integer) is a manual override for
- * agents sharing RAM with other jobs that need a tighter cap.
- *
- * Stable compiler path stays at 0 (single-threaded); the parallel compiler is
- * the only one that supports >0 shards — see usingParallelCompiler().
- */
-function codegenThreads(cfg: Config): number {
-  if (!usingParallelCompiler(cfg)) return 0;
-
-  const override = Number(process.env.PARABUN_LLVM_CODEGEN_THREADS);
-  if (Number.isInteger(override) && override > 0) return override;
-
-  const cores = availableParallelism();
-  const GB = 1024 ** 3;
-  const reserveBytes = 4 * GB;
-  const perThreadBytes = 1.5 * GB;
-  const memoryBudget = Math.max(1, Math.floor(Math.max(0, totalmem() - reserveBytes) / perThreadBytes));
-  return Math.min(cores, memoryBudget);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

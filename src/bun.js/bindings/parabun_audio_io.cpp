@@ -76,7 +76,7 @@ struct PCM {
 PCM* asPCM(JSValue v)
 {
     if (!v.isBigInt() || !v.isCell()) return nullptr;
-    auto* big = jsCast<JSBigInt*>(v.asCell());
+    auto* big = dynamicDowncast<JSBigInt>(v.asCell());
     return reinterpret_cast<PCM*>(JSBigInt::toBigInt64(big));
 }
 
@@ -388,7 +388,7 @@ JSC_DEFINE_HOST_FUNCTION(functionCaptureRead,
     }
 
     size_t outSamples = static_cast<size_t>(got) * p->channels;
-    auto* zigGlobal = jsCast<Zig::GlobalObject*>(globalObject);
+    auto* zigGlobal = dynamicDowncast<Zig::GlobalObject>(globalObject);
     auto* arr = JSC::JSFloat32Array::createUninitialized(globalObject,
         zigGlobal->typedArrayStructure(JSC::TypeFloat32, false), outSamples);
     RETURN_IF_EXCEPTION(scope, {});
@@ -428,7 +428,7 @@ JSC_DEFINE_HOST_FUNCTION(functionPlaybackWrite,
         throwTypeError(globalObject, scope, "playbackWrite: samples must be Float32Array"_s);
         return {};
     }
-    auto* view = jsCast<JSC::JSArrayBufferView*>(samplesArg.asCell());
+    auto* view = dynamicDowncast<JSC::JSArrayBufferView>(samplesArg.asCell());
     auto* src = static_cast<const float*>(view->vector());
     size_t totalSamples = view->length();
     if (totalSamples == 0) return JSValue::encode(jsNumber(0));
