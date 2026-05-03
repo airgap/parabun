@@ -215,7 +215,8 @@ function readWav(bytes: Uint8Array): WavData {
     }
   } else {
     throw new Error(
-      `parabun:audio readWav: unsupported PCM ${audioFormat}/${bitsPerSample}-bit ` + `(supported: PCM s16, IEEE float32)`,
+      `parabun:audio readWav: unsupported PCM ${audioFormat}/${bitsPerSample}-bit ` +
+        `(supported: PCM s16, IEEE float32)`,
     );
   }
 
@@ -1814,7 +1815,7 @@ type CaptureFrame = {
   overrun: boolean;
 };
 
-interface CaptureStream extends AsyncDisposable {
+interface CaptureStream extends AsyncDisposable, Disposable {
   readonly sampleRate: number;
   readonly channels: number;
   readonly device: string;
@@ -1831,14 +1832,27 @@ interface CaptureStream extends AsyncDisposable {
    * for the first sample to confirm the device opened.
    */
   readonly active: Signal<boolean>;
+  /**
+   * True from construction until close()/dispose(). Use this for
+   * lifetime-aware `effect` chains; pair with `use(fn)` for effects
+   * that auto-tear-down when the stream closes.
+   */
+  readonly alive: Signal<boolean>;
   /** Stream interleaved Float32 frames as an async iterator. */
   frames(opts?: { frameMs?: number }): AsyncIterableIterator<CaptureFrame>;
+  /**
+   * Run an effect bound to this stream's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the
+   * stream closes — no defensive `if (active.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void;
   /** Stop capturing and release the device. Idempotent. */
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
+  [Symbol.dispose](): void;
 }
 
-interface PlaybackStream extends AsyncDisposable {
+interface PlaybackStream extends AsyncDisposable, Disposable {
   readonly sampleRate: number;
   readonly channels: number;
   readonly device: string;
@@ -1855,6 +1869,11 @@ interface PlaybackStream extends AsyncDisposable {
    * actual queue drains continuously regardless of when we sampled.
    */
   readonly queuedMs: Signal<number>;
+  /**
+   * True from construction until close()/dispose(). Pair with `use(fn)`
+   * for effects that should auto-tear-down when playback releases.
+   */
+  readonly alive: Signal<boolean>;
   /** Write interleaved Float32 samples; resolves when bytes have drained into ALSA. */
   write(samples: Float32Array): Promise<void>;
   /** Block until everything written has been played out. */
@@ -1867,9 +1886,16 @@ interface PlaybackStream extends AsyncDisposable {
    * out) and `close()` (releases the device), `stop()` is the cancel verb.
    */
   stop(): Promise<void>;
+  /**
+   * Run an effect bound to this stream's lifetime. Auto-disposed
+   * when the stream closes — no defensive `if (alive.get())` guards
+   * needed in observer chains.
+   */
+  use(fn: () => void | (() => void)): () => void;
   /** Stop playback and release the device. Idempotent. */
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
+  [Symbol.dispose](): void;
 }
 
 // FinalizationRegistry backstop: if a stream drops without close(), the
@@ -1954,6 +1980,11 @@ class CaptureStreamImpl implements CaptureStream {
   #periodFrames: number;
   #peakLevel: WritableSignal<number>;
   #active: WritableSignal<boolean>;
+  #alive: WritableSignal<boolean>;
+  // Effects bound to this stream's lifetime via use(). Each disposer is
+  // invoked on close() so users don't need defensive `if (active.get())`
+  // guards in their reactive chains.
+  #boundEffects: Array<() => void> = [];
 
   // Read-only signal accessors. The internal #-prefixed fields are
   // WritableSignal to allow `.set()` from frames()/close(); the public
@@ -1967,6 +1998,10 @@ class CaptureStreamImpl implements CaptureStream {
     return this.#active;
   }
 
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
   constructor(handle: bigint, device: string, sampleRate: number, channels: number, periodFrames: number) {
     this.#handle = handle;
     this.device = device;
@@ -1975,7 +2010,14 @@ class CaptureStreamImpl implements CaptureStream {
     this.#periodFrames = periodFrames;
     this.#peakLevel = signals.signal(0);
     this.#active = signals.signal(false);
+    this.#alive = signals.signal(true);
     pcmRegistry.register(this, handle, this);
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signals.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   async *frames(opts?: { frameMs?: number }): AsyncIterableIterator<CaptureFrame> {
@@ -2014,10 +2056,28 @@ class CaptureStreamImpl implements CaptureStream {
       io.closePcm(h);
       this.#active.set(false);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      // Tear down every effect bound via use(). Errors in user
+      // cleanup don't block the rest of the close path.
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
   }
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
+  }
+
+  [Symbol.dispose](): void {
+    // Sync dispose path: same teardown without awaiting close()'s
+    // resolved promise (the kernel-side closePcm is sync, so the
+    // Promise the async close() returns is just for shape).
+    void this.close();
   }
 }
 
@@ -2027,11 +2087,17 @@ class PlaybackStreamImpl implements PlaybackStream {
   channels: number;
   device: string;
   #queuedMs: WritableSignal<number>;
+  #alive: WritableSignal<boolean>;
   #lastEmitMs: number = 0;
   #pollTimer: ReturnType<typeof setInterval> | null = null;
+  #boundEffects: Array<() => void> = [];
 
   get queuedMs(): Signal<number> {
     return this.#queuedMs;
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
   }
 
   constructor(handle: bigint, device: string, sampleRate: number, channels: number) {
@@ -2040,12 +2106,19 @@ class PlaybackStreamImpl implements PlaybackStream {
     this.sampleRate = sampleRate;
     this.channels = channels;
     this.#queuedMs = signals.signal(0);
+    this.#alive = signals.signal(true);
     // Low-frequency poll so the signal naturally trends to zero as the
     // buffer drains between writes — without a 16 kHz mic-level update
     // rate. 100 ms matches the convention used by mic.peakLevel /
     // listen().noiseFloor (PLAN-module-signals "Open decisions").
     this.#pollTimer = setInterval(() => this.#sampleQueued(), 100);
     pcmRegistry.register(this, handle, this);
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signals.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   #sampleQueued(): void {
@@ -2098,10 +2171,23 @@ class PlaybackStreamImpl implements PlaybackStream {
       pcmRegistry.unregister(this);
       io.closePcm(h);
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
   }
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
+  }
+
+  [Symbol.dispose](): void {
+    void this.close();
   }
 }
 

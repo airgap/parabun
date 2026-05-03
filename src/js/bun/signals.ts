@@ -425,6 +425,283 @@ function when<T>(source: EdgeSource<T>, fn: () => void): () => void {
   });
 }
 
+// ─── Resource-tied signals ─────────────────────────────────────────────────
+//
+// `resource(setup)` builds a handle whose lifecycle is explicit. Hardware
+// modules (mic, camera, sensors) emit signals tied to a real underlying
+// resource — when it closes, those signals should become inert and effects
+// observing them should unwind cleanly. This is the primitive that makes
+// that lifecycle first-class.
+//
+//   const mic = resource(({ signal: sig, onDispose }) => {
+//     const peak = sig(0);
+//     const handle = openMic();                     // pretend hardware
+//     handle.onPeak(v => peak.set(v));
+//     onDispose(() => handle.close());
+//     return { peak };                              // becomes mic.peak
+//   });
+//
+//   mic.peak.get();                                  // current peak level
+//   mic.alive.get();                                 // boolean, true until dispose
+//   mic.use(() => console.log(mic.peak.get()));      // effect bound to lifetime
+//   mic.dispose();                                   // close + cleanups + alive=false
+//
+// Setup runs synchronously and may register cleanups via ctx.onDispose.
+// Cleanups run in reverse-registration order on dispose. If setup throws,
+// any cleanups registered before the throw still run.
+
+interface ResourceContext {
+  signal: typeof signal;
+  derived: typeof derived;
+  onDispose: (fn: () => void) => void;
+  alive: ReadableSignal<boolean>;
+}
+
+interface ResourceHandle {
+  alive: ReadableSignal<boolean>;
+  dispose: () => void;
+  use: (fn: () => void | (() => void)) => () => void;
+  [Symbol.dispose]: () => void;
+  [Symbol.asyncDispose]: () => Promise<void>;
+}
+
+function resource<E extends Record<string, unknown>>(
+  setup: (ctx: ResourceContext) => E | undefined,
+): E & ResourceHandle {
+  if (!$isCallable(setup)) {
+    throw $ERR_INVALID_ARG_TYPE("setup", "function", setup);
+  }
+  const alive = new StateSignal<boolean>(true);
+  const cleanups: Array<() => void> = [];
+  const ctx: ResourceContext = {
+    signal,
+    derived,
+    onDispose(fn) {
+      if ($isCallable(fn)) cleanups.push(fn);
+    },
+    alive,
+  };
+
+  let exports: E | undefined;
+  try {
+    exports = setup(ctx);
+  } catch (err) {
+    while (cleanups.length > 0) {
+      const c = cleanups.pop()!;
+      try {
+        c();
+      } catch {}
+    }
+    throw err;
+  }
+
+  let disposed = false;
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    alive.set(false);
+    while (cleanups.length > 0) {
+      const c = cleanups.pop()!;
+      try {
+        c();
+      } catch {}
+    }
+  }
+
+  const handle = (exports ?? ({} as E)) as E & ResourceHandle;
+  handle.alive = alive;
+  handle.dispose = dispose;
+  handle[Symbol.dispose] = dispose;
+  handle[Symbol.asyncDispose] = () => {
+    dispose();
+    return Promise.resolve();
+  };
+  handle.use = function use(fn) {
+    const stop = effect(fn);
+    cleanups.push(stop);
+    return stop;
+  };
+  return handle;
+}
+
+// ─── Async-source adapters (resource-shaped) ───────────────────────────
+//
+// `fromAsync` / `fromInterval` / `pump` predate the resource() primitive
+// and stay as-is for backward compat. The new entries below are
+// resource-handles, so they pair cleanly with `using` declarations and
+// nest inside other resources via `ctx.onDispose(child.dispose)`.
+
+function fromAsyncIter<T>(
+  source: AsyncIterable<T> | Iterable<T> | AsyncIterator<T>,
+  init?: T,
+): { value: ReadableSignal<T | undefined> } & ResourceHandle {
+  return resource(({ signal: sig, onDispose }) => {
+    const value = sig<T | undefined>(init);
+    const it: AsyncIterator<T> =
+      (source as any)[Symbol.asyncIterator] != null
+        ? (source as AsyncIterable<T>)[Symbol.asyncIterator]()
+        : (source as any)[Symbol.iterator] != null
+          ? wrapSyncIter((source as Iterable<T>)[Symbol.iterator]())
+          : (source as AsyncIterator<T>);
+    let stopped = false;
+    onDispose(() => {
+      stopped = true;
+      try {
+        it.return?.(undefined as any);
+      } catch {}
+    });
+    (async () => {
+      try {
+        while (!stopped) {
+          const r = await it.next();
+          if (r.done || stopped) break;
+          value.set(r.value);
+        }
+      } catch {}
+    })();
+    return { value };
+  });
+}
+
+function wrapSyncIter<T>(it: Iterator<T>): AsyncIterator<T> {
+  return {
+    next: () => Promise.resolve(it.next()),
+    return: (v?: any) => Promise.resolve(it.return ? it.return(v) : { done: true, value: v }),
+  };
+}
+
+function fromStream<T>(stream: ReadableStream<T>, init?: T): { value: ReadableSignal<T | undefined> } & ResourceHandle {
+  if (stream == null || typeof (stream as any).getReader !== "function") {
+    throw new TypeError("para:signals.fromStream: first argument must be a ReadableStream");
+  }
+  return resource(({ signal: sig, onDispose }) => {
+    const value = sig<T | undefined>(init);
+    const reader = stream.getReader();
+    let stopped = false;
+    onDispose(() => {
+      stopped = true;
+      try {
+        reader.cancel().catch(() => {});
+      } catch {}
+    });
+    (async () => {
+      try {
+        while (!stopped) {
+          const r = await reader.read();
+          if (r.done || stopped) break;
+          value.set(r.value);
+        }
+      } catch {}
+    })();
+    return { value };
+  });
+}
+
+function fromEventTarget<T = Event>(
+  target: EventTarget,
+  eventName: string,
+  opts: { initial?: T; map?: (e: Event) => T } = {},
+): { value: ReadableSignal<T | undefined> } & ResourceHandle {
+  if (target == null || typeof (target as any).addEventListener !== "function") {
+    throw new TypeError("para:signals.fromEventTarget: first argument must be an EventTarget");
+  }
+  const map = opts.map;
+  return resource(({ signal: sig, onDispose }) => {
+    const value = sig<T | undefined>(opts.initial);
+    const handler = (e: Event) => value.set(map ? map(e) : (e as unknown as T));
+    target.addEventListener(eventName, handler);
+    onDispose(() => {
+      try {
+        target.removeEventListener(eventName, handler);
+      } catch {}
+    });
+    return { value };
+  });
+}
+
+// ─── Rate-limit operators ──────────────────────────────────────────────────
+//
+// Hardware emits faster than UI / consumers want. `throttled` keeps the
+// leading edge with a trailing flush; `debounced` only emits after silence.
+// Both return resources so the underlying upstream effect is cleanly
+// disposable.
+
+function throttled<T>(source: ReadableSignal<T>, ms: number): { value: ReadableSignal<T> } & ResourceHandle {
+  if (!(source instanceof ReadableSignal)) {
+    throw new TypeError("para:signals.throttled: first argument must be a signal");
+  }
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+    throw new RangeError("para:signals.throttled: ms must be a non-negative finite number");
+  }
+  return resource(({ signal: sig, onDispose }) => {
+    const out = sig<T>(source.peek());
+    let lastEmit = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let pending: T | undefined;
+    let havePending = false;
+    const stop = effect(() => {
+      const v = source.get();
+      const now = Date.now();
+      const elapsed = now - lastEmit;
+      if (elapsed >= ms) {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+          havePending = false;
+        }
+        if (!Object.is(v, out.peek())) {
+          lastEmit = now;
+          out.set(v);
+        }
+      } else {
+        pending = v;
+        havePending = true;
+        if (!timer) {
+          timer = setTimeout(() => {
+            timer = null;
+            if (havePending) {
+              havePending = false;
+              lastEmit = Date.now();
+              if (!Object.is(pending, out.peek())) out.set(pending as T);
+            }
+          }, ms - elapsed);
+        }
+      }
+    });
+    onDispose(() => {
+      stop();
+      if (timer) clearTimeout(timer);
+    });
+    return { value: out };
+  });
+}
+
+function debounced<T>(source: ReadableSignal<T>, ms: number): { value: ReadableSignal<T> } & ResourceHandle {
+  if (!(source instanceof ReadableSignal)) {
+    throw new TypeError("para:signals.debounced: first argument must be a signal");
+  }
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
+    throw new RangeError("para:signals.debounced: ms must be a non-negative finite number");
+  }
+  return resource(({ signal: sig, onDispose }) => {
+    const out = sig<T>(source.peek());
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const stop = effect(() => {
+      const v = source.get();
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        if (!Object.is(v, out.peek())) out.set(v);
+      }, ms);
+    });
+    onDispose(() => {
+      stop();
+      if (timer) clearTimeout(timer);
+    });
+    return { value: out };
+  });
+}
+
 export default {
   signal,
   derived,
@@ -435,5 +712,11 @@ export default {
   fromInterval,
   pump,
   when,
+  resource,
+  fromAsyncIter,
+  fromStream,
+  fromEventTarget,
+  throttled,
+  debounced,
   Signal: ReadableSignal,
 };
