@@ -172,9 +172,17 @@ async function* frames(stream: AsyncIterable<RawFrame>, opts: FramesOptions = {}
 // as `speech.listen()` — the generator object is decorated via
 // Object.assign with the read-only signal accessors, the for-await-of
 // usage is unchanged.
-interface MotionStream extends AsyncIterableIterator<MotionFrame> {
+interface MotionStream extends AsyncIterableIterator<MotionFrame>, AsyncDisposable, Disposable {
   /** True while smoothed motion score is above the configured sensitivity. */
   readonly detected: Signal<boolean>;
+  /**
+   * True from detectMotion() return until `dispose()` /
+   * `[Symbol.dispose]` / the source stream completing. Distinct from
+   * `detected` (which is "motion right now"); pair with `use(fn)`
+   * for effects that should auto-tear-down when motion tracking
+   * stops.
+   */
+  readonly alive: Signal<boolean>;
   /** Most recent smoothed motion score (fraction of changed luma pixels, [0, 1]). */
   readonly score: Signal<number>;
   /**
@@ -187,13 +195,26 @@ interface MotionStream extends AsyncIterableIterator<MotionFrame> {
    * `MotionFrame` value, iterate explicitly instead.
    */
   run(): () => void;
+  /**
+   * Run an effect bound to this motion stream's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the
+   * stream is disposed or completes.
+   */
+  use(fn: () => void | (() => void)): () => void;
+  /** Stop the iterator + signals. Idempotent. */
+  dispose(): void;
+  [Symbol.dispose](): void;
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 function detectMotion(stream: AsyncIterable<RgbaFrame>, opts: MotionOptions = {}): MotionStream {
   const sigDetected = signalsMod.signal(false) as WritableSignal<boolean>;
+  const sigAlive = signalsMod.signal(true) as WritableSignal<boolean>;
   const sigScore = signalsMod.signal(0) as WritableSignal<number>;
   const gen = detectMotionGenerator(stream, opts, sigDetected, sigScore);
+  const boundEffects: Array<() => void> = [];
   let runDisposer: (() => void) | null = null;
+  let disposed = false;
   const run = () => {
     if (runDisposer) return runDisposer;
     let stopped = false;
@@ -218,10 +239,38 @@ function detectMotion(stream: AsyncIterable<RgbaFrame>, opts: MotionOptions = {}
     };
     return runDisposer;
   };
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    try {
+      gen.return?.(undefined);
+    } catch {}
+    if (sigAlive.peek()) {
+      sigAlive.set(false);
+      while (boundEffects.length > 0) {
+        const stop = boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  };
   return Object.assign(gen, {
     detected: sigDetected as Signal<boolean>,
+    alive: sigAlive as Signal<boolean>,
     score: sigScore as Signal<number>,
     run,
+    use(fn: () => void | (() => void)): () => void {
+      const stop = signalsMod.effect(fn);
+      boundEffects.push(stop);
+      return stop;
+    },
+    dispose,
+    [Symbol.dispose]: dispose,
+    [Symbol.asyncDispose]: () => {
+      dispose();
+      return Promise.resolve();
+    },
   });
 }
 

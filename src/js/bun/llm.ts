@@ -216,6 +216,11 @@ class LLM {
   #busyCount = 0;
   #busy: WritableSignal<boolean>;
   #device: WritableSignal<"cuda" | "metal" | "cpu">;
+  // Lifetime signal — true from construction until dispose().
+  // Distinct from `busy` (per-generation) and from the model's
+  // disposed state (which we keep as a private boolean).
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
 
   get busy(): Signal<boolean> {
     return this.#busy;
@@ -223,6 +228,21 @@ class LLM {
 
   get device(): Signal<"cuda" | "metal" | "cpu"> {
     return this.#device;
+  }
+
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  /**
+   * Run an effect bound to this model's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the
+   * model itself is disposed.
+   */
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signals.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   /**
@@ -251,6 +271,7 @@ class LLM {
     this.chatTemplate = chatTemplate;
     this.#busy = signals.signal(false);
     this.#device = signals.signal((gpu.describe().active as "cuda" | "metal" | "cpu") ?? "cpu");
+    this.#alive = signals.signal(true);
     // Default stop set: the model's EOS, plus any extra terminators implied
     // by the chat template that aren't the EOS itself. Without this, Llama-3
     // generations that hit <|end_of_text|> (128001, distinct from <|eot_id|>)
@@ -637,7 +658,9 @@ class LLM {
         throw new Error("parabun:llm: prefix was built for a different model instance");
       }
       if (p.tokens.length > promptIds.length) {
-        throw new Error(`parabun:llm: prompt of ${promptIds.length} tokens is shorter than prefix of ${p.tokens.length}`);
+        throw new Error(
+          `parabun:llm: prompt of ${promptIds.length} tokens is shorter than prefix of ${p.tokens.length}`,
+        );
       }
       for (let i = 0; i < p.tokens.length; i++) {
         if (promptIds[i] !== p.tokens[i]) {
@@ -870,6 +893,13 @@ class LLM {
     if (this.#disposed) return;
     this.#disposed = true;
     this.model.dispose();
+    this.#alive.set(false);
+    while (this.#boundEffects.length > 0) {
+      const stop = this.#boundEffects.pop()!;
+      try {
+        stop();
+      } catch {}
+    }
   }
 
   [Symbol.dispose](): void {

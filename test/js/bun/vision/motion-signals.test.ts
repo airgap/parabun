@@ -184,4 +184,32 @@ describe("parabun:vision motion signals (LYK-742/762)", () => {
     expect(m.detected.get()).toBe(false);
     expect(m.score.get()).toBe(0);
   });
+
+  test("alive starts true; flips false on dispose; use(fn) auto-tears-down", async () => {
+    const vision = (await import("parabun:vision")).default;
+    const m = vision.detectMotion(synthFrames([100, 100, 100, 100, 100]));
+    expect(m.alive.get()).toBe(true);
+    let runs = 0;
+    m.use(() => {
+      runs++;
+      m.score.get();
+    });
+    expect(runs).toBe(1);
+    m.dispose();
+    expect(m.alive.get()).toBe(false);
+    const before = runs;
+    // After dispose, the bound effect must not re-fire even if signals change.
+    // gen.return() will eventually flush the generator; effect is already
+    // disposed so no further runs.
+    await new Promise(r => setTimeout(r, 50));
+    expect(runs).toBe(before);
+  });
+
+  test("[Symbol.dispose] is a function; calling it disposes", async () => {
+    const vision = (await import("parabun:vision")).default;
+    const m = vision.detectMotion(synthFrames([100, 100]));
+    expect(typeof m[Symbol.dispose]).toBe("function");
+    m[Symbol.dispose]();
+    expect(m.alive.get()).toBe(false);
+  });
 });

@@ -97,7 +97,7 @@ type CameraFormat = {
   pixelFormat: PixelFormat;
 };
 
-interface Camera extends AsyncDisposable {
+interface Camera extends AsyncDisposable, Disposable {
   readonly width: number;
   readonly height: number;
   readonly format: PixelFormat;
@@ -107,6 +107,12 @@ interface Camera extends AsyncDisposable {
    * wait for the first frame to confirm the device opened.
    */
   readonly active: Signal<boolean>;
+  /**
+   * True from construction until close()/dispose(). Distinct from
+   * `active` (which is "frames are flowing"); use `alive` for
+   * lifetime-aware effects via `use(fn)`.
+   */
+  readonly alive: Signal<boolean>;
   /**
    * Rolling-window frames-per-second estimate. Updates on every emitted
    * frame; the value is the inverse of the average inter-frame interval
@@ -127,9 +133,16 @@ interface Camera extends AsyncDisposable {
   frames(): AsyncIterableIterator<Frame>;
   /** Capture exactly one frame and return it. */
   grab(): Promise<Frame>;
+  /**
+   * Run an effect bound to this camera's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the
+   * camera closes — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void;
   /** Stop streaming and release the device. Idempotent. */
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
+  [Symbol.dispose](): void;
 }
 
 // FinalizationRegistry to back-stop forgotten close() calls. If a Camera
@@ -213,15 +226,20 @@ class CameraImpl implements Camera {
 
   // Reactive signals (LYK-761).
   #active: WritableSignal<boolean>;
+  #alive: WritableSignal<boolean>;
   #fps: WritableSignal<number>;
   #cameraFormat: WritableSignal<CameraFormat>;
   // Ring of recent frame timestamps in ms — feeds the fps estimator.
   #frameTs: number[] = [];
   // Last wall-clock at which #fps was emitted; we throttle to ~10 Hz.
   #lastFpsEmitMs: number = 0;
+  #boundEffects: Array<() => void> = [];
 
   get active(): Signal<boolean> {
     return this.#active;
+  }
+  get alive(): Signal<boolean> {
+    return this.#alive;
   }
   get fps(): Signal<number> {
     return this.#fps;
@@ -236,9 +254,16 @@ class CameraImpl implements Camera {
     this.height = height;
     this.format = format;
     this.#active = signalsMod.signal(false);
+    this.#alive = signalsMod.signal(true);
     this.#fps = signalsMod.signal(0);
     this.#cameraFormat = signalsMod.signal<CameraFormat>({ width, height, pixelFormat: format });
     cameraRegistry.register(this, handle, this);
+  }
+
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   /** Bookkeeping after a frame arrives — updates active + fps signals. */
@@ -292,10 +317,23 @@ class CameraImpl implements Camera {
     this.#active.set(false);
     this.#fps.set(0);
     this.#frameTs.length = 0;
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
   }
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
+  }
+
+  [Symbol.dispose](): void {
+    void this.close();
   }
 }
 

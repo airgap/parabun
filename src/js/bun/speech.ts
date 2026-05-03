@@ -138,9 +138,16 @@ type Signal<T> = {
 };
 type WritableSignal<T> = Signal<T> & { set(v: T): void };
 
-interface ListenStream extends AsyncIterableIterator<Utterance> {
+interface ListenStream extends AsyncIterableIterator<Utterance>, AsyncDisposable, Disposable {
   /** True while a speech burst is currently being collected. */
   readonly active: Signal<boolean>;
+  /**
+   * True from listen() return until `dispose()` / `[Symbol.dispose]` /
+   * the source stream completing. Distinct from `active` (which is
+   * "speech in progress"); pair with `use(fn)` for effects that
+   * should auto-tear-down when listening stops.
+   */
+  readonly alive: Signal<boolean>;
   /**
    * Adaptive noise-floor estimate (RMS, samples in [-1, 1]). Updates per
    * analysis frame as the sliding window of recent energies fills.
@@ -159,6 +166,16 @@ interface ListenStream extends AsyncIterableIterator<Utterance> {
    * reactive view; if you also want each `Utterance`, iterate explicitly.
    */
   run(): () => void;
+  /**
+   * Run an effect bound to this listen stream's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the
+   * stream is disposed or completes.
+   */
+  use(fn: () => void | (() => void)): () => void;
+  /** Stop listening, release the iterator. Idempotent. */
+  dispose(): void;
+  [Symbol.dispose](): void;
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 /**
@@ -200,14 +217,45 @@ function listen(stream: AsyncIterable<AudioChunk>, opts: ListenOptions): ListenS
     throw new RangeError("bun:speech.listen: opts.sampleRate must be > 0");
   }
   const sigActive = signalsMod.signal(false) as WritableSignal<boolean>;
+  const sigAlive = signalsMod.signal(true) as WritableSignal<boolean>;
   const sigNoiseFloor = signalsMod.signal(0) as WritableSignal<number>;
   const sigLastUtterance = signalsMod.signal<Utterance | null>(null) as WritableSignal<Utterance | null>;
   const gen = listenGenerator(stream, opts, sigActive, sigNoiseFloor, sigLastUtterance);
+  const boundEffects: Array<() => void> = [];
+  let disposed = false;
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    try {
+      gen.return?.(undefined as any);
+    } catch {}
+    if (sigAlive.peek()) {
+      sigAlive.set(false);
+      while (boundEffects.length > 0) {
+        const stop = boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
+  };
   return Object.assign(gen, {
     active: sigActive as Signal<boolean>,
+    alive: sigAlive as Signal<boolean>,
     noiseFloor: sigNoiseFloor as Signal<number>,
     lastUtterance: sigLastUtterance as Signal<Utterance | null>,
     run: attachRun(gen),
+    use(fn: () => void | (() => void)): () => void {
+      const stop = signalsMod.effect(fn);
+      boundEffects.push(stop);
+      return stop;
+    },
+    dispose,
+    [Symbol.dispose]: dispose,
+    [Symbol.asyncDispose]: () => {
+      dispose();
+      return Promise.resolve();
+    },
   });
 }
 

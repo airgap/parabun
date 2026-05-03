@@ -77,4 +77,30 @@ describe("parabun:camera signals (LYK-761)", () => {
     await new Promise(r => setTimeout(r, 50));
     expect(activeNotifies).toBe(before);
   });
+
+  test.skipIf(!haveVideo)(
+    "alive starts true; flips false on close(); use(fn) auto-tears-down; [Symbol.dispose] is callable",
+    async () => {
+      const camera = (await import("parabun:camera")).default;
+      let cam: any;
+      try {
+        cam = await camera.open("/dev/video0", { format: "yuyv", width: 640, height: 480 });
+      } catch {
+        return;
+      }
+      expect(cam.alive.get()).toBe(true);
+      let runs = 0;
+      cam.use(() => {
+        runs++;
+        cam.fps.get();
+      });
+      expect(runs).toBe(1);
+      expect(typeof cam[Symbol.dispose]).toBe("function");
+      await cam.close();
+      expect(cam.alive.get()).toBe(false);
+      const before = runs;
+      await new Promise(r => setTimeout(r, 50));
+      expect(runs).toBe(before);
+    },
+  );
 });

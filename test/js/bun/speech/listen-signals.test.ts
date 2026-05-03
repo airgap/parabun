@@ -60,4 +60,37 @@ describe("parabun:speech listen() signals", () => {
     expect(it.lastUtterance.get()).toBe(utts[0]);
     expect(it.noiseFloor.get()).toBeGreaterThan(0);
   });
+
+  test("alive starts true; flips false on dispose; use(fn) auto-tears-down", async () => {
+    const speech = (await import("parabun:speech")).default;
+    // Long-tail synthetic stream so dispose can interrupt mid-flight.
+    async function* longSilence() {
+      for (let i = 0; i < 1000; i++) {
+        yield { samples: silentFrame(FRAME), timestampMs: i * 30 };
+        await new Promise(r => setTimeout(r, 1));
+      }
+    }
+    const it = speech.listen(longSilence(), { sampleRate: SR, frameSize: FRAME });
+    expect(it.alive.get()).toBe(true);
+    let runs = 0;
+    it.use(() => {
+      runs++;
+      it.noiseFloor.get();
+    });
+    expect(runs).toBe(1);
+    it.dispose();
+    expect(it.alive.get()).toBe(false);
+    const before = runs;
+    await new Promise(r => setTimeout(r, 30));
+    expect(runs).toBe(before);
+  });
+
+  test("[Symbol.dispose] is a function; calling it disposes", async () => {
+    const speech = (await import("parabun:speech")).default;
+    async function* empty() {}
+    const it = speech.listen(empty(), { sampleRate: SR, frameSize: FRAME });
+    expect(typeof it[Symbol.dispose]).toBe("function");
+    it[Symbol.dispose]();
+    expect(it.alive.get()).toBe(false);
+  });
 });

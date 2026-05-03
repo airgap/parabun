@@ -57,4 +57,31 @@ describe("parabun:llm LLM signals", () => {
     },
     120000,
   );
+
+  test.skipIf(!have)(
+    "alive starts true; flips false on dispose(); use(fn) auto-tears-down; [Symbol.dispose] is callable",
+    async () => {
+      const llm = (await import("parabun:llm")).default;
+      const m = await llm.LLM.load(fixture!);
+
+      expect(m.alive.get()).toBe(true);
+      let runs = 0;
+      m.use(() => {
+        runs++;
+        m.busy.get();
+      });
+      expect(runs).toBe(1);
+      expect(typeof m[Symbol.dispose]).toBe("function");
+
+      m.dispose();
+      expect(m.alive.get()).toBe(false);
+      const before = runs;
+      // Bound effect was disposed — busy.set() (we can't call from
+      // outside) wouldn't re-fire it anyway, but the contract is that
+      // the effect is no longer alive.
+      await new Promise(r => setTimeout(r, 30));
+      expect(runs).toBe(before);
+    },
+    60000,
+  );
 });
