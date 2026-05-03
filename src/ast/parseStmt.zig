@@ -1544,7 +1544,19 @@ pub fn ParseStmt(
         // (`signal { a, b } = ...`) reports an error.
         //
         // On entry, the lexer is on the binding name (t_identifier).
-        fn parseSignalStmt(p: *P, signal_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
+        //
+        // `force_derive` distinguishes the two entry points:
+        //   - `signal NAME = RHS` → force_derive = false. Wraps the RHS in
+        //     `signal(RHS)` by default, or `derived(() => RHS)` when the
+        //     RHS reads other in-scope signals (auto-derive). The
+        //     `@parabun-strict-signals` file pragma disables auto-derive.
+        //   - `derived NAME = RHS` → force_derive = true. ALWAYS wraps the
+        //     RHS in `derived(() => RHS)`. The strict-signals pragma is
+        //     ignored — the user is being explicit. RHS that doesn't read
+        //     any signals just produces a derived that never re-fires;
+        //     this is allowed (mirrors how `signal NAME = LITERAL` is also
+        //     allowed even though it could be a plain `const`).
+        fn parseSignalStmt(p: *P, signal_range: logger.Range, opts: *ParseStatementOptions, force_derive: bool) anyerror!Stmt {
             if (!p.parabun_strict_signals_scanned) {
                 p.parabun_strict_signals_scanned = true;
                 p.parabun_strict_signals = strings.contains(p.source.contents, "@parabun-strict-signals");
@@ -1602,7 +1614,11 @@ pub fn ParseStmt(
                             bun.handleOom(p.signal_bound_refs.put(p.allocator, id.ref, {}));
 
                             const name = p.symbols.items[id.ref.innerIndex()].original_name;
-                            const should_derive = !p.parabun_strict_signals and rhsHasSignalName(p, rhs);
+                            // `derived NAME = RHS` is unconditional. `signal NAME = RHS`
+                            // auto-derives only when the RHS references another in-scope
+                            // signal name AND the @parabun-strict-signals pragma is off.
+                            const should_derive = force_derive or
+                                (!p.parabun_strict_signals and rhsHasSignalName(p, rhs));
 
                             const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
                             arrow_stmts[0] = p.s(S.Return{ .value = rhs }, body_loc);
@@ -1653,7 +1669,9 @@ pub fn ParseStmt(
                             gop.value_ptr.* += 1;
                         },
                         else => {
-                            p.log.addRangeError(p.source, signal_range, "\"signal\" declarations must use a simple identifier binding (no destructuring)") catch unreachable;
+                            const keyword: []const u8 = if (force_derive) "derived" else "signal";
+                            const msg = std.fmt.allocPrint(p.allocator, "\"{s}\" declarations must use a simple identifier binding (no destructuring)", .{keyword}) catch unreachable;
+                            p.log.addRangeError(p.source, signal_range, msg) catch unreachable;
                             value = rhs;
                         },
                     }
@@ -2144,10 +2162,30 @@ pub fn ParseStmt(
                 const saved = p.lexer;
                 try p.lexer.next();
                 if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
-                    return try parseSignalStmt(p, signal_range, opts);
+                    return try parseSignalStmt(p, signal_range, opts, false);
                 }
                 // Not a signal declaration — rewind so `signal` works as a
                 // plain identifier (`import { signal } from "para:signals"; signal(0);`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "derived NAME = RHS" declaration — the explicit form
+            // of what `signal NAME = EXPR` does automatically when EXPR reads
+            // other signals. The RHS is ALWAYS wrapped as
+            //   require("para:signals").derived(() => RHS)
+            // ignoring the @parabun-strict-signals pragma. The declared ref
+            // is signal-bound so reads of NAME elsewhere lower to NAME.get().
+            //
+            // Only triggers when `derived` is immediately followed (no
+            // newline) by an identifier. Any other continuation leaves
+            // `derived` as a plain identifier (`import { derived } from
+            // "para:signals"; derived(() => …);`).
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "derived")) {
+                const derived_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseSignalStmt(p, derived_range, opts, true);
+                }
                 p.lexer.restore(&saved);
             }
             // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising

@@ -133,6 +133,49 @@ users  |> filter(_, a) |> map(_, b)  →  map(filter(users, a), b)
 
 Zero `_` falls back to the function-target form (`x |> f(y)` means `f(y)(x)`). Multiple `_` copy the LHS structurally — if the LHS has side effects, bind it to a const first to avoid double evaluation. `_` is treated as a placeholder only at the top level of a pipeline RHS call; nested `_` (e.g. inside an inner arrow body) is left as a regular identifier. Outside `|>`, `_` remains a normal identifier and is not reserved.
 
+### `signal` declaration
+
+Statement-level cell sugar. `signal NAME = EXPR` desugars to `const NAME = require("para:signals").signal(EXPR)`, and the declared name is signal-bound so bare reads of `NAME` lower to `NAME.get()` and bare assignments (`NAME = X`, `NAME += X`, `NAME++` …) lower to the matching `.set()` / `.update()` call. `signal` always implies `const` — there's no `signal let` / `signal var`.
+
+```
+signal count = 0;
+console.log(count);                     // count.get()
+count = 5;                              // count.set(5)
+count++;                                // count.set(count.get() + 1)
+signal a = 1, b = 2;                    // multiple decls allowed
+signal n: number = 7;                   // TS annotation allowed (and stripped)
+```
+
+**Auto-derive (signal → derived).** If the RHS reads another in-scope signal name, `signal NAME = EXPR` is silently promoted to `const NAME = require("para:signals").derived(() => EXPR)` so `NAME` re-derives whenever its deps change:
+
+```
+signal a = 2;
+signal b = 3;
+signal sum = a + b;                     // → derived(() => a.get() + b.get())
+```
+
+The detection is best-effort and stops at nested arrow / function / class scopes (a closure introduces its own scope and we don't peek inside). When auto-derive misses a dep — or when the user wants to disable the heuristic — the file-level pragma `// @parabun-strict-signals` opts out, and every `signal` decl stays a writable signal holding the snapshot value.
+
+`signal` keeps its identifier reading when not immediately followed by an identifier — `import { signal } from "para:signals"; signal(0);` and `const signal = 7;` both work unchanged.
+
+### `derived` declaration
+
+Statement-level computed-cell sugar. `derived NAME = EXPR` desugars to `const NAME = require("para:signals").derived(() => EXPR)` — the explicit form of what `signal NAME = EXPR` does automatically when EXPR reads other signals. The `@parabun-strict-signals` pragma is **not** honored: `derived` is the user being explicit, so the wrap is unconditional. Bare reads of in-scope signals inside EXPR are rewritten to `.get()` the same way they would be inside `effect { … }` / `when EXPR { … }`. Bare reads of `NAME` itself (elsewhere in the file) lower to `NAME.get()`.
+
+```
+signal a = 1;
+signal b = 2;
+derived sum = a + b;                    // → derived(() => a.get() + b.get())
+derived doubled = sum * 2;              // → derived(() => sum.get() * 2)
+derived label: string = `sum is ${sum}`; // TS annotation allowed (and stripped)
+```
+
+If EXPR doesn't read any signals, the result is a `derived(() => CONST)` that never re-fires — this is allowed (mirrors how `signal NAME = LITERAL` doesn't error even though it could have been a plain `const`). Choose `derived` over `signal` when the intent matters: the source reads as "this is computed from upstream cells" rather than "this is a value cell that happens to read other cells."
+
+The bare-read tracking inside EXPR follows the same scope rules as the auto-promoted form — only references that resolve to a signal-bound binding get rewritten, and shadowing (`derived y = (() => { const a = 5; return a; })();` where outer `a` is a signal) leaves the inner `a` as a plain identifier.
+
+`derived` keeps its identifier reading when not immediately followed by an identifier — `import { derived } from "para:signals"; const x = derived(() => …);` works unchanged.
+
 ### `~>` (reactive binding operator)
 
 Desugars `A ~> B` to `require("para:signals").effect(() => { B = A; })` — an `effect` that evaluates `A` in a tracked context and re-assigns `B` whenever any signal read by `A` changes. Precedence: assign level (lower than `|>`, so `a |> f ~> sink` parses as `(a |> f) ~> sink`).
