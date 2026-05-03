@@ -407,6 +407,7 @@ pub const HardcodedModule = enum {
             .{ "bun:app", .{ .path = "bun:app" } },
             .{ "bun:ffi", .{ .path = "bun:ffi" } },
             .{ "bun:jsc", .{ .path = "bun:jsc" } },
+            .{ "bun:main", .{ .path = "bun:main" } },
             .{ "bun:sqlite", .{ .path = "bun:sqlite" } },
             .{ "para:arena", .{ .path = "para:arena" } },
             .{ "para:arrow", .{ .path = "para:arrow" } },

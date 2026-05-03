@@ -21,12 +21,15 @@ import { libdeflate } from "./libdeflate.ts";
 import { libjpegTurbo } from "./libjpeg-turbo.ts";
 import { libopus } from "./libopus.ts";
 import { libpng } from "./libpng.ts";
+import { libspng } from "./libspng.ts";
 import { libuv } from "./libuv.ts";
 import { libwebp } from "./libwebp.ts";
 import { minimp3 } from "./minimp3.ts";
 import { rnnoise } from "./rnnoise.ts";
 import { lolhtml } from "./lolhtml.ts";
 import { lshpack } from "./lshpack.ts";
+import { lsqpack } from "./lsqpack.ts";
+import { lsquic } from "./lsquic.ts";
 import { mimalloc } from "./mimalloc.ts";
 import { nodejsHeaders } from "./nodejs-headers.ts";
 import { picohttpparser } from "./picohttpparser.ts";
@@ -53,12 +56,14 @@ export const allDeps: readonly Dependency[] = [
   brotli,
   libdeflate,
   libarchive,
-  // Image codecs for `bun:image`. libpng links against zlib (must come
-  // after); libjpeg-turbo is standalone. Grouped here so `--without=image`
-  // gating can drop both in one move once the build flag lands.
+  // Image codecs. libpng + libspng both link against zlib (must come
+  // after); libjpeg-turbo is standalone. Para uses libpng for
+  // `parabun:image`; upstream uses libspng for `Bun.Image`. Both ship.
   libpng,
+  libspng,
   libjpegTurbo,
   libwebp,
+  // Audio codecs for `bun:audio` — Para-only.
   libopus,
   minimp3,
   rnnoise,
@@ -68,10 +73,15 @@ export const allDeps: readonly Dependency[] = [
   libuv,
   lolhtml,
   lshpack,
+  lsqpack,
   mimalloc,
   sqlite,
   tinycc,
   boringssl,
+  // lsquic after boringssl: needs ssl.h at compile time (fetchDeps), and as
+  // a DirectBuild dep its .o files go straight on the link line so static
+  // link order doesn't apply.
+  lsquic,
   // WebKit LAST in link order — WTF/JSC provide symbols that everything
   // above might reference (via JavaScriptCore types in headers).
   webkit,
@@ -89,12 +99,15 @@ export {
   libjpegTurbo,
   libopus,
   libpng,
+  libspng,
   libuv,
   libwebp,
   minimp3,
   rnnoise,
   lolhtml,
   lshpack,
+  lsqpack,
+  lsquic,
   mimalloc,
   nodejsHeaders,
   picohttpparser,
