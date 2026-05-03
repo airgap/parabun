@@ -13,6 +13,9 @@
       "include": "#parabun-operators"
     },
     {
+      "include": "#parabun-parallel"
+    },
+    {
       "include": "source.js.jsx"
     }
   ],
@@ -142,6 +145,31 @@
         {
           "name": "keyword.operator.callbind.parabun",
           "match": "(?<![\\-=<])->"
+        }
+      ]
+    },
+    "parabun-parallel": {
+      "patterns": [
+        {
+          "comment": "parallel let/const — statement form, fan-out promise composition",
+          "match": "\\b(parallel)\\s+(let|const)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.other.parallel.parabun"
+            },
+            "2": {
+              "name": "storage.type.js"
+            }
+          }
+        },
+        {
+          "comment": "parallel { … } — expression form, fan-out promise composition",
+          "match": "\\b(parallel)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.parallel.parabun"
+            }
+          }
         }
       ]
     }

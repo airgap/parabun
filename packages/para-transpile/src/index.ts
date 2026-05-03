@@ -15,6 +15,7 @@ import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
 import { injectUsingHelpers } from "./transforms/inject-helpers";
 import { transformMemo } from "./transforms/memo";
+import { transformParallel } from "./transforms/parallel";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
 import { transformRanges } from "./transforms/ranges";
@@ -42,6 +43,13 @@ export function transpile(src: string, _options: TranspileOptions = {}): string 
   let out = src;
   out = transformPure(out);
   out = transformMemo(out);
+  // `parallel` runs BEFORE error-chain because the statement form's RHSes
+  // can each carry their own `..!` / `..&` / `..>` operator — running
+  // first lets us split per-decl on top-level `,` (depth-aware) and then
+  // hand each RHS individually to the chain rewriter, sidestepping the
+  // chain rewriter's lack of comma-as-stop. The expression form's body
+  // is brace-bounded, also depth-safe.
+  out = transformParallel(out);
   out = transformBlocks(out);
   out = transformBindings(out);
   out = transformDefer(out);
@@ -81,6 +89,7 @@ export {
   transformDefer,
   transformErrorChain,
   transformMemo,
+  transformParallel,
   transformPipeline,
   transformPure,
   transformRanges,

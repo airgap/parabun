@@ -257,6 +257,52 @@ If the leading block is itself negated (`when not X { … }`), the bare `when no
 
 `when` keeps its identifier reading when followed by `(`, `;`, `=`, `.`, `,`, `?.`, or end-of-line — `const when = ...; when(x);` and `import { when } from "..."` work unchanged. Block form requires the next token to start a predicate expression (identifier, `!`, string, etc.).
 
+### `parallel { … }` / `parallel let|const … = …, …;`
+
+Fan-out promise composition with name preservation. Two forms — both run their RHSes in parallel via `Promise.all` and assemble the results back into the surface-syntax names. Solves the positional-array footgun of `const [a, b, c] = await Promise.all([f, g, h])` where reordering one side without the other silently mis-binds.
+
+**Expression form** — body is an object literal of (key, promise) pairs:
+
+```
+const { user, posts, comments } = await parallel {
+  user: fetchUser(id),
+  posts: fetchPosts(id),
+  comments: fetchComments(id),
+};
+```
+
+Lowers to:
+
+```
+const { user, posts, comments } = await Promise.all([fetchUser(id), fetchPosts(id), fetchComments(id)])
+  .then(([__pb0, __pb1, __pb2]) => ({ user: __pb0, posts: __pb1, comments: __pb2 }));
+```
+
+Empty form `parallel {}` resolves to `{}`. Spreads (`{...x}`) and computed keys (`{[k]: v}`) are rejected at parse time. Chains naturally with `..!` / `..&` / `..>` over the whole batch.
+
+**Statement form** — eliminates the source duplication of long names:
+
+```
+parallel let theDataFromServer    = fetchA(),
+             theDataFromOtherServer = fetchB(),
+             fooBarBazBim         = fetchC();
+// names are now in scope below as `const`s; all three RHSes ran in parallel
+```
+
+Lowers to `const [theDataFromServer, theDataFromOtherServer, fooBarBazBim] = await Promise.all([fetchA(), fetchB(), fetchC()]);`. `let` reads better at the call site (mirrors the multi-decl `let a = …, b = …` shape) but the lowering uses `const` because rebinding an awaited tuple isn't meaningful — `parallel const … = …` is also accepted and produces the same lowering.
+
+Statement form requires the enclosing function to be `async`. Each RHS may carry its own `..!` / `..&` / `..>` for per-binding fallback / cleanup:
+
+```
+parallel let user     = fetchUser(id)     ..! null,
+             posts    = fetchPosts(id)    ..! [],
+             comments = fetchComments(id) ..! [];
+```
+
+This is the natural way to get `allSettled`-flavored behavior with explicit per-item handlers; the underlying `Promise.all` stays fail-fast, but each settled `..!` defuses its own rejection before the join sees it.
+
+**Disambiguation.** `parallel` is a contextual keyword — only the two adjacent forms (`parallel {` and `parallel let|const`) trigger the rewrite. Anywhere else (`parallel(x)`, `parallel.foo`, `parallel = 1`, `import { parallel } from "para:parallel"`) it stays a normal identifier.
+
 ### `defer`
 
 Schedules an expression to run when the enclosing block exits — on normal fall-through, early return, or a thrown exception. Multiple defers dispose in LIFO order (reverse of declaration).

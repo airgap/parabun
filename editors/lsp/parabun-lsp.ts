@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\bparallel\s*\{|\bparallel\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -96,6 +96,7 @@ function transformLine(line: string): string {
   line = transformSignal(line);
   line = transformEffect(line);
   line = transformArena(line);
+  line = transformParallel(line);
   line = transformWhenBlock(line);
   line = transformCatchFinally(line);
   line = transformRbind(line);
@@ -144,6 +145,18 @@ function transformEffect(line: string): string {
 // column-preserving trick as transformEffect.
 function transformArena(line: string): string {
   return line.replace(/\b(arena)\b(?=\s*\{)/g, "     ");
+}
+
+// `parallel { … }` and `parallel let|const NAME …` → blank out `parallel`
+// (8 chars → 8 spaces) so TypeScript sees a bare object literal or a normal
+// `let|const` declaration. Column positions on the rest of the line stay
+// stable for hover / go-to-def.
+function transformParallel(line: string): string {
+  // Statement form: keep `let|const` so TS still sees a declaration.
+  line = line.replace(/\b(parallel)(\s+)(?=let|const)/g, (_m, _kw, space) => "        " + space);
+  // Expression form: hand TS a bare `{ … }` — fine in expression position.
+  line = line.replace(/\b(parallel)\b(?=\s*\{)/g, "        ");
+  return line;
 }
 
 // `when EXPR { body }` → `if  (EXPR) { body }`
@@ -1539,6 +1552,35 @@ function getParabunHover(content: string, line: number, character: number): stri
       "```",
     ].join("\n");
   }
+  if (/\bparallel\b/.test(around)) {
+    return [
+      "### `parallel` — fan-out promise composition",
+      "",
+      "Two forms — both run their RHSes in parallel via `Promise.all` while",
+      "preserving the surface-syntax names (no positional-array footgun).",
+      "",
+      "**Expression form:**",
+      "",
+      "```typescript",
+      "const { user, posts } = await parallel {",
+      "  user: fetchUser(id),",
+      "  posts: fetchPosts(id),",
+      "};",
+      "// → Promise.all([fetchUser(id), fetchPosts(id)])",
+      "//      .then(([__pb0, __pb1]) => ({ user: __pb0, posts: __pb1 }));",
+      "```",
+      "",
+      "**Statement form:**",
+      "",
+      "```typescript",
+      "parallel let user = fetchUser(id), posts = fetchPosts(id);",
+      "// → const [user, posts] = await Promise.all([fetchUser(id), fetchPosts(id)]);",
+      "```",
+      "",
+      "`Promise.all` semantics — fail-fast on first rejection. Per-decl",
+      "`..!` in the statement form gives independent fallbacks.",
+    ].join("\n");
+  }
   if (around.includes("~>")) {
     return [
       "### `~>` — reactive binding operator",
@@ -1783,6 +1825,20 @@ const parabunCompletions = [
     kind: 14,
     detail: "Parabun: schedule async disposal on block exit (async fn only)",
     insertText: "defer await ${0};",
+    insertTextFormat: 2,
+  },
+  {
+    label: "parallel { … }",
+    kind: 14,
+    detail: "Parabun: fan-out promise composition (expression form)",
+    insertText: "parallel {\n  ${1:key}: ${2:expr},\n}",
+    insertTextFormat: 2,
+  },
+  {
+    label: "parallel let",
+    kind: 14,
+    detail: "Parabun: fan-out promise composition (statement form)",
+    insertText: "parallel let ${1:name} = ${2:expr};",
     insertTextFormat: 2,
   },
   {

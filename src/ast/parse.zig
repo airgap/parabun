@@ -1606,6 +1606,170 @@ pub fn Parse(
             memo_args[1] = p.newExpr(E.Number{ .value = arity }, memo_range.loc);
             return p.callRuntime(memo_range.loc, "__parabunMemo", memo_args);
         }
+
+        // Parabun: parse `parallel { key: EXPR, … }` and lower to
+        //   Promise.all([EXPR, …]).then(([__pb0, …]) => ({ key: __pb0, … }))
+        //
+        // Body is parsed as a single object literal — string/identifier
+        // keys with expression values. Spreads, computed keys, methods,
+        // get/set, and shorthand are rejected (they'd all expand the
+        // semantics in ways that need their own design).
+        //
+        // At entry: `parallel` has been consumed; p.lexer is on the `{`.
+        pub fn parseParallelObjectExpr(p: *P, parallel_range: logger.Range) !Expr {
+            try p.lexer.expect(.t_open_brace);
+
+            // Allow "in" inside the body (it parses as a single object literal).
+            const old_allow_in = p.allow_in;
+            p.allow_in = true;
+            defer p.allow_in = old_allow_in;
+
+            var keys = ListManaged(Expr).init(p.allocator);
+            var values = ListManaged(Expr).init(p.allocator);
+
+            while (p.lexer.token != .t_close_brace) {
+                // Reject spread — `{...rest}` semantics inside parallel
+                // would require a runtime spread of a promise array, which
+                // isn't part of the surface design.
+                if (p.lexer.token == .t_dot_dot_dot) {
+                    try p.log.addRangeError(p.source, p.lexer.range(), "spread is not allowed in `parallel` blocks");
+                    return error.SyntaxError;
+                }
+                // Reject computed keys for the same reason — the lowering
+                // emits a static key in the object literal; a `[expr]` key
+                // would need more thought.
+                if (p.lexer.token == .t_open_bracket) {
+                    try p.log.addRangeError(p.source, p.lexer.range(), "computed keys are not allowed in `parallel` blocks");
+                    return error.SyntaxError;
+                }
+
+                const key_loc = p.lexer.loc();
+                const key_expr: Expr = switch (p.lexer.token) {
+                    .t_identifier => blk: {
+                        const ident = p.lexer.identifier;
+                        try p.lexer.next();
+                        // Identifier keys are emitted as PropertyName-shaped
+                        // E.String nodes in object literals (the printer treats
+                        // string-keyed props with valid-identifier names as
+                        // bareword keys automatically).
+                        break :blk p.newExpr(E.String{ .data = ident }, key_loc);
+                    },
+                    .t_string_literal, .t_no_substitution_template_literal => blk: {
+                        const data = try p.lexer.toEString();
+                        try p.lexer.next();
+                        break :blk p.newExpr(E.String{ .data = data.slice8() }, key_loc);
+                    },
+                    .t_numeric_literal => blk: {
+                        const num = p.newExpr(E.Number{ .value = p.lexer.number }, key_loc);
+                        try p.lexer.next();
+                        break :blk num;
+                    },
+                    else => {
+                        try p.log.addRangeError(p.source, p.lexer.range(), "expected key in `parallel` block (identifier, string, or number)");
+                        return error.SyntaxError;
+                    },
+                };
+
+                try p.lexer.expect(.t_colon);
+                const value_expr = try p.parseExpr(.comma);
+
+                try keys.append(key_expr);
+                try values.append(value_expr);
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expect(.t_close_brace);
+
+            // Build  Promise.all([v0, v1, ...])
+            const promise_id = p.newExpr(E.Identifier{ .ref = try p.storeNameInRef("Promise") }, parallel_range.loc);
+            const promise_all_dot = p.newExpr(E.Dot{
+                .target = promise_id,
+                .name = "all",
+                .name_loc = parallel_range.loc,
+            }, parallel_range.loc);
+            const values_array = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(try values.toOwnedSlice()),
+            }, parallel_range.loc);
+            const promise_all_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            promise_all_args[0] = values_array;
+            const promise_all_call = p.newExpr(E.Call{
+                .target = promise_all_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(promise_all_args),
+            }, parallel_range.loc);
+
+            // Empty form: `parallel {}` resolves to `{}`.
+            //   Promise.all([]).then(() => ({}))
+            const arrow_loc = parallel_range.loc;
+            const body_loc = logger.Loc{ .start = parallel_range.loc.start + 1 };
+
+            // The synthesized arrow needs function_args + function_body
+            // scopes for visit-pass loc lookup, mirroring the defer / arena
+            // pattern. We push them, declare temp refs, and pop.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            // Build the destructured arg + the returned object.
+            const n = keys.items.len;
+            var args_slice: []G.Arg = &.{};
+            var obj_expr: Expr = undefined;
+            if (n == 0) {
+                // No-arg arrow returning empty object literal.
+                obj_expr = p.newExpr(E.Object{
+                    .properties = G.Property.List{},
+                }, body_loc);
+            } else {
+                // Declare __pb0 .. __pbN refs, build B.Array of identifiers,
+                // and build the returned object literal whose value for each
+                // key is the corresponding __pbN ref.
+                const items = bun.handleOom(p.allocator.alloc(js_ast.ArrayBinding, n));
+                const props = bun.handleOom(p.allocator.alloc(G.Property, n));
+                for (0..n) |i| {
+                    const tmp_name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__pb{d}", .{i}));
+                    const tmp_ref = try p.declareSymbol(.constant, body_loc, tmp_name);
+                    items[i] = .{ .binding = p.b(B.Identifier{ .ref = tmp_ref }, body_loc) };
+                    props[i] = .{
+                        .key = keys.items[i],
+                        .value = p.newExpr(E.Identifier{ .ref = tmp_ref }, body_loc),
+                    };
+                }
+                const array_binding = p.b(B.Array{ .items = items, .has_spread = false, .is_single_line = true }, arrow_loc);
+                args_slice = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+                args_slice[0] = .{ .binding = array_binding };
+                obj_expr = p.newExpr(E.Object{
+                    .properties = G.Property.List.fromOwnedSlice(props),
+                }, body_loc);
+            }
+
+            // Arrow: ([__pb0, …]) => ({ k0: __pb0, … }) — single-expression
+            // body via a return stmt with prefer_expr, parenthesizing the
+            // object literal so it doesn't lex as a block.
+            const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            arrow_stmts[0] = p.s(S.Return{ .value = obj_expr }, body_loc);
+            const arrow_expr = p.newExpr(E.Arrow{
+                .args = args_slice,
+                .body = .{ .loc = body_loc, .stmts = arrow_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, arrow_loc);
+
+            p.popScope();
+            p.popScope();
+
+            // Build  promiseAllCall.then(arrow)
+            const then_dot = p.newExpr(E.Dot{
+                .target = promise_all_call,
+                .name = "then",
+                .name_loc = parallel_range.loc,
+            }, parallel_range.loc);
+            const then_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            then_args[0] = arrow_expr;
+            return p.newExpr(E.Call{
+                .target = then_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(then_args),
+            }, parallel_range.loc);
+        }
     };
 }
 

@@ -1708,6 +1708,102 @@ pub fn ParseStmt(
             }, signal_range.loc);
         }
 
+        // Parabun: parse `parallel let|const NAME = EXPR, NAME = EXPR, …;`.
+        // Each RHS is collected into a single `Promise.all([...])`, awaited,
+        // and array-destructured back into the original names — sidestepping
+        // the positional-array footgun of `const [a, b] = await Promise.all([f, g])`
+        // where reordering the names alone silently mis-binds.
+        //
+        //   parallel let a = f(), b = g();
+        //     → const [a, b] = await Promise.all([f(), g()]);
+        //
+        // `let` reads better at the call site (it mirrors the multi-decl
+        // `let a = …, b = …` shape) but the lowering uses `const` because
+        // a destructured awaited tuple isn't meaningfully rebindable.
+        //
+        // At entry: `parallel` and `let`/`const` have both been consumed;
+        // p.lexer is on the first identifier of the binding list.
+        fn parseParallelLetStmt(p: *P, parallel_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(parallel_range.loc);
+            }
+
+            // Collect: ordered list of (name_loc, name_ref, RHS expr).
+            var names = ListManaged(struct { loc: logger.Loc, ref: js_ast.Ref }).init(p.allocator);
+            var values = ListManaged(Expr).init(p.allocator);
+
+            while (true) {
+                if (p.lexer.token != .t_identifier) {
+                    try p.lexer.expect(.t_identifier);
+                    return error.SyntaxError;
+                }
+                const name_loc = p.lexer.loc();
+                const name = p.lexer.identifier;
+                try p.lexer.next();
+
+                // Optional TS type annotation: skip `: TYPE` until `=`.
+                if (comptime is_typescript_enabled) {
+                    if (p.lexer.token == .t_colon) {
+                        try p.lexer.next();
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                }
+
+                try p.lexer.expect(.t_equals);
+                const rhs = try p.parseExpr(.comma);
+
+                const ref = try p.declareSymbol(.constant, name_loc, name);
+                try names.append(.{ .loc = name_loc, .ref = ref });
+                try values.append(rhs);
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (names.items.len == 0) {
+                try p.log.addRangeError(p.source, parallel_range, "`parallel let` requires at least one declaration");
+                return error.SyntaxError;
+            }
+
+            // Build  await Promise.all([rhs0, rhs1, ...])
+            const promise_id = p.newExpr(E.Identifier{ .ref = try p.storeNameInRef("Promise") }, parallel_range.loc);
+            const promise_all_dot = p.newExpr(E.Dot{
+                .target = promise_id,
+                .name = "all",
+                .name_loc = parallel_range.loc,
+            }, parallel_range.loc);
+            const values_array = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(try values.toOwnedSlice()),
+            }, parallel_range.loc);
+            const promise_all_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            promise_all_args[0] = values_array;
+            const promise_all_call = p.newExpr(E.Call{
+                .target = promise_all_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(promise_all_args),
+            }, parallel_range.loc);
+            const await_expr = p.newExpr(E.Await{ .value = promise_all_call }, parallel_range.loc);
+
+            // Build the array binding pattern  [name0, name1, ...]
+            const items = bun.handleOom(p.allocator.alloc(js_ast.ArrayBinding, names.items.len));
+            for (names.items, 0..) |entry, i| {
+                items[i] = .{
+                    .binding = p.b(B.Identifier{ .ref = entry.ref }, entry.loc),
+                };
+            }
+            const array_binding = p.b(B.Array{ .items = items, .has_spread = false, .is_single_line = true }, parallel_range.loc);
+
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{ .binding = array_binding, .value = await_expr };
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = opts.is_export,
+            }, parallel_range.loc);
+        }
+
         // Parabun: best-effort walk of `expr` looking for any `e_identifier`
         // whose name appears in `p.signal_bound_names`. Stops at nested
         // arrows/functions/classes — those introduce new scopes and it's
@@ -2142,6 +2238,27 @@ pub fn ParseStmt(
                 }
                 // Not a defer declaration — rewind and fall through so `defer`
                 // works as a plain identifier (`const defer = 1; defer + 1;`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "parallel let|const NAME = …, NAME = …;" — fan-out
+            // promise composition with name preservation. Each RHS runs in
+            // parallel via Promise.all and is array-destructured back into
+            // the surface-syntax names. Only triggers when `parallel` is
+            // immediately followed (no newline) by `let` or `const` —
+            // otherwise `parallel` is a plain identifier (the expression
+            // form `parallel { … }` is handled by the prefix parser).
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "parallel")) {
+                const parallel_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                const is_let_form = !p.lexer.has_newline_before and
+                    p.lexer.token == .t_identifier and
+                    (strings.eqlComptime(p.lexer.raw(), "let") or strings.eqlComptime(p.lexer.raw(), "const"));
+                const is_const_form = !p.lexer.has_newline_before and p.lexer.token == .t_const;
+                if (is_let_form or is_const_form) {
+                    try p.lexer.next();
+                    return try parseParallelLetStmt(p, parallel_range, opts);
+                }
                 p.lexer.restore(&saved);
             }
             // Parabun: "arena { ...body... }" block statement — desugars to
