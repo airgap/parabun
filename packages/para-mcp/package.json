@@ -13,6 +13,9 @@
     "src/",
     "README.md"
   ],
+  "dependencies": {
+    "@para/signals": "workspace:*"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

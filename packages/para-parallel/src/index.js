@@ -14,6 +14,8 @@
 // chunks rather than N copies. Callers can supply additional
 // `Transferable`s via the `transfer` option for non-typed-array data.
 
+import { signal as makeSignal, effect as makeEffect } from "@para/signals";
+
 // ── Worker script, inlined as a blob URL ────────────────────────────────
 
 const WORKER_SOURCE = /* js */ `
@@ -140,12 +142,19 @@ class Pool {
   #completedTotal = 0;
   #config;
   #seq = false; // sequential-fallback mode
+  // Lifetime signal — true from createPool() until dispose(). Lets
+  // consumers observe pool health reactively instead of polling
+  // .stats(). Tied to a private `effect`-bound list (`#boundEffects`)
+  // so `pool.use(fn)` auto-tears-down on dispose.
+  #alive;
+  #boundEffects = [];
 
   constructor(config = {}) {
     this.#config = {
       concurrency: Math.max(1, config.concurrency ?? defaultConcurrency()),
       maxTasksPerWorker: Math.max(1, config.maxTasksPerWorker ?? Infinity),
     };
+    this.#alive = makeSignal(true);
     if (!supportsWorkers()) {
       this.#seq = true;
       return;
@@ -153,6 +162,21 @@ class Pool {
     const blob = new Blob([WORKER_SOURCE], { type: "application/javascript" });
     this.#blobURL = URL.createObjectURL(blob);
     for (let i = 0; i < this.#config.concurrency; i++) this.#spawnSlot(i);
+  }
+
+  get alive() {
+    return this.#alive;
+  }
+
+  /**
+   * Run an effect bound to this pool's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the pool
+   * is disposed — no defensive `pool.alive.get()` guards needed.
+   */
+  use(fn) {
+    const stop = makeEffect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   // ── slot lifecycle ─────────────────────────────────────────────────
@@ -638,6 +662,15 @@ class Pool {
         URL.revokeObjectURL(this.#blobURL);
       } catch {}
       this.#blobURL = null;
+    }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop();
+        try {
+          stop();
+        } catch {}
+      }
     }
   }
 }

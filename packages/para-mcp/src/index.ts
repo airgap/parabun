@@ -19,6 +19,7 @@
 //   - Resources / prompts surfaces (only tools/* covered).
 
 const childProcess = require("node:child_process");
+import { signal as makeSignal, effect as makeEffect } from "@para/signals";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -133,6 +134,11 @@ class MCPConnection {
   // Notification subscribers keyed by method name. Server notifications
   // (no `id`, no response expected) fan out to every listener.
   #notificationListeners = new Map<string, Set<NotificationListener>>();
+  // Lifetime signal — true from connect()/construction until close()
+  // OR transport-close. Lets consumers react to disconnect without
+  // polling. Effects bound via use() auto-tear-down on close.
+  #alive = makeSignal(true);
+  #boundEffects: Array<() => void> = [];
 
   // Populated by initialize().
   tools: ToolDescriptor[] = [];
@@ -147,6 +153,22 @@ class MCPConnection {
     this.#transport = transport;
     transport.onMessage(msg => this.#dispatch(msg));
     transport.onClose(err => this.#onTransportClose(err));
+  }
+
+  /** Lifetime signal — true while the connection is open. */
+  get alive() {
+    return this.#alive;
+  }
+
+  /**
+   * Run an effect bound to this connection's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the
+   * connection closes — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void {
+    const stop = makeEffect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   async #request<T = any>(method: string, params?: unknown): Promise<T> {
@@ -231,6 +253,18 @@ class MCPConnection {
     const cause = err ?? new Error("para:mcp: transport closed");
     for (const p of this.#pending.values()) p.reject(cause);
     this.#pending.clear();
+    this.#flipDeadAndTearDown();
+  }
+
+  #flipDeadAndTearDown(): void {
+    if (!this.#alive.peek()) return;
+    this.#alive.set(false);
+    while (this.#boundEffects.length > 0) {
+      const stop = this.#boundEffects.pop()!;
+      try {
+        stop();
+      } catch {}
+    }
   }
 
   /**
@@ -351,6 +385,7 @@ class MCPConnection {
     } catch {
       // Best-effort close.
     }
+    this.#flipDeadAndTearDown();
   }
 
   [Symbol.asyncDispose](): Promise<void> {
@@ -577,12 +612,32 @@ class MCPServer {
   #closed = false;
   #closedPromise: Promise<void> | null = null;
   #closedResolve: (() => void) | null = null;
+  // Lifetime signal — true from serve() construction until listen()
+  // resolves OR close() is called. Effects bound via use() auto-tear-
+  // down when the server stops.
+  #alive = makeSignal(true);
+  #boundEffects: Array<() => void> = [];
 
   constructor(opts: ServerOpts) {
     if (!opts || typeof opts.name !== "string" || !opts.name) {
       throw new TypeError("para:mcp: serve() requires { name, version? }");
     }
     this.#opts = { name: opts.name, version: opts.version ?? "0.1.0", protocolVersion: opts.protocolVersion };
+  }
+
+  /** Lifetime signal — true while the server is serving requests. */
+  get alive() {
+    return this.#alive;
+  }
+
+  /**
+   * Run an effect bound to this server's lifetime. Auto-disposed when
+   * the server stops — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void {
+    const stop = makeEffect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   /**
@@ -647,6 +702,7 @@ class MCPServer {
     t.onClose(() => {
       if (this.#closed) return;
       this.#closed = true;
+      this.#flipDeadAndTearDown();
       this.#closedResolve?.();
     });
     return promise;
@@ -658,7 +714,19 @@ class MCPServer {
     try {
       await this.#transport?.close();
     } catch {}
+    this.#flipDeadAndTearDown();
     this.#closedResolve?.();
+  }
+
+  #flipDeadAndTearDown(): void {
+    if (!this.#alive.peek()) return;
+    this.#alive.set(false);
+    while (this.#boundEffects.length > 0) {
+      const stop = this.#boundEffects.pop()!;
+      try {
+        stop();
+      } catch {}
+    }
   }
 
   #send(msg: object): void {

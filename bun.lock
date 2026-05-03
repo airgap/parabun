@@ -51,10 +51,16 @@
     "packages/para-mcp": {
       "name": "@para/mcp",
       "version": "0.0.0-dev",
+      "dependencies": {
+        "@para/signals": "workspace:*",
+      },
     },
     "packages/para-parallel": {
       "name": "@para/parallel",
       "version": "0.0.0-dev",
+      "dependencies": {
+        "@para/signals": "workspace:*",
+      },
     },
     "packages/para-pipeline": {
       "name": "@para/pipeline",

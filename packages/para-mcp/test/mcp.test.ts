@@ -85,4 +85,40 @@ describe("@para/mcp end-to-end (stdio)", () => {
       name: "MCPError",
     });
   });
+
+  test("alive starts true; use(fn) auto-tears-down on close", async () => {
+    // Open a fresh connection just for this case so we can close it
+    // without affecting the suite-shared `conn`.
+    const c = await mcp.connect("stdio", process.execPath, { args: [fixturePath] });
+    expect(c.alive.get()).toBe(true);
+    let runs = 0;
+    c.use(() => {
+      runs++;
+      c.alive.get();
+    });
+    expect(runs).toBe(1);
+    await c.close();
+    expect(c.alive.get()).toBe(false);
+    const before = runs;
+    await new Promise(r => setTimeout(r, 30));
+    expect(runs).toBe(before);
+  });
+});
+
+describe("@para/mcp server lifecycle (alive + use)", () => {
+  test("server.alive starts true; flips false on close()", async () => {
+    const server = mcp.serve({ name: "alive-test", version: "0.0.0" });
+    expect(server.alive.get()).toBe(true);
+    let runs = 0;
+    server.use(() => {
+      runs++;
+      server.alive.get();
+    });
+    expect(runs).toBe(1);
+    await server.close();
+    expect(server.alive.get()).toBe(false);
+    const before = runs;
+    await new Promise(r => setTimeout(r, 30));
+    expect(runs).toBe(before);
+  });
 });

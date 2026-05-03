@@ -288,3 +288,22 @@ describe("functional API uses default singleton", () => {
     expect(r).toBe(42);
   });
 });
+
+describe("pool lifecycle (alive + use)", () => {
+  test("alive starts true; flips false on dispose; use(fn) auto-tears-down", async () => {
+    const pool = createPool({ concurrency: 2 });
+    expect(pool.alive.get()).toBe(true);
+    let runs = 0;
+    pool.use(() => {
+      runs++;
+      pool.alive.get();
+    });
+    expect(runs).toBe(1);
+    await pool.dispose();
+    expect(pool.alive.get()).toBe(false);
+    const before = runs;
+    // Bound effect was disposed — no further runs even if signals change.
+    await new Promise(r => setTimeout(r, 20));
+    expect(runs).toBe(before);
+  });
+});
