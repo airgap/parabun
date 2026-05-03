@@ -11,6 +11,7 @@
 import { transformBareRead } from "./transforms/bare-read";
 import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
+import { transformDecimal } from "./transforms/decimal";
 import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
 import { injectUsingHelpers } from "./transforms/inject-helpers";
@@ -41,6 +42,11 @@ export type TranspileOptions = {
 //      doesn't consume `..!` / `..&` operands by mistake.
 export function transpile(src: string, _options: TranspileOptions = {}): string {
   let out = src;
+  // Decimal literals run first so the `Nd` suffix is gone before any
+  // operator pass sees the surrounding source — we don't want `1d..5` to
+  // confuse the range pass with a stray `d`. After this pass, decimals
+  // are plain `__paraDec("…")` calls.
+  out = transformDecimal(out);
   out = transformPure(out);
   out = transformMemo(out);
   // `parallel` runs BEFORE error-chain because the statement form's RHSes
@@ -86,6 +92,7 @@ export {
   transformBareRead,
   transformBindings,
   transformBlocks,
+  transformDecimal,
   transformDefer,
   transformErrorChain,
   transformMemo,

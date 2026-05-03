@@ -11,6 +11,7 @@
     "./packages/para-arena",
     "./packages/para-arrow",
     "./packages/para-csv",
+    "./packages/para-decimal",
     "./packages/para-pipeline",
     "./packages/para-rtp",
     "./packages/para-mcp",

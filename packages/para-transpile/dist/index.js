@@ -10,10 +10,12 @@
 import { transformBareRead } from "./transforms/bare-read";
 import { transformBindings } from "./transforms/bindings";
 import { transformBlocks } from "./transforms/blocks";
+import { transformDecimal } from "./transforms/decimal";
 import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
 import { injectUsingHelpers } from "./transforms/inject-helpers";
 import { transformMemo } from "./transforms/memo";
+import { transformParallel } from "./transforms/parallel";
 import { transformPipeline } from "./transforms/pipeline";
 import { transformPure } from "./transforms/pure";
 import { transformRanges } from "./transforms/ranges";
@@ -33,8 +35,20 @@ import { injectWrapImports } from "./transforms/wrap-imports";
 //      doesn't consume `..!` / `..&` operands by mistake.
 export function transpile(src, _options = {}) {
     let out = src;
+    // Decimal literals run first so the `Nd` suffix is gone before any
+    // operator pass sees the surrounding source — we don't want `1d..5` to
+    // confuse the range pass with a stray `d`. After this pass, decimals
+    // are plain `__paraDec("…")` calls.
+    out = transformDecimal(out);
     out = transformPure(out);
     out = transformMemo(out);
+    // `parallel` runs BEFORE error-chain because the statement form's RHSes
+    // can each carry their own `..!` / `..&` / `..>` operator — running
+    // first lets us split per-decl on top-level `,` (depth-aware) and then
+    // hand each RHS individually to the chain rewriter, sidestepping the
+    // chain rewriter's lack of comma-as-stop. The expression form's body
+    // is brace-bounded, also depth-safe.
+    out = transformParallel(out);
     out = transformBlocks(out);
     out = transformBindings(out);
     out = transformDefer(out);
@@ -58,8 +72,10 @@ export function transpile(src, _options = {}) {
     // Final pass: prepend `import { __parabunRange, … } from "bun:wrap"`
     // for any runtime helpers the previous transforms emitted, so the
     // output is runnable on a host that resolves `bun:wrap` (Parabun
-    // natively, or `parabun-browser-shims` aliased via the bundler).
+    // natively, or `parabun-browser-shims/wrap` aliased via the bundler
+    // — eventually moves into @para/transpile's runtime alongside the
+    // compiler).
     out = injectWrapImports(out);
     return out;
 }
-export { injectUsingHelpers, injectWrapImports, transformBareRead, transformBindings, transformBlocks, transformDefer, transformErrorChain, transformMemo, transformPipeline, transformPure, transformRanges, transformUsingPolyfill, };
+export { injectUsingHelpers, injectWrapImports, transformBareRead, transformBindings, transformBlocks, transformDecimal, transformDefer, transformErrorChain, transformMemo, transformParallel, transformPipeline, transformPure, transformRanges, transformUsingPolyfill, };

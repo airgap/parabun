@@ -18,6 +18,7 @@ const HELPERS = [
   "__parabunMemo",
   "__parabunDefer0",
   "__parabunAsyncDefer0",
+  "__paraDec",
 ] as const;
 
 const HELPER_RE = new RegExp(`\\b(${HELPERS.join("|")})\\b`, "g");

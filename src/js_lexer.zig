@@ -3050,6 +3050,15 @@ fn NewLexer_(
 
                     // Store bigints as text to avoid precision loss;
                     lexer.identifier = text;
+                } else if (lexer.code_point == 'd' and !is_json) {
+                    // Parabun: `Nd` decimal literal — store the source text in
+                    // identifier so the parser can lower it to __paraDec("N").
+                    // Also reject leading-zero base-10 literals (e.g. `01d`)
+                    // since those are ambiguous with the legacy octal grammar.
+                    if (text.len > 1 and first == '0' and !hasDotOrExponent) {
+                        try lexer.syntaxError();
+                    }
+                    lexer.identifier = text;
                 } else if (!hasDotOrExponent and lexer.end - lexer.start < 10) {
                     // Parse a 32-bit integer (very fast path);
                     var number: u32 = 0;
@@ -3076,6 +3085,17 @@ fn NewLexer_(
             // Handle bigint literals after the underscore-at-end check above;
             if (lexer.code_point == 'n' and !hasDotOrExponent) {
                 lexer.token = T.t_big_integer_literal;
+                lexer.step();
+            } else if (lexer.code_point == 'd' and !is_json) {
+                // Parabun: `Nd` decimal literal. We already populated
+                // lexer.identifier above with the raw numeric source — flip
+                // the token tag and consume the suffix.
+                lexer.token = T.t_decimal_literal;
+                if (lexer.identifier.len == 0) {
+                    // Fast-path branches above didn't populate identifier
+                    // (small integer / hex etc.); capture from raw() now.
+                    lexer.identifier = lexer.raw();
+                }
                 lexer.step();
             }
 

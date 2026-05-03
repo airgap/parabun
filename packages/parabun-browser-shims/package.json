@@ -33,6 +33,7 @@
     "polyfill"
   ],
   "dependencies": {
+    "@para/decimal": "workspace:*",
     "@para/simd": "workspace:*"
   },
   "devDependencies": {

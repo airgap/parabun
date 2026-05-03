@@ -156,10 +156,10 @@ function scanRhsEnd(code, startPos) {
                 return i;
             if (c === ",")
                 return i;
-            // `..!` / `..&` are looser-precedence than `|>` per the Para
+            // `..!` / `..&` / `..>` are looser-precedence than `|>` per the Para
             // operator table — pipeline ends BEFORE them so the chain operators
             // see the pipeline result as their LHS.
-            if (c === "." && code[i + 1] === "." && (code[i + 2] === "!" || code[i + 2] === "&")) {
+            if (c === "." && code[i + 1] === "." && (code[i + 2] === "!" || code[i + 2] === "&" || code[i + 2] === ">")) {
                 return i;
             }
         }

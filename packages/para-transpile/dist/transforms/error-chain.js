@@ -1,10 +1,11 @@
 // `EXPR ..! HANDLER` → `EXPR.catch(HANDLER)`
 // `EXPR ..& CLEANUP` → `EXPR.finally(CLEANUP)`
+// `EXPR ..> HANDLER` → `EXPR.then(HANDLER)`
 //
-// These are right-to-left chainable: `p ..! a ..& b` becomes
-// `p.catch(a).finally(b)`. Operator precedence is "conditional" in the
-// canonical Zig parser, which means they bind tighter than assignment but
-// looser than `||`/`&&` and friends.
+// These are right-to-left chainable: `p ..> f ..! a ..& b` becomes
+// `p.then(f).catch(a).finally(b)`. Operator precedence is "conditional" in
+// the canonical Zig parser, which means they bind tighter than assignment
+// but looser than `||`/`&&` and friends.
 //
 // The text-level rewrite uses non-greedy matching from the operator to the
 // end of the surrounding statement, then defers to the lexer's region
@@ -17,19 +18,22 @@ export function transformErrorChain(src) {
         // like `p ..! a ..! b ..& c` need multiple passes because each pass only
         // rewrites the LEFTMOST handler (its boundary is the next chain operator).
         // The lookahead alternatives below define what counts as "end of handler":
-        //   - another chain operator (`..!`, `..&`) — stop before it so the next
-        //     pass picks it up
-        //   - an already-inserted `.catch(` / `.finally(` from a prior pass
+        //   - another chain operator (`..!`, `..&`, `..>`) — stop before it so
+        //     the next pass picks it up
+        //   - an already-inserted `.catch(` / `.finally(` / `.then(` from a
+        //     prior pass
         //   - a closing `}` or `)` or `]` — handler ended at end of an expression
         //   - a semicolon, end of input, or newline — statement-level boundary
-        const stop = String.raw `(?=\s*\.\.[!&]|\.catch\(|\.finally\(|\s*[;)\]}]|\s*$|\s*\n)`;
+        const stop = String.raw `(?=\s*\.\.[!&>]|\.catch\(|\.finally\(|\.then\(|\s*[;)\]}]|\s*$|\s*\n)`;
         const finallyRe = new RegExp(String.raw `\s*\.\.&\s*(.+?)` + stop, "g");
         const catchRe = new RegExp(String.raw `\s*\.\.!\s*(.+?)` + stop, "g");
+        const thenRe = new RegExp(String.raw `\s*\.\.>\s*(.+?)` + stop, "g");
         let prev = "";
         while (prev !== out) {
             prev = out;
             out = out.replace(finallyRe, (_m, handler) => `.finally(${handler.trim()})`);
             out = out.replace(catchRe, (_m, handler) => `.catch(${handler.trim()})`);
+            out = out.replace(thenRe, (_m, handler) => `.then(${handler.trim()})`);
         }
         return out;
     });

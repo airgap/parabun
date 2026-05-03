@@ -48,6 +48,10 @@
         "@para/parallel": "workspace:*",
       },
     },
+    "packages/para-decimal": {
+      "name": "@para/decimal",
+      "version": "0.0.0-dev",
+    },
     "packages/para-mcp": {
       "name": "@para/mcp",
       "version": "0.0.0-dev",
@@ -89,6 +93,7 @@
       "name": "parabun-browser-shims",
       "version": "0.3.0",
       "dependencies": {
+        "@para/decimal": "workspace:*",
         "@para/simd": "workspace:*",
       },
       "devDependencies": {
@@ -211,6 +216,8 @@
     "@para/arrow": ["@para/arrow@workspace:packages/para-arrow"],
 
     "@para/csv": ["@para/csv@workspace:packages/para-csv"],
+
+    "@para/decimal": ["@para/decimal@workspace:packages/para-decimal"],
 
     "@para/mcp": ["@para/mcp@workspace:packages/para-mcp"],
 

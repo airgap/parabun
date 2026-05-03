@@ -282,6 +282,19 @@ pub fn ParsePrefix(
             try p.lexer.next();
             return p.newExpr(E.BigInt{ .value = value }, loc);
         }
+        fn t_decimal_literal(noalias p: *P) anyerror!Expr {
+            // Parabun: `Nd` lowers to `__paraDec("N")`. The string form of the
+            // numeric source is critical — going through Number(0.1) would
+            // defeat the whole purpose of the literal (avoiding the float
+            // roundtrip). The lexer captured the raw source text in
+            // lexer.identifier before consuming the `d` suffix.
+            const loc = p.lexer.loc();
+            const text = p.lexer.identifier;
+            try p.lexer.next();
+            const args = p.allocator.alloc(Expr, 1) catch unreachable;
+            args[0] = p.newExpr(E.String{ .data = text }, loc);
+            return p.callRuntime(loc, "__paraDec", args);
+        }
         fn t_slash(noalias p: *P) anyerror!Expr {
             const loc = p.lexer.loc();
             try p.lexer.scanRegExp();
@@ -885,6 +898,7 @@ pub fn ParsePrefix(
                 .t_template_head => t_template_head(p),
                 .t_numeric_literal => t_numeric_literal(p),
                 .t_big_integer_literal => t_big_integer_literal(p),
+                .t_decimal_literal => t_decimal_literal(p),
                 .t_string_literal, .t_no_substitution_template_literal => p.parseStringLiteral(),
                 .t_slash_equals, .t_slash => t_slash(p),
                 .t_void => t_void(p),

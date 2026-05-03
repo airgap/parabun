@@ -16,6 +16,9 @@
       "include": "#parabun-parallel"
     },
     {
+      "include": "#parabun-decimal-literal"
+    },
+    {
       "include": "source.js.jsx"
     }
   ],
@@ -168,6 +171,22 @@
           "captures": {
             "1": {
               "name": "keyword.other.parallel.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-decimal-literal": {
+      "patterns": [
+        {
+          "comment": "Nd decimal literal — base-10 number followed by `d` suffix",
+          "match": "(?<![\\w$.])((?:\\.\\d+|\\d+(?:\\.\\d*)?)(?:[eE][+-]?\\d+)?)(d)(?![\\w$])",
+          "captures": {
+            "1": {
+              "name": "constant.numeric.decimal.parabun"
+            },
+            "2": {
+              "name": "keyword.other.suffix.decimal.parabun"
             }
           }
         }

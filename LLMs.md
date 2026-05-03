@@ -98,6 +98,19 @@ V1 is integer-only with step 1. For large ranges prefer a counter `for` loop —
 
 **Break from baseline JS.** The idiom `1..toString()` previously parsed as `(1.).toString()` (the first `.` was a decimal-point terminator on `1`). In Parabun it parses as the range `1..toString` followed by a call. Write `(1).toString()` or `1.0.toString()` when you want the baseline behaviour — the one idiom that breaks is an obscure stylistic variant already avoided in modern code.
 
+### `Nd` (decimal literal)
+
+Suffix `d` on a base-10 numeric literal lowers to a Decimal value with exact-decimal arithmetic — same shape as the built-in `Nn` BigInt suffix. Critically, the lowering passes the **string form** of the source, never a parsed JS Number, so the literal skips the float roundtrip:
+
+```
+0.1d          →  __paraDec("0.1")      (NOT __paraDec(0.1))
+1d            →  __paraDec("1")
+1.5e-3d       →  __paraDec("1.5e-3")
+0.1d.plus(0.2d).eq(0.3d)   //  → true (would be false in float)
+```
+
+JS doesn't allow operator overloading, so subsequent arithmetic is explicit method calls: `.plus` / `.minus` / `.times` / `.dividedBy` (or `.div`), `.eq` / `.lt` / `.gt` / `.lte` / `.gte`, `.neg` / `.abs`, plus `.toString()` / `.toNumber()` for interop. Internal representation is `{ coef: bigint, exp: number }` — every operation that doesn't divide is exact. `.dividedBy` takes `{ precision, roundingMode }` opts (default precision 20, default `HALF_EVEN`); division by zero throws. NaN / Infinity are deliberately not supported. Backed by `@para/decimal`.
+
 ### `..!` (catch operator)
 
 Desugars `expr ..! handler` to `expr.catch(handler)`. Precedence: conditional level.
@@ -824,7 +837,7 @@ Edits to `src/js/bun/*.ts` need a runtime cache clear
 
 ## Browser compilation
 
-Parse-time syntax (`pure`, `memo`, `|>`, `..!`, `..&`, `..>`, `..` / `..=` ranges, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
+Parse-time syntax (`pure`, `memo`, `|>`, `..!`, `..&`, `..>`, `..` / `..=` ranges, `Nd` decimal literals, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range / decimal literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
 
 The cross-runtime Lib modules (`signals`, `parallel`, `pipeline`, `arena`, `simd`, `csv`, `arrow`, `rtp`, `mcp`) ship as individual `@para/*` npm packages. Applications targeting non-Parabun hosts alias the `para:*` specifiers onto them — typically with one regex rule:
 

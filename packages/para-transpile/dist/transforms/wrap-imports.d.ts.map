@@ -1,1 +1,1 @@
-{"version":3,"file":"wrap-imports.d.ts","sourceRoot":"","sources":["../../src/transforms/wrap-imports.ts"],"names":[],"mappings":"AAuBA,wBAAgB,iBAAiB,CAAC,GAAG,EAAE,MAAM,GAAG,MAAM,CAmBrD"}
+{"version":3,"file":"wrap-imports.d.ts","sourceRoot":"","sources":["../../src/transforms/wrap-imports.ts"],"names":[],"mappings":"AAyBA,wBAAgB,iBAAiB,CAAC,GAAG,EAAE,MAAM,GAAG,MAAM,CAmBrD"}

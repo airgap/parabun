@@ -13,6 +13,7 @@ pub const T = enum(u8) {
     t_numeric_literal, // contents are in lexer.number (float64)
     t_string_literal, // contents are in lexer.string_literal ([]uint16)
     t_big_integer_literal, // contents are in lexer.identifier (string)
+    t_decimal_literal, // Parabun: `Nd` decimal literal — source text in lexer.identifier
 
     // pseudo-literals
     t_template_head, // contents are in lexer.string_literal ([]uint16)
@@ -271,6 +272,7 @@ pub const tokenToString = brk: {
     const TNumericLiteral = "number".*;
     const TStringLiteral = "string".*;
     const TBigIntegerLiteral = "bigint".*;
+    const TDecimalLiteral = "decimal".*;
 
     // Pseudo-literals
     const TTemplateHead = "template literal".*;
@@ -404,6 +406,7 @@ pub const tokenToString = brk: {
     tokenEnums.set(T.t_numeric_literal, &TNumericLiteral);
     tokenEnums.set(T.t_string_literal, &TStringLiteral);
     tokenEnums.set(T.t_big_integer_literal, &TBigIntegerLiteral);
+    tokenEnums.set(T.t_decimal_literal, &TDecimalLiteral);
 
     // Pseudo-literals
     tokenEnums.set(T.t_template_head, &TTemplateHead);

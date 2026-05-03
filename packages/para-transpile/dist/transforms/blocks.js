@@ -1,6 +1,7 @@
 // Block-form Para constructs:
 //
 //   signal NAME = EXPR;             → const NAME = require("para:signals").signal(EXPR);
+//   derived NAME = EXPR;            → const NAME = require("para:signals").derived(() => EXPR);
 //   effect { BODY }                 → require("para:signals").effect(() => { BODY });
 //   arena  { BODY }                 → require("para:arena").scope(() => { BODY });
 //   when EXPR { BODY }              → require("para:signals").when(() => EXPR, () => { BODY });
@@ -20,6 +21,7 @@ import { findMatchingBrace, scanRegions } from "../lex";
 export function transformBlocks(src) {
     let out = src;
     out = transformSignalDecls(out);
+    out = transformDerivedDecls(out);
     out = transformEffectBlocks(out);
     out = transformArenaBlocks(out);
     out = transformWhenBlocks(out);
@@ -72,6 +74,59 @@ function transformSignalDecls(src) {
         out += src.slice(last, matchStart);
         out += `const ${name} = require("para:signals").signal(${initializer})`;
         last = i; // the trailing `;` / `\n` is appended on the next iter or final tail
+        re.lastIndex = i;
+    }
+    out += src.slice(last);
+    return out;
+}
+// ─────────────────────────────────────────────────────────────────────────
+// derived NAME = EXPR;
+//
+// Mirrors `signal NAME = EXPR` exactly, but always wraps the RHS in an
+// arrow and routes through `derived(() => EXPR)` instead of `signal(EXPR)`.
+// Bare-read rewriting of signal references inside EXPR is handled by the
+// existing bare-read pass — it walks `signals.derived(...)` initializers
+// the same as `signals.signal(...)` ones.
+//
+// If EXPR doesn't read any signals, the result is a derived that never
+// re-fires. Mirroring how `signal NAME = LITERAL` doesn't error, we don't
+// error here either — the user is explicit about wanting a derived.
+// ─────────────────────────────────────────────────────────────────────────
+function transformDerivedDecls(src) {
+    const spans = scanRegions(src);
+    const findSpan = (pos) => spans.find(s => pos >= s.start && pos < s.end);
+    const inCode = (pos) => findSpan(pos)?.region === "code";
+    const re = /(^|[;\n{}])(\s*)derived\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;]+?)?\s*=\s*/g;
+    let out = "";
+    let last = 0;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+        const matchStart = m.index + m[1].length + m[2].length;
+        if (!inCode(matchStart))
+            continue;
+        const matchEnd = re.lastIndex;
+        const name = m[3];
+        let depth = 0;
+        let i = matchEnd;
+        while (i < src.length) {
+            if (!inCode(i)) {
+                const span = findSpan(i);
+                i = span ? span.end : i + 1;
+                continue;
+            }
+            const c = src[i];
+            if (c === "(" || c === "[" || c === "{")
+                depth++;
+            else if (c === ")" || c === "]" || c === "}")
+                depth--;
+            else if (depth === 0 && (c === ";" || c === "\n"))
+                break;
+            i++;
+        }
+        const initializer = src.slice(matchEnd, i).trim();
+        out += src.slice(last, matchStart);
+        out += `const ${name} = require("para:signals").derived(() => ${initializer})`;
+        last = i;
         re.lastIndex = i;
     }
     out += src.slice(last);
