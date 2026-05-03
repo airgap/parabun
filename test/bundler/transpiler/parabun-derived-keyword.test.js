@@ -218,3 +218,84 @@ describe("Parabun: derived NAME = EXPR — runtime behavior", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+// Regression — fixed bug where the wrapper-arrow's parse-pass scopes were
+// pushed at `p.lexer.loc()` (start of RHS), colliding with the inner arrow's
+// own args scope and tripping the strictly-monotonic scopes_in_order check
+// with a "Scope location N must be greater than M" panic. The wrapper now
+// anchors at `equals_loc - 1` / `equals_loc` so it always sits strictly
+// between the previous decl's scopes and any inner scope the RHS pushes.
+describe("Parabun: arrow-as-RHS regression (was crashing the parser)", () => {
+  it("`signal NAME = () => …` parses and round-trips the function as the cell value", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "signal-arrow-rhs",
+      `
+        signal x = () => 5;
+        console.log(typeof x.get(), x.get()());
+      `,
+    );
+    expect(stdout).toBe("function 5");
+    expect(exitCode).toBe(0);
+  });
+
+  it("`derived NAME = () => …` parses and stores the function as the derived value", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "derived-arrow-rhs",
+      `
+        derived y = () => 7;
+        console.log(typeof y.get(), y.get()());
+      `,
+    );
+    expect(stdout).toBe("function 7");
+    expect(exitCode).toBe(0);
+  });
+
+  it("`signal NAME = function() {…}` (function expression RHS) parses too", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "signal-fn-expr-rhs",
+      `
+        signal x = function () { return 99; };
+        console.log(x.get()());
+      `,
+    );
+    expect(stdout).toBe("99");
+    expect(exitCode).toBe(0);
+  });
+
+  it("multi-decl with arrow RHS in every slot — exercises per-decl scope-loc bumping", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "multi-decl-arrows",
+      `
+        signal  a = () => 1, b = () => 2;
+        derived c = () => 3, d = () => 4;
+        console.log(a.get()(), b.get()(), c.get()(), d.get()());
+      `,
+    );
+    expect(stdout).toBe("1 2 3 4");
+    expect(exitCode).toBe(0);
+  });
+
+  it("arrow RHS with parameters (`(n, m) => n + m`) survives the wrapper too", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "derived-arrow-params-rhs",
+      `
+        derived add = (n, m) => n + m;
+        console.log(add.get()(3, 4));
+      `,
+    );
+    expect(stdout).toBe("7");
+    expect(exitCode).toBe(0);
+  });
+
+  it("nested arrow inside a normal-looking RHS still works", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "signal-iife-rhs",
+      `
+        signal x = (() => 42)();
+        console.log(x);
+      `,
+    );
+    expect(stdout).toBe("42");
+    expect(exitCode).toBe(0);
+  });
+});

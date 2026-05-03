@@ -1586,12 +1586,24 @@ pub fn ParseStmt(
 
                 var value: ?Expr = null;
                 if (p.lexer.token == .t_equals) {
+                    // Anchor the wrapper-arrow scopes to `equals_loc - 1` and
+                    // `equals_loc`. These are the only locs we can use that
+                    // are STRICTLY between the previous decl's RHS (which has
+                    // already pushed inner scopes at locs after its source
+                    // span) and the current decl's RHS (which will push at
+                    // locs > the equals sign once parseExpr advances).
+                    //
+                    // The previous attempt — `p.lexer.loc()` (= start of RHS)
+                    // — collides with inner-arrow args scopes for
+                    // `signal x = () => …;`. The synthetic-loc-from-keyword
+                    // attempt (`signal_range.loc + decl_index*2`) fails for
+                    // multi-decl because decl N+1's synthetic loc lands BEFORE
+                    // decl N's already-pushed inner scopes, breaking the
+                    // monotonic-scopes_in_order invariant.
+                    const equals_loc = p.lexer.loc();
                     try p.lexer.next();
-                    // Arrow and body need distinct, strictly-increasing locs
-                    // so the scopes_in_order assertion holds (and so multiple
-                    // decls in one signal stmt don't collide).
-                    const arrow_loc = p.lexer.loc();
-                    const body_loc = logger.Loc{ .start = arrow_loc.start + 1 };
+                    const arrow_loc = logger.Loc{ .start = equals_loc.start - 1 };
+                    const body_loc = equals_loc;
 
                     _ = p.pushScopeForParsePass(.function_args, arrow_loc) catch bun.outOfMemory();
                     _ = p.pushScopeForParsePass(.function_body, body_loc) catch bun.outOfMemory();

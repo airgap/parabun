@@ -106,3 +106,51 @@ describe("derived NAME = EXPR — does not interfere with `derived` identifier",
     expect(out).toContain('import { signal, derived } from "para:signals"');
   });
 });
+
+// Regression — pair to test/bundler/transpiler/parabun-derived-keyword.test.js's
+// "arrow-as-RHS regression" block. The Zig parser was crashing on these
+// shapes due to a scope-loc collision; @para/transpile already lowered them
+// correctly, so these tests pin the lowering shape so we don't drift away
+// from parity once the Zig fix lands.
+describe("arrow / function expression as RHS — parity with the Zig parser", () => {
+  test("`signal NAME = () => …` keeps the arrow as the cell value (no extra wrap)", () => {
+    const out = transpile(`signal x = () => 5;`);
+    expect(out).toContain(`require("para:signals").signal(`);
+    // Exactly one arrow lambda — the user's, passed straight to signal().
+    expect(out).toMatch(/signal\(\(\)\s*=>\s*5\)/);
+  });
+
+  test("`derived NAME = () => …` wraps with a synthetic outer thunk (function-as-value)", () => {
+    const out = transpile(`derived y = () => 7;`);
+    expect(out).toContain(`require("para:signals").derived(`);
+    // Two arrows: outer thunk + the user's arrow as its return value.
+    expect(out).toMatch(/derived\(\(\)\s*=>\s*\(\)\s*=>\s*7\)/);
+  });
+
+  test("`signal NAME = function() {…}` (function expression) lowers without crash", () => {
+    const out = transpile(`signal x = function () { return 99; };`);
+    expect(out).toContain(`require("para:signals").signal(`);
+    expect(out).toContain("function");
+    expect(out).toContain("return 99");
+  });
+
+  test("separate single-decl statements with arrow RHS each", () => {
+    // Multi-decl on a single statement (`signal a = …, b = …;`) is a
+    // Zig-parser-only feature today — @para/transpile's regex-based
+    // splitter doesn't recognize top-level commas as decl separators, so
+    // it treats `1, b = () => 2` as one comma-expression initializer.
+    // The Zig parser's `parabun-derived-keyword.test.js` covers the
+    // multi-decl shape end-to-end. Until the splitter is taught about
+    // commas, parity here only holds for one decl per statement.
+    const out = transpile(`signal a = () => 1;\nsignal b = () => 2;\nderived c = () => 3;\nderived d = () => 4;`);
+    expect(out).toMatch(/const a = require\("para:signals"\)\.signal\(\(\)\s*=>\s*1\)/);
+    expect(out).toMatch(/const b = require\("para:signals"\)\.signal\(\(\)\s*=>\s*2\)/);
+    expect(out).toMatch(/const c = require\("para:signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*3\)/);
+    expect(out).toMatch(/const d = require\("para:signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*4\)/);
+  });
+
+  test("arrow with parameters as RHS", () => {
+    const out = transpile(`derived add = (n, m) => n + m;`);
+    expect(out).toMatch(/derived\(\(\)\s*=>\s*\(n,\s*m\)\s*=>\s*n\s*\+\s*m\)/);
+  });
+});
