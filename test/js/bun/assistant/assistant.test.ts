@@ -97,4 +97,26 @@ describe("parabun:assistant", () => {
     },
     60000,
   );
+
+  test.skipIf(!haveLLM)(
+    "alive starts true; flips false on close(); use(fn) auto-tears-down; [Symbol.dispose] callable",
+    async () => {
+      const assistant = (await import("parabun:assistant")).default;
+      const bot = await assistant.create({ llm: llmFixture! });
+      try {
+        expect(bot.alive.get()).toBe(true);
+        let runs = 0;
+        bot.use(() => {
+          runs++;
+          bot.state.get();
+        });
+        expect(runs).toBe(1);
+        expect(typeof bot[Symbol.dispose]).toBe("function");
+      } finally {
+        await bot.close();
+      }
+      expect(bot.alive.get()).toBe(false);
+    },
+    60000,
+  );
 });

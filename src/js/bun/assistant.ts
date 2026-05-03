@@ -825,6 +825,11 @@ class Assistant {
   #lastTurn: WritableSignal<Turn | null>;
   #history: WritableSignal<Message[]>;
   #interrupted: WritableSignal<boolean>;
+  // Lifetime signal — true from create() until close()/[Symbol.dispose].
+  // Distinct from `state` (which is the conversational state machine).
+  // Effects bound via use() auto-tear-down when this flips false.
+  #alive: WritableSignal<boolean>;
+  #boundEffects: Array<() => void> = [];
 
   // ─── Composed resources ───
   #llm: any | null = null; // parabun:llm LLM instance
@@ -895,6 +900,20 @@ class Assistant {
   }
   get interrupted(): Signal<boolean> {
     return this.#interrupted;
+  }
+  get alive(): Signal<boolean> {
+    return this.#alive;
+  }
+
+  /**
+   * Run an effect bound to the bot's lifetime. Behaves like
+   * `signals.effect(fn)` but is automatically disposed when the bot
+   * closes — no defensive `if (alive.get())` guards needed.
+   */
+  use(fn: () => void | (() => void)): () => void {
+    const stop = signalsMod.effect(fn);
+    this.#boundEffects.push(stop);
+    return stop;
   }
 
   /** Underlying LLM instance — for advanced use, e.g. reading m.busy or m.device. */
@@ -979,6 +998,7 @@ class Assistant {
     this.#lastTurn = signalsMod.signal<Turn | null>(null);
     this.#history = signalsMod.signal<Message[]>([]);
     this.#interrupted = signalsMod.signal(false);
+    this.#alive = signalsMod.signal(true);
     this.#toolsActive = signalsMod.signal<Set<string>>(new Set());
     this.#micOpts = opts.mic;
     this.#speakerOpts = opts.speaker;
@@ -1644,10 +1664,27 @@ class Assistant {
       } catch {}
       this.#knowledge = null;
     }
+    if (this.#alive.peek()) {
+      this.#alive.set(false);
+      while (this.#boundEffects.length > 0) {
+        const stop = this.#boundEffects.pop()!;
+        try {
+          stop();
+        } catch {}
+      }
+    }
   }
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
+  }
+
+  [Symbol.dispose](): void {
+    // Sync dispose: kicks off the async close() but doesn't await it.
+    // The bot's individual resources (mic / spk / llm / memory / knowledge)
+    // already have their own [Symbol.dispose] paths from prior commits;
+    // this surface exists so callers can `using bot = ...` without `await`.
+    void this.close();
   }
 }
 
