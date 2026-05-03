@@ -2,7 +2,7 @@
   "name": "@para/csv",
   "version": "0.0.0-dev",
   "private": true,
-  "description": "Streaming RFC 4180 CSV parser. Async iterator over rows; quoted fields; custom record separators. Optional parallel mode (off the main thread) backed by @para/parallel. NOT YET RELEASED — private:true / 0.0.0-dev pending the workspace split.",
+  "description": "Streaming RFC 4180 CSV parser + writer. Row-objects iterator (parseCsv / stringify), columnar TypedArray output (parseColumns / parseBatches), single-pass aggregates (reduceColumns). BOM, comments, trim, skipEmptyLines, custom escape. Optional off-main-thread mode via @para/parallel. NOT YET RELEASED — private:true / 0.0.0-dev pending the workspace split.",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",

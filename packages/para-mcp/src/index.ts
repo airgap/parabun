@@ -40,6 +40,46 @@ type ToolCallResult = {
   isError?: boolean;
 };
 
+type ResourceDescriptor = {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+};
+
+type ResourceContent = {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+};
+
+type ReadResourceResult = {
+  contents: ResourceContent[];
+};
+
+type PromptArgumentDescriptor = {
+  name: string;
+  description?: string;
+  required?: boolean;
+};
+
+type PromptDescriptor = {
+  name: string;
+  description?: string;
+  arguments?: PromptArgumentDescriptor[];
+};
+
+type PromptMessage = {
+  role: "user" | "assistant" | "system";
+  content: ToolContent;
+};
+
+type GetPromptResult = {
+  description?: string;
+  messages: PromptMessage[];
+};
+
 type StdioConnectOpts = {
   args?: string[];
   env?: Record<string, string>;
@@ -83,14 +123,21 @@ class MCPError extends Error {
 
 // ─── MCPConnection ─────────────────────────────────────────────────────────
 
+type NotificationListener = (params: any) => void;
+
 class MCPConnection {
   #transport: Transport;
   #pending = new Map<JsonRpcId, { resolve: (v: any) => void; reject: (e: any) => void }>();
   #nextId = 1;
   #closed = false;
+  // Notification subscribers keyed by method name. Server notifications
+  // (no `id`, no response expected) fan out to every listener.
+  #notificationListeners = new Map<string, Set<NotificationListener>>();
 
   // Populated by initialize().
   tools: ToolDescriptor[] = [];
+  resources: ResourceDescriptor[] = [];
+  prompts: PromptDescriptor[] = [];
   serverInfo: { name?: string; version?: string } | null = null;
   protocolVersion: string | null = null;
   /** Capabilities advertised by the server. */
@@ -127,15 +174,55 @@ class MCPConnection {
 
   #dispatch(msg: any): void {
     if (!msg || typeof msg !== "object") return;
-    // Response (has id + result/error). Notifications from server (no id)
-    // are intentionally ignored in v1 — there's no listener API yet.
+    // Response (has id + result/error).
     if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
       const pending = this.#pending.get(msg.id);
       if (!pending) return;
       this.#pending.delete(msg.id);
       if (msg.error) pending.reject(new MCPError(msg.error));
       else pending.resolve(msg.result);
+      return;
     }
+    // Server notification (method, no id). Built-in handling for the
+    // list-changed events refreshes the cached catalog; anything
+    // subscribed via `on(method, …)` runs after that.
+    if (msg.id === undefined && typeof msg.method === "string") {
+      const method: string = msg.method;
+      if (method === "notifications/tools/list_changed") {
+        this.refreshTools().catch(() => {});
+      } else if (method === "notifications/resources/list_changed") {
+        this.refreshResources().catch(() => {});
+      } else if (method === "notifications/prompts/list_changed") {
+        this.refreshPrompts().catch(() => {});
+      }
+      const listeners = this.#notificationListeners.get(method);
+      if (listeners)
+        for (const cb of listeners) {
+          try {
+            cb(msg.params);
+          } catch {}
+        }
+    }
+  }
+
+  /**
+   * Subscribe to a server-emitted notification (e.g.
+   * `"notifications/resources/updated"`). Returns an unsubscribe
+   * function. Built-in `notifications/{tools,resources,prompts}/list_changed`
+   * events still automatically refresh the cached catalog regardless
+   * of any listener.
+   */
+  on(method: string, cb: NotificationListener): () => void {
+    let set = this.#notificationListeners.get(method);
+    if (!set) {
+      set = new Set();
+      this.#notificationListeners.set(method, set);
+    }
+    set.add(cb);
+    return () => {
+      set!.delete(cb);
+      if (set!.size === 0) this.#notificationListeners.delete(method);
+    };
   }
 
   #onTransportClose(err?: Error): void {
@@ -158,7 +245,10 @@ class MCPConnection {
       serverInfo?: { name: string; version: string };
     }>("initialize", {
       protocolVersion: opts.protocolVersion ?? DEFAULT_PROTOCOL_VERSION,
-      capabilities: { tools: {} },
+      // Advertise interest in every catalog the spec defines. The server
+      // chooses which it actually exposes via its own `capabilities`; we
+      // skip prefetching the surfaces it doesn't claim.
+      capabilities: { tools: {}, resources: {}, prompts: {} },
       clientInfo: opts.clientInfo ?? DEFAULT_CLIENT_INFO,
     });
     this.protocolVersion = init.protocolVersion;
@@ -170,24 +260,18 @@ class MCPConnection {
     // until it arrives.
     this.#notify("notifications/initialized");
 
-    // Pull the tool catalog up front. If the server doesn't expose tools,
-    // leave the list empty.
-    const toolsAdvertised = "tools" in this.serverCapabilities;
-    if (toolsAdvertised) {
-      try {
-        const list = await this.#request<{ tools?: ToolDescriptor[] }>("tools/list");
-        this.tools = list?.tools ?? [];
-      } catch {
-        this.tools = [];
-      }
-    }
+    // Prefetch each catalog the server advertises. Errors fall back to
+    // an empty cache rather than failing the whole initialize.
+    const advertised = (cap: string) => cap in this.serverCapabilities;
+    await Promise.all([
+      advertised("tools") ? this.refreshTools().catch(() => []) : Promise.resolve([]),
+      advertised("resources") ? this.refreshResources().catch(() => []) : Promise.resolve([]),
+      advertised("prompts") ? this.refreshPrompts().catch(() => []) : Promise.resolve([]),
+    ]);
   }
 
-  /**
-   * Refreshes the cached tool list. Servers that change their tool surface
-   * at runtime emit `notifications/tools/list_changed`; v1 doesn't subscribe
-   * to those, so callers can call this manually when they expect change.
-   */
+  // ─── Tools surface ───────────────────────────────────────────────────
+
   async refreshTools(): Promise<ToolDescriptor[]> {
     const list = await this.#request<{ tools?: ToolDescriptor[] }>("tools/list");
     this.tools = list?.tools ?? [];
@@ -195,14 +279,64 @@ class MCPConnection {
   }
 
   /**
-   * Invoke a tool by name with arguments. Returns the server's
-   * `ToolCallResult` shape — `{ content: ToolContent[], isError? }`.
+   * Invoke a tool by name. Returns the server's `ToolCallResult` shape.
    */
   async call(name: string, args: Record<string, unknown> = {}): Promise<ToolCallResult> {
     if (typeof name !== "string" || !name) {
       throw new TypeError("para:mcp: tool name must be a non-empty string");
     }
     return this.#request<ToolCallResult>("tools/call", { name, arguments: args });
+  }
+
+  // ─── Resources surface ───────────────────────────────────────────────
+
+  async refreshResources(): Promise<ResourceDescriptor[]> {
+    const list = await this.#request<{ resources?: ResourceDescriptor[] }>("resources/list");
+    this.resources = list?.resources ?? [];
+    return this.resources;
+  }
+
+  /**
+   * Read a resource by URI. Returns the server's `ReadResourceResult`
+   * — `{ contents: [{ uri, text? | blob?, mimeType? }, …] }`.
+   */
+  async readResource(uri: string): Promise<ReadResourceResult> {
+    if (typeof uri !== "string" || !uri) {
+      throw new TypeError("para:mcp: resource uri must be a non-empty string");
+    }
+    return this.#request<ReadResourceResult>("resources/read", { uri });
+  }
+
+  /**
+   * Subscribe to change notifications for a single resource URI. The
+   * server responds with `notifications/resources/updated` events;
+   * subscribe via `on("notifications/resources/updated", cb)` to
+   * receive them. Returns an unsubscribe function.
+   */
+  async subscribeResource(uri: string): Promise<() => Promise<void>> {
+    await this.#request("resources/subscribe", { uri });
+    return async () => {
+      await this.#request("resources/unsubscribe", { uri }).catch(() => {});
+    };
+  }
+
+  // ─── Prompts surface ─────────────────────────────────────────────────
+
+  async refreshPrompts(): Promise<PromptDescriptor[]> {
+    const list = await this.#request<{ prompts?: PromptDescriptor[] }>("prompts/list");
+    this.prompts = list?.prompts ?? [];
+    return this.prompts;
+  }
+
+  /**
+   * Render a prompt by name with arguments. Returns the server's
+   * `GetPromptResult` shape — `{ description?, messages: PromptMessage[] }`.
+   */
+  async getPrompt(name: string, args: Record<string, string> = {}): Promise<GetPromptResult> {
+    if (typeof name !== "string" || !name) {
+      throw new TypeError("para:mcp: prompt name must be a non-empty string");
+    }
+    return this.#request<GetPromptResult>("prompts/get", { name, arguments: args });
   }
 
   async close(): Promise<void> {
@@ -398,7 +532,284 @@ async function connect(
   return conn;
 }
 
+// ─── Server side ───────────────────────────────────────────────────────────
+//
+// The MCP spec is a symmetric JSON-RPC; the server side handles the
+// `initialize` handshake and routes inbound `tools/list`, `tools/call`,
+// `resources/list`, `resources/read`, `resources/subscribe`,
+// `prompts/list`, `prompts/get` requests to user-registered handlers.
+//
+// Surface:
+//
+//   const server = mcp.serve({ name: "weather", version: "0.1.0" });
+//   server.tool("get_temp", { description, inputSchema }, async args => ({
+//     content: [{ type: "text", text: `${args.location}: 72°F` }],
+//   }));
+//   server.resource("weather://current", { name, mimeType: "application/json" },
+//     async () => ({ contents: [{ uri: "weather://current", text: "{...}" }] }));
+//   server.prompt("forecast", { description }, async args => ({
+//     messages: [{ role: "user", content: { type: "text", text: "…" } }],
+//   }));
+//   await server.listen("stdio"); // resolves when the transport closes.
+//
+// The server is JSON-RPC literal — handlers throw `MCPError` (or any
+// Error; non-MCPError gets wrapped as code -32603) to surface a JSON-RPC
+// error to the caller.
+
+type ToolHandler = (args: Record<string, unknown>) => ToolCallResult | Promise<ToolCallResult>;
+type ResourceHandler = (uri: string) => ReadResourceResult | Promise<ReadResourceResult>;
+type PromptHandler = (args: Record<string, string>) => GetPromptResult | Promise<GetPromptResult>;
+
+type ServerOpts = {
+  name: string;
+  version?: string;
+  /** Server's protocol version sent in the initialize response. */
+  protocolVersion?: string;
+};
+
+class MCPServer {
+  #opts: ServerOpts;
+  #tools = new Map<string, { descriptor: ToolDescriptor; handler: ToolHandler }>();
+  #resources = new Map<string, { descriptor: ResourceDescriptor; handler: ResourceHandler }>();
+  #prompts = new Map<string, { descriptor: PromptDescriptor; handler: PromptHandler }>();
+  #transport: Transport | null = null;
+  #initialized = false;
+  #closed = false;
+  #closedPromise: Promise<void> | null = null;
+  #closedResolve: (() => void) | null = null;
+
+  constructor(opts: ServerOpts) {
+    if (!opts || typeof opts.name !== "string" || !opts.name) {
+      throw new TypeError("para:mcp: serve() requires { name, version? }");
+    }
+    this.#opts = { name: opts.name, version: opts.version ?? "0.1.0", protocolVersion: opts.protocolVersion };
+  }
+
+  /**
+   * Register a tool. The handler receives the raw arguments object and
+   * returns a `ToolCallResult` (or a Promise of one).
+   */
+  tool(name: string, descriptor: Omit<ToolDescriptor, "name">, handler: ToolHandler): this {
+    if (this.#tools.has(name)) throw new Error(`para:mcp: tool "${name}" already registered`);
+    this.#tools.set(name, { descriptor: { name, ...descriptor }, handler });
+    if (this.#initialized) this.#notifyListChanged("tools");
+    return this;
+  }
+
+  /**
+   * Register a resource by URI. The handler is called when the client
+   * issues `resources/read` for this URI; it must return the resource
+   * contents in the `ReadResourceResult` shape.
+   */
+  resource(uri: string, descriptor: Omit<ResourceDescriptor, "uri">, handler: ResourceHandler): this {
+    if (this.#resources.has(uri)) throw new Error(`para:mcp: resource "${uri}" already registered`);
+    this.#resources.set(uri, { descriptor: { uri, ...descriptor }, handler });
+    if (this.#initialized) this.#notifyListChanged("resources");
+    return this;
+  }
+
+  /**
+   * Register a prompt. The handler receives the rendered argument map
+   * and returns a `GetPromptResult`.
+   */
+  prompt(name: string, descriptor: Omit<PromptDescriptor, "name">, handler: PromptHandler): this {
+    if (this.#prompts.has(name)) throw new Error(`para:mcp: prompt "${name}" already registered`);
+    this.#prompts.set(name, { descriptor: { name, ...descriptor }, handler });
+    if (this.#initialized) this.#notifyListChanged("prompts");
+    return this;
+  }
+
+  /**
+   * Push a `notifications/resources/updated` event to the client. Use
+   * after the data behind a registered resource has changed.
+   */
+  notifyResourceUpdated(uri: string): void {
+    this.#send({ jsonrpc: "2.0", method: "notifications/resources/updated", params: { uri } });
+  }
+
+  #notifyListChanged(catalog: "tools" | "resources" | "prompts"): void {
+    this.#send({ jsonrpc: "2.0", method: `notifications/${catalog}/list_changed` });
+  }
+
+  /**
+   * Start serving on the given transport. For `"stdio"` the server
+   * reads JSON-RPC frames from stdin and writes them to stdout.
+   * Returns a Promise that resolves when the transport closes.
+   */
+  async listen(transportKind: "stdio" | Transport): Promise<void> {
+    if (this.#transport) throw new Error("para:mcp: server is already listening");
+    const t = transportKind === "stdio" ? makeStdioServerTransport() : transportKind;
+    this.#transport = t;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#closedPromise = promise;
+    this.#closedResolve = resolve;
+    t.onMessage(msg => this.#dispatch(msg));
+    t.onClose(() => {
+      if (this.#closed) return;
+      this.#closed = true;
+      this.#closedResolve?.();
+    });
+    return promise;
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    try {
+      await this.#transport?.close();
+    } catch {}
+    this.#closedResolve?.();
+  }
+
+  #send(msg: object): void {
+    if (this.#closed || !this.#transport) return;
+    try {
+      this.#transport.send(msg);
+    } catch {
+      // Best-effort write; if the transport collapses the close handler runs.
+    }
+  }
+
+  #dispatch(msg: any): void {
+    if (!msg || typeof msg !== "object") return;
+    // Notifications from the client (no id, no response).
+    if (msg.id === undefined && typeof msg.method === "string") {
+      if (msg.method === "notifications/initialized") this.#initialized = true;
+      return;
+    }
+    if (msg.id === undefined || typeof msg.method !== "string") return;
+    this.#handleRequest(msg).catch(err => {
+      this.#send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: {
+          code: err instanceof MCPError ? err.code : -32603,
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+    });
+  }
+
+  async #handleRequest(msg: { id: JsonRpcId; method: string; params?: any }): Promise<void> {
+    const { id, method, params } = msg;
+    let result: unknown;
+    switch (method) {
+      case "initialize":
+        result = {
+          protocolVersion: this.#opts.protocolVersion ?? DEFAULT_PROTOCOL_VERSION,
+          capabilities: {
+            ...(this.#tools.size > 0 ? { tools: { listChanged: true } } : {}),
+            ...(this.#resources.size > 0 ? { resources: { listChanged: true, subscribe: true } } : {}),
+            ...(this.#prompts.size > 0 ? { prompts: { listChanged: true } } : {}),
+          },
+          serverInfo: { name: this.#opts.name, version: this.#opts.version ?? "0.1.0" },
+        };
+        break;
+      case "tools/list":
+        result = { tools: [...this.#tools.values()].map(t => t.descriptor) };
+        break;
+      case "tools/call": {
+        const name = params?.name;
+        const entry = this.#tools.get(name);
+        if (!entry) throw new MCPError({ code: -32602, message: `unknown tool: ${name}` });
+        result = await entry.handler(params?.arguments ?? {});
+        break;
+      }
+      case "resources/list":
+        result = { resources: [...this.#resources.values()].map(r => r.descriptor) };
+        break;
+      case "resources/read": {
+        const uri = params?.uri;
+        const entry = this.#resources.get(uri);
+        if (!entry) throw new MCPError({ code: -32602, message: `unknown resource: ${uri}` });
+        result = await entry.handler(uri);
+        break;
+      }
+      case "resources/subscribe":
+      case "resources/unsubscribe":
+        // Subscriptions are tracked client-side only in v1; the server
+        // simply accepts them and pushes `notifications/resources/updated`
+        // unconditionally when the user calls notifyResourceUpdated().
+        result = {};
+        break;
+      case "prompts/list":
+        result = { prompts: [...this.#prompts.values()].map(p => p.descriptor) };
+        break;
+      case "prompts/get": {
+        const name = params?.name;
+        const entry = this.#prompts.get(name);
+        if (!entry) throw new MCPError({ code: -32602, message: `unknown prompt: ${name}` });
+        result = await entry.handler(params?.arguments ?? {});
+        break;
+      }
+      default:
+        throw new MCPError({ code: -32601, message: `method not found: ${method}` });
+    }
+    this.#send({ jsonrpc: "2.0", id, result });
+  }
+}
+
+// ─── Server-side stdio transport ───────────────────────────────────────────
+
+function makeStdioServerTransport(): Transport {
+  let onMessage: ((msg: any) => void) | null = null;
+  let onClose: ((err?: Error) => void) | null = null;
+  let buffer = "";
+  let closed = false;
+
+  process.stdin.setEncoding("utf8");
+  const onData = (chunk: string) => {
+    buffer += chunk;
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      if (!line.trim()) continue;
+      let msg: unknown;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      onMessage?.(msg);
+    }
+  };
+  const onEnd = () => {
+    if (closed) return;
+    closed = true;
+    onClose?.();
+  };
+  process.stdin.on("data", onData);
+  process.stdin.on("end", onEnd);
+
+  return {
+    send(msg) {
+      if (closed) throw new Error("para:mcp: server stdio transport is closed");
+      process.stdout.write(JSON.stringify(msg) + "\n");
+    },
+    onMessage(cb) {
+      onMessage = cb;
+    },
+    onClose(cb) {
+      onClose = cb;
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      try {
+        process.stdin.off("data", onData);
+        process.stdin.off("end", onEnd);
+      } catch {}
+    },
+  };
+}
+
+function serve(opts: ServerOpts): MCPServer {
+  return new MCPServer(opts);
+}
+
 export default {
   connect,
+  serve,
   MCPError,
 };

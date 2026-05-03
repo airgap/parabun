@@ -389,6 +389,415 @@ async function toFloat64Array(source: Source<number> | FArray | FusedChain): Pro
   return new Float64Array(buf);
 }
 
+// ─── More combinators (parity with IxJS / RxJS surface) ───────────────────
+
+function scan<T, A>(fn: (acc: A, x: T, i: number) => A | Promise<A>, init: A): Transform<T, A> {
+  return async function* (source: Source<T>): Stream<A> {
+    let acc = init;
+    let i = 0;
+    for await (const x of source) {
+      acc = await fn(acc, x, i++);
+      yield acc;
+    }
+  };
+}
+
+function distinct<T>(keyFn?: (x: T) => unknown): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    const seen = new Set<unknown>();
+    for await (const x of source) {
+      const k = keyFn ? keyFn(x) : x;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      yield x;
+    }
+  };
+}
+
+function distinctUntilChanged<T>(eqFn?: (a: T, b: T) => boolean): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    let primed = false;
+    let prev: T;
+    for await (const x of source) {
+      if (!primed) {
+        prev = x;
+        primed = true;
+        yield x;
+        continue;
+      }
+      const same = eqFn ? eqFn(prev!, x) : prev! === x;
+      if (!same) {
+        prev = x;
+        yield x;
+      }
+    }
+  };
+}
+
+function pairwise<T>(): Transform<T, [T, T]> {
+  return async function* (source: Source<T>): Stream<[T, T]> {
+    let primed = false;
+    let prev: T;
+    for await (const x of source) {
+      if (!primed) {
+        prev = x;
+        primed = true;
+        continue;
+      }
+      yield [prev!, x];
+      prev = x;
+    }
+  };
+}
+
+// Sliding window of `size`, advancing by `step` (default 1). Partial
+// windows at end-of-stream are not emitted (matches IxJS bufferCount
+// without the `every` partial-flush).
+function windowed<T>(size: number, step: number = 1): Transform<T, T[]> {
+  if (size <= 0) throw new RangeError("windowed: size must be > 0");
+  if (step <= 0) throw new RangeError("windowed: step must be > 0");
+  return async function* (source: Source<T>): Stream<T[]> {
+    const buf: T[] = [];
+    let skip = 0;
+    for await (const x of source) {
+      if (skip > 0) {
+        skip--;
+        continue;
+      }
+      buf.push(x);
+      if (buf.length === size) {
+        yield buf.slice();
+        if (step >= size) {
+          buf.length = 0;
+          skip = step - size;
+        } else {
+          buf.splice(0, step);
+        }
+      }
+    }
+  };
+}
+
+function enumerate<T>(): Transform<T, [number, T]> {
+  return async function* (source: Source<T>): Stream<[number, T]> {
+    let i = 0;
+    for await (const x of source) yield [i++, x];
+  };
+}
+
+function catchError<T>(handler: (err: unknown) => Source<T> | T | void): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    try {
+      for await (const x of source) yield x;
+    } catch (err) {
+      const recovery = handler(err);
+      if (recovery === undefined) return;
+      if (
+        recovery != null &&
+        (typeof (recovery as any)[Symbol.asyncIterator] === "function" ||
+          typeof (recovery as any)[Symbol.iterator] === "function")
+      ) {
+        for await (const x of recovery as Source<T>) yield x;
+      } else {
+        yield recovery as T;
+      }
+    }
+  };
+}
+
+// Retries `times` times — each retry restarts the source iterator from
+// scratch, so the source must be a sync iterable or a factory the
+// caller wraps. Stateful AsyncGenerators consumed once won't replay.
+function retry<T>(times: number = 1): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    let attempts = 0;
+    while (true) {
+      try {
+        for await (const x of source) yield x;
+        return;
+      } catch (err) {
+        if (attempts++ >= times) throw err;
+      }
+    }
+  };
+}
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+function delay<T>(ms: number): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    for await (const x of source) {
+      await sleep(ms);
+      yield x;
+    }
+  };
+}
+
+// debounce: only yields a value when no new value has arrived for `ms`.
+// Maintains exactly one in-flight `it.next()` at a time and races it
+// against the silence timer.
+function debounce<T>(ms: number): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    const it = (source as any)[Symbol.asyncIterator]
+      ? (source as AsyncIterable<T>)[Symbol.asyncIterator]()
+      : ({
+          next: () => Promise.resolve((source as Iterable<T>)[Symbol.iterator]().next()),
+        } as AsyncIterator<T>);
+
+    let nextPromise: Promise<IteratorResult<T>> = it.next();
+    let last: T | undefined;
+    let pending = false;
+
+    while (true) {
+      if (!pending) {
+        // Wait for a value to arrive — there's nothing to race yet.
+        const r = await nextPromise;
+        if (r.done) return;
+        last = r.value;
+        pending = true;
+        nextPromise = it.next();
+        continue;
+      }
+      const winner: any = await Promise.race([
+        nextPromise.then((r: any) => ({ kind: "next" as const, r })),
+        sleep(ms).then(() => ({ kind: "tick" as const })),
+      ]);
+      if (winner.kind === "tick") {
+        yield last as T;
+        pending = false;
+        // nextPromise stays in flight; the top-of-loop await consumes it.
+      } else {
+        if (winner.r.done) {
+          yield last as T;
+          return;
+        }
+        last = winner.r.value;
+        nextPromise = it.next();
+        // pending stays true — fresh silence window starts now.
+      }
+    }
+  };
+}
+
+// throttle: emit at most once per `ms` window. Drops intermediate
+// values; emits the first one immediately and then opens a new window.
+function throttle<T>(ms: number): Transform<T, T> {
+  return async function* (source: Source<T>): Stream<T> {
+    let nextAllowed = 0;
+    for await (const x of source) {
+      const now = Date.now();
+      if (now >= nextAllowed) {
+        nextAllowed = now + ms;
+        yield x;
+      }
+    }
+  };
+}
+
+// ─── Terminals ────────────────────────────────────────────────────────────
+
+// All "selector" terminals are curried: `first(pred)(source)` (pred
+// optional; without one, returns the first item). Same shape as the
+// existing `reduce` / `forEach` terminals so the `|>` chain is uniform.
+function first<T>(pred?: (x: T) => boolean | Promise<boolean>) {
+  return async function (source: Source<T>): Promise<T | undefined> {
+    for await (const x of source) {
+      if (!pred || (await pred(x))) return x;
+    }
+    return undefined;
+  };
+}
+
+function last<T>(pred?: (x: T) => boolean | Promise<boolean>) {
+  return async function (source: Source<T>): Promise<T | undefined> {
+    let result: T | undefined;
+    for await (const x of source) {
+      if (!pred || (await pred(x))) result = x;
+    }
+    return result;
+  };
+}
+
+function find<T>(pred: (x: T) => boolean | Promise<boolean>) {
+  return first(pred);
+}
+
+function min<T>(keyFn?: (x: T) => number) {
+  return async function (source: Source<T>): Promise<T | undefined> {
+    let best: T | undefined;
+    let bestKey = Infinity;
+    let primed = false;
+    for await (const x of source) {
+      const k = keyFn ? keyFn(x) : (x as unknown as number);
+      if (!primed || k < bestKey) {
+        best = x;
+        bestKey = k;
+        primed = true;
+      }
+    }
+    return best;
+  };
+}
+
+function max<T>(keyFn?: (x: T) => number) {
+  return async function (source: Source<T>): Promise<T | undefined> {
+    let best: T | undefined;
+    let bestKey = -Infinity;
+    let primed = false;
+    for await (const x of source) {
+      const k = keyFn ? keyFn(x) : (x as unknown as number);
+      if (!primed || k > bestKey) {
+        best = x;
+        bestKey = k;
+        primed = true;
+      }
+    }
+    return best;
+  };
+}
+
+function every<T>(pred: (x: T) => boolean | Promise<boolean>) {
+  return async function (source: Source<T>): Promise<boolean> {
+    for await (const x of source) {
+      if (!(await pred(x))) return false;
+    }
+    return true;
+  };
+}
+
+function some<T>(pred: (x: T) => boolean | Promise<boolean>) {
+  return async function (source: Source<T>): Promise<boolean> {
+    for await (const x of source) {
+      if (await pred(x)) return true;
+    }
+    return false;
+  };
+}
+
+function toMap<T, K, V = T>(keyFn: (x: T) => K, valueFn?: (x: T) => V) {
+  return async function (source: Source<T>): Promise<Map<K, V>> {
+    const m = new Map<K, V>();
+    for await (const x of source) {
+      m.set(keyFn(x), valueFn ? valueFn(x) : (x as unknown as V));
+    }
+    return m;
+  };
+}
+
+async function toSet<T>(source: Source<T>): Promise<Set<T>> {
+  const s = new Set<T>();
+  for await (const x of source) s.add(x);
+  return s;
+}
+
+function groupBy<T, K>(keyFn: (x: T) => K) {
+  return async function (source: Source<T>): Promise<Map<K, T[]>> {
+    const m = new Map<K, T[]>();
+    for await (const x of source) {
+      const k = keyFn(x);
+      const bucket = m.get(k);
+      if (bucket) bucket.push(x);
+      else m.set(k, [x]);
+    }
+    return m;
+  };
+}
+
+function partition<T>(pred: (x: T) => boolean | Promise<boolean>) {
+  return async function (source: Source<T>): Promise<[T[], T[]]> {
+    const yes: T[] = [];
+    const no: T[] = [];
+    for await (const x of source) {
+      if (await pred(x)) yes.push(x);
+      else no.push(x);
+    }
+    return [yes, no];
+  };
+}
+
+// ─── Sources / multi-source combinators ──────────────────────────────────
+
+function of<T>(...values: T[]): Iterable<T> {
+  return values;
+}
+
+function from<T>(source: Source<T>): Source<T> {
+  return source;
+}
+
+function empty<T>(): Iterable<T> {
+  return [];
+}
+
+async function* concat<T>(...sources: Array<Source<T>>): Stream<T> {
+  for (const s of sources) {
+    for await (const x of s) yield x;
+  }
+}
+
+// merge: race-style interleaving across multiple async sources.
+async function* merge<T>(...sources: Array<Source<T>>): Stream<T> {
+  type Wrapped = {
+    it: AsyncIterator<T>;
+    index: number;
+    pending: Promise<{ index: number; result: IteratorResult<T> }>;
+  };
+  const iterators = sources.map(s => {
+    if ((s as any)[Symbol.asyncIterator]) return (s as AsyncIterable<T>)[Symbol.asyncIterator]();
+    const it = (s as Iterable<T>)[Symbol.iterator]();
+    return {
+      next: () => Promise.resolve(it.next()),
+    } as AsyncIterator<T>;
+  });
+  const wrap = (it: AsyncIterator<T>, index: number): Wrapped => ({
+    it,
+    index,
+    pending: it.next().then(result => ({ index, result })),
+  });
+  const live: Array<Wrapped | null> = iterators.map((it, i) => wrap(it, i));
+  let alive = live.length;
+  while (alive > 0) {
+    const pending: Array<Promise<{ index: number; result: IteratorResult<T> }>> = [];
+    for (const w of live) {
+      if (w !== null) pending.push(w.pending);
+    }
+    const { index, result } = await Promise.race(pending);
+    const slot = live[index];
+    if (slot === null) continue;
+    if (result.done) {
+      live[index] = null;
+      alive--;
+    } else {
+      yield result.value;
+      slot.pending = slot.it.next().then(r => ({ index, result: r }));
+    }
+  }
+}
+
+// zip: lockstep tuples; stops at the shortest source.
+async function* zip<T>(...sources: Array<Source<T>>): Stream<T[]> {
+  const iters = sources.map(s => {
+    if ((s as any)[Symbol.asyncIterator]) return (s as AsyncIterable<T>)[Symbol.asyncIterator]();
+    const it = (s as Iterable<T>)[Symbol.iterator]();
+    return { next: () => Promise.resolve(it.next()) } as AsyncIterator<T>;
+  });
+  while (true) {
+    const next = await Promise.all(iters.map(it => it.next()));
+    if (next.some(r => r.done)) return;
+    yield next.map(r => r.value);
+  }
+}
+
+async function* repeat<T>(source: Source<T>, n: number = Infinity): Stream<T> {
+  if (n <= 0) return;
+  // Materialize once so we can replay (async generators can't be rewound).
+  const buf: T[] = [];
+  for await (const x of source) buf.push(x);
+  for (let i = 0; i < n; i++) {
+    for (const x of buf) yield x;
+  }
+}
+
 // `range(stop)` / `range(start, stop[, step])` — a lazy integer source.
 function* range(a: number, b?: number, step: number = 1): Iterable<number> {
   const start = b === undefined ? 0 : a;
@@ -559,6 +968,7 @@ async function pipeParallel<T>(source: Source<T>, ...stages: Array<(s: any) => a
 }
 
 export default {
+  // Combinators (transforms)
   map,
   filter,
   take,
@@ -569,14 +979,46 @@ export default {
   flatMap,
   chunk,
   tap,
+  scan,
+  distinct,
+  distinctUntilChanged,
+  pairwise,
+  windowed,
+  enumerate,
+  catchError,
+  retry,
+  delay,
+  debounce,
+  throttle,
+  // Terminals
   collect,
   reduce,
   forEach,
   count,
   sum,
+  first,
+  last,
+  find,
+  min,
+  max,
+  every,
+  some,
+  toMap,
+  toSet,
+  groupBy,
+  partition,
   toFloat32Array,
   toFloat64Array,
+  // Sources / multi-source combinators
   range,
+  of,
+  from,
+  empty,
+  concat,
+  merge,
+  zip,
+  repeat,
+  // Conveniences
   pipe,
   pipeParallel,
 };

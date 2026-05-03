@@ -28,50 +28,141 @@ const parallel = require("@para/parallel");
 
 type CsvSource = string | Uint8Array | Blob | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array | string>;
 
-type ParseOptions = {
-  /** Field delimiter. Default `,`. Use `\t` for TSV, `|` for pipe-separated. */
+/**
+ * Common dialect / lexer options shared by every read path. The
+ * higher-level paths (parseCsv, parseColumns, parseBatches,
+ * reduceColumns) layer their own consumer-shape options on top.
+ */
+type DialectOptions = {
+  /**
+   * Field delimiter. Default `,`. Use `\t` for TSV, `|` for pipe-separated.
+   * Pass `""` to auto-detect from the first non-comment line — the
+   * lexer counts occurrences of `,`, `\t`, `;`, `|` (in that
+   * preference order on ties) outside quoted regions and picks the
+   * winner. Detection peeks at one line of the stream; the rest
+   * continues to stream normally.
+   */
   delimiter?: string;
   /** Field quote character. Default `"`. */
   quote?: string;
   /**
-   * If `true` (default), the first non-empty row is treated as headers and
-   * subsequent rows are emitted as objects keyed by header name. If `false`,
-   * every row is emitted as a string array. Pass an explicit array of header
-   * names to use them and treat the first data row as data.
+   * Escape character for the quote inside a quoted field. Default is
+   * the quote character itself (RFC 4180 doubled-quote escaping). Set
+   * to `"\\"` for backslash-escape dialects.
    */
-  headers?: boolean | string[];
+  escape?: string;
   /**
-   * If `true` (default), numeric cells become `number`, "true"/"false" become
-   * `boolean`, empty cells become `null`. If `false`, every cell stays a
-   * string and the caller does any conversion.
+   * If non-empty, lines starting with this character (before any
+   * delimiter or whitespace) are ignored. Default `""` (no comment
+   * support). Common values: `"#"`, `"//"`.
    */
-  typeInference?: boolean;
+  comment?: string;
   /**
-   * Skip this many leading rows BEFORE header detection. Useful for files
-   * with a comment block at the top. Default 0.
+   * If `true` (default), each cell's leading and trailing whitespace
+   * is stripped after parsing. Whitespace inside a quoted field is
+   * preserved either way.
    */
-  skipLines?: number;
+  trim?: boolean;
   /**
-   * Opt-in parallel chunk parsing via para:parallel's worker pool. Splits
-   * the input at line boundaries and parses chunks concurrently. Two
-   * caveats:
-   *   1. Input is materialized to a single string first (no streaming).
-   *   2. Falls back to serial if any quote character appears in the
-   *      input — finding safe chunk boundaries inside quoted regions
-   *      needs a pre-pass that v1 doesn't do.
-   * If both apply, the heuristic is "use parallel for big files of
-   * machine-generated data, serial for everything else."
+   * If `true` (default), wholly-blank rows are skipped silently. If
+   * `false`, blank lines emit an empty row.
    */
-  parallel?: boolean;
+  skipEmptyLines?: boolean;
 };
 
-type ResolvedOptions = Required<Omit<ParseOptions, "headers">> & { headers: ParseOptions["headers"] };
+/**
+ * Optional row-level transforms shared by every entry point.
+ * `transformHeader` runs once per header cell; `transform` runs per
+ * data cell (parseCsv only — columnar paths write straight into
+ * TypedArrays where a string→string mapping doesn't fit).
+ */
+type TransformOptions = {
+  /**
+   * Map each header cell before it becomes the object key (parseCsv)
+   * or the schema-lookup name (parseColumns / parseBatches /
+   * reduceColumns). Common use: normalize case or strip surrounding
+   * underscores so CSV headers can match camelCase schema keys.
+   */
+  transformHeader?: (header: string, index: number) => string;
+};
+
+type ParseOptions = DialectOptions &
+  TransformOptions & {
+    /**
+     * If `true` (default), the first non-empty row is treated as headers and
+     * subsequent rows are emitted as objects keyed by header name. If `false`,
+     * every row is emitted as a string array. Pass an explicit array of header
+     * names to use them and treat the first data row as data.
+     */
+    headers?: boolean | string[];
+    /**
+     * If `true` (default), numeric cells become `number`, "true"/"false" become
+     * `boolean`, empty cells become `null`. If `false`, every cell stays a
+     * string and the caller does any conversion.
+     */
+    typeInference?: boolean;
+    /**
+     * Skip this many leading rows BEFORE header detection. Useful for files
+     * with a comment block at the top. Default 0.
+     */
+    skipLines?: number;
+    /**
+     * Cap the number of data rows yielded. The header row does not
+     * count. Default `Infinity` (no cap).
+     */
+    maxRows?: number;
+    /**
+     * Map each cell value before type inference / object assembly. The
+     * second argument is the column name (when headers are in use) or
+     * the column index (when `headers: false`). Returning `undefined`
+     * is treated the same as returning the original string.
+     */
+    transform?: (value: string, column: string | number) => string;
+    /**
+     * Opt-in parallel chunk parsing via para:parallel's worker pool. Splits
+     * the input at line boundaries and parses chunks concurrently. Two
+     * caveats:
+     *   1. Input is materialized to a single string first (no streaming).
+     *   2. Falls back to serial if any quote character appears in the
+     *      input — finding safe chunk boundaries inside quoted regions
+     *      needs a pre-pass that v1 doesn't do.
+     * If both apply, the heuristic is "use parallel for big files of
+     * machine-generated data, serial for everything else."
+     */
+    parallel?: boolean;
+  };
+
+type ResolvedOptions = Required<Omit<ParseOptions, "headers" | "transformHeader" | "transform" | "maxRows">> & {
+  headers: ParseOptions["headers"];
+  transformHeader?: ParseOptions["transformHeader"];
+  transform?: ParseOptions["transform"];
+  maxRows: number; // Infinity when not capped
+};
 
 // ─── Decoder layer ─────────────────────────────────────────────────────────
 // Normalizes whatever the caller passed into an AsyncIterable<string>. Each
 // yielded chunk may end mid-line; the parser handles that.
 
+// Strip a UTF-8 BOM (U+FEFF) if it appears at the start of the stream.
+// Excel and a few other tools insert one when exporting CSV; we never
+// want it to land in the first field of the first row.
+async function* stripBom(stream: AsyncIterable<string>): AsyncIterable<string> {
+  let first = true;
+  for await (const chunk of stream) {
+    if (first) {
+      first = false;
+      yield chunk.charCodeAt(0) === 0xfeff ? chunk.slice(1) : chunk;
+    } else {
+      yield chunk;
+    }
+  }
+}
+
 async function* decodeSource(source: CsvSource): AsyncIterable<string> {
+  yield* stripBom(decodeSourceRaw(source));
+}
+
+async function* decodeSourceRaw(source: CsvSource): AsyncIterable<string> {
   if (typeof source === "string") {
     yield source;
     return;
@@ -81,7 +172,7 @@ async function* decodeSource(source: CsvSource): AsyncIterable<string> {
     return;
   }
   if (source instanceof Blob) {
-    yield* decodeSource(source.stream());
+    yield* decodeSourceRaw(source.stream());
     return;
   }
   // ReadableStream and AsyncIterable both have async-iteration; the
@@ -138,18 +229,127 @@ const enum State {
   AfterQuote, // just saw a closing quote inside a quoted field
 }
 
-async function* tokenize(source: CsvSource, delimiter: string, quote: string): AsyncIterable<string[]> {
-  if (delimiter.length !== 1) throw new TypeError("para:csv: delimiter must be a single character");
-  if (quote.length !== 1) throw new TypeError("para:csv: quote must be a single character");
-  const D = delimiter;
-  const Q = quote;
+// Single-line scan: count occurrences of each candidate delimiter
+// outside quoted regions. Used by delimiter auto-detect.
+function chooseDelimiter(sample: string, quote: string, comment: string): string {
+  // Skip leading comment lines.
+  let start = 0;
+  while (comment && start < sample.length && sample[start] === comment) {
+    const nl = sample.indexOf("\n", start);
+    if (nl < 0) {
+      start = sample.length;
+      break;
+    }
+    start = nl + 1;
+  }
+  let end = sample.indexOf("\n", start);
+  if (end < 0) end = sample.length;
+  if (end > start && sample.charCodeAt(end - 1) === 13) end--; // strip CR
+  const line = sample.slice(start, end);
+  const candidates: readonly string[] = [",", "\t", ";", "|"]; // preference order on ties
+  let inQuote = false;
+  const counts = [0, 0, 0, 0];
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === quote) {
+      inQuote = !inQuote;
+      continue;
+    }
+    if (inQuote) continue;
+    for (let k = 0; k < candidates.length; k++) {
+      if (ch === candidates[k]) {
+        counts[k]++;
+        break;
+      }
+    }
+  }
+  let best = 0;
+  for (let k = 1; k < candidates.length; k++) {
+    if (counts[k] > counts[best]) best = k;
+  }
+  return counts[best] > 0 ? candidates[best] : ",";
+}
+
+// Buffer chunks until we've seen one full line (or end of stream),
+// then yield the buffered chunks followed by the remaining stream.
+// Used to peek at the first line for delimiter detection without
+// breaking the streaming iterator contract for the rest.
+async function* peekFirstLine(
+  stream: AsyncIterable<string>,
+  onSample: (sample: string) => void,
+): AsyncIterable<string> {
+  const buffered: string[] = [];
+  let sample = "";
+  let it = stream[Symbol.asyncIterator]();
+  let foundNewline = false;
+  while (!foundNewline) {
+    const next = await it.next();
+    if (next.done) break;
+    const chunk = next.value;
+    buffered.push(chunk);
+    sample += chunk;
+    if (chunk.includes("\n") || chunk.includes("\r")) foundNewline = true;
+  }
+  onSample(sample);
+  for (const c of buffered) yield c;
+  while (true) {
+    const next = await it.next();
+    if (next.done) return;
+    yield next.value;
+  }
+}
+
+async function* tokenize(source: CsvSource, dialect: DialectOptions = {}): AsyncIterable<string[]> {
+  const Q = dialect.quote ?? '"';
+  const E = dialect.escape ?? Q; // distinct escape (e.g. "\\") falls back to RFC 4180 doubled-quote
+  const COMMENT = dialect.comment ?? "";
+  const TRIM = dialect.trim ?? false;
+  const SKIP_EMPTY = dialect.skipEmptyLines ?? true;
+  if (Q.length !== 1) throw new TypeError("para:csv: quote must be a single character");
+  if (E.length !== 1) throw new TypeError("para:csv: escape must be a single character");
+  if (COMMENT.length > 1) throw new TypeError("para:csv: comment must be a single character or empty");
+
+  // Resolve delimiter, honoring auto-detect (`""`).
+  let D = dialect.delimiter ?? ",";
+  let stream: AsyncIterable<string> = decodeSource(source);
+  if (D === "") {
+    stream = peekFirstLine(stream, sample => {
+      D = chooseDelimiter(sample, Q, COMMENT);
+    });
+  } else if (D.length !== 1) {
+    throw new TypeError("para:csv: delimiter must be a single character (or empty for auto-detect)");
+  }
+  // Doubled-quote escaping and a distinct escape char are mutually
+  // exclusive interpretations of the byte after a quote inside a quoted
+  // field. When E !== Q the parser must NOT also treat `""` as an escape.
+  const escapeIsQuote = E === Q;
 
   let state: State = State.FieldStart;
   let field = "";
   let row: string[] = [];
+  let fieldQuoted = false; // current field came from a quoted source; trim should not apply
   let pendingCR = false; // saw `\r`; next char decides if it's part of CRLF or a lone CR
+  let inComment = false; // skipping the rest of a comment line
+  let escapeNext = false; // last char in Quoted state was the escape char (E !== Q)
 
-  for await (const chunk of decodeSource(source)) {
+  // Trim only applies to unquoted values. Quoting exists *to* preserve
+  // surrounding whitespace, so a `trim:true` caller still gets verbatim
+  // quoted cells.
+  const finishField = (s: string, quoted: boolean) => (TRIM && !quoted ? s.replace(/^\s+|\s+$/g, "") : s);
+
+  // True when every cell in the row is empty (or empty after trim). Used
+  // to honor `skipEmptyLines`.
+  const rowIsBlank = (r: readonly string[]): boolean => {
+    for (let j = 0; j < r.length; j++) {
+      const v = r[j];
+      if (v.length === 0) continue;
+      if (TRIM && v.replace(/^\s+|\s+$/g, "").length === 0) continue;
+      return false;
+    }
+    return true;
+  };
+
+  for await (const chunk of stream) {
     for (let i = 0; i < chunk.length; i++) {
       const ch = chunk[i];
 
@@ -163,28 +363,45 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
         // Lone CR was already a row terminator; fall through to process this char.
       }
 
+      // Comment line: consume everything up to (and including) the next newline.
+      if (inComment) {
+        if (ch === "\n") {
+          inComment = false;
+        } else if (ch === "\r") {
+          inComment = false;
+          pendingCR = true;
+        }
+        continue;
+      }
+
       switch (state) {
         case State.FieldStart: {
-          if (ch === Q) {
+          if (COMMENT && ch === COMMENT && row.length === 0 && field.length === 0) {
+            inComment = true;
+          } else if (ch === Q) {
             state = State.Quoted;
+            fieldQuoted = true;
           } else if (ch === D) {
-            row.push("");
+            row.push(finishField("", false));
             // stay in FieldStart for the next field
           } else if (ch === "\n") {
-            // empty trailing field — emit the row only if we've started one.
-            // A wholly-empty line between rows (CRLF + blank + CRLF) is skipped.
+            // empty trailing field — flush the row.
             if (row.length > 0 || field.length > 0) {
-              row.push(field);
-              yield row;
+              row.push(finishField(field, false));
+              if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
               row = [];
               field = "";
+            } else if (!SKIP_EMPTY) {
+              yield [];
             }
           } else if (ch === "\r") {
             if (row.length > 0 || field.length > 0) {
-              row.push(field);
-              yield row;
+              row.push(finishField(field, false));
+              if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
               row = [];
               field = "";
+            } else if (!SKIP_EMPTY) {
+              yield [];
             }
             pendingCR = true;
           } else {
@@ -195,18 +412,18 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
         }
         case State.Unquoted: {
           if (ch === D) {
-            row.push(field);
+            row.push(finishField(field, false));
             field = "";
             state = State.FieldStart;
           } else if (ch === "\n") {
-            row.push(field);
-            yield row;
+            row.push(finishField(field, false));
+            if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
             row = [];
             field = "";
             state = State.FieldStart;
           } else if (ch === "\r") {
-            row.push(field);
-            yield row;
+            row.push(finishField(field, false));
+            if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
             row = [];
             field = "";
             state = State.FieldStart;
@@ -217,7 +434,14 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
           break;
         }
         case State.Quoted: {
-          if (ch === Q) {
+          if (escapeNext) {
+            // Previous char was the escape; this one is literal.
+            field += ch;
+            escapeNext = false;
+          } else if (!escapeIsQuote && ch === E) {
+            // Distinct escape (e.g. backslash). Consume; next char is literal.
+            escapeNext = true;
+          } else if (ch === Q) {
             state = State.AfterQuote;
           } else {
             field += ch;
@@ -225,25 +449,28 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
           break;
         }
         case State.AfterQuote: {
-          if (ch === Q) {
+          if (escapeIsQuote && ch === Q) {
             // Doubled quote inside a quoted field → literal quote.
             field += Q;
             state = State.Quoted;
           } else if (ch === D) {
-            row.push(field);
+            row.push(finishField(field, fieldQuoted));
             field = "";
+            fieldQuoted = false;
             state = State.FieldStart;
           } else if (ch === "\n") {
-            row.push(field);
-            yield row;
+            row.push(finishField(field, fieldQuoted));
+            if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
             row = [];
             field = "";
+            fieldQuoted = false;
             state = State.FieldStart;
           } else if (ch === "\r") {
-            row.push(field);
-            yield row;
+            row.push(finishField(field, fieldQuoted));
+            if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
             row = [];
             field = "";
+            fieldQuoted = false;
             state = State.FieldStart;
             pendingCR = true;
           } else {
@@ -251,6 +478,7 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
             // 4180 says this is malformed; we accept it and treat the quote
             // as a literal character within the field (lenient mode).
             field += Q + ch;
+            fieldQuoted = false; // mixed content; trim now applies
             state = State.Unquoted;
           }
           break;
@@ -264,8 +492,8 @@ async function* tokenize(source: CsvSource, delimiter: string, quote: string): A
     throw new SyntaxError("para:csv: unterminated quoted field at end of input");
   }
   if (row.length > 0 || field.length > 0 || state === State.AfterQuote) {
-    row.push(field);
-    yield row;
+    row.push(finishField(field, fieldQuoted));
+    if (!SKIP_EMPTY || !rowIsBlank(row)) yield row;
   }
 }
 
@@ -292,10 +520,31 @@ function resolveOptions(options: ParseOptions): ResolvedOptions {
   return {
     delimiter: options.delimiter ?? ",",
     quote: options.quote ?? '"',
+    escape: options.escape ?? options.quote ?? '"',
+    comment: options.comment ?? "",
+    trim: options.trim ?? false,
+    skipEmptyLines: options.skipEmptyLines ?? true,
     headers: options.headers ?? true,
     typeInference: options.typeInference ?? true,
     skipLines: options.skipLines ?? 0,
+    maxRows: options.maxRows ?? Infinity,
+    transformHeader: options.transformHeader,
+    transform: options.transform,
     parallel: options.parallel ?? false,
+  };
+}
+
+// Extract just the lexer-relevant knobs from any options bag. Used by
+// every entry point (parseCsv / parseColumns / parseBatches /
+// reduceColumns) so they all expose the same dialect surface.
+function pickDialect(o: DialectOptions): DialectOptions {
+  return {
+    delimiter: o.delimiter,
+    quote: o.quote,
+    escape: o.escape,
+    comment: o.comment,
+    trim: o.trim,
+    skipEmptyLines: o.skipEmptyLines,
   };
 }
 
@@ -380,6 +629,12 @@ async function* parseCsvParallelImpl(
   // pmap (it returns results indexed by input order).
   let skipped = 0;
   let headers: string[] | null = Array.isArray(opts.headers) ? [...opts.headers] : null;
+  if (headers !== null && opts.transformHeader) {
+    const th = opts.transformHeader;
+    headers = headers.map((h, i) => th(h, i));
+  }
+  let yielded = 0;
+  const transform = opts.transform;
   for (const chunkRows of rowsPerChunk) {
     for (const row of chunkRows) {
       if (skipped < opts.skipLines) {
@@ -387,20 +642,25 @@ async function* parseCsvParallelImpl(
         continue;
       }
       if (opts.headers === true && headers === null) {
-        headers = row;
+        headers = opts.transformHeader ? row.map((h, i) => opts.transformHeader!(h, i)) : row.slice();
         continue;
       }
+      if (yielded >= opts.maxRows) return;
       if (opts.headers === false) {
-        yield opts.typeInference ? (row.map(inferCell) as unknown as string[]) : row;
+        const cells = transform ? row.map((c, i) => transform(c, i) ?? c) : row;
+        yield opts.typeInference ? (cells.map(inferCell) as unknown as string[]) : cells;
+        yielded++;
         continue;
       }
       const obj: Record<string, string | number | boolean | null> = {};
       const hs = headers!;
       for (let i = 0; i < hs.length; i++) {
-        const cell = row[i] ?? "";
+        const raw = row[i] ?? "";
+        const cell = transform ? (transform(raw, hs[i]) ?? raw) : raw;
         obj[hs[i]] = opts.typeInference ? inferCell(cell) : cell;
       }
       yield obj;
+      yielded++;
     }
   }
 }
@@ -417,7 +677,17 @@ async function* parseCsvImpl(
   if (opts.parallel) {
     let full = "";
     for await (const piece of decodeSource(source)) full += piece;
-    const safe = full.length >= PARALLEL_MIN_BYTES && !full.includes(opts.quote);
+    // The parallel path's split-on-delimiter chunker doesn't carry full
+    // dialect semantics. Disable it whenever a non-default knob is set
+    // and let the serial state machine handle it. Non-RFC escape, custom
+    // comment, trim, and non-default skipEmptyLines all force serial.
+    const dialectIsDefault =
+      opts.delimiter !== "" && // auto-detect needs the serial peek path
+      (opts.escape === opts.quote || opts.escape === undefined) &&
+      !opts.comment &&
+      !opts.trim &&
+      opts.skipEmptyLines !== false;
+    const safe = dialectIsDefault && full.length >= PARALLEL_MIN_BYTES && !full.includes(opts.quote);
     if (safe) {
       yield* parseCsvParallelImpl(full, opts);
       return;
@@ -425,13 +695,22 @@ async function* parseCsvImpl(
     source = full; // Hand the materialized string to the serial path.
   }
 
-  const rows = tokenize(source, opts.delimiter, opts.quote);
+  const rows = tokenize(source, opts);
 
   let skipped = 0;
   let headers: string[] | null = Array.isArray(opts.headers) ? [...opts.headers] : null;
   // headers === true means: read first non-skipped row as headers
   // headers === false means: emit every row as an array
   // headers === string[] means: use these names, every row is data
+
+  // Apply transformHeader to a user-provided header array up-front so
+  // schema-style lookups behave consistently with the auto-detected case.
+  if (headers !== null && opts.transformHeader) {
+    const th = opts.transformHeader;
+    headers = headers.map((h, i) => th(h, i));
+  }
+  let yielded = 0;
+  const transform = opts.transform;
 
   for await (const row of rows) {
     if (skipped < opts.skipLines) {
@@ -440,12 +719,16 @@ async function* parseCsvImpl(
     }
 
     if (opts.headers === true && headers === null) {
-      headers = row;
+      headers = opts.transformHeader ? row.map((h, i) => opts.transformHeader!(h, i)) : row.slice();
       continue;
     }
 
+    if (yielded >= opts.maxRows) return;
+
     if (opts.headers === false) {
-      yield opts.typeInference ? (row.map(inferCell) as unknown as string[]) : row;
+      const cells = transform ? row.map((c, i) => transform(c, i) ?? c) : row;
+      yield opts.typeInference ? (cells.map(inferCell) as unknown as string[]) : cells;
+      yielded++;
       continue;
     }
 
@@ -454,12 +737,14 @@ async function* parseCsvImpl(
     const obj: Record<string, string | number | boolean | null> = {};
     const hs = headers!;
     for (let i = 0; i < hs.length; i++) {
-      const cell = row[i] ?? "";
+      const raw = row[i] ?? "";
+      const cell = transform ? (transform(raw, hs[i]) ?? raw) : raw;
       obj[hs[i]] = opts.typeInference ? inferCell(cell) : cell;
     }
     // Cells beyond the declared header count are dropped silently. This
     // matches pandas' default behavior.
     yield obj;
+    yielded++;
   }
 }
 
@@ -507,20 +792,22 @@ type ColumnsResult<S extends Schema> = {
                     : never;
 };
 
-type ParseColumnsOptions<S extends Schema> = {
-  schema: S;
-  /** Field delimiter. Default `,`. */
-  delimiter?: string;
-  /** Field quote character. Default `"`. */
-  quote?: string;
-  /**
-   * `true` (default) — first row is the header row, schema keys are
-   * matched against header cells. `false` — schema keys are taken in
-   * declaration order against column indices 0, 1, 2, …. Or pass an
-   * explicit array of header names.
-   */
-  headers?: boolean | string[];
-};
+type ParseColumnsOptions<S extends Schema> = DialectOptions &
+  TransformOptions & {
+    schema: S;
+    /**
+     * `true` (default) — first row is the header row, schema keys are
+     * matched against header cells. `false` — schema keys are taken in
+     * declaration order against column indices 0, 1, 2, …. Or pass an
+     * explicit array of header names.
+     */
+    headers?: boolean | string[];
+    /**
+     * Cap the number of data rows ingested. The header row does not
+     * count. Default `Infinity`.
+     */
+    maxRows?: number;
+  };
 
 const TYPED_CTORS: Record<Exclude<ColumnType, "string">, any> = {
   f32: Float32Array,
@@ -542,9 +829,10 @@ async function parseColumnsImpl<S extends Schema>(
   const schema = options.schema;
   const colNames = Object.keys(schema);
   const colTypes = colNames.map(n => schema[n]);
-  const delimiter = options.delimiter ?? ",";
-  const quote = options.quote ?? '"';
   const headersOpt = options.headers ?? true;
+  const dialect = pickDialect(options);
+  const transformHeader = options.transformHeader;
+  const maxRows = options.maxRows ?? Infinity;
 
   // Map schema column names → CSV column indices. With headers, look
   // up by name; without, indices match schema declaration order.
@@ -572,9 +860,10 @@ async function parseColumnsImpl<S extends Schema>(
   }
 
   let rowIndex = 0;
-  for await (const row of tokenize(source, delimiter, quote)) {
+  for await (const row of tokenize(source, dialect)) {
     if (rowIndex === 0 && headersOpt !== false) {
-      headerCells = Array.isArray(headersOpt) ? headersOpt : row;
+      const rawHeaders = Array.isArray(headersOpt) ? headersOpt : row;
+      headerCells = transformHeader ? rawHeaders.map((h, i) => transformHeader(h, i)) : rawHeaders;
       for (let i = 0; i < colNames.length; i++) {
         const idx = headerCells.indexOf(colNames[i]);
         if (idx < 0) {
@@ -596,6 +885,7 @@ async function parseColumnsImpl<S extends Schema>(
       for (let i = 0; i < colNames.length; i++) indices[i] = i;
     }
 
+    if (length >= maxRows) break;
     if (length === capacity) grow();
 
     for (let i = 0; i < colNames.length; i++) {
@@ -668,10 +958,12 @@ async function* parseBatchesImpl<S extends Schema>(
   const schema = options.schema;
   const colNames = Object.keys(schema);
   const colTypes = colNames.map(n => schema[n]);
-  const delimiter = options.delimiter ?? ",";
-  const quote = options.quote ?? '"';
   const headersOpt = options.headers ?? true;
   const batchSize = Math.max(1, options.batchSize ?? 8192);
+  const dialect = pickDialect(options);
+  const transformHeader = options.transformHeader;
+  const maxRows = options.maxRows ?? Infinity;
+  let consumed = 0;
 
   const indices = new Array<number>(colNames.length);
   let headerCells: string[] | null = null;
@@ -689,12 +981,13 @@ async function* parseBatchesImpl<S extends Schema>(
   let buffers = makeBatch(batchSize);
   let length = 0;
 
-  for await (const row of tokenize(source, delimiter, quote)) {
+  for await (const row of tokenize(source, dialect)) {
     if (!headersResolved) {
       if (headersOpt === false) {
         for (let i = 0; i < colNames.length; i++) indices[i] = i;
       } else {
-        headerCells = Array.isArray(headersOpt) ? headersOpt : row;
+        const rawHeaders = Array.isArray(headersOpt) ? headersOpt : row;
+        headerCells = transformHeader ? rawHeaders.map((h, i) => transformHeader(h, i)) : rawHeaders;
         for (let i = 0; i < colNames.length; i++) {
           const idx = headerCells.indexOf(colNames[i]);
           if (idx < 0) {
@@ -710,6 +1003,9 @@ async function* parseBatchesImpl<S extends Schema>(
       // isn't data — skip writing it.
       if (headersOpt !== false && !Array.isArray(headersOpt)) continue;
     }
+
+    if (consumed >= maxRows) break;
+    consumed++;
 
     for (let i = 0; i < colNames.length; i++) {
       const cell = row[indices[i]];
@@ -768,13 +1064,13 @@ type ReduceColumnsResult<S extends Schema, R extends ReduceSpec<S>> = {
   [K in keyof R]: R[K] extends readonly Reducer[] ? ColumnReduceResult<R[K]> : never;
 };
 
-type ReduceOptions<S extends Schema, R extends ReduceSpec<S>> = {
-  schema: S;
-  reducers: R;
-  headers?: boolean | string[];
-  delimiter?: string;
-  quote?: string;
-};
+type ReduceOptions<S extends Schema, R extends ReduceSpec<S>> = DialectOptions &
+  TransformOptions & {
+    schema: S;
+    reducers: R;
+    headers?: boolean | string[];
+    maxRows?: number;
+  };
 
 async function reduceColumnsImpl<S extends Schema, R extends ReduceSpec<S>>(
   source: CsvSource,
@@ -784,9 +1080,11 @@ async function reduceColumnsImpl<S extends Schema, R extends ReduceSpec<S>>(
   const reducers = options.reducers;
   const colNames = Object.keys(reducers) as (keyof S)[];
   const colTypes = colNames.map(n => schema[n as string]);
-  const delimiter = options.delimiter ?? ",";
-  const quote = options.quote ?? '"';
   const headersOpt = options.headers ?? true;
+  const dialect = pickDialect(options);
+  const transformHeader = options.transformHeader;
+  const maxRows = options.maxRows ?? Infinity;
+  let consumed = 0;
 
   const indices = new Array<number>(colNames.length);
   let headerCells: string[] | null = null;
@@ -804,12 +1102,13 @@ async function reduceColumnsImpl<S extends Schema, R extends ReduceSpec<S>>(
     m2: 0,
   }));
 
-  for await (const row of tokenize(source, delimiter, quote)) {
+  for await (const row of tokenize(source, dialect)) {
     if (!headersResolved) {
       if (headersOpt === false) {
         for (let i = 0; i < colNames.length; i++) indices[i] = i;
       } else {
-        headerCells = Array.isArray(headersOpt) ? headersOpt : row;
+        const rawHeaders = Array.isArray(headersOpt) ? headersOpt : row;
+        headerCells = transformHeader ? rawHeaders.map((h, i) => transformHeader(h, i)) : rawHeaders;
         for (let i = 0; i < colNames.length; i++) {
           const name = colNames[i] as string;
           const idx = headerCells.indexOf(name);
@@ -822,6 +1121,9 @@ async function reduceColumnsImpl<S extends Schema, R extends ReduceSpec<S>>(
       headersResolved = true;
       if (headersOpt !== false && !Array.isArray(headersOpt)) continue;
     }
+
+    if (consumed >= maxRows) break;
+    consumed++;
 
     for (let i = 0; i < colNames.length; i++) {
       const cell = row[indices[i]];
@@ -884,9 +1186,154 @@ async function reduceColumnsImpl<S extends Schema, R extends ReduceSpec<S>>(
   return result as ReduceColumnsResult<S, R>;
 }
 
+// ─── Writer ────────────────────────────────────────────────────────────────
+//
+// stringify() handles the inverse of parseCsv: take a row collection
+// (objects keyed by column, or arrays of cells) and emit RFC 4180 CSV
+// text. A field is quoted when it contains the delimiter, the quote
+// character, an embedded escape (when distinct from quote), or a CR/LF.
+// Empty cells stay empty (not "").
+//
+// The shape of `rows[0]` decides the output:
+//   - object → header row taken from explicit `headers` or the union
+//     of keys across all rows (in first-seen order); each row's cells
+//     are pulled by header name.
+//   - array  → header row only emitted if the caller passed explicit
+//     `headers`; otherwise the array values themselves form each row.
+
+type StringifyValue = string | number | boolean | null | undefined | bigint | Date;
+type StringifyRow = readonly StringifyValue[] | Record<string, StringifyValue>;
+
+type StringifyOptions = {
+  /** Field delimiter. Default `,`. */
+  delimiter?: string;
+  /** Field quote character. Default `"`. */
+  quote?: string;
+  /** Escape char inside quoted fields. Default = quote (RFC 4180 doubled-quote). */
+  escape?: string;
+  /** Line terminator between rows. Default `"\r\n"` for Excel-friendliness. */
+  newline?: string;
+  /**
+   * `true` (default) — emit a header row.
+   *   - With object rows: header cells come from explicit `headers`
+   *     or the union of keys across input rows.
+   *   - With array rows: header row is omitted unless `headers` is
+   *     explicitly provided.
+   * `false` — never emit a header row.
+   * `string[]` — explicit header row; for object rows, also fixes the
+   * column order.
+   */
+  headers?: boolean | string[];
+  /** Prefix the output with a UTF-8 BOM (U+FEFF). Default `false`. */
+  bom?: boolean;
+};
+
+function stringifyValue(v: StringifyValue): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (v instanceof Date) return v.toISOString();
+  return String(v);
+}
+
+function stringifyImpl(rows: Iterable<StringifyRow>, options: StringifyOptions = {}): string {
+  const D = options.delimiter ?? ",";
+  const Q = options.quote ?? '"';
+  const E = options.escape ?? Q;
+  const NL = options.newline ?? "\r\n";
+  if (D.length !== 1) throw new TypeError("para:csv: delimiter must be a single character");
+  if (Q.length !== 1) throw new TypeError("para:csv: quote must be a single character");
+  if (E.length !== 1) throw new TypeError("para:csv: escape must be a single character");
+
+  // Pre-build the regex of "must be quoted" chars. Carriage return is
+  // included so a stray '\r' inside a cell doesn't poison the next row.
+  const escapeForRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const needsQuoteRe = new RegExp(`[${escapeForRegex(D)}${escapeForRegex(Q)}\\r\\n]`);
+
+  const escapeCell = (raw: string): string => {
+    if (raw.length === 0) return "";
+    if (!needsQuoteRe.test(raw) && (E === Q || !raw.includes(E))) return raw;
+    let escaped = "";
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i];
+      if (c === Q) {
+        // RFC 4180: double the quote. Distinct escape: prefix with E.
+        escaped += E === Q ? Q + Q : E + Q;
+      } else if (c === E && E !== Q) {
+        escaped += E + E;
+      } else {
+        escaped += c;
+      }
+    }
+    return Q + escaped + Q;
+  };
+
+  const rowArr = Array.isArray(rows) ? (rows as readonly StringifyRow[]) : [...rows];
+
+  // Decide header strategy.
+  let headerRow: string[] | null = null;
+  let columnKeys: string[] | null = null; // for object rows, the lookup order
+  const firstRow = rowArr[0];
+  const firstIsArray = Array.isArray(firstRow);
+
+  if (Array.isArray(options.headers)) {
+    headerRow = options.headers.slice();
+    columnKeys = firstIsArray ? null : headerRow;
+  } else if (options.headers === false) {
+    headerRow = null;
+  } else if (firstRow !== undefined && !firstIsArray) {
+    // headers default true for object rows: union of keys, first-seen order.
+    const seen = new Set<string>();
+    const keys: string[] = [];
+    for (const r of rowArr) {
+      if (Array.isArray(r)) continue;
+      for (const k of Object.keys(r)) {
+        if (!seen.has(k)) {
+          seen.add(k);
+          keys.push(k);
+        }
+      }
+    }
+    columnKeys = keys;
+    headerRow = keys;
+  } else {
+    // Array rows with no explicit headers: no header row.
+    headerRow = null;
+  }
+
+  const emitRow = (cells: readonly StringifyValue[]): string => {
+    let out = "";
+    for (let i = 0; i < cells.length; i++) {
+      if (i > 0) out += D;
+      out += escapeCell(stringifyValue(cells[i]));
+    }
+    return out;
+  };
+
+  let result = options.bom ? "﻿" : "";
+  if (headerRow) {
+    result += emitRow(headerRow);
+    if (rowArr.length > 0) result += NL;
+  }
+  for (let r = 0; r < rowArr.length; r++) {
+    const row = rowArr[r];
+    let line: string;
+    if (Array.isArray(row)) {
+      line = emitRow(row as readonly StringifyValue[]);
+    } else {
+      const keys = columnKeys ?? Object.keys(row);
+      const cells = keys.map(k => (row as Record<string, StringifyValue>)[k]);
+      line = emitRow(cells);
+    }
+    result += line;
+    if (r < rowArr.length - 1) result += NL;
+  }
+  return result;
+}
+
 export default {
   parseCsv: parseCsvImpl,
   parseColumns: parseColumnsImpl,
   parseBatches: parseBatchesImpl,
   reduceColumns: reduceColumnsImpl,
+  stringify: stringifyImpl,
 };

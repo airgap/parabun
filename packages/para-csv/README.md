@@ -32,7 +32,7 @@ The JS ecosystem otherwise covers this with DuckDB-WASM (10+ MB bundle) or Apach
 
 ## API
 
-### `parseColumns(source, { schema, headers?, delimiter?, quote? })`
+### `parseColumns(source, { schema, headers?, ...dialect })`
 
 Returns a `Promise<{ [col]: TypedArray | string[] }>` with one buffer per schema column.
 
@@ -41,20 +41,55 @@ Returns a `Promise<{ [col]: TypedArray | string[] }>` with one buffer per schema
   - `"i8"` / `"u8"` / `"i16"` / `"u16"` / `"i32"` / `"u32"` → matching int TypedArray
   - `"string"` → plain `string[]` (TypedArrays can't hold strings)
 - **`headers`** — `true` (default) treats the first row as headers and matches schema keys against header cell names. `false` maps schema keys to column indices in declaration order. Or pass an explicit array of header names.
-- **`delimiter`** — default `,`. Use `\t` for TSV.
-- **`quote`** — default `"`.
+- **dialect options** — see [`parseCsv`](#parsecsvsource-opts) below.
 
 Empty / missing numeric cells become `NaN` for floats, `0` for ints. Caller validates if `0` is a meaningful sentinel.
 
 ### `parseCsv(source, opts?)`
 
-The classical row-objects async iterator. RFC 4180 quoting, optional headers, type inference, custom delimiter / quote. `parallel: true` opt-in for off-main-thread parsing via `@para/parallel`.
+The classical row-objects async iterator. RFC 4180 quoting, optional headers, type inference. `parallel: true` opt-in for off-main-thread parsing via `@para/parallel`.
 
 ```js
 for await (const row of csv.parseCsv("./big.csv", { headers: true })) {
   // row = { col1: ..., col2: ... } with inferred types
 }
 ```
+
+Options (shared across `parseCsv`, `parseColumns`, `parseBatches`, `reduceColumns` unless noted):
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `delimiter` | `","` | Field delimiter. `"\t"` for TSV. Pass `""` to auto-detect from the first non-comment line (`,` `\t` `;` `|`). |
+| `quote` | `'"'` | Quote character. |
+| `escape` | same as `quote` | RFC 4180 doubled-quote by default. Set to `"\\"` for backslash-escape dialects. |
+| `comment` | `""` (off) | If set, lines starting with this character are skipped before any field opens. |
+| `trim` | `false` | Strip whitespace around each cell. Quoted cells stay verbatim. |
+| `skipEmptyLines` | `true` | Drop wholly-blank rows. |
+| `headers` | `true` | First row is headers (object output). `false` for arrays. `string[]` to pass explicit headers. |
+| `transformHeader` | none | `(header, index) => string`. Normalize header casing / spacing before object keys are built or schema lookup happens. |
+| `transform` | none | `(value, column) => string`. `parseCsv` only — map each cell value before type inference. |
+| `maxRows` | `Infinity` | Cap on data rows yielded; the header row doesn't count. Trivial preview support. |
+| `typeInference` | `true` | `parseCsv` only — auto-coerce numeric / boolean / null. |
+| `skipLines` | `0` | Skip leading rows before header detection. |
+| `parallel` | `false` | Off-main-thread parse via `@para/parallel`. See below. |
+
+A leading UTF-8 BOM is stripped from the first chunk automatically.
+
+### `stringify(rows, opts?)`
+
+Inverse of `parseCsv`. Accepts an array of objects (header row inferred from key union) or an array of arrays (no header row unless `headers` is passed).
+
+```js
+const text = csv.stringify([
+  { id: 1, name: "Ada, Lovelace" },
+  { id: 2, name: "Grace" },
+]);
+// id,name
+// 1,"Ada, Lovelace"
+// 2,Grace
+```
+
+Options: `delimiter`, `quote`, `escape`, `newline` (default `"\r\n"`), `headers` (`true` / `false` / `string[]`), `bom`. Cells are quoted only when they need to be (delimiter, quote, escape, CR, LF). `null` / `undefined` round-trip as empty cells. `Date` values stringify as ISO 8601.
 
 ## On the parallel mode (`parseCsv` only)
 
