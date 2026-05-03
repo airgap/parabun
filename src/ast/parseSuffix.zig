@@ -886,6 +886,31 @@ pub fn ParseSuffix(
             }, left.loc);
             return .next;
         }
+        fn t_dot_dot_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
+            // Parabun: `expr ..> handler` desugars to `expr.then(handler)`
+            if (level.gte(.conditional)) {
+                return .done;
+            }
+
+            const op_range = p.lexer.range();
+            try p.lexer.next();
+
+            const rhs = try p.parseExpr(.conditional);
+
+            // Build: left.then(rhs)
+            const then_target = p.newExpr(E.Dot{
+                .target = left.*,
+                .name = "then",
+                .name_loc = op_range.loc,
+            }, left.loc);
+            const args = try ExprNodeList.initOne(p.allocator, rhs);
+            left.* = p.newExpr(E.Call{
+                .target = then_target,
+                .args = args,
+                .close_paren_loc = p.lexer.loc(),
+            }, left.loc);
+            return .next;
+        }
         fn t_bar_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
             // Parabun: `expr |> fn` desugars to `fn(expr)`
             // Binds tighter than ..! and ..& (conditional), so:
@@ -1421,6 +1446,7 @@ pub fn ParseSuffix(
                     .t_dot_dot_equals,
                     .t_dot_dot_exclamation,
                     .t_dot_dot_ampersand,
+                    .t_dot_dot_greater_than,
                     .t_bar_greater_than,
                     .t_tilde_greater_than,
                     .t_minus_greater_than,

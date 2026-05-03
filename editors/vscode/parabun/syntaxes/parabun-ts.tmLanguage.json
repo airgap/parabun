@@ -3,10 +3,18 @@
   "name": "Parabun TypeScript",
   "scopeName": "source.pts",
   "patterns": [
-    { "include": "#parabun-fun" },
-    { "include": "#parabun-pure" },
-    { "include": "#parabun-operators" },
-    { "include": "source.ts" }
+    {
+      "include": "#parabun-fun"
+    },
+    {
+      "include": "#parabun-pure"
+    },
+    {
+      "include": "#parabun-operators"
+    },
+    {
+      "include": "source.ts"
+    }
   ],
   "repository": {
     "parabun-fun": {
@@ -15,7 +23,9 @@
           "comment": "fun keyword (shorthand for function)",
           "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
           "captures": {
-            "1": { "name": "storage.type.function.ts" }
+            "1": {
+              "name": "storage.type.function.ts"
+            }
           }
         }
       ]
@@ -26,51 +36,81 @@
           "comment": "export pure async fun/function",
           "match": "\\b(export)\\s+(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.control.export.ts" },
-            "2": { "name": "keyword.other.pure.parabun" },
-            "3": { "name": "storage.modifier.async.ts" },
-            "4": { "name": "storage.type.function.ts" }
+            "1": {
+              "name": "keyword.control.export.ts"
+            },
+            "2": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "3": {
+              "name": "storage.modifier.async.ts"
+            },
+            "4": {
+              "name": "storage.type.function.ts"
+            }
           }
         },
         {
           "comment": "export pure fun/function",
           "match": "\\b(export)\\s+(pure)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.control.export.ts" },
-            "2": { "name": "keyword.other.pure.parabun" },
-            "3": { "name": "storage.type.function.ts" }
+            "1": {
+              "name": "keyword.control.export.ts"
+            },
+            "2": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "3": {
+              "name": "storage.type.function.ts"
+            }
           }
         },
         {
           "comment": "pure async fun/function declaration/expression",
           "match": "\\b(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" },
-            "2": { "name": "storage.modifier.async.ts" },
-            "3": { "name": "storage.type.function.ts" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "2": {
+              "name": "storage.modifier.async.ts"
+            },
+            "3": {
+              "name": "storage.type.function.ts"
+            }
           }
         },
         {
           "comment": "pure fun/function declaration/expression",
           "match": "\\b(pure)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" },
-            "2": { "name": "storage.type.function.ts" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "2": {
+              "name": "storage.type.function.ts"
+            }
           }
         },
         {
           "comment": "pure async arrow (before async keyword)",
           "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" },
-            "2": { "name": "storage.modifier.async.ts" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "2": {
+              "name": "storage.modifier.async.ts"
+            }
           }
         },
         {
           "comment": "pure arrow (before parens or identifier)",
           "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            }
           }
         }
       ]
@@ -93,9 +133,14 @@
           "match": "\\.\\.&"
         },
         {
-          "comment": ".. exclusive-range operator (must come after ..= / ..! / ..&)",
+          "comment": "..> then operator",
+          "name": "keyword.operator.then.parabun",
+          "match": "\\.\\.>"
+        },
+        {
+          "comment": ".. exclusive-range operator (must come after ..= / ..! / ..& / ..>)",
           "name": "keyword.operator.range.parabun",
-          "match": "\\.\\."
+          "match": "\\.\\.(?!\\.)"
         },
         {
           "comment": "|> pipeline operator",

@@ -1527,6 +1527,18 @@ function getParabunHover(content: string, line: number, character: number): stri
       "```",
     ].join("\n");
   }
+  if (around.includes("..>")) {
+    return [
+      "### `..>` — then operator",
+      "",
+      "Attaches a fulfillment handler to a promise expression.",
+      "",
+      "```typescript",
+      "fetch(url) ..> parse",
+      "// → fetch(url).then(parse)",
+      "```",
+    ].join("\n");
+  }
   if (around.includes("~>")) {
     return [
       "### `~>` — reactive binding operator",
@@ -1792,6 +1804,12 @@ const parabunCompletions = [
     insertText: "..& ",
   },
   {
+    label: "..>",
+    kind: 24,
+    detail: "Parabun: then operator",
+    insertText: "..> ",
+  },
+  {
     label: "|>",
     kind: 24,
     detail: "Parabun: pipeline operator",
@@ -1918,6 +1936,30 @@ function getCodeActions(uri: string, content: string, range: LspRange, params?: 
                   end: { line: i, character: line.length },
                 },
                 newText: `${before} ..& ${handler}${after}`,
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    const thenMatch = line.match(/\.then\(([^)]+)\)/);
+    if (thenMatch && thenMatch.index !== undefined) {
+      const before = line.slice(0, thenMatch.index);
+      const handler = thenMatch[1];
+      const after = line.slice(thenMatch.index + thenMatch[0].length);
+      actions.push({
+        title: "Convert .then() to ..> operator",
+        kind: "refactor.rewrite",
+        edit: {
+          changes: {
+            [uri]: [
+              {
+                range: {
+                  start: { line: i, character: 0 },
+                  end: { line: i, character: line.length },
+                },
+                newText: `${before} ..> ${handler}${after}`,
               },
             ],
           },

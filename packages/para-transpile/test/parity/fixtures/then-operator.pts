@@ -1,0 +1,7 @@
+const parse = r => r.json();
+const handler = err => err;
+const cleanup = () => 0;
+const items = data => data.items;
+const a = fetch("/api") ..> parse;
+const b = fetch("/api") ..> parse ..> items;
+const c = fetch("/api") ..> parse ..! handler ..& cleanup;

@@ -106,9 +106,18 @@ Desugars `expr ..! handler` to `expr.catch(handler)`. Precedence: conditional le
 
 Desugars `expr ..& cleanup` to `expr.finally(cleanup)`. Precedence: conditional level.
 
+### `..>` (then operator)
+
+Desugars `expr ..> handler` to `expr.then(handler)`. Precedence: conditional level — same as `..!` / `..&`, so chains compose: `p ..> f ..! err ..& done` → `p.then(f).catch(err).finally(done)`.
+
+```
+const data = fetch(url) ..> parse ..! handleErr ..& cleanup;
+// → fetch(url).then(parse).catch(handleErr).finally(cleanup);
+```
+
 ### `|>` (pipeline operator)
 
-Desugars `x |> f` to `f(x)`. Precedence: nullish coalescing level (tighter than `..!`/`..&`).
+Desugars `x |> f` to `f(x)`. Precedence: nullish coalescing level (tighter than `..!`/`..&`/`..>`).
 
 **Method shorthand.** If the token after `|>` is `.`, treat it as a member expression on the LHS instead of a function to call with the LHS:
 
@@ -339,7 +348,7 @@ All extensions are implemented as parse-time desugaring in `src/ast/`:
 
 | File | Purpose |
 |------|---------|
-| `parseSuffix.zig` | `..!`, `..&`, `|>`, `~>` operator handlers |
+| `parseSuffix.zig` | `..!`, `..&`, `..>`, `|>`, `~>` operator handlers |
 | `parsePrefix.zig` | `pure` keyword detection in expressions, `this` restriction check, `throw` as expression |
 | `parseStmt.zig` | `pure` in statement/export contexts |
 | `parse.zig` | `parsePurePrefixExpr`, `parsePureAsyncPrefixExpr` |
@@ -354,7 +363,7 @@ File extension registration: `src/options.zig` (loaders, extension orders, all 1
 Lightweight LSP that runs with the Parabun binary. Provides:
 
 - **Diagnostics** — Real parse errors from `Bun.Transpiler` (purity violations, syntax errors)
-- **Completions** — `pure`, `pure function`, `pure async function`, `memo`, `memo async`, `defer`, `defer await`, `..!`, `..&`, `|>`, `~>`, `..` / `..=` (ranges)
+- **Completions** — `pure`, `pure function`, `pure async function`, `memo`, `memo async`, `defer`, `defer await`, `..!`, `..&`, `..>`, `|>`, `~>`, `..` / `..=` (ranges)
 - **Hover** — Markdown docs for `pure` keyword and all operators
 - **Semantic tokens** — `pure` keyword tagged as `function` type with `pure` modifier
 
@@ -769,7 +778,7 @@ Edits to `src/js/bun/*.ts` need a runtime cache clear
 
 ## Browser compilation
 
-Parse-time syntax (`pure`, `memo`, `|>`, `..!`, `..&`, `..` / `..=` ranges, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
+Parse-time syntax (`pure`, `memo`, `|>`, `..!`, `..&`, `..>`, `..` / `..=` ranges, `defer` / `defer await`, `throw` as expression) compiles to plain JS and runs in a browser unchanged. The runtime-backed features do NOT — `arena { body }` imports `para:arena`, `signal` / `effect` / `~>` import `para:signals`, and `memo` / range literals import `bun:wrap`. Bundlers targeting `browser` can't resolve these specifiers by default.
 
 The cross-runtime Lib modules (`signals`, `parallel`, `pipeline`, `arena`, `simd`, `csv`, `arrow`, `rtp`, `mcp`) ship as individual `@para/*` npm packages. Applications targeting non-Parabun hosts alias the `para:*` specifiers onto them — typically with one regex rule:
 

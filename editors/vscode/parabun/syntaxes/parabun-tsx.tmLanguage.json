@@ -3,10 +3,18 @@
   "name": "Parabun TSX",
   "scopeName": "source.ptsx",
   "patterns": [
-    { "include": "#parabun-fun" },
-    { "include": "#parabun-pure" },
-    { "include": "#parabun-operators" },
-    { "include": "source.tsx" }
+    {
+      "include": "#parabun-fun"
+    },
+    {
+      "include": "#parabun-pure"
+    },
+    {
+      "include": "#parabun-operators"
+    },
+    {
+      "include": "source.tsx"
+    }
   ],
   "repository": {
     "parabun-fun": {
@@ -14,7 +22,9 @@
         {
           "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
           "captures": {
-            "1": { "name": "storage.type.function.tsx" }
+            "1": {
+              "name": "storage.type.function.tsx"
+            }
           }
         }
       ]
@@ -24,46 +34,76 @@
         {
           "match": "\\b(export)\\s+(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.control.export.tsx" },
-            "2": { "name": "keyword.other.pure.parabun" },
-            "3": { "name": "storage.modifier.async.tsx" },
-            "4": { "name": "storage.type.function.tsx" }
+            "1": {
+              "name": "keyword.control.export.tsx"
+            },
+            "2": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "3": {
+              "name": "storage.modifier.async.tsx"
+            },
+            "4": {
+              "name": "storage.type.function.tsx"
+            }
           }
         },
         {
           "match": "\\b(export)\\s+(pure)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.control.export.tsx" },
-            "2": { "name": "keyword.other.pure.parabun" },
-            "3": { "name": "storage.type.function.tsx" }
+            "1": {
+              "name": "keyword.control.export.tsx"
+            },
+            "2": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "3": {
+              "name": "storage.type.function.tsx"
+            }
           }
         },
         {
           "match": "\\b(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" },
-            "2": { "name": "storage.modifier.async.tsx" },
-            "3": { "name": "storage.type.function.tsx" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "2": {
+              "name": "storage.modifier.async.tsx"
+            },
+            "3": {
+              "name": "storage.type.function.tsx"
+            }
           }
         },
         {
           "match": "\\b(pure)\\s+(fun(?:ction)?)\\b",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" },
-            "2": { "name": "storage.type.function.tsx" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "2": {
+              "name": "storage.type.function.tsx"
+            }
           }
         },
         {
           "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" },
-            "2": { "name": "storage.modifier.async.tsx" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            },
+            "2": {
+              "name": "storage.modifier.async.tsx"
+            }
           }
         },
         {
           "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
           "captures": {
-            "1": { "name": "keyword.other.pure.parabun" }
+            "1": {
+              "name": "keyword.other.pure.parabun"
+            }
           }
         }
       ]
@@ -83,8 +123,13 @@
           "match": "\\.\\.&"
         },
         {
+          "name": "keyword.operator.then.parabun",
+          "match": "\\.\\.>"
+        },
+        {
           "name": "keyword.operator.range.parabun",
-          "match": "\\.\\."
+          "match": "\\.\\.(?!\\.)",
+          "comment": "Bare `..` range \u2014 negative lookahead `(?!\\.)` so the pattern does not eat the first two dots of `...` (spread/rest), which would leave the trailing `.x` looking like member access. The `..=` / `..!` / `..&` / `..>` variants cannot collide because each carries its own third character."
         },
         {
           "name": "keyword.operator.pipeline.parabun",

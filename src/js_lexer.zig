@@ -2746,7 +2746,7 @@ fn NewLexer_(
                         lexer.token = T.t_dot_dot_dot;
                         return;
                     } else if (!is_json) {
-                        // Parabun: "..=", "..!", "..&"
+                        // Parabun: "..=", "..!", "..&", "..>"
                         if (third == '=') {
                             lexer.step();
                             lexer.step();
@@ -2761,6 +2761,11 @@ fn NewLexer_(
                             lexer.step();
                             lexer.step();
                             lexer.token = T.t_dot_dot_ampersand;
+                            return;
+                        } else if (third == '>') {
+                            lexer.step();
+                            lexer.step();
+                            lexer.token = T.t_dot_dot_greater_than;
                             return;
                         }
                         // Parabun: ".." (exclusive range). Reached in cases
