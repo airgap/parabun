@@ -837,15 +837,22 @@ pub fn ParseSuffix(
             return .next;
         }
         fn t_dot_dot_exclamation(p: *P, level: Level, left: *Expr) anyerror!Continuation {
-            // Parabun: `expr ..! handler` desugars to `expr.catch(handler)`
-            if (level.gte(.conditional)) {
+            // Parabun: `expr ..! handler` desugars to `expr.catch(handler)`.
+            // RHS parses at .assign so a bare arrow handler works
+            // (`p ..! err => fallback`); while we're inside the RHS the
+            // `in_chain_op_arrow_rhs` flag below tells nested chain-op handlers
+            // to back off, so the arrow body terminates at the next ..!/..&/..>.
+            if (level.gte(.conditional) or p.in_chain_op_arrow_rhs) {
                 return .done;
             }
 
             const op_range = p.lexer.range();
             try p.lexer.next();
 
-            const rhs = try p.parseExpr(.conditional);
+            const old_in_chain = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = true;
+            const rhs = try p.parseExpr(.assign);
+            p.in_chain_op_arrow_rhs = old_in_chain;
 
             // Build: left.catch(rhs)
             const catch_target = p.newExpr(E.Dot{
@@ -862,15 +869,19 @@ pub fn ParseSuffix(
             return .next;
         }
         fn t_dot_dot_ampersand(p: *P, level: Level, left: *Expr) anyerror!Continuation {
-            // Parabun: `expr ..& cleanup` desugars to `expr.finally(cleanup)`
-            if (level.gte(.conditional)) {
+            // Parabun: `expr ..& cleanup` desugars to `expr.finally(cleanup)`.
+            // See t_dot_dot_exclamation for the bare-arrow / chain-op-terminator rationale.
+            if (level.gte(.conditional) or p.in_chain_op_arrow_rhs) {
                 return .done;
             }
 
             const op_range = p.lexer.range();
             try p.lexer.next();
 
-            const rhs = try p.parseExpr(.conditional);
+            const old_in_chain = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = true;
+            const rhs = try p.parseExpr(.assign);
+            p.in_chain_op_arrow_rhs = old_in_chain;
 
             // Build: left.finally(rhs)
             const finally_target = p.newExpr(E.Dot{
@@ -887,15 +898,19 @@ pub fn ParseSuffix(
             return .next;
         }
         fn t_dot_dot_greater_than(p: *P, level: Level, left: *Expr) anyerror!Continuation {
-            // Parabun: `expr ..> handler` desugars to `expr.then(handler)`
-            if (level.gte(.conditional)) {
+            // Parabun: `expr ..> handler` desugars to `expr.then(handler)`.
+            // See t_dot_dot_exclamation for the bare-arrow / chain-op-terminator rationale.
+            if (level.gte(.conditional) or p.in_chain_op_arrow_rhs) {
                 return .done;
             }
 
             const op_range = p.lexer.range();
             try p.lexer.next();
 
-            const rhs = try p.parseExpr(.conditional);
+            const old_in_chain = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = true;
+            const rhs = try p.parseExpr(.assign);
+            p.in_chain_op_arrow_rhs = old_in_chain;
 
             // Build: left.then(rhs)
             const then_target = p.newExpr(E.Dot{

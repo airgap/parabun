@@ -128,6 +128,25 @@ const data = fetch(url) ..> parse ..! handleErr ..& cleanup;
 // → fetch(url).then(parse).catch(handleErr).finally(cleanup);
 ```
 
+**Bare arrow handlers.** The RHS of each chain operator parses at assignment level with a "chain-op terminator" flag, so a bare arrow body terminates at the next top-level `..*`. The parens that older docs called for are no longer required:
+
+```
+fetch(url)
+  ..> r => r.json()
+  ..! err => defaults
+  ..& () => done();
+// → fetch(url).then(r => r.json()).catch(err => defaults).finally(() => done());
+```
+
+Wrap with parens when you actually want a chain operator INSIDE an arrow body:
+
+```
+p ..! err => (recover() ..! finalFallback);
+// → p.catch(err => (recover().catch(finalFallback)));
+```
+
+A brace-bodied arrow (`r => { return r.json(); }`) follows JS's usual restriction that nothing chains directly after the closing `}` — wrap the arrow with parens if you need to chain past it.
+
 ### `|>` (pipeline operator)
 
 Desugars `x |> f` to `f(x)`. Precedence: nullish coalescing level (tighter than `..!`/`..&`/`..>`).

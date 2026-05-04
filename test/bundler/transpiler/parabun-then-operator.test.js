@@ -21,13 +21,62 @@ describe("Parabun ..> (then operator)", () => {
       expect(out).toContain(".then(JSON.stringify)");
     });
 
-    it("works with parenthesized arrow handler", () => {
-      // Arrow expressions are at .assign level which is below .conditional —
-      // the same rule that makes `..!` / `..&` reject bare arrows. A
-      // parenthesized arrow IS a primary expression and works.
+    it("works with parenthesized arrow handler (regression)", () => {
+      // The original parens-around-arrow form must keep working.
       const out = transpiler.transformSync("const x = promise ..> (r => r.json());");
       expect(out).toContain(".then(");
       expect(out).toContain("r.json()");
+    });
+
+    it("works with bare arrow handler (no parens needed)", () => {
+      // The chain-op RHS lowers to .assign level + sets the chain-op
+      // terminator flag, so a bare arrow body terminates at the next chain op.
+      const out = transpiler.transformSync("const x = promise ..> r => r.json();");
+      expect(out).toContain(".then(");
+      expect(out).toContain("r.json()");
+    });
+
+    it("chains three with bare arrows", () => {
+      const out = transpiler.transformSync("const x = p ..> r => r.json() ..! err => defaults ..& () => done();");
+      expect(out).toContain(".then(");
+      expect(out).toContain("r.json()");
+      expect(out).toContain(".catch(");
+      expect(out).toContain("defaults");
+      expect(out).toContain(".finally(");
+      expect(out).toContain("done()");
+    });
+
+    it("bare arrow with multi-statement brace body works as the final handler", () => {
+      // Brace bodies re-enter a fresh expression context so chain ops inside
+      // the body don't terminate it. Chaining MORE chain ops AFTER a brace
+      // body requires parens around the arrow — same JS quirk as
+      // `(x => { return x; })()` — but the brace body itself is fine when it
+      // is the last handler in the chain.
+      const out = transpiler.transformSync("const x = p ..! err => fb ..> r => { return r.json(); };");
+      expect(out).toContain(".catch(");
+      expect(out).toContain(".then(");
+      expect(out).toContain("return r.json()");
+    });
+
+    it("inner chain op inside parens stays nested", () => {
+      // Parens reset the terminator flag, so the inner ..! stays part of the
+      // arrow body and the outer ..! still chains onto p.
+      const out = transpiler.transformSync("const x = p ..! err => (recover() ..! finalFallback);");
+      // outer
+      expect(out).toContain(".catch(");
+      // inner appears too
+      const callCount = (out.match(/\.catch\(/g) ?? []).length;
+      expect(callCount).toBe(2);
+      expect(out).toContain("recover()");
+      expect(out).toContain("finalFallback");
+    });
+
+    it("mixes bare arrow with named handler in one chain", () => {
+      const out = transpiler.transformSync("const x = p ..> r => r.value ..! handler ..& done;");
+      expect(out).toContain(".then(");
+      expect(out).toContain("r.value");
+      expect(out).toContain(".catch(handler)");
+      expect(out).toContain(".finally(done)");
     });
 
     it("chains multiple ..> ..>", () => {

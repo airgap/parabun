@@ -332,6 +332,15 @@ pub fn Parse(
             const oldAllowIn = p.allow_in;
             p.allow_in = true;
 
+            // Parabun: parens are an explicit escape from chain-op RHS
+            // terminator behavior so an arrow body can opt back in to nested
+            // chain operators by wrapping with `(...)`. Restored once the
+            // close paren is consumed so an arrow body that follows runs with
+            // the outer flag (a bare arrow `..> (x) => x + 1 ..! err` still
+            // terminates the body before the next chain op).
+            const old_in_chain_op_arrow_rhs = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = false;
+
             // Forbid "await" and "yield", but only for arrow functions
             var old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
             p.fn_or_arrow_data_parse.arrow_arg_errors = arrowArgErrors;
@@ -397,6 +406,9 @@ pub fn Parse(
 
             // Restore "in" operator status before we parse the arrow function body
             p.allow_in = oldAllowIn;
+            // Parabun: restore the chain-op RHS terminator flag so an arrow
+            // body that follows the parens runs with the outer context.
+            p.in_chain_op_arrow_rhs = old_in_chain_op_arrow_rhs;
 
             // Also restore "await" and "yield" expression errors
             p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);

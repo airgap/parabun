@@ -437,6 +437,12 @@ pub fn ParseFn(
         pub fn parseFnBody(p: *P, data: *FnOrArrowDataParse) !G.FnBody {
             const oldFnOrArrowData = p.fn_or_arrow_data_parse;
             const oldAllowIn = p.allow_in;
+            // Parabun: a brace body re-enters a fresh expression context, so the
+            // chain-op terminator flag from any enclosing chain-op RHS does not
+            // apply inside.
+            const old_in_chain_op_arrow_rhs = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = false;
+            defer p.in_chain_op_arrow_rhs = old_in_chain_op_arrow_rhs;
             p.fn_or_arrow_data_parse = data.*;
             p.allow_in = true;
 

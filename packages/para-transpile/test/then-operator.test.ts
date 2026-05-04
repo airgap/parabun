@@ -65,4 +65,38 @@ const result = fetch("/api")
     expect(out).toContain(".catch(console.error)");
     expect(out).toContain(".finally(cleanup)");
   });
+
+  test("bare arrow handler on a single line", () => {
+    expect(transpile("const x = p ..> r => r.json();").trim()).toBe("const x = p.then(r => r.json());");
+  });
+
+  test("chain of three with bare arrows on a single line", () => {
+    expect(transpile("const x = p ..> r => r.json() ..! err => defaults ..& () => done();").trim()).toBe(
+      "const x = p.then(r => r.json()).catch(err => defaults).finally(() => done());",
+    );
+  });
+
+  test("bare arrow with nullary `() => ...` handler", () => {
+    expect(transpile("const x = p ..& () => done();").trim()).toBe("const x = p.finally(() => done());");
+  });
+
+  test("inner chain inside parens stays nested", () => {
+    expect(transpile("const x = p ..! err => (recover() ..! finalFallback);").trim()).toBe(
+      "const x = p.catch(err => (recover().catch(finalFallback)));",
+    );
+  });
+
+  test("mix of bare arrow and named handler in one chain", () => {
+    expect(transpile("const x = p ..> r => r.value ..! handler ..& done;").trim()).toBe(
+      "const x = p.then(r => r.value).catch(handler).finally(done);",
+    );
+  });
+
+  test("parenthesized arrow form still works (regression)", () => {
+    expect(transpile("const x = promise ..> (r => r.json());").trim()).toBe("const x = promise.then((r => r.json()));");
+  });
+
+  test("end-of-statement bare arrow without trailing semicolon", () => {
+    expect(transpile("const x = p ..> r => r.json()").trim()).toBe("const x = p.then(r => r.json())");
+  });
 });

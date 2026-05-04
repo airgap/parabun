@@ -156,6 +156,16 @@ pub fn NewParser_(
         allow_in: bool = false,
         allow_private_identifiers: bool = false,
 
+        // Parabun: while parsing the RHS of a chain operator (..!, ..&, ..>),
+        // any chain-operator token at top level inside the RHS terminates the
+        // RHS parse — so a bare arrow `r => r.json() ..! err => fallback`
+        // works without parens (the first arrow body stops before the next
+        // chain op rather than greedily consuming it). The flag is cleared
+        // inside parentheses and brace bodies so a user who explicitly wraps
+        // (` ..! foo => (recover() ..! finalFallback)`) still gets the inner
+        // chain op honored.
+        in_chain_op_arrow_rhs: bool = false,
+
         has_top_level_return: bool = false,
         latest_return_had_semicolon: bool = false,
         has_import_meta: bool = false,

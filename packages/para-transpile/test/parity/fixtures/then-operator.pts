@@ -5,3 +5,5 @@ const items = data => data.items;
 const a = fetch("/api") ..> parse;
 const b = fetch("/api") ..> parse ..> items;
 const c = fetch("/api") ..> parse ..! handler ..& cleanup;
+const d = fetch("/api") ..> r => r.json();
+const e = fetch("/api") ..> r => r.json() ..! err => err ..& () => 0;

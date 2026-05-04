@@ -40,12 +40,18 @@ pub fn ParsePrefix(
                 // Allow "in" inside parentheses
                 const oldAllowIn = p.allow_in;
                 p.allow_in = true;
+                // Parabun: parens are an explicit escape from chain-op RHS
+                // terminator behavior — `..! err => (recover() ..! fb)` should
+                // see the inner ..! as part of the arrow body.
+                const old_in_chain_op_arrow_rhs = p.in_chain_op_arrow_rhs;
+                p.in_chain_op_arrow_rhs = false;
 
                 var value = try p.parseExpr(Level.lowest);
                 p.markExprAsParenthesized(&value);
                 try p.lexer.expect(.t_close_paren);
 
                 p.allow_in = oldAllowIn;
+                p.in_chain_op_arrow_rhs = old_in_chain_op_arrow_rhs;
                 return value;
             }
 
