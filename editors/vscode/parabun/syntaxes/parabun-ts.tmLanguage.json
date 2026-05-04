@@ -168,8 +168,8 @@
     "parabun-parallel": {
       "patterns": [
         {
-          "comment": "parallel let/const — statement form, fan-out promise composition",
-          "match": "\\b(parallel)\\s+(let|const)\\b",
+          "comment": "parallel/para let/const — statement form, fan-out promise composition",
+          "match": "\\b(parallel|para)\\s+(let|const)\\b",
           "captures": {
             "1": {
               "name": "keyword.other.parallel.parabun"
@@ -180,8 +180,8 @@
           }
         },
         {
-          "comment": "parallel { … } — expression form, fan-out promise composition",
-          "match": "\\b(parallel)\\b(?=\\s*\\{)",
+          "comment": "parallel/para { … } — expression form, fan-out promise composition",
+          "match": "\\b(parallel|para)\\b(?=\\s*\\{)",
           "captures": {
             "1": {
               "name": "keyword.other.parallel.parabun"

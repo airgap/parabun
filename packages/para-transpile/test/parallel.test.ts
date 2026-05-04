@@ -113,3 +113,73 @@ describe("parallel — statement form `parallel let|const … = …, …`", () =
     expect(transpile("parallel = 1;").trim()).toBe("parallel = 1;");
   });
 });
+
+describe("para — shorthand alias for parallel", () => {
+  test("statement form: `para let` lowers identically to `parallel let`", () => {
+    expect(transpile("para let a = f1(), b = f2();").trim()).toBe(transpile("parallel let a = f1(), b = f2();").trim());
+  });
+
+  test("statement form: `para const` lowers identically to `parallel const`", () => {
+    expect(transpile("para const x = f();").trim()).toBe(transpile("parallel const x = f();").trim());
+  });
+
+  test("statement form: `para let` with one decl", () => {
+    expect(transpile("para let x = f();").trim()).toBe("const [x] = await Promise.all([f()]);");
+  });
+
+  test("statement form: per-decl ..! preserved", () => {
+    expect(transpile("para let a = f1() ..! d1, b = f2() ..! d2;").trim()).toBe(
+      "const [a, b] = await Promise.all([f1().catch(d1), f2().catch(d2)]);",
+    );
+  });
+
+  test("expression form: `para { … }` lowers identically to `parallel { … }`", () => {
+    expect(transpile("const x = await para { a: f1(), b: f2() };").trim()).toBe(
+      transpile("const x = await parallel { a: f1(), b: f2() };").trim(),
+    );
+  });
+
+  test("expression form: bare `para { … }` lowering shape", () => {
+    expect(transpile("const x = await para { user: fetchUser(id) };").trim()).toBe(
+      "const x = await Promise.all([fetchUser(id)]).then(([__pb0]) => ({ user: __pb0 }));",
+    );
+  });
+
+  test("mixed in one file: `parallel` and `para` decls coexist", () => {
+    const out = transpile("parallel let a = f1(); para let b = f2();").trim();
+    expect(out).toContain("const [a] = await Promise.all([f1()]);");
+    expect(out).toContain("const [b] = await Promise.all([f2()]);");
+  });
+
+  test("`para` as a regular identifier still works", () => {
+    expect(transpile("const para = 5; const x = para + 1;").trim()).toBe("const para = 5; const x = para + 1;");
+  });
+
+  test("`para()` as a function call doesn't trigger the keyword", () => {
+    expect(transpile("function para() {} para();").trim()).toBe("function para() {} para();");
+  });
+
+  test("`para.foo` as a property access doesn't trigger", () => {
+    expect(transpile("para.foo;").trim()).toBe("para.foo;");
+  });
+
+  test("`import { para }` doesn't trigger", () => {
+    expect(transpile(`import { para } from "somewhere";`).trim()).toBe(`import { para } from "somewhere";`);
+  });
+
+  test("`para = 1` assignment doesn't trigger", () => {
+    expect(transpile("para = 1;").trim()).toBe("para = 1;");
+  });
+
+  test("`para` followed by an unrelated identifier doesn't trigger", () => {
+    // e.g. `paratrooper`, `paragraph` — `\b` keeps these from matching.
+    expect(transpile("const paragraph = 1; const paratrooper = 2;").trim()).toBe(
+      "const paragraph = 1; const paratrooper = 2;",
+    );
+  });
+
+  test("does not fire inside string literals", () => {
+    expect(transpile(`const s = "para { x: y }";`).trim()).toBe(`const s = "para { x: y }";`);
+    expect(transpile(`const s = "para let x = 1;";`).trim()).toBe(`const s = "para let x = 1;";`);
+  });
+});

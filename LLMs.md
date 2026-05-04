@@ -347,6 +347,8 @@ This is the natural way to get `allSettled`-flavored behavior with explicit per-
 
 **Disambiguation.** `parallel` is a contextual keyword — only the two adjacent forms (`parallel {` and `parallel let|const`) trigger the rewrite. Anywhere else (`parallel(x)`, `parallel.foo`, `parallel = 1`, `import { parallel } from "para:parallel"`) it stays a normal identifier.
 
+**Shorthand.** `para` is a shorthand alias for `parallel`. Both forms are interchangeable everywhere `parallel` works, and lower identically. Same contextual-keyword rules apply — `para` only acts as a keyword before `{` / `let` / `const`; everywhere else (`para()`, `para.foo`, `import { para }`, `const para = 1`) it stays a normal identifier. Mirrors the `fun` / `function` pair.
+
 ### `defer`
 
 Schedules an expression to run when the enclosing block exits — on normal fall-through, early return, or a thrown exception. Multiple defers dispose in LIFO order (reverse of declaration).

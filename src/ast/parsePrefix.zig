@@ -135,8 +135,9 @@ pub fn ParsePrefix(
             // `Promise.all([v0, v1]).then(([__pb0, __pb1]) => ({ k0: __pb0, k1: __pb1 }))`.
             // Only triggers when `parallel` is immediately followed (no
             // newline) by `{`. Any other continuation leaves `parallel` as
-            // a plain identifier.
-            if (strings.eqlComptime(name, "parallel") and (raw.ptr == name.ptr and raw.len == name.len)) {
+            // a plain identifier. `para` is an interchangeable shorthand
+            // (mirrors the `fun` / `function` precedent).
+            if ((strings.eqlComptime(name, "parallel") or strings.eqlComptime(name, "para")) and (raw.ptr == name.ptr and raw.len == name.len)) {
                 if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
                     return try p.parseParallelObjectExpr(name_range);
                 }

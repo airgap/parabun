@@ -219,3 +219,128 @@ describe("Parabun parallel — runtime end-to-end", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+describe("Parabun para — shorthand for parallel", () => {
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
+
+  it("statement form: `para let` lowers identically to `parallel let`", () => {
+    const a = transpiler.transformSync("async function f() { para let a = f1(), b = f2(); return a + b; }");
+    const b = transpiler.transformSync("async function f() { parallel let a = f1(), b = f2(); return a + b; }");
+    expect(a).toBe(b);
+  });
+
+  it("statement form: `para const` lowers identically to `parallel const`", () => {
+    const a = transpiler.transformSync("async function f() { para const x = g(); return x; }");
+    const b = transpiler.transformSync("async function f() { parallel const x = g(); return x; }");
+    expect(a).toBe(b);
+  });
+
+  it("expression form: `para { … }` lowers identically to `parallel { … }`", () => {
+    const a = transpiler.transformSync("async function f() { return await para { a: f1(), b: f2() }; }");
+    const b = transpiler.transformSync("async function f() { return await parallel { a: f1(), b: f2() }; }");
+    expect(a).toBe(b);
+  });
+
+  it("statement form: per-decl ..! preserved with `para`", () => {
+    const out = transpiler.transformSync(
+      "async function f() { para let a = f1() ..! d1, b = f2() ..! d2; return a + b; }",
+    );
+    expect(out).toContain(".catch(d1)");
+    expect(out).toContain(".catch(d2)");
+    expect(out).toContain("[a, b]");
+  });
+
+  it("mixed file: `parallel` and `para` decls coexist", () => {
+    const out = transpiler.transformSync(
+      "async function f() { parallel let a = f1(); para let b = f2(); return a + b; }",
+    );
+    // Two separate Promise.all calls, one per statement.
+    const matches = out.match(/Promise\.all\(/g) ?? [];
+    expect(matches.length).toBe(2);
+    expect(out).toContain("[a]");
+    expect(out).toContain("[b]");
+  });
+
+  it("`para` as a regular identifier still works (assignment + use)", () => {
+    const out = transpiler.transformSync("const para = 5; const x = para + 1;");
+    expect(out).toContain("para");
+    expect(out).toContain("para + 1");
+    expect(out).not.toContain("Promise.all");
+  });
+
+  it("`para()` as a function call doesn't trigger the keyword", () => {
+    const out = transpiler.transformSync("function para() {} para();");
+    expect(out).toContain("para()");
+    expect(out).not.toContain("Promise.all");
+  });
+
+  it("`import { para } from ...` works as a normal binding", () => {
+    const out = transpiler.transformSync("import { para } from 'somewhere'; para();");
+    expect(out).toContain("para");
+    expect(out).not.toContain("Promise.all");
+  });
+
+  it("runtime: `para` expression form resolves three values", async () => {
+    using dir = tempDir("para-exprform-runtime", {
+      "main.pts": `
+        async function main() {
+          const r = await para { a: Promise.resolve(1), b: Promise.resolve(2), c: Promise.resolve(3) };
+          console.log(r.a, r.b, r.c);
+        }
+        main();
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.pts"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("1 2 3");
+    expect(exitCode).toBe(0);
+  });
+
+  it("runtime: `para` statement form binds in scope", async () => {
+    using dir = tempDir("para-stmtform-runtime", {
+      "main.pts": `
+        async function main() {
+          para let a = Promise.resolve(1), b = Promise.resolve(2);
+          console.log(a + b);
+        }
+        main();
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.pts"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("3");
+    expect(exitCode).toBe(0);
+  });
+
+  it("runtime: `para` as a regular identifier doesn't trigger the keyword", async () => {
+    using dir = tempDir("para-identifier-runtime", {
+      "main.pts": `
+        const para = 5;
+        const x = para + 1;
+        console.log(x);
+      `,
+    });
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "main.pts"],
+      env: bunEnv,
+      cwd: String(dir),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stdout.trim()).toBe("6");
+    expect(exitCode).toBe(0);
+  });
+});

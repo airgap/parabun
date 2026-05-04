@@ -2247,7 +2247,9 @@ pub fn ParseStmt(
             // immediately followed (no newline) by `let` or `const` —
             // otherwise `parallel` is a plain identifier (the expression
             // form `parallel { … }` is handled by the prefix parser).
-            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "parallel")) {
+            // `para` is an interchangeable shorthand (mirrors the `fun` /
+            // `function` precedent).
+            if (is_identifier and (strings.eqlComptime(p.lexer.raw(), "parallel") or strings.eqlComptime(p.lexer.raw(), "para"))) {
                 const parallel_range = p.lexer.range();
                 const saved = p.lexer;
                 try p.lexer.next();

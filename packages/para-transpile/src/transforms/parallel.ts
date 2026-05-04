@@ -1,4 +1,6 @@
 // `parallel` block — fan-out promise composition with name preservation.
+// `para` is an interchangeable shorthand — both keywords trigger the
+// same lowering (mirrors the `fun` / `function` precedent).
 //
 // Two forms:
 //
@@ -14,9 +16,10 @@
 //     const [user, posts] = await Promise.all([fetchUser(id), fetchPosts(id)]);
 //
 // Disambiguation:
-//   - `parallel let` / `parallel const` → statement form (decl list)
-//   - `parallel {` → expression form (object literal of promises)
-//   - any other continuation leaves `parallel` as a plain identifier.
+//   - `parallel let` / `parallel const` (or `para let` / `para const`)
+//     → statement form (decl list)
+//   - `parallel {` (or `para {`) → expression form (object literal of promises)
+//   - any other continuation leaves the keyword as a plain identifier.
 //
 // In Form B, `let` is kept as the surface keyword (mirrors the multi-decl
 // `let a=…, b=…` shape) but the lowering uses `const` because the binding
@@ -49,10 +52,10 @@ function transformStatementForm(src: string): string {
   const findSpan = (pos: number) => spans.find(s => pos >= s.start && pos < s.end);
   const inCode = (pos: number) => findSpan(pos)?.region === "code";
 
-  // Match `parallel` followed by `let` or `const` at a statement boundary.
-  // The leading group anchors to start-of-input or a statement-terminating
-  // char (same shape as signal/derived).
-  const re = /(^|[;\n{}])(\s*)parallel\s+(let|const)\s+/g;
+  // Match `parallel` (or `para` shorthand) followed by `let` or `const`
+  // at a statement boundary. The leading group anchors to start-of-input
+  // or a statement-terminating char (same shape as signal/derived).
+  const re = /(^|[;\n{}])(\s*)(?:parallel|para)\s+(let|const)\s+/g;
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;
@@ -153,12 +156,12 @@ function transformExpressionForm(src: string): string {
   const findSpan = (pos: number) => spans.find(s => pos >= s.start && pos < s.end);
   const inCode = (pos: number) => findSpan(pos)?.region === "code";
 
-  // `parallel` at any position, immediately followed (whitespace allowed)
-  // by `{`. We don't restrict to statement boundaries — expression form
-  // can show up after `await`, `=`, `(`, `,`, `:` in an object, etc.
-  // The safety check is `inCode(matchStart)` — we never fire inside
-  // strings/comments.
-  const re = /\bparallel(\s*)\{/g;
+  // `parallel` (or `para` shorthand) at any position, immediately
+  // followed (whitespace allowed) by `{`. We don't restrict to statement
+  // boundaries — expression form can show up after `await`, `=`, `(`,
+  // `,`, `:` in an object, etc. The safety check is `inCode(matchStart)`
+  // — we never fire inside strings/comments.
+  const re = /\b(?:parallel|para)(\s*)\{/g;
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;

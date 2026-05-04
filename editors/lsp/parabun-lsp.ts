@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\bparallel\s*\{|\bparallel\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -147,15 +147,15 @@ function transformArena(line: string): string {
   return line.replace(/\b(arena)\b(?=\s*\{)/g, "     ");
 }
 
-// `parallel { … }` and `parallel let|const NAME …` → blank out `parallel`
-// (8 chars → 8 spaces) so TypeScript sees a bare object literal or a normal
-// `let|const` declaration. Column positions on the rest of the line stay
-// stable for hover / go-to-def.
+// `parallel { … }` / `parallel let|const NAME …` (and `para` shorthand) →
+// blank out the keyword (replacing each char with a space) so TypeScript sees
+// a bare object literal or a normal `let|const` declaration. Column positions
+// on the rest of the line stay stable for hover / go-to-def.
 function transformParallel(line: string): string {
   // Statement form: keep `let|const` so TS still sees a declaration.
-  line = line.replace(/\b(parallel)(\s+)(?=let|const)/g, (_m, _kw, space) => "        " + space);
+  line = line.replace(/\b(parallel|para)(\s+)(?=let|const)/g, (_m, kw, space) => " ".repeat(kw.length) + space);
   // Expression form: hand TS a bare `{ … }` — fine in expression position.
-  line = line.replace(/\b(parallel)\b(?=\s*\{)/g, "        ");
+  line = line.replace(/\b(parallel|para)\b(?=\s*\{)/g, (_m, kw) => " ".repeat(kw.length));
   return line;
 }
 
@@ -1552,12 +1552,13 @@ function getParabunHover(content: string, line: number, character: number): stri
       "```",
     ].join("\n");
   }
-  if (/\bparallel\b/.test(around)) {
+  if (/\b(parallel|para)\b/.test(around)) {
     return [
       "### `parallel` — fan-out promise composition",
       "",
       "Two forms — both run their RHSes in parallel via `Promise.all` while",
       "preserving the surface-syntax names (no positional-array footgun).",
+      "`para` is an interchangeable shorthand — both keywords lower identically.",
       "",
       "**Expression form:**",
       "",
@@ -1839,6 +1840,20 @@ const parabunCompletions = [
     kind: 14,
     detail: "Parabun: fan-out promise composition (statement form)",
     insertText: "parallel let ${1:name} = ${2:expr};",
+    insertTextFormat: 2,
+  },
+  {
+    label: "para { … }",
+    kind: 14,
+    detail: "Parabun: fan-out promise composition (expression form, shorthand for `parallel`)",
+    insertText: "para {\n  ${1:key}: ${2:expr},\n}",
+    insertTextFormat: 2,
+  },
+  {
+    label: "para let",
+    kind: 14,
+    detail: "Parabun: fan-out promise composition (statement form, shorthand for `parallel`)",
+    insertText: "para let ${1:name} = ${2:expr};",
     insertTextFormat: 2,
   },
   {
