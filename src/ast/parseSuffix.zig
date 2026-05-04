@@ -836,6 +836,59 @@ pub fn ParseSuffix(
             left.* = p.callRuntime(op_loc, "__parabunRangeInclusive", args);
             return .next;
         }
+        // Parabun: leading-dot sugar for chain-op handlers — `..> .json()` /
+        // `..! .message`. The leading `.` is unambiguous in chain-op handler
+        // position (the chain operator already consumed everything to the
+        // left), so we synthesize an arrow `(__pcv) => __pcv.<chain>` whose
+        // body is the dot-prefixed property/call chain. The synthesized param
+        // name is `__pcv` (Para chain value) — chosen to match the `__pb0`
+        // family of Parabun synthetic identifiers and to be unlikely to
+        // collide with any user identifier.
+        //
+        // The lexer is positioned at the leading `.` on entry; on return the
+        // arrow body has consumed the full member/call chain via parseSuffix
+        // run with `in_chain_op_arrow_rhs = true`, so the next chain op (if
+        // any) terminates the body.
+        fn parseLeadingDotChainHandler(p: *P, op_loc: logger.Loc) anyerror!Expr {
+            const arrow_loc = op_loc;
+            const dot_loc = p.lexer.loc();
+
+            // Push the arrow's scopes for the visit pass — same dance as the
+            // ~> / -> arrow synthesis above.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, dot_loc) catch bun.outOfMemory();
+
+            const param_name = "__pcv";
+            const param_ref = try p.declareSymbol(.constant, dot_loc, param_name);
+            const param_ident = p.newExpr(E.Identifier{ .ref = param_ref }, dot_loc);
+
+            // Run the suffix loop on top of the synthetic identifier with the
+            // chain-op terminator flag set so any ..!/..&/..> stops the body.
+            // The loop happily eats the leading `.` and any following member
+            // accesses, indexes, and calls.
+            var body_expr = param_ident;
+            const old_in_chain = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = true;
+            try p.parseSuffix(&body_expr, .assign, null, Expr.EFlags.none);
+            p.in_chain_op_arrow_rhs = old_in_chain;
+
+            p.popScope();
+            p.popScope();
+
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            body_stmts[0] = p.s(S.Return{ .value = body_expr }, dot_loc);
+
+            const args_slice = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+            args_slice[0] = .{ .binding = p.b(B.Identifier{ .ref = param_ref }, dot_loc) };
+
+            return p.newExpr(E.Arrow{
+                .args = args_slice,
+                .body = .{ .loc = dot_loc, .stmts = body_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, arrow_loc);
+        }
+
         fn t_dot_dot_exclamation(p: *P, level: Level, left: *Expr) anyerror!Continuation {
             // Parabun: `expr ..! handler` desugars to `expr.catch(handler)`.
             // RHS parses at .assign so a bare arrow handler works
@@ -849,10 +902,18 @@ pub fn ParseSuffix(
             const op_range = p.lexer.range();
             try p.lexer.next();
 
-            const old_in_chain = p.in_chain_op_arrow_rhs;
-            p.in_chain_op_arrow_rhs = true;
-            const rhs = try p.parseExpr(.assign);
-            p.in_chain_op_arrow_rhs = old_in_chain;
+            // Parabun: leading-dot sugar — `..! .message` desugars to
+            // `..! (__pcv) => __pcv.message`. Triggered only when a bare `.`
+            // is the first token after the chain operator.
+            const rhs = if (p.lexer.token == .t_dot)
+                try parseLeadingDotChainHandler(p, op_range.loc)
+            else blk: {
+                const old_in_chain = p.in_chain_op_arrow_rhs;
+                p.in_chain_op_arrow_rhs = true;
+                const parsed = try p.parseExpr(.assign);
+                p.in_chain_op_arrow_rhs = old_in_chain;
+                break :blk parsed;
+            };
 
             // Build: left.catch(rhs)
             const catch_target = p.newExpr(E.Dot{
@@ -907,10 +968,17 @@ pub fn ParseSuffix(
             const op_range = p.lexer.range();
             try p.lexer.next();
 
-            const old_in_chain = p.in_chain_op_arrow_rhs;
-            p.in_chain_op_arrow_rhs = true;
-            const rhs = try p.parseExpr(.assign);
-            p.in_chain_op_arrow_rhs = old_in_chain;
+            // Parabun: leading-dot sugar — `..> .json()` desugars to
+            // `..> (__pcv) => __pcv.json()`. See parseLeadingDotChainHandler.
+            const rhs = if (p.lexer.token == .t_dot)
+                try parseLeadingDotChainHandler(p, op_range.loc)
+            else blk: {
+                const old_in_chain = p.in_chain_op_arrow_rhs;
+                p.in_chain_op_arrow_rhs = true;
+                const parsed = try p.parseExpr(.assign);
+                p.in_chain_op_arrow_rhs = old_in_chain;
+                break :blk parsed;
+            };
 
             // Build: left.then(rhs)
             const then_target = p.newExpr(E.Dot{
@@ -1542,7 +1610,9 @@ const logger = bun.logger;
 const strings = bun.strings;
 
 const js_ast = bun.ast;
+const B = js_ast.B;
 const E = js_ast.E;
+const G = js_ast.G;
 const S = js_ast.S;
 const Expr = js_ast.Expr;
 const Stmt = js_ast.Stmt;

@@ -147,6 +147,18 @@ p ..! err => (recover() ..! finalFallback);
 
 A brace-bodied arrow (`r => { return r.json(); }`) follows JS's usual restriction that nothing chains directly after the closing `}` — wrap the arrow with parens if you need to chain past it.
 
+**Leading-dot sugar.** In handler position of `..>` and `..!`, a leading `.` followed by any property access / call chain desugars to an arrow with a synthetic `__pcv` parameter. The leading dot is unambiguous in this position because the chain operator just consumed the LHS — there's nothing to the left of the dot to read a property from.
+
+```
+fetch(url)
+  ..> .json()             // (__pcv) => __pcv.json()
+  ..> .users[0].id        // (__pcv) => __pcv.users[0].id
+  ..! .message;           // (__pcv) => __pcv.message
+// → fetch(url).then((__pcv) => __pcv.json()).then((__pcv) => __pcv.users[0].id).catch((__pcv) => __pcv.message);
+```
+
+`..&` deliberately does NOT get the sugar — `.finally` callbacks receive no value, so there's no implicit receiver to bind. A leading `.` after `..&` parses as a normal property access (a syntax error, since there's no preceding expression).
+
 ### `|>` (pipeline operator)
 
 Desugars `x |> f` to `f(x)`. Precedence: nullish coalescing level (tighter than `..!`/`..&`/`..>`).

@@ -116,6 +116,85 @@ describe("Parabun ..> (then operator)", () => {
       expect(out).toContain("await");
       expect(out).toContain(".then(next)");
     });
+
+    describe("leading-dot sugar", () => {
+      // `..> .json()` desugars to `..> (__pcv) => __pcv.json()` — the leading
+      // dot is unambiguous in chain-op handler position and saves the user
+      // from typing the param name + arrow.
+
+      it("..> .json() lowers to a method-call arrow handler", () => {
+        const out = transpiler.transformSync("const x = p ..> .json();");
+        expect(out).toContain(".then(");
+        expect(out).toContain(".json()");
+        // The arrow body's identifier is the synthetic param.
+        expect(out).toMatch(/=>\s*\S+\.json\(\)/);
+      });
+
+      it("..> .data lowers to a property-access arrow handler", () => {
+        const out = transpiler.transformSync("const x = p ..> .data;");
+        expect(out).toContain(".then(");
+        expect(out).toMatch(/=>\s*\S+\.data/);
+      });
+
+      it("..> .users[0].id chains property + index + property", () => {
+        const out = transpiler.transformSync("const x = p ..> .users[0].id;");
+        expect(out).toContain(".then(");
+        expect(out).toMatch(/=>\s*\S+\.users\[0\]\.id/);
+      });
+
+      it("..> .toString() — argless call works", () => {
+        const out = transpiler.transformSync("const x = p ..> .toString();");
+        expect(out).toContain(".then(");
+        expect(out).toMatch(/=>\s*\S+\.toString\(\)/);
+      });
+
+      it("..> .map(x => x * 2) — inner arrow argument doesn't break the sugar", () => {
+        const out = transpiler.transformSync("const x = p ..> .map(x => x * 2);");
+        expect(out).toContain(".then(");
+        expect(out).toContain(".map(");
+        expect(out).toContain("x * 2");
+      });
+
+      it("..! .message — error message extraction", () => {
+        const out = transpiler.transformSync("const x = p ..! .message;");
+        expect(out).toContain(".catch(");
+        expect(out).toMatch(/=>\s*\S+\.message/);
+      });
+
+      it("..! .stack — property on error", () => {
+        const out = transpiler.transformSync("const x = p ..! .stack;");
+        expect(out).toContain(".catch(");
+        expect(out).toMatch(/=>\s*\S+\.stack/);
+      });
+
+      it("mixes leading-dot, bare arrow, and identifier handler in one chain", () => {
+        const out = transpiler.transformSync("const x = p ..> .json() ..! err => defaults ..& done;");
+        expect(out).toContain(".then(");
+        expect(out).toContain(".json()");
+        expect(out).toContain(".catch(");
+        expect(out).toContain("defaults");
+        expect(out).toContain(".finally(done)");
+      });
+
+      it("identifier handler still works (no leading-dot confusion)", () => {
+        // `..> parseJson` is a bare identifier — no dot before it, sugar should
+        // not fire.
+        const out = transpiler.transformSync("const x = p ..> parseJson;");
+        expect(out).toContain(".then(parseJson)");
+        // Should not have synthesized an arrow with a synthetic param.
+        expect(out).not.toContain("=>");
+      });
+
+      it("parens-wrapped arrow still works (no leading-dot confusion)", () => {
+        // `..> ((r) => r.json())` is the explicit form — leading `(`, not `.`.
+        const out = transpiler.transformSync("const x = p ..> ((r) => r.json());");
+        expect(out).toContain(".then(");
+        expect(out).toContain("r.json()");
+        // The user's `r` param shouldn't have been replaced by a synthetic one.
+        expect(out).toContain("(r) =>");
+        expect(out).not.toContain("__pcv");
+      });
+    });
   });
 
   describe("end-to-end runtime", () => {
@@ -190,6 +269,54 @@ describe("Parabun ..> (then operator)", () => {
       });
       const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
       expect(stdout.trim()).toBe("recovered:bad");
+      expect(exitCode).toBe(0);
+    });
+
+    test("..> .value extracts a property end-to-end", async () => {
+      // Leading-dot sugar: `..> .value` becomes `..> (__pcv) => __pcv.value`.
+      using dir = tempDir("then-operator-leading-dot-value", {
+        "main.pts": `
+          async function main() {
+            const result = await (Promise.resolve({ value: 42 }) ..> .value);
+            console.log(result);
+          }
+          main();
+        `,
+      });
+      await using proc = Bun.spawn({
+        cmd: [bunExe(), "main.pts"],
+        env: bunEnv,
+        cwd: String(dir),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect(stdout.trim()).toBe("42");
+      expect(exitCode).toBe(0);
+    });
+
+    test("full leading-dot chain: ..> .json() ..! .message", async () => {
+      using dir = tempDir("then-operator-leading-dot-chain", {
+        "main.pts": `
+          const fakeRes = { json: () => ({ users: [{ id: 7 }] }) };
+          async function main() {
+            const id = await (Promise.resolve(fakeRes) ..> .json() ..> .users[0].id);
+            console.log(id);
+            const msg = await (Promise.reject(new Error("nope")) ..! .message);
+            console.log(msg);
+          }
+          main();
+        `,
+      });
+      await using proc = Bun.spawn({
+        cmd: [bunExe(), "main.pts"],
+        env: bunEnv,
+        cwd: String(dir),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect(stdout.trim()).toBe("7\nnope");
       expect(exitCode).toBe(0);
     });
   });

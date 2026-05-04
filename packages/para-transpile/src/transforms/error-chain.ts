@@ -63,7 +63,8 @@ function rewriteChainsInCode(code: string): string {
       const handlerEnd = scanHandlerEnd(code, handlerStart);
       // Recurse into the handler — handlers may contain parens whose
       // contents themselves include chain ops (`err => (recover() ..! fb)`).
-      const handler = rewriteChainsInCode(code.slice(handlerStart, handlerEnd).trim());
+      const handlerRaw = code.slice(handlerStart, handlerEnd).trim();
+      const handler = rewriteHandler(handlerRaw, here.method);
       acc = `${acc}.${here.method}(${handler})`;
       cursor = handlerEnd;
       // Skip whitespace looking for another chain op at top level.
@@ -73,6 +74,30 @@ function rewriteChainsInCode(code: string): string {
     i = cursor;
   }
   return out;
+}
+
+/**
+ * Rewrite a single chain-op handler. For ..> and ..!, a leading `.` after
+ * trimming is the leading-dot sugar — `..> .json()` becomes the arrow
+ * `(__pcv) => __pcv.json()`. ..& deliberately doesn't get the sugar (a
+ * `.finally` callback receives no value, so there's no implicit receiver
+ * to bind), so a leading-dot handler under ..& is left as-is and will
+ * surface as a runtime error / parse error downstream.
+ *
+ * The synthesized param name (`__pcv` — "para chain value") matches what
+ * the canonical Zig parser emits, so parity-fixture comparisons stay
+ * byte-equivalent.
+ */
+function rewriteHandler(raw: string, method: "catch" | "finally" | "then"): string {
+  if ((method === "then" || method === "catch") && raw.startsWith(".")) {
+    // Recurse into the body too so nested chain ops inside the dot-chain
+    // (`..> .compute() ..! .recover()` doesn't happen at the same nesting,
+    // but a method arg might contain one). The body is `__pcv` followed by
+    // the original handler text.
+    const body = `__pcv${rewriteChainsInCode(raw)}`;
+    return `(__pcv) => ${body}`;
+  }
+  return rewriteChainsInCode(raw);
 }
 
 /**

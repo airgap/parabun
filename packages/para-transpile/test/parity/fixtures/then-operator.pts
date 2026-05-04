@@ -7,3 +7,6 @@ const b = fetch("/api") ..> parse ..> items;
 const c = fetch("/api") ..> parse ..! handler ..& cleanup;
 const d = fetch("/api") ..> r => r.json();
 const e = fetch("/api") ..> r => r.json() ..! err => err ..& () => 0;
+const f = fetch("/api") ..> .json();
+const g = fetch("/api") ..> .users[0].id;
+const h = fetch("/api") ..> .json() ..! .message;
