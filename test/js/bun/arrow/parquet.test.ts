@@ -877,6 +877,127 @@ describe("para:arrow parquet — List<primitive>", () => {
   });
 });
 
+describe("para:arrow parquet — bloom filters", () => {
+  test("readBloomFilters returns empty maps when no bloomFilters option was set", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = [
+      { id: 1, name: "a" },
+      { id: 2, name: "b" },
+    ];
+    const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "uncompressed" });
+    const filters = arrow.readBloomFilters(bytes);
+    expect(filters).toHaveLength(1);
+    expect(filters[0].size).toBe(0);
+  });
+
+  test("int32 column: every inserted value mightContain (no false negatives)", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const N = 1_000;
+    const rows = Array.from({ length: N }, (_, i) => ({ id: i * 7 + 13, tag: `t${i % 4}` }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "uncompressed",
+      bloomFilters: ["id"],
+    });
+    const filters = arrow.readBloomFilters(bytes);
+    expect(filters).toHaveLength(1);
+    const idFilter = filters[0].get("id")!;
+    expect(idFilter).toBeDefined();
+    expect(idFilter.numBytes).toBeGreaterThanOrEqual(32);
+    // No false negatives — every value we wrote must report true.
+    for (const r of rows) {
+      expect(idFilter.mightContain(r.id)).toBe(true);
+    }
+  });
+
+  test("int32 column: false-positive rate is reasonable", async () => {
+    const arrow = (await import("para:arrow")).default;
+    // Insert 1000 values, probe 10000 values that aren't in the set.
+    // Expect FPR well below 5% — default 32 KB filter has plenty of
+    // capacity at 1K NDV (~10⁻⁵ theoretical FPR).
+    const N = 1_000;
+    const rows = Array.from({ length: N }, (_, i) => ({ id: i * 7 + 13 }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "uncompressed",
+      bloomFilters: ["id"],
+    });
+    const filter = arrow.readBloomFilters(bytes)[0].get("id")!;
+    const inserted = new Set(rows.map(r => r.id));
+    let fp = 0;
+    let probed = 0;
+    for (let v = 1_000_000; v < 1_010_000; v++) {
+      if (inserted.has(v)) continue;
+      probed++;
+      if (filter.mightContain(v)) fp++;
+    }
+    const fpr = fp / probed;
+    expect(fpr).toBeLessThan(0.05);
+  });
+
+  test("utf8 column: strings round-trip through the bloom filter", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const tags = ["alpha", "β", "γαμμα", "test", "data", "bloom", "filter", "★"];
+    const rows = tags.map((t, i) => ({ id: i, tag: t }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "snappy",
+      bloomFilters: ["tag"],
+    });
+    const tagFilter = arrow.readBloomFilters(bytes)[0].get("tag")!;
+    for (const t of tags) {
+      expect(tagFilter.mightContain(t)).toBe(true);
+    }
+    // Some absent strings should miss.
+    expect(tagFilter.mightContain("definitely-not-in-the-set-12345")).toBe(false);
+  });
+
+  test("multiple columns: independent filters per column", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      uid: i + 1000,
+      sku: `SKU-${i}`,
+      qty: i % 10,
+    }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "snappy",
+      bloomFilters: ["uid", "sku"],
+    });
+    const m = arrow.readBloomFilters(bytes)[0];
+    expect(m.has("uid")).toBe(true);
+    expect(m.has("sku")).toBe(true);
+    expect(m.has("qty")).toBe(false); // not requested
+    expect(m.get("uid")!.mightContain(1042)).toBe(true);
+    expect(m.get("uid")!.mightContain(99)).toBe(false);
+    expect(m.get("sku")!.mightContain("SKU-42")).toBe(true);
+    expect(m.get("sku")!.mightContain("SKU-99999")).toBe(false);
+  });
+
+  test("the data round-trips correctly when bloom filters are enabled", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 500 }, (_, i) => ({ id: i, label: `item-${i}` }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "zstd",
+      bloomFilters: ["id", "label"],
+    });
+    const back = arrow.toRows(arrow.fromParquet(bytes));
+    expect(back).toEqual(rows);
+  });
+
+  test("INT96 column rejects bloom-filter request (spec-defined)", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const N = 4;
+    const nanos = new BigInt64Array([0n, 1_000_000_000n, 2_000_000_000n, 3_000_000_000n]);
+    const col = new arrow.Column({ kind: "timestamp_nanos" }, N, nanos);
+    const batch = new arrow.RecordBatch(
+      { fields: [{ name: "ts", type: { kind: "timestamp_nanos" }, nullable: false }] },
+      [col],
+      N,
+    );
+    const tbl = new arrow.Table(batch.schema, [batch]);
+    expect(() => arrow.toParquet(tbl, { compression: "uncompressed", bloomFilters: ["ts"] })).toThrow(
+      /INT96.*not supported/,
+    );
+  });
+});
+
 describe("para:arrow parquet — scale", () => {
   test("25K-row table round-trips through zstd", async () => {
     const arrow = (await import("para:arrow")).default;

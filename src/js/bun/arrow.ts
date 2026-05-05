@@ -1642,12 +1642,26 @@ function fromParquet(bytes: Uint8Array): Table {
 
 function toParquet(
   source: Table | RecordBatch,
-  opts?: { compression?: "uncompressed" | "snappy" | "gzip" | "zstd" },
+  opts?: {
+    compression?: "uncompressed" | "snappy" | "gzip" | "zstd";
+    bloomFilters?: string[];
+  },
 ): Uint8Array {
   if (!(source instanceof Table) && !(source instanceof RecordBatch)) {
     throw new TypeError("para:arrow.toParquet: source must be a Table or RecordBatch");
   }
   return parquet.toParquet(source, opts) as Uint8Array;
+}
+
+// Read every parquet bloom filter from `bytes` without decoding the
+// row groups themselves. Returns one Map<columnName, BloomFilter> per
+// row group. Use this for cheap "definitely-not-present" checks
+// before paying for a full fromParquet.
+function readBloomFilters(bytes: Uint8Array): Array<Map<string, { mightContain(v: any): boolean; numBytes: number }>> {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("para:arrow.readBloomFilters: bytes must be a Uint8Array");
+  }
+  return parquet.readBloomFilters(bytes);
 }
 
 export default {
@@ -1684,4 +1698,5 @@ export default {
   toIPC,
   fromParquet,
   toParquet,
+  readBloomFilters,
 };

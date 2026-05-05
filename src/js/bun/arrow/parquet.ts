@@ -285,6 +285,162 @@ const PQ_CODEC_GZIP = 2;
 // below with a clear message rather than silently producing garbage.
 const PQ_CODEC_ZSTD = 6;
 
+// ─── Split-Block Bloom Filter (SBBF) ──────────────────────────────────────
+//
+// Per parquet.thrift's BloomFilter spec. Each filter is a sequence of
+// 32-byte blocks (= 8 little-endian uint32s = 256 bits). Insert hashes
+// the value with XxHash64 (seed=0); the high 32 bits select a block,
+// the low 32 bits drive 8 salted bit-sets within the block.
+//
+// Hash flavors / algorithms / compressions are fixed in practice: every
+// reader supports SBLOCK + XXHASH + UNCOMPRESSED. The Thrift union
+// encoding is the only thing wider.
+
+// Spec-defined salts used by the per-block bit selection.
+const SBBF_SALT = new Uint32Array([
+  0x47b6137b, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31,
+]);
+
+const SBBF_BLOCK_BYTES = 32;
+
+// Insert one 64-bit hash into `blocks` (Uint32Array of length numBlocks*8).
+function sbbfInsert(blocks: Uint32Array, numBlocks: number, hash: bigint): void {
+  // Block index: high 32 bits × numBlocks, take high 32 bits.
+  const hi = Number(hash >> 32n) >>> 0;
+  const lo = Number(hash & 0xffffffffn) >>> 0;
+  // (hi * numBlocks) >>> 32 — use BigInt to avoid losing precision when
+  // hi*numBlocks overflows 53 bits.
+  const blockIdx = Number((BigInt(hi) * BigInt(numBlocks)) >> 32n);
+  const base = blockIdx * 8;
+  for (let i = 0; i < 8; i++) {
+    // Math.imul handles 32-bit signed multiply with low-32 truncation.
+    const masked = Math.imul(lo, SBBF_SALT[i] | 0) >>> 0;
+    const bit = masked >>> 27;
+    blocks[base + i] |= 1 << bit;
+  }
+}
+
+// Same shape as insert; returns false iff any bit we'd have set is
+// missing → the value is *definitely not* present.
+function sbbfMightContain(blocks: Uint32Array, numBlocks: number, hash: bigint): boolean {
+  const hi = Number(hash >> 32n) >>> 0;
+  const lo = Number(hash & 0xffffffffn) >>> 0;
+  const blockIdx = Number((BigInt(hi) * BigInt(numBlocks)) >> 32n);
+  const base = blockIdx * 8;
+  for (let i = 0; i < 8; i++) {
+    const masked = Math.imul(lo, SBBF_SALT[i] | 0) >>> 0;
+    const bit = masked >>> 27;
+    if ((blocks[base + i] & (1 << bit)) === 0) return false;
+  }
+  return true;
+}
+
+// Hash an arbitrary parquet value to its XxHash64 digest using the
+// PLAIN-encoded bytes the spec mandates. Supported types match the
+// parquet bloom-filter spec (INT96 is intentionally excluded — the spec
+// disallows it because the canonical 12-byte representation is
+// implementation-defined).
+function bloomHashValue(value: any, physicalType: number, typeLength?: number): bigint {
+  switch (physicalType) {
+    case PQ_TYPE_BOOLEAN: {
+      const b = new Uint8Array(1);
+      b[0] = value ? 1 : 0;
+      return Bun.hash.xxHash64(b);
+    }
+    case PQ_TYPE_INT32: {
+      const b = new Uint8Array(4);
+      new DataView(b.buffer).setInt32(0, value | 0, true);
+      return Bun.hash.xxHash64(b);
+    }
+    case PQ_TYPE_INT64: {
+      const b = new Uint8Array(8);
+      new DataView(b.buffer).setBigInt64(0, BigInt(value), true);
+      return Bun.hash.xxHash64(b);
+    }
+    case PQ_TYPE_FLOAT: {
+      const b = new Uint8Array(4);
+      new DataView(b.buffer).setFloat32(0, +value, true);
+      return Bun.hash.xxHash64(b);
+    }
+    case PQ_TYPE_DOUBLE: {
+      const b = new Uint8Array(8);
+      new DataView(b.buffer).setFloat64(0, +value, true);
+      return Bun.hash.xxHash64(b);
+    }
+    case PQ_TYPE_BYTE_ARRAY: {
+      // PLAIN form for BYTE_ARRAY in bloom-filter context is the raw
+      // bytes (no length prefix). Strings use UTF-8.
+      const bytes = typeof value === "string" ? new TextEncoder().encode(value) : (value as Uint8Array);
+      return Bun.hash.xxHash64(bytes);
+    }
+    case PQ_TYPE_FIXED_LEN_BYTE_ARRAY: {
+      const bytes = value as Uint8Array;
+      if (typeLength !== undefined && bytes.length !== typeLength) {
+        throw new RangeError(
+          `parquet bloom filter: FLBA value length ${bytes.length} ≠ expected typeLength ${typeLength}`,
+        );
+      }
+      return Bun.hash.xxHash64(bytes);
+    }
+    default:
+      throw new Error(`parquet bloom filter: physical type ${physicalType} not supported`);
+  }
+}
+
+// Build a fresh SBBF bitmap from a values iterable. `numBytes` is
+// rounded up to a 32-byte multiple. Picks ~32 KB per filter by default
+// (~10⁵ NDV at ~1% FPR).
+function buildSbbf(
+  values: any,
+  numNonNull: number,
+  physicalType: number,
+  typeLength?: number,
+  numBytesHint?: number,
+): Uint8Array {
+  const numBytes = Math.max(SBBF_BLOCK_BYTES, alignTo(numBytesHint ?? 32 * 1024, SBBF_BLOCK_BYTES));
+  const numBlocks = numBytes / SBBF_BLOCK_BYTES;
+  const blocks = new Uint32Array(numBlocks * 8);
+  if (physicalType === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+    // FLBA values is one big Uint8Array of width-byte windows.
+    const w = typeLength!;
+    for (let i = 0; i < numNonNull; i++) {
+      const slice = (values as Uint8Array).subarray(i * w, (i + 1) * w);
+      sbbfInsert(blocks, numBlocks, bloomHashValue(slice, physicalType, typeLength));
+    }
+  } else {
+    for (let i = 0; i < numNonNull; i++) {
+      sbbfInsert(blocks, numBlocks, bloomHashValue(values[i], physicalType, typeLength));
+    }
+  }
+  return new Uint8Array(blocks.buffer, 0, numBytes);
+}
+
+function alignTo(n: number, mult: number): number {
+  return Math.ceil(n / mult) * mult;
+}
+
+// Decode a BloomFilterHeader thrift struct at the current reader
+// position. We only emit / accept the canonical SBLOCK + XXHASH +
+// UNCOMPRESSED variants — every other writer + reader in the wild
+// uses these too.
+function parseBloomFilterHeader(r: ThriftReader): { numBytes: number } {
+  let numBytes = 0;
+  r.readStruct((fid, _t, rr) => {
+    switch (fid) {
+      case 1:
+        numBytes = rr.readZigzagI32();
+        return true;
+      case 2: // algorithm (SplitBlockAlgorithm) — single empty inner struct, skip body.
+      case 3: // hash      (XxHash)              — same.
+      case 4: // compression (Uncompressed)      — same.
+        rr.skip(TC_STRUCT);
+        return true;
+    }
+    return false;
+  });
+  return { numBytes };
+}
+
 // ConvertedType — pre-2.4 logical-type annotation (PQ_CT_UTF8 declared
 // up by the type constants above). Every parquet reader since 2.0
 // understands these; the newer LogicalType union is more expressive
@@ -352,6 +508,20 @@ interface ColumnMetaData {
    * predicate is skipped without reading the data pages.
    */
   statistics: ColumnStatistics | undefined;
+  /**
+   * Bloom filter offset in the parquet file (field 14 in the
+   * thrift). Optional — undefined means no bloom filter for this
+   * column. Used by `readBloomFilters()` for fast "definitely not
+   * present" lookups before fully decoding a row group.
+   */
+  bloomFilterOffset: bigint | undefined;
+  /**
+   * Length of the bloom-filter region (header + bitmap), or
+   * undefined for older writers that didn't emit field 15. We can
+   * also derive this from the header's numBytes, so absence is
+   * recoverable.
+   */
+  bloomFilterLength: number | undefined;
 }
 
 interface ColumnChunk {
@@ -475,6 +645,8 @@ function parseColumnMetaData(r: ThriftReader): ColumnMetaData {
     dataPageOffset: 0n,
     dictionaryPageOffset: undefined,
     statistics: undefined,
+    bloomFilterOffset: undefined,
+    bloomFilterLength: undefined,
   };
   r.readStruct((fid, t, rr) => {
     switch (fid) {
@@ -505,6 +677,17 @@ function parseColumnMetaData(r: ThriftReader): ColumnMetaData {
         return true;
       case 12:
         out.statistics = parseStatistics(rr);
+        return true;
+      case 14:
+        // bloom_filter_offset — i64 file offset of the
+        // BloomFilterHeader. The bitmap follows immediately.
+        out.bloomFilterOffset = rr.readZigzagI64();
+        return true;
+      case 15:
+        // bloom_filter_length — total byte length of the bloom
+        // filter region (header + bitmap). Optional; recoverable
+        // from the header's numBytes when absent.
+        out.bloomFilterLength = rr.readZigzagI32();
         return true;
     }
     return false;
@@ -1580,6 +1763,88 @@ function concatValues(prev: any, next: any, nextCount: number): any {
   return out;
 }
 
+// Read all bloom filters from a parquet file. Returns one entry per
+// (rowGroupIndex, columnName) tuple — rowGroup-scoped because each
+// row group has its own filter, and a query that spans multiple row
+// groups must check each independently.
+//
+// Each filter exposes `mightContain(value)` → boolean.
+//   - `true` means the value MIGHT be present (could be a false
+//     positive, since the filter is probabilistic). Caller must
+//     check the actual data.
+//   - `false` means the value is DEFINITELY NOT present. Caller can
+//     safely skip the row group.
+//
+// Columns without a bloom filter (writer didn't emit one, or the
+// file predates parquet 2.7) simply don't appear in the map.
+export type ParquetBloomFilter = {
+  /** Probabilistic membership check. False = definitely not present. */
+  mightContain(value: any): boolean;
+  /** Filter size in bytes (multiple of 32). */
+  numBytes: number;
+};
+export type ParquetBloomFilters = Array<Map<string, ParquetBloomFilter>>;
+
+export function readBloomFilters(bytes: Uint8Array): ParquetBloomFilters {
+  if (bytes.length < 12 || bytes[0] !== 0x50 || bytes[1] !== 0x41 || bytes[2] !== 0x52 || bytes[3] !== 0x31) {
+    throw new Error("parquet: missing PAR1 magic");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const footerLen = view.getInt32(bytes.length - 8, true);
+  const footerStart = bytes.length - 8 - footerLen;
+  const footerReader = new ThriftReader(bytes.subarray(footerStart, bytes.length - 8));
+  const meta = parseFileMetaData(footerReader);
+  const out: ParquetBloomFilters = [];
+  for (const rg of meta.rowGroups) {
+    const m = new Map<string, ParquetBloomFilter>();
+    for (const chunk of rg.columns) {
+      const md = chunk.metaData;
+      if (md.bloomFilterOffset === undefined) continue;
+      const off = Number(md.bloomFilterOffset);
+      const r = new ThriftReader(bytes, off);
+      const header = parseBloomFilterHeader(r);
+      const numBytes = header.numBytes;
+      const numBlocks = numBytes / SBBF_BLOCK_BYTES;
+      // The bitmap follows the header inline. Header consumed `r.pos -
+      // off` bytes; bitmap = next numBytes after that.
+      const bitmapStart = r.pos;
+      const bitmapBytes = bytes.subarray(bitmapStart, bitmapStart + numBytes);
+      // The parquet file's bloom-filter offset isn't guaranteed to be
+      // 4-byte aligned, so we can't directly alias the slice as a
+      // Uint32Array. Copy into a fresh Uint8Array (whose backing
+      // ArrayBuffer is fresh + aligned at 0), then alias.
+      const aligned = new Uint8Array(numBytes);
+      aligned.set(bitmapBytes);
+      const blocks = new Uint32Array(aligned.buffer, 0, numBlocks * 8);
+      const physicalType = md.type;
+      // typeLength for FLBA pulls from the schema; for non-FLBA
+      // bloom-filterable types it's irrelevant.
+      let typeLength: number | undefined;
+      if (physicalType === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+        // Walk the schema to find this column's leaf and grab
+        // type_length. Path-in-schema's last entry is the leaf name.
+        const leafName = md.pathInSchema[md.pathInSchema.length - 1];
+        for (const e of meta.schema) {
+          if (e.name === leafName && e.typeLength !== undefined) {
+            typeLength = e.typeLength;
+            break;
+          }
+        }
+      }
+      const colName = md.pathInSchema.length > 0 ? md.pathInSchema[0] : "";
+      m.set(colName, {
+        numBytes,
+        mightContain(value: any): boolean {
+          const h = bloomHashValue(value, physicalType, typeLength);
+          return sbbfMightContain(blocks, numBlocks, h);
+        },
+      });
+    }
+    out.push(m);
+  }
+  return out;
+}
+
 export function fromParquet(bytes: Uint8Array): TableLike {
   const { Column, RecordBatch, Table } = getTypes();
 
@@ -2281,6 +2546,13 @@ interface ColumnPlan {
         nullCount: bigint;
       }
     | undefined;
+  /**
+   * Bloom-filter region (header + bitmap), pre-built. Patched in
+   * after the data pages so we know its file offset; emitted by
+   * writeColumnMetaData as fields 14/15.
+   */
+  bloomFilter: Uint8Array | undefined;
+  bloomFilterOffset: bigint | undefined;
 }
 
 // Compute min/max + null count for a typed-array column. The min/max
@@ -2518,6 +2790,14 @@ function writeColumnMetaData(
     tw.writeFieldHeader(lf, 12, TC_STRUCT);
     lf = 12;
     tw.out.writeBytes(writeStatistics(plan.stats));
+  }
+  // 14: bloom_filter_offset, 15: bloom_filter_length — both populated
+  // only when the writer was asked to emit a bloom filter for this
+  // column AND the filter region was patched in upstream. Length is
+  // useful enough that we always emit it when we emit the offset.
+  if (plan.bloomFilter !== undefined && plan.bloomFilterOffset !== undefined) {
+    lf = tw.writeI64(lf, 14, plan.bloomFilterOffset);
+    lf = tw.writeI32(lf, 15, plan.bloomFilter.length);
   }
   tw.writeStop();
   return tw.finish();
@@ -2861,7 +3141,20 @@ function encodeListColumnAcrossBatches(
 
 export function toParquet(
   source: TableLike | RecordBatchLike,
-  opts?: { compression?: "uncompressed" | "snappy" | "gzip" | "zstd" },
+  opts?: {
+    compression?: "uncompressed" | "snappy" | "gzip" | "zstd";
+    /**
+     * Column names to emit a bloom filter for. Each named column gets
+     * a Split-Block Bloom Filter (SBBF, XxHash64, ~32 KB by default)
+     * written between the data pages and the file footer; readers
+     * (including readBloomFilters) can use it for row-group-level
+     * predicate pushdown without decoding the column.
+     *
+     * Unrecognised names are silently skipped (no filter emitted).
+     * INT96 columns are excluded from the spec — passing one throws.
+     */
+    bloomFilters?: string[];
+  },
 ): Uint8Array {
   const compression = opts?.compression ?? "snappy";
   let codec = PQ_CODEC_UNCOMPRESSED;
@@ -2871,6 +3164,7 @@ export function toParquet(
   else if (compression !== "uncompressed") {
     throw new RangeError(`para:arrow.toParquet: unknown compression "${compression}"`);
   }
+  const bloomCols = new Set<string>(opts?.bloomFilters ?? []);
 
   // Materialize columns from the source. Concat batches into single
   // typed arrays so we can write one row group.
@@ -2881,8 +3175,13 @@ export function toParquet(
   const out = new ByteWriter();
   out.writeBytes(new Uint8Array([0x50, 0x41, 0x52, 0x31])); // PAR1
 
-  const columnChunks: Uint8Array[] = [];
+  // Column chunk metadata is emitted AFTER the bloom-filter region
+  // so each chunk can carry its bloom_filter_offset (field 14). We
+  // track the per-column data-page offset + compressed size during
+  // the page-emission pass and assemble chunks once offsets settle.
   const colPlans: ColumnPlan[] = [];
+  const dataPageOffsets: bigint[] = [];
+  const compressedSizes: number[] = [];
 
   for (let ci = 0; ci < schema.fields.length; ci++) {
     const field = schema.fields[ci];
@@ -2919,9 +3218,17 @@ export function toParquet(
         // schema (per-element vs per-list). Skip — readers treat
         // missing stats as unknown.
         stats: undefined,
+        // Bloom filters for list columns aren't supported in v1 — the
+        // semantics ("did the LIST contain this element?") would need
+        // hashing each inner value, which is doable but a different
+        // contract than "this column has this value." Drop the column
+        // from the bloom set rather than emit an empty filter.
+        bloomFilter: undefined,
+        bloomFilterOffset: undefined,
       };
       colPlans.push(plan);
-      columnChunks.push(writeColumnChunk(plan, codec, compressedSize + pageHeader.length, pageStartOffset));
+      dataPageOffsets.push(pageStartOffset);
+      compressedSizes.push(compressedSize + pageHeader.length);
       continue;
     }
 
@@ -3080,6 +3387,20 @@ export function toParquet(
       precision = dt.precision;
       scale = dt.scale;
     }
+    // Optional bloom filter — built only when the caller asked for
+    // one on this column. INT96 is excluded (the spec doesn't define
+    // a canonical 12-byte hash for it). The bitmap goes into the
+    // plan now; we patch the file offset in below, after all data
+    // pages are emitted.
+    let bloomBitmap: Uint8Array | undefined;
+    if (bloomCols.has(field.name) && numNonNull > 0) {
+      if (physicalType === PQ_TYPE_INT96) {
+        throw new Error(
+          `para:arrow.toParquet: bloom filter requested for INT96 column "${field.name}" — not supported by the parquet spec`,
+        );
+      }
+      bloomBitmap = buildSbbf(nonNullValues, numNonNull, physicalType, flbaWidth);
+    }
     const plan: ColumnPlan = {
       name: field.name,
       physicalType,
@@ -3099,9 +3420,82 @@ export function toParquet(
       // get undefined stats (downstream readers handle "missing
       // stats" as "unknown" already).
       stats: computeColumnStats(nonNullValues, numNonNull, numRows, physicalType),
+      bloomFilter: bloomBitmap,
+      bloomFilterOffset: undefined,
     };
     colPlans.push(plan);
-    columnChunks.push(writeColumnChunk(plan, codec, compressedSize + pageHeader.length, pageStartOffset));
+    dataPageOffsets.push(pageStartOffset);
+    compressedSizes.push(compressedSize + pageHeader.length);
+  }
+
+  // ─── Bloom filter region ────────────────────────────────────────────
+  // Emit one (header + bitmap) blob per requested column, recording the
+  // file offset so the column metadata can point at it. The thrift
+  // BloomFilterHeader is the canonical SBLOCK + XXHASH + UNCOMPRESSED.
+  for (const plan of colPlans) {
+    if (!plan.bloomFilter) continue;
+    plan.bloomFilterOffset = BigInt(out.pos);
+    const tw = new ThriftWriter();
+    let lf = 0;
+    lf = tw.writeI32(lf, 1, plan.bloomFilter.length); // numBytes
+    // 2: algorithm (BloomFilterAlgorithm with field 1 = SplitBlockAlgorithm{})
+    tw.writeFieldHeader(lf, 2, TC_STRUCT);
+    lf = 2;
+    {
+      const inner = new ThriftWriter();
+      let lf2 = 0;
+      inner.writeFieldHeader(lf2, 1, TC_STRUCT);
+      lf2 = 1;
+      // SplitBlockAlgorithm is empty — just stop.
+      const empty = new ThriftWriter();
+      empty.writeStop();
+      inner.out.writeBytes(empty.finish());
+      void lf2;
+      inner.writeStop();
+      tw.out.writeBytes(inner.finish());
+    }
+    // 3: hash (BloomFilterHash with field 1 = XxHash{})
+    tw.writeFieldHeader(lf, 3, TC_STRUCT);
+    lf = 3;
+    {
+      const inner = new ThriftWriter();
+      let lf2 = 0;
+      inner.writeFieldHeader(lf2, 1, TC_STRUCT);
+      lf2 = 1;
+      const empty = new ThriftWriter();
+      empty.writeStop();
+      inner.out.writeBytes(empty.finish());
+      void lf2;
+      inner.writeStop();
+      tw.out.writeBytes(inner.finish());
+    }
+    // 4: compression (BloomFilterCompression with field 1 = Uncompressed{})
+    tw.writeFieldHeader(lf, 4, TC_STRUCT);
+    lf = 4;
+    {
+      const inner = new ThriftWriter();
+      let lf2 = 0;
+      inner.writeFieldHeader(lf2, 1, TC_STRUCT);
+      lf2 = 1;
+      const empty = new ThriftWriter();
+      empty.writeStop();
+      inner.out.writeBytes(empty.finish());
+      void lf2;
+      inner.writeStop();
+      tw.out.writeBytes(inner.finish());
+    }
+    tw.writeStop();
+    const headerBytes = tw.finish();
+    out.writeBytes(headerBytes);
+    out.writeBytes(plan.bloomFilter);
+  }
+
+  // ─── Column chunks ──────────────────────────────────────────────────
+  // Now that bloom-filter offsets are settled, emit each chunk's
+  // metadata.
+  const columnChunks: Uint8Array[] = [];
+  for (let i = 0; i < colPlans.length; i++) {
+    columnChunks.push(writeColumnChunk(colPlans[i], codec, compressedSizes[i], dataPageOffsets[i]));
   }
 
   // Row group metadata uses the totals across columns.
