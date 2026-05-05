@@ -3537,10 +3537,24 @@ function encodeMapSourceAcrossBatches(
   const valueType = field.type.valueType;
   const valueOptional = field.type.valueNullable === true;
   if (keyType.kind === "list" || keyType.kind === "struct" || keyType.kind === "map") {
-    throw new Error(`para:arrow.toParquet: Map key type "${keyType.kind}" not supported`);
+    // Map keys MUST be primitive per the parquet MAP_KEY_VALUE spec
+    // (key is REQUIRED + scalar). This is a permanent constraint,
+    // not a v1 limitation.
+    throw new Error(
+      `para:arrow.toParquet: Map<${keyType.kind}, …> not supported — parquet requires primitive map keys`,
+    );
   }
   if (valueType.kind === "list" || valueType.kind === "struct" || valueType.kind === "map") {
-    throw new Error(`para:arrow.toParquet: Map value type "${valueType.kind}" not supported`);
+    // Map values can be any nested type per spec, but the writer's
+    // Dremel encoder is currently scoped to primitive values. The
+    // workaround is to flatten to two columns (one List<key>, one
+    // List<value>) and zip on the read side, OR materialise as
+    // List<Struct<key, value>> directly which today's writer
+    // handles via the list-of-struct path.
+    throw new Error(
+      `para:arrow.toParquet: Map<K, ${valueType.kind}> not yet supported by the writer. ` +
+        `Workaround: convert to List<Struct<key, value>> (today's writer handles that shape directly).`,
+    );
   }
   const keyPhysical = parquetPhysicalForKind(keyType.kind);
   const valuePhysical = parquetPhysicalForKind(valueType.kind);
@@ -3964,7 +3978,22 @@ function encodeListSourceAcrossBatches(
   const elemOptional = field.type.elemNullable === true; // explicit opt-in; default REQUIRED
   const innerKind = innerType.kind;
   if (innerKind === "list") {
-    throw new Error("para:arrow.toParquet: nested List<List<...>> not yet supported");
+    // Recursive Dremel — the inner list contributes its own rep
+    // level (max_rep ≥ 2) and the inner-list def levels stack on
+    // top of the outer's. Doable but ~250 LOC of careful per-row
+    // bookkeeping. The pragmatic workaround: flatten to a
+    // List<Struct<index, value>> where index identifies the inner
+    // list — the writer handles that today via the
+    // list-of-struct path.
+    throw new Error(
+      `para:arrow.toParquet: List<List<${innerType.child?.kind ?? "…"}>> not yet supported. ` +
+        `Workaround: flatten to List<Struct<inner_index, value>> (writer handles list-of-struct today).`,
+    );
+  }
+  if (innerKind === "map") {
+    throw new Error(
+      `para:arrow.toParquet: List<Map<…>> not yet supported. Workaround: flatten to List<Struct<key, value>>.`,
+    );
   }
   const innerPhysical = parquetPhysicalForKind(innerKind);
   const innerConverted = parquetConvertedForKind(innerKind);

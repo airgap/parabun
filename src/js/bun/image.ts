@@ -26,7 +26,7 @@ function todo(): never {
   throw new Error(NOT_IMPLEMENTED_MSG);
 }
 
-type ImageFormat = "jpeg" | "png" | "webp" | "avif";
+type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "heic" | "jxl";
 type DecodedImage = {
   data: Uint8Array;
   width: number;
@@ -117,6 +117,8 @@ type SharpenOptions = {
 // Lazy-required to avoid loading the FFI module unless an AVIF call
 // actually fires. The module itself is opaque (no eager probe).
 const avifMod = require("./image/avif.ts");
+const heifMod = require("./image/heif.ts");
+const jxlMod = require("./image/jxl.ts");
 
 // Animated formats route through the video/ffmpeg helper since at
 // the codec level animated GIF / animated WebP / APNG are
@@ -177,6 +179,16 @@ function decode(bytes: Uint8Array): DecodedImage {
   if (avifMod.isAvif(bytes)) {
     const out = avifMod.decode(bytes);
     return { data: out.data, width: out.width, height: out.height, channels: 4, format: "avif" };
+  }
+  // HEIC / HEIF dispatch — same magic-byte gate. libheif required.
+  if (heifMod.isHeif(bytes)) {
+    const out = heifMod.decode(bytes);
+    return { data: out.data, width: out.width, height: out.height, channels: 4, format: "heic" };
+  }
+  // JPEG XL dispatch — naked codestream OR ISOBMFF container. libjxl required.
+  if (jxlMod.isJxl(bytes)) {
+    const out = jxlMod.decode(bytes);
+    return { data: out.data, width: out.width, height: out.height, channels: 4, format: "jxl" };
   }
   return native.decode(bytes);
 }
