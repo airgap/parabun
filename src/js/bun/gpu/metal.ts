@@ -961,6 +961,431 @@ kernel void attn_output_f32(
     }
     outv[h * headDim + i] = acc;
 }
+
+// ─── Secondary GPU primitives (gpu.ts public surface) ──────────────────
+// Mirrors the CUDA reduce/argmin-argmax kernels in cuda.ts. Apple GPU
+// idiom: simdgroup-wide reduces via simd_sum / simd_min / simd_max +
+// simd_shuffle_xor; cross-warp merge through a 32-slot threadgroup
+// buffer. Each kernel emits ONE per-threadgroup partial; the host sums
+// (or extremum-merges) the small partial array (≤ REDUCE_GRID = 256).
+//
+// Block size 256 (= 8 simd warps). Grid size REDUCE_GRID = 256 →
+// 65,536 threads, strided over arbitrary input length. Same dispatch
+// shape across all of these so launchers can share boilerplate.
+
+kernel void reduce_sum_f32(
+    device const float *in        [[buffer(0)]],
+    device       float *partials  [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]],
+    uint                bid       [[threadgroup_position_in_grid]],
+    uint                ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup float warpAcc[32];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+
+    float local = 0.0f;
+    for (uint i = start; i < n; i += stride) local += in[i];
+    local = simd_sum(local);
+    if (lane == 0u) warpAcc[warp] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        local = (tid < nwarps) ? warpAcc[lane] : 0.0f;
+        local = simd_sum(local);
+        if (tid == 0u) partials[bid] = local;
+    }
+}
+
+kernel void reduce_min_f32(
+    device const float *in        [[buffer(0)]],
+    device       float *partials  [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]],
+    uint                bid       [[threadgroup_position_in_grid]],
+    uint                ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup float warpAcc[32];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+
+    float local = INFINITY;
+    for (uint i = start; i < n; i += stride) {
+        float v = in[i];
+        local = fmin(local, v);
+    }
+    local = simd_min(local);
+    if (lane == 0u) warpAcc[warp] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        local = (tid < nwarps) ? warpAcc[lane] : INFINITY;
+        local = simd_min(local);
+        if (tid == 0u) partials[bid] = local;
+    }
+}
+
+kernel void reduce_max_f32(
+    device const float *in        [[buffer(0)]],
+    device       float *partials  [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]],
+    uint                bid       [[threadgroup_position_in_grid]],
+    uint                ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup float warpAcc[32];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+
+    float local = -INFINITY;
+    for (uint i = start; i < n; i += stride) {
+        float v = in[i];
+        local = fmax(local, v);
+    }
+    local = simd_max(local);
+    if (lane == 0u) warpAcc[warp] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        local = (tid < nwarps) ? warpAcc[lane] : -INFINITY;
+        local = simd_max(local);
+        if (tid == 0u) partials[bid] = local;
+    }
+}
+
+// argmin / argmax — value+index pair tracked through the reduce. The
+// simdgroup reduce uses simd_shuffle_xor pairwise compares so each
+// lane sees both halves of the pair. Sentinel 0xffffffffu marks an
+// uninitialised slot; ties broken by lower index (matches numpy /
+// reduce conventions).
+kernel void argmin_grid_f32(
+    device const float *in        [[buffer(0)]],
+    device       float *partialV  [[buffer(1)]],
+    device       uint  *partialI  [[buffer(2)]],
+    constant     uint  &n         [[buffer(3)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]],
+    uint                bid       [[threadgroup_position_in_grid]],
+    uint                ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup float warpV[32];
+    threadgroup uint  warpI[32];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+
+    float bestV = INFINITY;
+    uint  bestI = 0xffffffffu;
+    for (uint i = start; i < n; i += stride) {
+        float v = in[i];
+        if (isnan(v)) continue;
+        if (bestI == 0xffffffffu || v < bestV || (v == bestV && i < bestI)) {
+            bestV = v;
+            bestI = i;
+        }
+    }
+
+    // Simdgroup tree-reduce: 16, 8, 4, 2, 1.
+    for (uint s = 16u; s > 0u; s >>= 1) {
+        float ov = simd_shuffle_xor(bestV, s);
+        uint  oi = simd_shuffle_xor(bestI, s);
+        bool better;
+        if (oi == 0xffffffffu) better = false;
+        else if (bestI == 0xffffffffu) better = true;
+        else if (ov < bestV) better = true;
+        else if (ov == bestV && oi < bestI) better = true;
+        else better = false;
+        if (better) { bestV = ov; bestI = oi; }
+    }
+    if (lane == 0u) {
+        warpV[warp] = bestV;
+        warpI[warp] = bestI;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        bestV = (tid < nwarps) ? warpV[lane] : INFINITY;
+        bestI = (tid < nwarps) ? warpI[lane] : 0xffffffffu;
+        for (uint s = 16u; s > 0u; s >>= 1) {
+            float ov = simd_shuffle_xor(bestV, s);
+            uint  oi = simd_shuffle_xor(bestI, s);
+            bool better;
+            if (oi == 0xffffffffu) better = false;
+            else if (bestI == 0xffffffffu) better = true;
+            else if (ov < bestV) better = true;
+            else if (ov == bestV && oi < bestI) better = true;
+            else better = false;
+            if (better) { bestV = ov; bestI = oi; }
+        }
+        if (tid == 0u) {
+            partialV[bid] = bestV;
+            partialI[bid] = bestI;
+        }
+    }
+}
+
+kernel void argmax_grid_f32(
+    device const float *in        [[buffer(0)]],
+    device       float *partialV  [[buffer(1)]],
+    device       uint  *partialI  [[buffer(2)]],
+    constant     uint  &n         [[buffer(3)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]],
+    uint                bid       [[threadgroup_position_in_grid]],
+    uint                ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup float warpV[32];
+    threadgroup uint  warpI[32];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+
+    float bestV = -INFINITY;
+    uint  bestI = 0xffffffffu;
+    for (uint i = start; i < n; i += stride) {
+        float v = in[i];
+        if (isnan(v)) continue;
+        if (bestI == 0xffffffffu || v > bestV || (v == bestV && i < bestI)) {
+            bestV = v;
+            bestI = i;
+        }
+    }
+
+    for (uint s = 16u; s > 0u; s >>= 1) {
+        float ov = simd_shuffle_xor(bestV, s);
+        uint  oi = simd_shuffle_xor(bestI, s);
+        bool better;
+        if (oi == 0xffffffffu) better = false;
+        else if (bestI == 0xffffffffu) better = true;
+        else if (ov > bestV) better = true;
+        else if (ov == bestV && oi < bestI) better = true;
+        else better = false;
+        if (better) { bestV = ov; bestI = oi; }
+    }
+    if (lane == 0u) {
+        warpV[warp] = bestV;
+        warpI[warp] = bestI;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        bestV = (tid < nwarps) ? warpV[lane] : -INFINITY;
+        bestI = (tid < nwarps) ? warpI[lane] : 0xffffffffu;
+        for (uint s = 16u; s > 0u; s >>= 1) {
+            float ov = simd_shuffle_xor(bestV, s);
+            uint  oi = simd_shuffle_xor(bestI, s);
+            bool better;
+            if (oi == 0xffffffffu) better = false;
+            else if (bestI == 0xffffffffu) better = true;
+            else if (ov > bestV) better = true;
+            else if (ov == bestV && oi < bestI) better = true;
+            else better = false;
+            if (better) { bestV = ov; bestI = oi; }
+        }
+        if (tid == 0u) {
+            partialV[bid] = bestV;
+            partialI[bid] = bestI;
+        }
+    }
+}
+
+// Atomic-privatized histogram. Each threadgroup builds a private bin
+// array in threadgroup memory (atomic_uint), counts strided through
+// its share of the input, then atomic-adds the local counts back to
+// the global output. v1 caps bins at 1024 (= 4 KB threadgroup mem,
+// well under the per-group 32 KB budget on Apple GPUs).
+kernel void histogram_f32(
+    device const float        *in        [[buffer(0)]],
+    device       atomic_uint  *outBins   [[buffer(1)]],
+    constant     uint         &n         [[buffer(2)]],
+    constant     uint         &bins      [[buffer(3)]],
+    constant     float        &minV      [[buffer(4)]],
+    constant     float        &maxV      [[buffer(5)]],
+    uint                       tid       [[thread_position_in_threadgroup]],
+    uint                       tpg       [[threads_per_threadgroup]],
+    uint                       bid       [[threadgroup_position_in_grid]],
+    uint                       ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup atomic_uint sBins[1024];
+
+    // Zero the threadgroup histogram (only up to the runtime bin count).
+    for (uint i = tid; i < bins && i < 1024u; i += tpg) {
+        atomic_store_explicit(&sBins[i], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float range = maxV - minV;
+    float scale = (range > 0.0f) ? (float)bins / range : 0.0f;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+    for (uint i = start; i < n; i += stride) {
+        float v = in[i];
+        if (isnan(v) || v < minV || v >= maxV) continue;
+        uint b = (uint)((v - minV) * scale);
+        if (b >= bins) b = bins - 1u;
+        atomic_fetch_add_explicit(&sBins[b], 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Spill threadgroup histogram into output. Skipping zero-count
+    // bins shaves a global atomic when most threadgroups don't see
+    // every bin (sparse-bin inputs).
+    for (uint i = tid; i < bins && i < 1024u; i += tpg) {
+        uint c = atomic_load_explicit(&sBins[i], memory_order_relaxed);
+        if (c != 0u) atomic_fetch_add_explicit(&outBins[i], c, memory_order_relaxed);
+    }
+}
+
+// Pass 2 of two-pass variance: Σ (x - mean)² with a precomputed mean.
+// Pass 1 is reduce_sum_f32 → host divides by n. Pass 2 emits
+// per-block partials; host sums + divides by (n - ddof). Matches
+// cuda.ts variance_sumsq_f32.
+kernel void variance_sumsq_f32(
+    device const float *in        [[buffer(0)]],
+    device       float *partials  [[buffer(1)]],
+    constant     uint  &n         [[buffer(2)]],
+    constant     float &mean      [[buffer(3)]],
+    uint                tid       [[thread_position_in_threadgroup]],
+    uint                tpg       [[threads_per_threadgroup]],
+    uint                bid       [[threadgroup_position_in_grid]],
+    uint                ngrp      [[threadgroups_per_grid]])
+{
+    threadgroup float warpAcc[32];
+    uint lane = tid & 31u;
+    uint warp = tid >> 5;
+    uint stride = tpg * ngrp;
+    uint start = bid * tpg + tid;
+
+    float local = 0.0f;
+    for (uint i = start; i < n; i += stride) {
+        float d = in[i] - mean;
+        local += d * d;
+    }
+    local = simd_sum(local);
+    if (lane == 0u) warpAcc[warp] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (warp == 0u) {
+        uint nwarps = (tpg + 31u) >> 5;
+        local = (tid < nwarps) ? warpAcc[lane] : 0.0f;
+        local = simd_sum(local);
+        if (tid == 0u) partials[bid] = local;
+    }
+}
+
+// ─── Scan (inclusive prefix sum) — three kernels ────────────────────
+// Mirrors cuda.ts's scan trio. Caller iterates a recursive
+// scanDeviceInPlaceF32 that bottoms out at the leaf cap (1024 elems
+// = the single-block scan). Block size SCAN_BLOCK = 256.
+//
+//   1. scan_block_inclusive_f32 — per-block Hillis-Steele scan; block i
+//      writes its grand total to blockSums[i].
+//   2. scan_blocksums_inclusive_f32 — single-block scan over blockSums
+//      (host pads blockDim to nextPow2; kernel internally pads reads
+//      with 0 for tid >= numBlocks).
+//   3. scan_add_offsets_f32 — block i ≥ 1 picks up blockSums[i-1] (now
+//      an exclusive prefix offset) and adds it to its segment.
+
+kernel void scan_block_inclusive_f32(
+    device const float *in         [[buffer(0)]],
+    device       float *out        [[buffer(1)]],
+    device       float *blockSums  [[buffer(2)]],
+    constant     uint  &n          [[buffer(3)]],
+    uint                tid        [[thread_position_in_threadgroup]],
+    uint                bid        [[threadgroup_position_in_grid]],
+    uint                tpg        [[threads_per_threadgroup]])
+{
+    threadgroup float sdata[256];
+    uint idx = bid * tpg + tid;
+
+    sdata[tid] = (idx < n) ? in[idx] : 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Hillis-Steele inclusive scan: log2(tpg) read-then-sync-then-add steps.
+    for (uint s = 1u; s < tpg; s <<= 1) {
+        float v = (tid >= s) ? sdata[tid - s] : 0.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        sdata[tid] += v;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (idx < n) out[idx] = sdata[tid];
+    if (tid == tpg - 1u) blockSums[bid] = sdata[tid];
+}
+
+kernel void scan_blocksums_inclusive_f32(
+    device       float *blockSums  [[buffer(0)]],
+    constant     uint  &numBlocks  [[buffer(1)]],
+    uint                tid        [[thread_position_in_threadgroup]],
+    uint                tpg        [[threads_per_threadgroup]])
+{
+    threadgroup float sdata[1024];
+    sdata[tid] = (tid < numBlocks) ? blockSums[tid] : 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint s = 1u; s < tpg; s <<= 1) {
+        float v = (tid >= s) ? sdata[tid - s] : 0.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        sdata[tid] += v;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid < numBlocks) blockSums[tid] = sdata[tid];
+}
+
+kernel void scan_add_offsets_f32(
+    device       float *out        [[buffer(0)]],
+    device const float *blockSums  [[buffer(1)]],
+    constant     uint  &n          [[buffer(2)]],
+    uint                tid        [[thread_position_in_threadgroup]],
+    uint                bid        [[threadgroup_position_in_grid]],
+    uint                tpg        [[threads_per_threadgroup]])
+{
+    if (bid == 0u) return;
+    uint idx = bid * tpg + tid;
+    if (idx < n) out[idx] += blockSums[bid - 1u];
+}
+
+// One step of bitonic sort, in-place ascending. Caller pads input to a
+// power of 2 with +Inf and runs the canonical k = 2..n, j = k/2..1
+// sequence — log²(n) launches. Mirrors cuda.ts's bitonic_step_f32.
+kernel void bitonic_step_f32(
+    device       float *arr  [[buffer(0)]],
+    constant     uint  &j    [[buffer(1)]],
+    constant     uint  &k    [[buffer(2)]],
+    constant     uint  &n    [[buffer(3)]],
+    uint                gid  [[thread_position_in_grid]])
+{
+    if (gid >= n) return;
+    uint ixj = gid ^ j;
+    if (ixj <= gid || ixj >= n) return;
+
+    bool ascending = (gid & k) == 0u;
+    float vi = arr[gid];
+    float vixj = arr[ixj];
+
+    bool swap = ascending ? (vi > vixj) : (vi < vixj);
+    if (swap) {
+        arr[gid] = vixj;
+        arr[ixj] = vi;
+    }
+}
 `;
 
 // ─── FFI: base symbols ─────────────────────────────────────────────────────
@@ -1064,6 +1489,33 @@ let matVecQ4KFn: bigint = 0n;
 let matVecQ4KPipeline: bigint = 0n;
 let matVecQ6KFn: bigint = 0n;
 let matVecQ6KPipeline: bigint = 0n;
+
+// Secondary GPU primitives — gpu.ts public surface (reduce / argMin /
+// argMax). Loaded at probe; null until then. Each `0n` is the
+// "uncompiled / unavailable" sentinel that the launchers check before
+// dispatch; missing pipelines collapse to a CPU fallback upstream.
+let reduceSumFn: bigint = 0n;
+let reduceSumPipeline: bigint = 0n;
+let reduceMinFn: bigint = 0n;
+let reduceMinPipeline: bigint = 0n;
+let reduceMaxFn: bigint = 0n;
+let reduceMaxPipeline: bigint = 0n;
+let argminGridFn: bigint = 0n;
+let argminGridPipeline: bigint = 0n;
+let argmaxGridFn: bigint = 0n;
+let argmaxGridPipeline: bigint = 0n;
+let histogramFn: bigint = 0n;
+let histogramPipeline: bigint = 0n;
+let varianceSumsqFn: bigint = 0n;
+let varianceSumsqPipeline: bigint = 0n;
+let scanBlockInclusiveFn: bigint = 0n;
+let scanBlockInclusivePipeline: bigint = 0n;
+let scanBlocksumsInclusiveFn: bigint = 0n;
+let scanBlocksumsInclusivePipeline: bigint = 0n;
+let scanAddOffsetsFn: bigint = 0n;
+let scanAddOffsetsPipeline: bigint = 0n;
+let bitonicStepFn: bigint = 0n;
+let bitonicStepPipeline: bigint = 0n;
 
 // ─── devOps state ───────────────────────────────────────────────────────
 // Map of kernel name → { fn, pipe } for each kernel compiled at probe
@@ -1343,6 +1795,68 @@ function probe(): boolean {
     matVecQ6KPipeline = mvQ6.pipe;
   }
 
+  // Secondary GPU primitives (gpu.ts public surface). Optional at the
+  // probe layer — failure to compile any of these collapses the
+  // corresponding launcher to a `null pipeline` check, the launcher
+  // returns null, and the gpu.ts public wrapper falls through to the
+  // CPU reference. This means a Metal device that can't compile (say)
+  // argmin still ships matVec/conv2D etc.
+  const rs = compileKernel(lib, "reduce_sum_f32");
+  if (rs !== null) {
+    reduceSumFn = rs.fn;
+    reduceSumPipeline = rs.pipe;
+  }
+  const rmin = compileKernel(lib, "reduce_min_f32");
+  if (rmin !== null) {
+    reduceMinFn = rmin.fn;
+    reduceMinPipeline = rmin.pipe;
+  }
+  const rmax = compileKernel(lib, "reduce_max_f32");
+  if (rmax !== null) {
+    reduceMaxFn = rmax.fn;
+    reduceMaxPipeline = rmax.pipe;
+  }
+  const amin = compileKernel(lib, "argmin_grid_f32");
+  if (amin !== null) {
+    argminGridFn = amin.fn;
+    argminGridPipeline = amin.pipe;
+  }
+  const amax = compileKernel(lib, "argmax_grid_f32");
+  if (amax !== null) {
+    argmaxGridFn = amax.fn;
+    argmaxGridPipeline = amax.pipe;
+  }
+  const hgr = compileKernel(lib, "histogram_f32");
+  if (hgr !== null) {
+    histogramFn = hgr.fn;
+    histogramPipeline = hgr.pipe;
+  }
+  const vsq = compileKernel(lib, "variance_sumsq_f32");
+  if (vsq !== null) {
+    varianceSumsqFn = vsq.fn;
+    varianceSumsqPipeline = vsq.pipe;
+  }
+  const sbi = compileKernel(lib, "scan_block_inclusive_f32");
+  if (sbi !== null) {
+    scanBlockInclusiveFn = sbi.fn;
+    scanBlockInclusivePipeline = sbi.pipe;
+  }
+  const sbsi = compileKernel(lib, "scan_blocksums_inclusive_f32");
+  if (sbsi !== null) {
+    scanBlocksumsInclusiveFn = sbsi.fn;
+    scanBlocksumsInclusivePipeline = sbsi.pipe;
+  }
+  const sao = compileKernel(lib, "scan_add_offsets_f32");
+  if (sao !== null) {
+    scanAddOffsetsFn = sao.fn;
+    scanAddOffsetsPipeline = sao.pipe;
+  }
+  const bts = compileKernel(lib, "bitonic_step_f32");
+  if (bts !== null) {
+    bitonicStepFn = bts.fn;
+    bitonicStepPipeline = bts.pipe;
+  }
+
   // devOps kernels. Each is optional at the probe layer — partial
   // compilation is fine, getDevOps() enforces the all-or-nothing
   // rule that parabun:llm needs.
@@ -1375,6 +1889,50 @@ function probe(): boolean {
     matVecQ6KFn = 0n;
     matVecQ4KPipeline = 0n;
     matVecQ4KFn = 0n;
+    if (reduceSumPipeline !== 0n) objcRelease(reduceSumPipeline);
+    if (reduceSumFn !== 0n) objcRelease(reduceSumFn);
+    if (reduceMinPipeline !== 0n) objcRelease(reduceMinPipeline);
+    if (reduceMinFn !== 0n) objcRelease(reduceMinFn);
+    if (reduceMaxPipeline !== 0n) objcRelease(reduceMaxPipeline);
+    if (reduceMaxFn !== 0n) objcRelease(reduceMaxFn);
+    if (argminGridPipeline !== 0n) objcRelease(argminGridPipeline);
+    if (argminGridFn !== 0n) objcRelease(argminGridFn);
+    if (argmaxGridPipeline !== 0n) objcRelease(argmaxGridPipeline);
+    if (argmaxGridFn !== 0n) objcRelease(argmaxGridFn);
+    if (histogramPipeline !== 0n) objcRelease(histogramPipeline);
+    if (histogramFn !== 0n) objcRelease(histogramFn);
+    if (varianceSumsqPipeline !== 0n) objcRelease(varianceSumsqPipeline);
+    if (varianceSumsqFn !== 0n) objcRelease(varianceSumsqFn);
+    if (scanBlockInclusivePipeline !== 0n) objcRelease(scanBlockInclusivePipeline);
+    if (scanBlockInclusiveFn !== 0n) objcRelease(scanBlockInclusiveFn);
+    if (scanBlocksumsInclusivePipeline !== 0n) objcRelease(scanBlocksumsInclusivePipeline);
+    if (scanBlocksumsInclusiveFn !== 0n) objcRelease(scanBlocksumsInclusiveFn);
+    if (scanAddOffsetsPipeline !== 0n) objcRelease(scanAddOffsetsPipeline);
+    if (scanAddOffsetsFn !== 0n) objcRelease(scanAddOffsetsFn);
+    if (bitonicStepPipeline !== 0n) objcRelease(bitonicStepPipeline);
+    if (bitonicStepFn !== 0n) objcRelease(bitonicStepFn);
+    reduceSumPipeline = 0n;
+    reduceSumFn = 0n;
+    reduceMinPipeline = 0n;
+    reduceMinFn = 0n;
+    reduceMaxPipeline = 0n;
+    reduceMaxFn = 0n;
+    argminGridPipeline = 0n;
+    argminGridFn = 0n;
+    argmaxGridPipeline = 0n;
+    argmaxGridFn = 0n;
+    histogramPipeline = 0n;
+    histogramFn = 0n;
+    varianceSumsqPipeline = 0n;
+    varianceSumsqFn = 0n;
+    scanBlockInclusivePipeline = 0n;
+    scanBlockInclusiveFn = 0n;
+    scanBlocksumsInclusivePipeline = 0n;
+    scanBlocksumsInclusiveFn = 0n;
+    scanAddOffsetsPipeline = 0n;
+    scanAddOffsetsFn = 0n;
+    bitonicStepPipeline = 0n;
+    bitonicStepFn = 0n;
     conv2DPipeline = 0n;
     conv2DFn = 0n;
     matmulPipeline = 0n;
@@ -2921,6 +3479,637 @@ function winsForSize(op: string, n: number, elemBytes: number): boolean {
 
 // ─── Backend methods ───────────────────────────────────────────────────────
 
+// ─── reduce / argMin / argMax launchers ─────────────────────────────────
+// Each kernel runs REDUCE_GRID threadgroups × REDUCE_BLOCK threads with
+// a strided read loop, so total work is O(n) regardless of N. Host
+// merges the small REDUCE_GRID-sized partial array. This mirrors
+// cuda.ts's launchReduceF32 / launchArgF32 shape so the gpu.ts
+// dispatch boundary is identical.
+const REDUCE_GRID = 256;
+const REDUCE_BLOCK = 256;
+
+function dispatchReduceF32(pipeline: bigint, input: Float32Array, partialsBytes: number): Float32Array | null {
+  if (pipeline === 0n) return null;
+  if (!probe()) return null;
+  const ptr = ffiPtr!;
+  const n = input.length;
+
+  const inBytes = BigInt(n * 4);
+  const inBuf = newBufferFromF32(input, inBytes);
+  if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferFromF32(reduce) failed");
+
+  let partialsBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    partialsBuf = msgSend_4_u64_u64!(
+      device,
+      sel("newBufferWithLength:options:"),
+      BigInt(partialsBytes),
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    if (partialsBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(partials) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), partialsBuf, 0n, 1n);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 2n);
+
+    // dispatchThreadgroups: REDUCE_GRID groups × REDUCE_BLOCK threads.
+    const grid = new BigUint64Array([BigInt(REDUCE_GRID), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(REDUCE_BLOCK), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(partialsBuf, sel("contents"));
+    if (contents === 0n) throw new Error("parabun:gpu metal: partials contents is null");
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, partialsBytes));
+    const out = new Float32Array(REDUCE_GRID);
+    out.set(view.subarray(0, REDUCE_GRID));
+    return out;
+  } finally {
+    objcRelease(inBuf);
+    if (partialsBuf !== 0n) objcRelease(partialsBuf);
+  }
+}
+
+function launchReduceMetalF32(input: Float32Array, op: "sum" | "min" | "max"): number | null {
+  const n = input.length;
+  if (n === 0) {
+    // Match the CPU + CUDA reductions: empty sum is 0, empty extrema NaN.
+    return op === "sum" ? 0 : NaN;
+  }
+  const pipeline = op === "sum" ? reduceSumPipeline : op === "min" ? reduceMinPipeline : reduceMaxPipeline;
+  const partials = dispatchReduceF32(pipeline, input, REDUCE_GRID * 4);
+  if (partials === null) return null;
+
+  if (op === "sum") {
+    // Kahan-compensated sum to match cuda.ts's launchReduceF32 host-side.
+    let s = 0;
+    let c = 0;
+    for (let i = 0; i < REDUCE_GRID; i++) {
+      const y = partials[i] - c;
+      const t = s + y;
+      c = t - s - y;
+      s = t;
+    }
+    return s;
+  }
+  if (op === "min") {
+    let best = Infinity;
+    for (let i = 0; i < REDUCE_GRID; i++) {
+      const v = partials[i];
+      if (v < best) best = v;
+    }
+    return Number.isFinite(best) ? best : NaN;
+  }
+  // max
+  let best = -Infinity;
+  for (let i = 0; i < REDUCE_GRID; i++) {
+    const v = partials[i];
+    if (v > best) best = v;
+  }
+  return Number.isFinite(best) ? best : NaN;
+}
+
+function launchArgMetalF32(input: Float32Array, mode: "min" | "max"): number | null {
+  const n = input.length;
+  if (n === 0) return -1; // public wrapper translates this into a RangeError
+  const pipeline = mode === "min" ? argminGridPipeline : argmaxGridPipeline;
+  if (pipeline === 0n) return null;
+  if (!probe()) return null;
+  const ptr = ffiPtr!;
+
+  const inBytes = BigInt(n * 4);
+  const inBuf = newBufferFromF32(input, inBytes);
+  if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferFromF32(arg) failed");
+
+  let pvBuf: bigint = 0n;
+  let piBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    const partialsBytes = BigInt(REDUCE_GRID * 4);
+    pvBuf = msgSend_4_u64_u64!(
+      device,
+      sel("newBufferWithLength:options:"),
+      partialsBytes,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    piBuf = msgSend_4_u64_u64!(
+      device,
+      sel("newBufferWithLength:options:"),
+      partialsBytes,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    if (pvBuf === 0n || piBuf === 0n) {
+      throw new Error("parabun:gpu metal: newBufferWithLength(partials v/i) failed");
+    }
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), pipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), pvBuf, 0n, 1n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), piBuf, 0n, 2n);
+    const pN = new Uint32Array([n]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 3n);
+
+    const grid = new BigUint64Array([BigInt(REDUCE_GRID), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(REDUCE_BLOCK), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const pvContents = msgSend_2!(pvBuf, sel("contents"));
+    const piContents = msgSend_2!(piBuf, sel("contents"));
+    if (pvContents === 0n || piContents === 0n) {
+      throw new Error("parabun:gpu metal: partials contents is null");
+    }
+    const pv = new Float32Array(ffiToArrayBuffer!(Number(pvContents), 0, REDUCE_GRID * 4));
+    const pi = new Uint32Array(ffiToArrayBuffer!(Number(piContents), 0, REDUCE_GRID * 4));
+
+    // Host merge: same tie-break as the device code (lower index wins
+    // on equal values; uninitialised slots — index = 0xffffffffu —
+    // ignored unless they're all we have).
+    const SENTINEL = 0xffffffff;
+    let bestI = SENTINEL;
+    let bestV = mode === "min" ? Infinity : -Infinity;
+    for (let i = 0; i < REDUCE_GRID; i++) {
+      const ci = pi[i];
+      if (ci === SENTINEL) continue;
+      const cv = pv[i];
+      let better: boolean;
+      if (bestI === SENTINEL) better = true;
+      else if (mode === "min") {
+        better = cv < bestV || (cv === bestV && ci < bestI);
+      } else {
+        better = cv > bestV || (cv === bestV && ci < bestI);
+      }
+      if (better) {
+        bestI = ci;
+        bestV = cv;
+      }
+    }
+    return bestI === SENTINEL ? -1 : bestI;
+  } finally {
+    objcRelease(inBuf);
+    if (pvBuf !== 0n) objcRelease(pvBuf);
+    if (piBuf !== 0n) objcRelease(piBuf);
+  }
+}
+
+// gpu.ts public surface — Backend.reduce / argMin / argMax. Signature
+// matches cuda.ts so the gpu.ts dispatcher hits one or the other based
+// on resolveActive(). null return means "device path declined" — the
+// public wrapper falls through to the CPU reference.
+function reduce(input: FArray | GpuHandle, op: "sum" | "min" | "max"): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: reduce requires Float32Array (f64 not yet supported)");
+  }
+  const r = launchReduceMetalF32(view, op);
+  if (r !== null) return r;
+  // Fallback path is handled by the gpu.ts public wrapper — but be
+  // friendly if Metal isn't available: do the same Kahan-compensated
+  // host-side pass cuda.ts uses, so the call never fails silently.
+  if (op === "sum") {
+    let s = 0;
+    let c = 0;
+    for (let i = 0; i < view.length; i++) {
+      const y = view[i] - c;
+      const t = s + y;
+      c = t - s - y;
+      s = t;
+    }
+    return s;
+  }
+  if (op === "min") {
+    let m = Infinity;
+    for (let i = 0; i < view.length; i++) if (view[i] < m) m = view[i];
+    return view.length === 0 ? NaN : m;
+  }
+  let m = -Infinity;
+  for (let i = 0; i < view.length; i++) if (view[i] > m) m = view[i];
+  return view.length === 0 ? NaN : m;
+}
+
+function argMin(input: FArray | GpuHandle): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: argMin requires Float32Array (f64 not yet supported)");
+  }
+  const r = launchArgMetalF32(view, "min");
+  if (r !== null) return r;
+  // Pipeline missing — host path. Same NaN convention as cuda.ts.
+  let bestI = -1;
+  let bestV = Infinity;
+  for (let i = 0; i < view.length; i++) {
+    const v = view[i];
+    if (Number.isNaN(v)) return i;
+    if (bestI === -1 || v < bestV || (v === bestV && i < bestI)) {
+      bestV = v;
+      bestI = i;
+    }
+  }
+  return bestI;
+}
+
+function argMax(input: FArray | GpuHandle): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: argMax requires Float32Array (f64 not yet supported)");
+  }
+  const r = launchArgMetalF32(view, "max");
+  if (r !== null) return r;
+  let bestI = -1;
+  let bestV = -Infinity;
+  for (let i = 0; i < view.length; i++) {
+    const v = view[i];
+    if (Number.isNaN(v)) return i;
+    if (bestI === -1 || v > bestV || (v === bestV && i < bestI)) {
+      bestV = v;
+      bestI = i;
+    }
+  }
+  return bestI;
+}
+
+// ─── histogram launcher ──────────────────────────────────────────────
+const HISTOGRAM_MAX_BINS = 1024;
+
+function launchHistogramMetalF32(input: Float32Array, bins: number, minV: number, maxV: number): Uint32Array | null {
+  if (histogramPipeline === 0n) return null;
+  if (!probe()) return null;
+  if (bins <= 0 || bins > HISTOGRAM_MAX_BINS) return null;
+  const ptr = ffiPtr!;
+  const n = input.length;
+  if (n === 0) return new Uint32Array(bins);
+
+  const inBytes = BigInt(n * 4);
+  const inBuf = newBufferFromF32(input, inBytes);
+  if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferFromF32(histogram) failed");
+
+  let outBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    const outBytes = BigInt(bins * 4);
+    outBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), outBytes, BigInt(MTL_STORAGE_MODE_SHARED));
+    if (outBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(histogram out) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), histogramPipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), outBuf, 0n, 1n);
+    const pN = new Uint32Array([n]);
+    const pBins = new Uint32Array([bins]);
+    const pMin = new Float32Array([minV]);
+    const pMax = new Float32Array([maxV]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pBins), 4n, 3n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pMin), 4n, 4n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pMax), 4n, 5n);
+
+    const grid = new BigUint64Array([BigInt(REDUCE_GRID), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(REDUCE_BLOCK), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(outBuf, sel("contents"));
+    if (contents === 0n) throw new Error("parabun:gpu metal: histogram out contents is null");
+    const view = new Uint32Array(ffiToArrayBuffer!(Number(contents), 0, bins * 4));
+    const out = new Uint32Array(bins);
+    out.set(view);
+    return out;
+  } finally {
+    objcRelease(inBuf);
+    if (outBuf !== 0n) objcRelease(outBuf);
+  }
+}
+
+function histogram(input: FArray | GpuHandle, bins: number, minV: number, maxV: number): Uint32Array | null {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: histogram requires Float32Array (f64 not yet supported)");
+  }
+  return launchHistogramMetalF32(view, bins, minV, maxV);
+}
+
+// ─── variance launcher ───────────────────────────────────────────────
+// Two-pass: pass 1 reuses launchReduceMetalF32 to get sum (host divides
+// by n for the mean). Pass 2 dispatches variance_sumsq_f32 with the
+// precomputed mean, host sums + divides by (n - ddof).
+function launchVarianceMetalF32(input: Float32Array, ddof: number): number | null {
+  if (varianceSumsqPipeline === 0n || reduceSumPipeline === 0n) return null;
+  if (!probe()) return null;
+  const n = input.length;
+  if (n === 0 || ddof >= n) return NaN;
+
+  // Pass 1: sum.
+  const sum = launchReduceMetalF32(input, "sum");
+  if (sum === null) return null;
+  const mean = sum / n;
+
+  // Pass 2: dispatch variance_sumsq.
+  const ptr = ffiPtr!;
+  const inBytes = BigInt(n * 4);
+  const inBuf = newBufferFromF32(input, inBytes);
+  if (inBuf === 0n) throw new Error("parabun:gpu metal: newBufferFromF32(variance) failed");
+
+  let partialsBuf: bigint = 0n;
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    const partialsBytes = BigInt(REDUCE_GRID * 4);
+    partialsBuf = msgSend_4_u64_u64!(
+      device,
+      sel("newBufferWithLength:options:"),
+      partialsBytes,
+      BigInt(MTL_STORAGE_MODE_SHARED),
+    );
+    if (partialsBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(variance partials) failed");
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), varianceSumsqPipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), inBuf, 0n, 0n);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), partialsBuf, 0n, 1n);
+    const pN = new Uint32Array([n]);
+    const pMean = new Float32Array([mean]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 2n);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pMean), 4n, 3n);
+
+    const grid = new BigUint64Array([BigInt(REDUCE_GRID), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(REDUCE_BLOCK), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const contents = msgSend_2!(partialsBuf, sel("contents"));
+    if (contents === 0n) throw new Error("parabun:gpu metal: variance partials contents is null");
+    const partials = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, REDUCE_GRID * 4));
+    let sumSq = 0;
+    let c2 = 0;
+    for (let i = 0; i < REDUCE_GRID; i++) {
+      const y = partials[i] - c2;
+      const t = sumSq + y;
+      c2 = t - sumSq - y;
+      sumSq = t;
+    }
+    return sumSq / (n - ddof);
+  } finally {
+    objcRelease(inBuf);
+    if (partialsBuf !== 0n) objcRelease(partialsBuf);
+  }
+}
+
+function variance(input: FArray | GpuHandle, ddof: number): number {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: variance requires Float32Array (f64 not yet supported)");
+  }
+  const r = launchVarianceMetalF32(view, ddof);
+  if (r !== null) return r;
+  // Pipeline missing — host fallback (Kahan-compensated, matches cuda.ts).
+  if (view.length === 0 || ddof >= view.length) return NaN;
+  let s = 0;
+  let c = 0;
+  for (let i = 0; i < view.length; i++) {
+    const y = view[i] - c;
+    const t = s + y;
+    c = t - s - y;
+    s = t;
+  }
+  const mean = s / view.length;
+  let sumSq = 0;
+  let c2 = 0;
+  for (let i = 0; i < view.length; i++) {
+    const d = view[i] - mean;
+    const y = d * d - c2;
+    const t = sumSq + y;
+    c2 = t - sumSq - y;
+    sumSq = t;
+  }
+  return sumSq / (view.length - ddof);
+}
+
+// ─── Recursive scan launcher ─────────────────────────────────────────
+const SCAN_BLOCK = 256;
+const SCAN_LEAF_MAX = 1024;
+
+function nextPow2(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+function scanLeafMetal(encoder: bigint, dBuf: bigint, n: number): boolean {
+  if (scanBlocksumsInclusivePipeline === 0n) return false;
+  const ptr = ffiPtr!;
+  const block = nextPow2(Math.max(2, n));
+  msgSend_3_id!(encoder, sel("setComputePipelineState:"), scanBlocksumsInclusivePipeline);
+  msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dBuf, 0n, 0n);
+  const pN = new Uint32Array([n]);
+  msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 1n);
+  const grid = new BigUint64Array([1n, 1n, 1n]);
+  const threads = new BigUint64Array([BigInt(block), 1n, 1n]);
+  msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+  return true;
+}
+
+function scanDeviceInPlaceMetal(encoder: bigint, dBuf: bigint, n: number, scratchBuffers: bigint[]): boolean {
+  if (n <= 1) return true;
+  if (n <= SCAN_LEAF_MAX) return scanLeafMetal(encoder, dBuf, n);
+  if (scanBlockInclusivePipeline === 0n || scanAddOffsetsPipeline === 0n || scanBlocksumsInclusivePipeline === 0n) {
+    return false;
+  }
+  const ptr = ffiPtr!;
+  const numBlocks = Math.ceil(n / SCAN_BLOCK);
+  const sumsBytes = BigInt(numBlocks * 4);
+  const dSums = msgSend_4_u64_u64!(
+    device,
+    sel("newBufferWithLength:options:"),
+    sumsBytes,
+    BigInt(MTL_STORAGE_MODE_SHARED),
+  );
+  if (dSums === 0n) return false;
+  scratchBuffers.push(dSums);
+
+  // Stage 1: per-block scan in-place.
+  msgSend_3_id!(encoder, sel("setComputePipelineState:"), scanBlockInclusivePipeline);
+  msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dBuf, 0n, 0n);
+  msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dBuf, 0n, 1n);
+  msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dSums, 0n, 2n);
+  const pN = new Uint32Array([n]);
+  msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 3n);
+  {
+    const grid = new BigUint64Array([BigInt(numBlocks), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(SCAN_BLOCK), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+  }
+
+  // Recurse on dSums.
+  if (!scanDeviceInPlaceMetal(encoder, dSums, numBlocks, scratchBuffers)) return false;
+
+  // Stage 3: add offsets.
+  msgSend_3_id!(encoder, sel("setComputePipelineState:"), scanAddOffsetsPipeline);
+  msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dBuf, 0n, 0n);
+  msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dSums, 0n, 1n);
+  msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 2n);
+  {
+    const grid = new BigUint64Array([BigInt(numBlocks), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(SCAN_BLOCK), 1n, 1n]);
+    msgSend_4_ptr_ptr!(encoder, sel("dispatchThreadgroups:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+  }
+  return true;
+}
+
+function launchScanMetalF32(input: Float32Array): Float32Array | null {
+  if (scanBlockInclusivePipeline === 0n || scanBlocksumsInclusivePipeline === 0n || scanAddOffsetsPipeline === 0n) {
+    return null;
+  }
+  if (!probe()) return null;
+  const n = input.length;
+  if (n === 0) return new Float32Array(0);
+  const ptr = ffiPtr!;
+
+  const bytes = BigInt(n * 4);
+  const dOut = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
+  if (dOut === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(scan out) failed");
+
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  const scratchBuffers: bigint[] = [];
+  try {
+    // HtoD via memcpy into the shared-memory output buffer.
+    const contents = msgSend_2!(dOut, sel("contents"));
+    if (contents === 0n) throw new Error("parabun:gpu metal: scan out contents is null");
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, n * 4));
+    view.set(input);
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    if (!scanDeviceInPlaceMetal(encoder, dOut, n, scratchBuffers)) {
+      msgSend_2!(encoder, sel("endEncoding"));
+      return null;
+    }
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const out = new Float32Array(n);
+    out.set(view);
+    return out;
+  } finally {
+    objcRelease(dOut);
+    for (const b of scratchBuffers) objcRelease(b);
+  }
+}
+
+function scan(input: FArray | GpuHandle): FArray {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: scan requires Float32Array (f64 not yet supported)");
+  }
+  const r = launchScanMetalF32(view);
+  if (r !== null) return r;
+  // Pipeline missing — Kahan-compensated host scan, matches cuda.ts.
+  const out = new Float32Array(view.length);
+  let s = 0;
+  let c = 0;
+  for (let i = 0; i < view.length; i++) {
+    const y = view[i] - c;
+    const t = s + y;
+    c = t - s - y;
+    s = t;
+    out[i] = s;
+  }
+  return out;
+}
+
+// ─── Bitonic-sort quantile launcher ──────────────────────────────────
+const SORT_BLOCK = 256;
+const SORT_MAX_ELEMS = 1 << 24; // 16M; padded to nextPow2
+
+function launchQuantileMetalF32(input: Float32Array, q: number): number | null {
+  if (bitonicStepPipeline === 0n) return null;
+  if (!probe()) return null;
+  const n = input.length;
+  if (n === 0) return NaN;
+  if (n === 1) return input[0];
+  if (n > SORT_MAX_ELEMS) return null;
+
+  const ptr = ffiPtr!;
+  const nPadded = nextPow2(n);
+  const bytes = BigInt(nPadded * 4);
+  const dBuf = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
+  if (dBuf === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(sort) failed");
+
+  let cmdBuf: bigint = 0n;
+  let encoder: bigint = 0n;
+  try {
+    // Prepare padded buffer in-place: copy input + +Inf tail.
+    const contents = msgSend_2!(dBuf, sel("contents"));
+    if (contents === 0n) throw new Error("parabun:gpu metal: sort buffer contents is null");
+    const view = new Float32Array(ffiToArrayBuffer!(Number(contents), 0, nPadded * 4));
+    view.set(input);
+    for (let i = n; i < nPadded; i++) view[i] = Infinity;
+
+    cmdBuf = msgSend_2!(commandQueue, sel("commandBuffer"));
+    encoder = msgSend_2!(cmdBuf, sel("computeCommandEncoder"));
+    msgSend_3_id!(encoder, sel("setComputePipelineState:"), bitonicStepPipeline);
+    msgSend_5_id_u64_u64!(encoder, sel("setBuffer:offset:atIndex:"), dBuf, 0n, 0n);
+    const pN = new Uint32Array([nPadded]);
+    msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pN), 4n, 3n);
+
+    // dispatchThreads: one thread per element, full grid each step.
+    // Using the same encoder + pipeline; we re-set the j/k constants
+    // each step but reuse the buffer binding.
+    const grid = new BigUint64Array([BigInt(nPadded), 1n, 1n]);
+    const threads = new BigUint64Array([BigInt(SORT_BLOCK), 1n, 1n]);
+    for (let k = 2; k <= nPadded; k <<= 1) {
+      for (let j = k >> 1; j > 0; j >>= 1) {
+        const pJ = new Uint32Array([j]);
+        const pK = new Uint32Array([k]);
+        msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pJ), 4n, 1n);
+        msgSend_5_ptr_u64_u64!(encoder, sel("setBytes:length:atIndex:"), ptr(pK), 4n, 2n);
+        msgSend_4_ptr_ptr!(encoder, sel("dispatchThreads:threadsPerThreadgroup:"), ptr(grid), ptr(threads));
+      }
+    }
+    msgSend_2!(encoder, sel("endEncoding"));
+    msgSend_2!(cmdBuf, sel("commit"));
+    msgSend_2!(cmdBuf, sel("waitUntilCompleted"));
+
+    const pos = q * (n - 1);
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    if (lo === hi) return view[lo];
+    const frac = pos - lo;
+    return view[lo] * (1 - frac) + view[hi] * frac;
+  } finally {
+    objcRelease(dBuf);
+  }
+}
+
+function quantile(input: FArray | GpuHandle, q: number): number | null {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu metal: quantile requires Float32Array (f64 not yet supported)");
+  }
+  return launchQuantileMetalF32(view, q);
+}
+
 function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
   return simd.dot(unwrapHandle(a), unwrapHandle(b));
 }
@@ -3341,6 +4530,96 @@ function dispose(): void {
     objcRelease(matVecQ6KFn);
     matVecQ6KFn = 0n;
   }
+  // Secondary primitives — each pair guarded since any individual one
+  // may have failed to compile at probe and is still 0n.
+  if (reduceSumPipeline !== 0n) {
+    objcRelease(reduceSumPipeline);
+    reduceSumPipeline = 0n;
+  }
+  if (reduceSumFn !== 0n) {
+    objcRelease(reduceSumFn);
+    reduceSumFn = 0n;
+  }
+  if (reduceMinPipeline !== 0n) {
+    objcRelease(reduceMinPipeline);
+    reduceMinPipeline = 0n;
+  }
+  if (reduceMinFn !== 0n) {
+    objcRelease(reduceMinFn);
+    reduceMinFn = 0n;
+  }
+  if (reduceMaxPipeline !== 0n) {
+    objcRelease(reduceMaxPipeline);
+    reduceMaxPipeline = 0n;
+  }
+  if (reduceMaxFn !== 0n) {
+    objcRelease(reduceMaxFn);
+    reduceMaxFn = 0n;
+  }
+  if (argminGridPipeline !== 0n) {
+    objcRelease(argminGridPipeline);
+    argminGridPipeline = 0n;
+  }
+  if (argminGridFn !== 0n) {
+    objcRelease(argminGridFn);
+    argminGridFn = 0n;
+  }
+  if (argmaxGridPipeline !== 0n) {
+    objcRelease(argmaxGridPipeline);
+    argmaxGridPipeline = 0n;
+  }
+  if (argmaxGridFn !== 0n) {
+    objcRelease(argmaxGridFn);
+    argmaxGridFn = 0n;
+  }
+  if (histogramPipeline !== 0n) {
+    objcRelease(histogramPipeline);
+    histogramPipeline = 0n;
+  }
+  if (histogramFn !== 0n) {
+    objcRelease(histogramFn);
+    histogramFn = 0n;
+  }
+  if (varianceSumsqPipeline !== 0n) {
+    objcRelease(varianceSumsqPipeline);
+    varianceSumsqPipeline = 0n;
+  }
+  if (varianceSumsqFn !== 0n) {
+    objcRelease(varianceSumsqFn);
+    varianceSumsqFn = 0n;
+  }
+  if (scanBlockInclusivePipeline !== 0n) {
+    objcRelease(scanBlockInclusivePipeline);
+    scanBlockInclusivePipeline = 0n;
+  }
+  if (scanBlockInclusiveFn !== 0n) {
+    objcRelease(scanBlockInclusiveFn);
+    scanBlockInclusiveFn = 0n;
+  }
+  if (scanBlocksumsInclusivePipeline !== 0n) {
+    objcRelease(scanBlocksumsInclusivePipeline);
+    scanBlocksumsInclusivePipeline = 0n;
+  }
+  if (scanBlocksumsInclusiveFn !== 0n) {
+    objcRelease(scanBlocksumsInclusiveFn);
+    scanBlocksumsInclusiveFn = 0n;
+  }
+  if (scanAddOffsetsPipeline !== 0n) {
+    objcRelease(scanAddOffsetsPipeline);
+    scanAddOffsetsPipeline = 0n;
+  }
+  if (scanAddOffsetsFn !== 0n) {
+    objcRelease(scanAddOffsetsFn);
+    scanAddOffsetsFn = 0n;
+  }
+  if (bitonicStepPipeline !== 0n) {
+    objcRelease(bitonicStepPipeline);
+    bitonicStepPipeline = 0n;
+  }
+  if (bitonicStepFn !== 0n) {
+    objcRelease(bitonicStepFn);
+    bitonicStepFn = 0n;
+  }
   if (simdMapPipeline !== 0n) {
     objcRelease(simdMapPipeline);
     simdMapPipeline = 0n;
@@ -3387,6 +4666,16 @@ export default {
   matmul,
   conv2D,
   imageBlurRGBA,
+  // Secondary primitives for gpu.ts. Each launcher returns null when
+  // the corresponding pipeline didn't compile at probe — gpu.ts then
+  // falls through to the CPU reference. (Match cuda.ts surface.)
+  reduce,
+  argMin,
+  argMax,
+  histogram,
+  variance,
+  scan,
+  quantile,
   simdMap,
   alloc,
   isAligned,

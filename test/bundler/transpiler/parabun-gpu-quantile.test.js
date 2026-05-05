@@ -185,3 +185,79 @@ describe("parabun:gpu — median / quantile", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+// CUDA bitonic-sort path. Auto-skips on hosts without CUDA + NVRTC; the
+// fixture runs `gpu.setBackend("cuda")` and bails to a sentinel if the
+// device path isn't available, so the test passes on CPU-only CI hosts
+// without manual gating in the harness.
+describe("parabun:gpu — quantile (cuda bitonic-sort path)", () => {
+  it("matches the CPU reference within f32 precision across q ∈ {0, 0.25, 0.5, 0.75, 1, 0.137}", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-quantile-cuda",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        const arr = new Float32Array(2048);
+        for (let i = 0; i < arr.length; i++) arr[i] = Math.sin(i * 0.123) * 100;
+        const sorted = new Float32Array(arr); sorted.sort();
+        const targets = [0.0, 0.25, 0.5, 0.75, 1.0, 0.137];
+        let maxErr = 0;
+        for (const q of targets) {
+          const ours = gpu.quantile(arr, q);
+          const pos = q * (arr.length - 1);
+          const lo = Math.floor(pos), hi = Math.ceil(pos);
+          const ref = lo === hi ? sorted[lo] : sorted[lo] * (1 - (pos - lo)) + sorted[hi] * (pos - lo);
+          maxErr = Math.max(maxErr, Math.abs(ours - ref));
+        }
+        // Bitonic over fp32 + linear interp host-side: bit-exact match
+        // expected (no FMA reorder vs CPU sort path).
+        console.log("maxErr<=1e-5", maxErr <= 1e-5);
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return; // CPU-only host
+    expect(stdout).toBe("maxErr<=1e-5 true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("non-power-of-2 lengths are padded with +Inf and produce the right order statistic", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-quantile-cuda-pad",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        // n = 1000 → padded to 1024 with +Inf. q=0.5 lands at sorted[499.5]
+        // which must NOT be one of the +Inf padding entries (those would
+        // sort to indices 1000..1023).
+        const arr = new Float32Array(1000);
+        for (let i = 0; i < arr.length; i++) arr[i] = i + 0.5; // already sorted
+        // pos = 0.5 * 999 = 499.5 → 0.5 * (sorted[499] + sorted[500])
+        //                         = 0.5 * (499.5 + 500.5) = 500
+        console.log("median", gpu.median(arr));
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return;
+    expect(stdout).toBe("median 500");
+    expect(exitCode).toBe(0);
+  });
+
+  it("does not mutate the input on CUDA path", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-quantile-cuda-immutable",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        const input = new Float32Array([5, 2, 8, 1, 7, 3, 6, 4]);
+        const before = Array.from(input).join(",");
+        gpu.median(input);
+        const after = Array.from(input).join(",");
+        console.log("orderPreserved", before === after);
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return;
+    expect(stdout).toBe("orderPreserved true");
+    expect(exitCode).toBe(0);
+  });
+});

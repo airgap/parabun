@@ -198,3 +198,104 @@ describe("parabun:gpu — scan (inclusive prefix sum)", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+// CUDA recursive scan path. Auto-skips on hosts without CUDA + NVRTC.
+// The previous launcher capped at 65,536 elements; the recursive version
+// scans blockSums itself when numBlocks exceeds the single-block leaf
+// cap. These cases exercise multi-level recursion.
+describe("parabun:gpu — scan (cuda recursive multi-stage path)", () => {
+  it("300K-element scan exceeds the old single-stage cap", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-cuda-300k",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        const N = 300_000;
+        const arr = new Float32Array(N);
+        arr.fill(1); // scan(ones) = 1, 2, 3, ..., N
+        const ours = gpu.scan(arr);
+        const checks = [[0, 1], [255, 256], [1023, 1024], [65535, 65536], [N - 1, N]];
+        let ok = true;
+        for (const [i, expected] of checks) {
+          if (ours[i] !== expected) { console.log("MISMATCH", i, ours[i], "!=", expected); ok = false; }
+        }
+        console.log("all_ok", ok);
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return;
+    expect(stdout).toBe("all_ok true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("1M-element scan (two recursion levels)", async () => {
+    // n = 1_048_576 → numBlocks = 4096 → second-level numBlocks = 16 → leaf.
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-cuda-1m",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        const N = 1 << 20;
+        const arr = new Float32Array(N);
+        arr.fill(1);
+        const ours = gpu.scan(arr);
+        const checks = [[0, 1], [65535, 65536], [(1 << 18) - 1, 1 << 18], [N - 1, N]];
+        let ok = true;
+        for (const [i, expected] of checks) {
+          if (ours[i] !== expected) { console.log("MISMATCH", i, ours[i], "!=", expected); ok = false; }
+        }
+        console.log("all_ok", ok);
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return;
+    expect(stdout).toBe("all_ok true");
+    expect(exitCode).toBe(0);
+  });
+
+  it("non-power-of-2 size past the old 64K cap", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-cuda-odd-size",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        const N = 70_001;
+        const arr = new Float32Array(N);
+        arr.fill(1);
+        const ours = gpu.scan(arr);
+        console.log("first", ours[0], "last", ours[N - 1]);
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return;
+    expect(stdout).toBe("first 1 last 70001");
+    expect(exitCode).toBe(0);
+  });
+
+  it("varied-value 200K scan matches the CPU reference within tolerance", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-scan-cuda-varied",
+      `
+        import gpu from "parabun:gpu";
+        if (!gpu.hasBackend("cuda")) { console.log("SKIP_NO_CUDA"); process.exit(0); }
+        gpu.setBackend("cuda");
+        const N = 200_000;
+        const arr = new Float32Array(N);
+        for (let i = 0; i < N; i++) arr[i] = (i % 7) - 3;
+        gpu.setBackend("cuda");
+        const ours = gpu.scan(arr);
+        gpu.setBackend("cpu");
+        const ref = gpu.scan(arr);
+        let maxErr = 0;
+        for (let i = 0; i < N; i++) maxErr = Math.max(maxErr, Math.abs(ours[i] - ref[i]));
+        // f32 + reordered associativity in tree-reduce: a few ULPs per
+        // step. With small-int inputs the running sum stays bounded, so
+        // absolute error stays small.
+        console.log("maxErr_lt_1", maxErr < 1.0);
+      `,
+    );
+    if (stdout === "SKIP_NO_CUDA") return;
+    expect(stdout).toBe("maxErr_lt_1 true");
+    expect(exitCode).toBe(0);
+  });
+});

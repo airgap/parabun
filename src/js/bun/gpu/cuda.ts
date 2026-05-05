@@ -1023,7 +1023,8 @@ function launchMatVecF32(mat: Float32Array | GpuHandle, vec: Float32Array, m: nu
         throw new Error("parabun:gpu cuda: cuMemcpyHtoD(mat) failed");
       }
     }
-    if (s.cuMemcpyHtoD_v2(dVec, ptr(vec), vecBytes) !== 0) throw new Error("parabun:gpu cuda: cuMemcpyHtoD(vec) failed");
+    if (s.cuMemcpyHtoD_v2(dVec, ptr(vec), vecBytes) !== 0)
+      throw new Error("parabun:gpu cuda: cuMemcpyHtoD(vec) failed");
 
     const pMatBuf = new BigUint64Array([dMat]);
     const pVecBuf = new BigUint64Array([dVec]);
@@ -1678,16 +1679,21 @@ function launchHistogramF32(
 }
 
 // ─── Kernel launch: scan (inclusive prefix sum) ───────────────────────────
-// Three-stage launch driven by the kernels above.
-//   Stage 1: per-block scan + emit blockSums[i] = block i's total.
-//   Stage 2: single-block scan over blockSums (rounded up to power-of-2).
-//   Stage 3: each block i ≥ 1 adds blockSums[i-1] to its own output.
+// Recursive three-stage launch driven by the kernels above.
+//   Stage 1: per-block scan in-place; block i emits its grand total to
+//            blockSums[i].
+//   Stage 2: recursively scan blockSums in-place — bottoms out at the
+//            single-block leaf (n ≤ SCAN_LEAF_MAX) which the
+//            scan_blocksums_inclusive_f32 kernel handles in one launch
+//            with blockDim.x = nextPow2(n).
+//   Stage 3: each block i ≥ 1 adds blockSums[i-1] (now an exclusive
+//            prefix offset) back into its own segment.
 //
-// Bounded at SCAN_BLOCK² = 65,536 elements per call. Above that, returns
-// null so the public wrapper falls back to CPU. Recursive multi-stage
-// scan (which would lift the limit) is a follow-up.
+// Recursion depth is log_{SCAN_BLOCK}(n) — for n = 2³² ≈ 4.3B that's
+// just 4 levels. Effectively unbounded in practice; the real cap is GPU
+// memory.
 const SCAN_BLOCK = 256;
-const SCAN_MAX_ELEMS = SCAN_BLOCK * SCAN_BLOCK;
+const SCAN_LEAF_MAX = 1024; // bound by sdata[1024] in scan_blocksums_inclusive_f32
 
 function nextPow2(n: number): number {
   let p = 1;
@@ -1695,148 +1701,133 @@ function nextPow2(n: number): number {
   return p;
 }
 
+// Single-block leaf scan: scan_blocksums_inclusive_f32 internally pads
+// reads with 0 for tid >= numBlocks, so any n ≤ SCAN_LEAF_MAX works as
+// long as blockDim.x is a power of 2 (Hillis-Steele requirement).
+function scanLeafF32(dBuf: bigint, n: number): void {
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const block = nextPow2(Math.max(2, n)); // sdata[1024] caps this at 1024
+  const pBuf = new BigUint64Array([dBuf]);
+  const pN = new Uint32Array([n]);
+  const params = new BigUint64Array([BigInt(ptr(pBuf)), BigInt(ptr(pN))]);
+  const r = s.cuLaunchKernel(devOpsFns!.scanBlocksumsInclusive, 1, 1, 1, block, 1, 1, 0, 0n, ptr(params), null);
+  if (r !== 0) throw new Error(`parabun:gpu cuda: cuLaunchKernel(scan_leaf) failed (${r})`);
+}
+
+// Scan a device buffer in-place. Recurses on blockSums when numBlocks
+// exceeds the leaf cap — supports arbitrary input length up to GPU
+// memory.
+function scanDeviceInPlaceF32(dBuf: bigint, n: number): void {
+  if (n <= 1) return;
+  if (n <= SCAN_LEAF_MAX) {
+    scanLeafF32(dBuf, n);
+    return;
+  }
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+  const numBlocks = Math.ceil(n / SCAN_BLOCK);
+  const sumsBytes = BigInt(numBlocks * 4);
+
+  // Per-block scan in-place (the kernel reads in[idx] before any sync,
+  // writes out[idx] after, so passing the same buffer for both is safe
+  // — one read and one write per (idx, thread)).
+  const dSumsBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dSumsBuf), sumsBytes) !== 0) {
+    throw new Error("parabun:gpu cuda: cuMemAlloc(scan blockSums) failed");
+  }
+  const dSums = dSumsBuf[0];
+
+  try {
+    {
+      const pIn = new BigUint64Array([dBuf]);
+      const pOut = new BigUint64Array([dBuf]);
+      const pSums = new BigUint64Array([dSums]);
+      const pN = new Uint32Array([n]);
+      const params = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pOut)), BigInt(ptr(pSums)), BigInt(ptr(pN))]);
+      const r = s.cuLaunchKernel(
+        devOpsFns!.scanBlockInclusive,
+        numBlocks,
+        1,
+        1,
+        SCAN_BLOCK,
+        1,
+        1,
+        0,
+        0n,
+        ptr(params),
+        null,
+      );
+      if (r !== 0) throw new Error(`parabun:gpu cuda: cuLaunchKernel(scan_block_inclusive) failed (${r})`);
+    }
+
+    // Recurse: scan blockSums (becomes per-block prefix offsets).
+    scanDeviceInPlaceF32(dSums, numBlocks);
+
+    // Add prior-block offset to each segment.
+    {
+      const pOut = new BigUint64Array([dBuf]);
+      const pSums = new BigUint64Array([dSums]);
+      const pN = new Uint32Array([n]);
+      const params = new BigUint64Array([BigInt(ptr(pOut)), BigInt(ptr(pSums)), BigInt(ptr(pN))]);
+      const r = s.cuLaunchKernel(
+        devOpsFns!.scanAddOffsets,
+        numBlocks,
+        1,
+        1,
+        SCAN_BLOCK,
+        1,
+        1,
+        0,
+        0n,
+        ptr(params),
+        null,
+      );
+      if (r !== 0) throw new Error(`parabun:gpu cuda: cuLaunchKernel(scan_add_offsets) failed (${r})`);
+    }
+  } finally {
+    s.cuMemFree_v2(dSums);
+  }
+}
+
 function launchScanF32(input: Float32Array | GpuHandle): Float32Array | null {
   if (!probeDevOps()) return null;
   const aView = isGpuHandle(input) ? (input.view as Float32Array) : input;
   const n = aView.length;
   if (n === 0) return new Float32Array(0);
-  if (n > SCAN_MAX_ELEMS) return null; // caller falls back to CPU
 
   const s = cudaLib!.symbols;
   const ptr = ffiPtr!;
   const aBytes = BigInt(n * 4);
-  const numBlocks = Math.ceil(n / SCAN_BLOCK);
-  const blockSumsLen = nextPow2(numBlocks);
-  const blockSumsBytes = BigInt(blockSumsLen * 4);
 
-  // Allocate input + output + blockSums on device.
-  let dA: bigint;
-  let aOwned: boolean;
-  if (isGpuHandle(input)) {
-    if (input.released) throw new Error("parabun:gpu: scan called on released handle");
-    if (input.buffer === 0n) throw new Error("parabun:gpu cuda: handle has no device buffer (f64?)");
-    dA = input.buffer;
-    aOwned = false;
-  } else {
-    const dABuf = new BigUint64Array(1);
-    if (s.cuMemAlloc_v2(ptr(dABuf), aBytes) !== 0) {
-      throw new Error("parabun:gpu cuda: cuMemAlloc(input) failed");
-    }
-    dA = dABuf[0];
-    aOwned = true;
-    if (s.cuMemcpyHtoD_v2(dA, ptr(aView), aBytes) !== 0) {
-      s.cuMemFree_v2(dA);
-      throw new Error("parabun:gpu cuda: cuMemcpyHtoD(input) failed");
-    }
-  }
-
+  // Allocate output buffer + populate from input. The recursive
+  // in-place scan operates on this; held-handle inputs use the host
+  // mirror via .view so we never mutate the caller's device buffer.
   const dOutBuf = new BigUint64Array(1);
   if (s.cuMemAlloc_v2(ptr(dOutBuf), aBytes) !== 0) {
-    if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("parabun:gpu cuda: cuMemAlloc(out) failed");
+    throw new Error("parabun:gpu cuda: cuMemAlloc(scan out) failed");
   }
   const dOut = dOutBuf[0];
 
-  const dSumsBuf = new BigUint64Array(1);
-  if (s.cuMemAlloc_v2(ptr(dSumsBuf), blockSumsBytes) !== 0) {
-    s.cuMemFree_v2(dOut);
-    if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("parabun:gpu cuda: cuMemAlloc(blockSums) failed");
-  }
-  const dSums = dSumsBuf[0];
-  // Zero the padding tail of blockSums (rounded-up area beyond numBlocks)
-  // so the second-stage scan picks up zeros there. Simple: zero the
-  // whole buffer up front.
-  const zero = new Float32Array(blockSumsLen);
-  if (s.cuMemcpyHtoD_v2(dSums, ptr(zero), blockSumsBytes) !== 0) {
-    s.cuMemFree_v2(dSums);
-    s.cuMemFree_v2(dOut);
-    if (aOwned) s.cuMemFree_v2(dA);
-    throw new Error("parabun:gpu cuda: cuMemcpyHtoD(blockSums zero) failed");
-  }
-
-  const cleanup = () => {
-    s.cuMemFree_v2(dSums);
-    s.cuMemFree_v2(dOut);
-    if (aOwned) s.cuMemFree_v2(dA);
-  };
-
-  // ── Stage 1 — per-block scan + emit blockSums.
-  {
-    const pIn = new BigUint64Array([dA]);
-    const pOut = new BigUint64Array([dOut]);
-    const pSums = new BigUint64Array([dSums]);
-    const pN = new Uint32Array([n]);
-    const params = new BigUint64Array([BigInt(ptr(pIn)), BigInt(ptr(pOut)), BigInt(ptr(pSums)), BigInt(ptr(pN))]);
-    const r = s.cuLaunchKernel(
-      devOpsFns!.scanBlockInclusive,
-      numBlocks,
-      1,
-      1,
-      SCAN_BLOCK,
-      1,
-      1,
-      0,
-      0n,
-      ptr(params),
-      null,
-    );
-    if (r !== 0) {
-      cleanup();
-      throw new Error(`parabun:gpu cuda: cuLaunchKernel(scan_block_inclusive) failed (${r})`);
+  try {
+    if (s.cuMemcpyHtoD_v2(dOut, ptr(aView), aBytes) !== 0) {
+      throw new Error("parabun:gpu cuda: cuMemcpyHtoD(scan input) failed");
     }
-  }
 
-  // ── Stage 2 — scan blockSums in a single block.
-  {
-    const pSums = new BigUint64Array([dSums]);
-    const pNB = new Uint32Array([numBlocks]);
-    const params = new BigUint64Array([BigInt(ptr(pSums)), BigInt(ptr(pNB))]);
-    const r = s.cuLaunchKernel(
-      devOpsFns!.scanBlocksumsInclusive,
-      1,
-      1,
-      1,
-      blockSumsLen,
-      1,
-      1,
-      0,
-      0n,
-      ptr(params),
-      null,
-    );
-    if (r !== 0) {
-      cleanup();
-      throw new Error(`parabun:gpu cuda: cuLaunchKernel(scan_blocksums_inclusive) failed (${r})`);
+    scanDeviceInPlaceF32(dOut, n);
+
+    if (s.cuCtxSynchronize() !== 0) {
+      throw new Error("parabun:gpu cuda: cuCtxSynchronize after scan failed");
     }
-  }
 
-  // ── Stage 3 — add prior-block offsets back. Skipped if there's only one
-  // block (no offsets to add).
-  if (numBlocks > 1) {
-    const pOut = new BigUint64Array([dOut]);
-    const pSums = new BigUint64Array([dSums]);
-    const pN = new Uint32Array([n]);
-    const params = new BigUint64Array([BigInt(ptr(pOut)), BigInt(ptr(pSums)), BigInt(ptr(pN))]);
-    const r = s.cuLaunchKernel(devOpsFns!.scanAddOffsets, numBlocks, 1, 1, SCAN_BLOCK, 1, 1, 0, 0n, ptr(params), null);
-    if (r !== 0) {
-      cleanup();
-      throw new Error(`parabun:gpu cuda: cuLaunchKernel(scan_add_offsets) failed (${r})`);
+    const out = new Float32Array(n);
+    if (s.cuMemcpyDtoH_v2(ptr(out), dOut, aBytes) !== 0) {
+      throw new Error("parabun:gpu cuda: cuMemcpyDtoH(scan out) failed");
     }
+    return out;
+  } finally {
+    s.cuMemFree_v2(dOut);
   }
-
-  if (s.cuCtxSynchronize() !== 0) {
-    cleanup();
-    throw new Error("parabun:gpu cuda: cuCtxSynchronize failed");
-  }
-
-  const out = new Float32Array(n);
-  if (s.cuMemcpyDtoH_v2(ptr(out), dOut, aBytes) !== 0) {
-    cleanup();
-    throw new Error("parabun:gpu cuda: cuMemcpyDtoH(out) failed");
-  }
-  cleanup();
-  return out;
 }
 
 // ─── Kernel launch: argmin / argmax ───────────────────────────────────────
@@ -2131,6 +2122,103 @@ function launchVarianceF32(input: Float32Array | GpuHandle, ddof: number): numbe
     sumSq = t;
   }
   return sumSq / (n - ddof);
+}
+
+// ─── Kernel launch: quantile (bitonic sort + linear interpolation) ───────
+// Pads the input to nextPow2(n) with +Inf so tail elements sort to the
+// end. Runs the canonical bitonic sequence (k = 2..nPadded, j = k/2..1),
+// then reads back just the two elements straddling pos = q*(n-1) and
+// interpolates host-side — matches numpy's default "linear" interp and
+// the cpuQuantileF32 reference.
+//
+// Returns null if the device path can't run (no NVRTC, or input exceeds
+// SORT_MAX_ELEMS); caller falls back to CPU sort. NaN inputs are not
+// supported (CUDA's `>` is unordered for NaN — sorted positions are
+// undefined). For deterministic NaN-aware semantics, callers should
+// pre-filter or stay on CPU.
+
+const SORT_BLOCK = 256;
+const SORT_MAX_ELEMS = 1 << 24; // padded; ~64 MB scratch at f32
+
+function launchQuantileF32(input: Float32Array | GpuHandle, q: number): number | null {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  const n = view.length;
+  if (n === 0) return NaN;
+  if (n === 1) return view[0];
+  if (n > SORT_MAX_ELEMS) return null;
+  if (!probeDevOps()) return null;
+
+  const s = cudaLib!.symbols;
+  const ptr = ffiPtr!;
+
+  const nPadded = nextPow2(n);
+  const bytes = BigInt(nPadded * 4);
+
+  const dBufBuf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ptr(dBufBuf), bytes) !== 0) {
+    throw new Error("parabun:gpu cuda: cuMemAlloc(sort) failed");
+  }
+  const dBuf = dBufBuf[0];
+
+  // Build padded host buffer (n elements + (nPadded - n) trailing +Inf)
+  // and ship it in one HtoD. Held-handle inputs reach for the host
+  // mirror via .view rather than DtoD, which would also work but adds
+  // a second memcpy and a +Inf tail HtoD.
+  const padded = new Float32Array(nPadded);
+  padded.set(view);
+  for (let i = n; i < nPadded; i++) padded[i] = Infinity;
+  if (s.cuMemcpyHtoD_v2(dBuf, ptr(padded), bytes) !== 0) {
+    s.cuMemFree_v2(dBuf);
+    throw new Error("parabun:gpu cuda: cuMemcpyHtoD(sort) failed");
+  }
+
+  // Bitonic sort: outer k = 2, 4, ..., nPadded; inner j = k/2, k/4, ..., 1.
+  const grid = Math.ceil(nPadded / SORT_BLOCK);
+  for (let k = 2; k <= nPadded; k <<= 1) {
+    for (let j = k >> 1; j > 0; j >>= 1) {
+      const pBuf = new BigUint64Array([dBuf]);
+      const pJ = new Uint32Array([j]);
+      const pK = new Uint32Array([k]);
+      const pN = new Uint32Array([nPadded]);
+      const params = new BigUint64Array([BigInt(ptr(pBuf)), BigInt(ptr(pJ)), BigInt(ptr(pK)), BigInt(ptr(pN))]);
+      const r = s.cuLaunchKernel(devOpsFns!.bitonicStep, grid, 1, 1, SORT_BLOCK, 1, 1, 0, 0n, ptr(params), null);
+      if (r !== 0) {
+        s.cuMemFree_v2(dBuf);
+        throw new Error(`parabun:gpu cuda: cuLaunchKernel(bitonic_step) failed (${r})`);
+      }
+    }
+  }
+
+  if (s.cuCtxSynchronize() !== 0) {
+    s.cuMemFree_v2(dBuf);
+    throw new Error("parabun:gpu cuda: cuCtxSynchronize after bitonic failed");
+  }
+
+  // Pull back just the two elements straddling pos = q*(n-1).
+  const pos = q * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+
+  if (lo === hi) {
+    const out1 = new Float32Array(1);
+    if (s.cuMemcpyDtoH_v2(ptr(out1), dBuf + BigInt(lo * 4), 4n) !== 0) {
+      s.cuMemFree_v2(dBuf);
+      throw new Error("parabun:gpu cuda: cuMemcpyDtoH(quantile) failed");
+    }
+    s.cuMemFree_v2(dBuf);
+    return out1[0];
+  }
+
+  // hi is always lo + 1 here (Math.ceil of a non-integer); read both
+  // contiguous elements in one DtoH.
+  const pair = new Float32Array(2);
+  if (s.cuMemcpyDtoH_v2(ptr(pair), dBuf + BigInt(lo * 4), 8n) !== 0) {
+    s.cuMemFree_v2(dBuf);
+    throw new Error("parabun:gpu cuda: cuMemcpyDtoH(quantile pair) failed");
+  }
+  s.cuMemFree_v2(dBuf);
+  const frac = pos - lo;
+  return pair[0] * (1 - frac) + pair[1] * frac;
 }
 
 // ─── Kernel launch: dotF32 ────────────────────────────────────────────────
@@ -3299,9 +3387,8 @@ function histogram(input: FArray | GpuHandle, bins: number, min: number, max: nu
 }
 
 // Scan dispatch — inclusive prefix sum over Float32Array. Returns null
-// (then a CPU fallback inline) when NVRTC isn't available or the input
-// exceeds the v1 SCAN_MAX_ELEMS cap of 65,536 — recursive multi-stage
-// scan to lift the cap is follow-up work.
+// (then a CPU fallback inline) only when NVRTC isn't available; the
+// recursive launcher handles arbitrary-size inputs up to GPU memory.
 function scan(input: FArray | GpuHandle): FArray {
   const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
   if (!(view instanceof Float32Array)) {
@@ -3310,7 +3397,7 @@ function scan(input: FArray | GpuHandle): FArray {
   const out = launchScanF32(input as Float32Array | GpuHandle);
   if (out !== null) return out;
   // CPU fallback — Kahan-compensated inclusive scan, matches gpu.ts's
-  // CPU reference. Used when NVRTC is missing or n > SCAN_MAX_ELEMS.
+  // CPU reference. Used only when NVRTC is missing.
   const cpu = new Float32Array(view.length);
   let sum = 0;
   let c = 0;
@@ -3352,6 +3439,18 @@ function variance(input: FArray | GpuHandle, ddof: number): number {
     throw new TypeError("parabun:gpu cuda: variance requires Float32Array (f64 not yet supported)");
   }
   return launchVarianceF32(input as Float32Array | GpuHandle, ddof);
+}
+
+// Quantile dispatch — see launchQuantileF32. Bitonic-sort + linear
+// interpolation; matches numpy / cpuQuantileF32 semantics. Returns null
+// when the device path can't run (no NVRTC, n > SORT_MAX_ELEMS) — the
+// gpu.ts wrapper falls back to the CPU sort.
+function quantile(input: FArray | GpuHandle, q: number): number | null {
+  const view = isGpuHandle(input) ? (input.view as Float32Array) : input;
+  if (!(view instanceof Float32Array)) {
+    throw new TypeError("parabun:gpu cuda: quantile requires Float32Array (f64 not yet supported)");
+  }
+  return launchQuantileF32(input as Float32Array | GpuHandle, q);
 }
 
 function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): FArray {
@@ -3666,7 +3765,8 @@ function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
 //   - Layout matches the host-side code exactly (row-major, head-major
 //     for multi-head tensors) so parity is trivial to check.
 
-const DEV_CUDA_SOURCE = `
+const DEV_CUDA_SOURCE =
+  `
 // NVRTC ships without <math.h> / <limits>, so synthesize the constants.
 #define F_INF  __int_as_float(0x7f800000)
 #define F_NINF __int_as_float(0xff800000)
@@ -4734,11 +4834,10 @@ extern "C" __global__ void histogram_f32(
 //      an exclusive offset relative to the global stream) and adds it to
 //      every element of its segment.
 //
-// Block size 256 throughout. With one stage of block-sum scanning we
-// support up to 256² = 65,536 elements per call. Larger inputs need
-// either a recursive scan-of-scans or a host-side split — both are
-// follow-up work; for now the launcher caps at 256² and routes larger
-// inputs through the existing CPU reference.
+// Block size 256 throughout. The launcher recurses on the blockSums
+// stream when it exceeds the single-block leaf cap (1024 elements), so
+// the supported size is unbounded in practice — recursion depth is
+// log_{256}(n), four levels at n = 2³².
 
 extern "C" __global__ void scan_block_inclusive_f32(
     const float* __restrict__ in,
@@ -4964,6 +5063,44 @@ extern "C" __global__ void argmax_grid_f32(
     }
 }
 
+// ─── Bitonic sort step (in-place, ascending) ──────────────────────────────
+// Drives the launchQuantileF32 path. Caller pads input to a power-of-2
+// length with +Inf (so tail elements sort to the end and don't affect the
+// quantile lookup) and runs the canonical bitonic sequence:
+//
+//   for (k = 2; k <= n; k <<= 1)
+//     for (j = k >> 1; j > 0; j >>= 1)
+//        bitonic_step_f32<<<grid, 256>>>(arr, j, k, n);
+//
+// Each step compares pairs (i, i^j) and swaps if they're out of order in
+// their bitonic direction (ascending = (i & k) == 0). Total launches:
+// O(log²(n)) — for n = 2²⁰ that's 210 launches × 4096 blocks each, well
+// under a millisecond on consumer GPUs. NaN inputs are not handled
+// (CUDA's ` >
+  ` is unordered for NaN) — caller is responsible for filtering
+// or accepting CPU semantics divergence.
+extern "C" __global__ void bitonic_step_f32(
+    float* __restrict__ arr,
+    unsigned int j,
+    unsigned int k,
+    unsigned int n
+) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned int ixj = i ^ j;
+    if (ixj <= i || ixj >= n) return;
+
+    bool ascending = (i & k) == 0u;
+    float vi = arr[i];
+    float vixj = arr[ixj];
+
+    bool swap = ascending ? (vi > vixj) : (vi < vixj);
+    if (swap) {
+        arr[i] = vixj;
+        arr[ixj] = vi;
+    }
+}
+
 // Encoder self-attention (fused multi-head scaled dot-product attention).
 // One block computes the attention output for one (head, query-row) pair.
 // Streams the softmax with running max + correction so attention scores
@@ -5085,6 +5222,7 @@ type DevOpsFns = {
   argminGrid: bigint;
   argmaxGrid: bigint;
   varianceSumsq: bigint;
+  bitonicStep: bigint;
 };
 
 let devOpsProbed = false;
@@ -5184,6 +5322,7 @@ function probeDevOps(): boolean {
     "argminGrid",
     "argmaxGrid",
     "varianceSumsq",
+    "bitonicStep",
   ];
   const kernelNames: Record<keyof DevOpsFns, string> = {
     embedLookup: "embed_lookup_f32",
@@ -5219,6 +5358,7 @@ function probeDevOps(): boolean {
     argminGrid: "argmin_grid_f32",
     argmaxGrid: "argmax_grid_f32",
     varianceSumsq: "variance_sumsq_f32",
+    bitonicStep: "bitonic_step_f32",
   };
 
   const fns = {} as DevOpsFns;
@@ -5800,6 +5940,7 @@ export default {
   argMin,
   argMax,
   variance,
+  quantile,
   simdMap,
   alloc,
   isAligned,

@@ -342,6 +342,16 @@ interface Backend {
    */
   variance?(input: Float32Array | GpuHandle, ddof: number): number;
   /**
+   * Linear-interpolated quantile over `Float32Array`. Backends MAY
+   * implement this for parallel-sort device kernels (CUDA: bitonic
+   * sort + DtoH read of the two straddling order statistics). Return
+   * `null` to signal "device path declined" — the public wrapper then
+   * falls back to the CPU sort. NaN inputs are not guaranteed to
+   * match CPU semantics on backends that use unordered float
+   * comparisons internally.
+   */
+  quantile?(input: Float32Array | GpuHandle, q: number): number | null;
+  /**
    * Single-launch fused Gaussian blur on packed RGBA uint8 — used by
    * parabun:image's GPU dispatch path. Returns null if the backend has no
    * GPU implementation available (e.g. CUDA without NVRTC), so the
@@ -1271,7 +1281,9 @@ function imageBlurRGBA(input: Uint8Array, w: number, h: number, radius: number):
     throw new RangeError("parabun:gpu.imageBlurRGBA: radius must be an integer in [0, 100]");
   }
   if (input.length !== w * h * 4) {
-    throw new RangeError(`parabun:gpu.imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`);
+    throw new RangeError(
+      `parabun:gpu.imageBlurRGBA: input length ${input.length} != w*h*4 (${w}*${h}*4 = ${w * h * 4})`,
+    );
   }
   const backend = resolveActive();
   if (!backend.imageBlurRGBA) return null;
@@ -1396,6 +1408,14 @@ function quantile(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Arra
   }
   const a = unwrapGpuArg(input as any);
   const aV = isGpuHandle(a) ? (a.view as Float32Array) : (a as Float32Array);
+  // Try the active backend first — CUDA dispatches to a bitonic sort
+  // kernel for n ≤ 16M; null means "device path declined" (no NVRTC,
+  // input too large, etc.) and we fall back to the host sort.
+  const back = resolveActive();
+  if (back.quantile) {
+    const r = back.quantile(a as any, q);
+    if (r !== null) return r;
+  }
   return cpuQuantileF32(aV, q);
 }
 
