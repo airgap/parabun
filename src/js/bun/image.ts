@@ -26,7 +26,7 @@ function todo(): never {
   throw new Error(NOT_IMPLEMENTED_MSG);
 }
 
-type ImageFormat = "jpeg" | "png" | "webp";
+type ImageFormat = "jpeg" | "png" | "webp" | "avif";
 type DecodedImage = {
   data: Uint8Array;
   width: number;
@@ -114,9 +114,21 @@ type SharpenOptions = {
   radius?: number;
 };
 
+// Lazy-required to avoid loading the FFI module unless an AVIF call
+// actually fires. The module itself is opaque (no eager probe).
+const avifMod = require("./image/avif.ts");
+
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError("parabun:image.decode: expected Uint8Array");
+  }
+  // AVIF dispatch — magic byte sniff before the native codec, since
+  // the C++ side only knows JPEG/PNG/WebP. The avif submodule lazy-
+  // dlopens libavif and throws a useful "install libavif" error if
+  // the system doesn't have it.
+  if (avifMod.isAvif(bytes)) {
+    const out = avifMod.decode(bytes);
+    return { data: out.data, width: out.width, height: out.height, channels: 4, format: "avif" };
   }
   return native.decode(bytes);
 }
@@ -126,7 +138,31 @@ function encode(img: DecodedImage, opts: EncodeOptions): Uint8Array {
     throw new TypeError("parabun:image.encode: img must be the object returned from decode()");
   }
   if (typeof opts !== "object" || opts === null || typeof opts.format !== "string") {
-    throw new TypeError('parabun:image.encode: opts must be { format: "jpeg" | "png", quality? }');
+    throw new TypeError('parabun:image.encode: opts must be { format: "jpeg" | "png" | "webp" | "avif", quality? }');
+  }
+  if (opts.format === "avif") {
+    // AVIF expects 4-channel RGBA input. Synth a 4-channel buffer
+    // from a 3-channel source by inserting opaque alpha — same
+    // convention as the native PNG path uses for 3-channel inputs.
+    let rgba: Uint8Array;
+    if (img.channels === 4) {
+      rgba = img.data;
+    } else if (img.channels === 3) {
+      const n = img.width * img.height;
+      rgba = new Uint8Array(n * 4);
+      for (let i = 0; i < n; i++) {
+        rgba[i * 4] = img.data[i * 3];
+        rgba[i * 4 + 1] = img.data[i * 3 + 1];
+        rgba[i * 4 + 2] = img.data[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+      }
+    } else {
+      throw new RangeError(`parabun:image AVIF encode: unsupported channels=${img.channels} (need 3 or 4)`);
+    }
+    return avifMod.encode(rgba, img.width, img.height, {
+      quality: opts.quality,
+      lossless: opts.lossless,
+    });
   }
   return native.encode(img, opts);
 }
