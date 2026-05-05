@@ -1,0 +1,92 @@
+// Pi CPU temperature → warn / error thresholds → two LEDs + log lines.
+//
+//   bun run build:release demos/iot-temp-warn.pts [--seconds N] [--warn 65] [--error 75]
+//
+// Same demo as iot-temp-warn.ts, but uses Para's reactive call-binding
+// (`->`) so the two LED writes and the threshold-transition log read
+// like declarative wiring rather than a manual `effect` block.
+//
+// Reads /sys/class/thermal/thermal_zone0/temp (millidegrees C — works on
+// every Pi, no extra wiring) every second and drives two LEDs:
+//   BCM 17 → yellow LED — lit when temp ≥ warn (default 65°C)
+//   BCM 27 → red LED    — lit when temp ≥ error (default 75°C)
+
+import gpio from "parabun:gpio";
+import signals from "para:signals";
+import { readFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const arg = (k: string, d: number) => {
+  const i = args.indexOf(k);
+  return i >= 0 ? Number(args[i + 1]) : d;
+};
+const seconds = arg("--seconds", -1);
+const warnAt = arg("--warn", 65);
+const errorAt = arg("--error", 75);
+
+if (errorAt <= warnAt) {
+  console.error(`--error (${errorAt}) must be greater than --warn (${warnAt})`);
+  process.exit(1);
+}
+
+const chips = gpio.chips();
+const rp1 = chips.find(c => c.label === "pinctrl-rp1");
+const chipPath = process.env.GPIO_CHIP ?? rp1?.path ?? chips[0]?.path;
+if (!chipPath) {
+  console.error("no /dev/gpiochip* found — parabun:gpio is Linux-only.");
+  process.exit(1);
+}
+
+await using chip = gpio.open(chipPath);
+await using warnLed = chip.line(17, { mode: "out", initial: 0 });
+await using errLed = chip.line(27, { mode: "out", initial: 0 });
+
+pure function readTemp(): number {
+  const raw = readFileSync("/sys/class/thermal/thermal_zone0/temp", "utf8").trim();
+  return Number(raw) / 1000;
+}
+
+const sensor = signals.fromInterval(readTemp, 1000);
+
+// Warn band: lit at warn AND at error.
+const warnOn = signals.derived(() => {
+  const t = sensor.signal.get();
+  return t !== undefined && t >= warnAt ? 1 : 0;
+});
+const errOn = signals.derived(() => {
+  const t = sensor.signal.get();
+  return t !== undefined && t >= errorAt ? 1 : 0;
+});
+
+// Reactive wiring — every change of warnOn / errOn re-calls the LED.
+warnOn.get() -> warnLed.write;
+errOn.get() -> errLed.write;
+
+// Transition logging — only fires when level actually changes.
+let last: "ok" | "warn" | "error" | null = null;
+signals.effect(() => {
+  const t = sensor.signal.get();
+  if (t === undefined) return;
+  const lv = errOn.get() ? "error" : warnOn.get() ? "warn" : "ok";
+  if (lv !== last) {
+    const tag = lv === "error" ? "[ERR ]" : lv === "warn" ? "[WARN]" : "[ok  ]";
+    console.log(`${tag} ${t.toFixed(1)}°C  (warn=${warnAt}  error=${errorAt})`);
+    last = lv;
+  }
+});
+
+console.log(`watching CPU temp — warn≥${warnAt}°C  error≥${errorAt}°C`);
+console.log(`LEDs: BCM17=warn  BCM27=error`);
+
+if (seconds > 0) {
+  console.log(`(non-interactive: stopping in ${seconds}s)`);
+  await Bun.sleep(seconds * 1000);
+} else {
+  console.log("Ctrl-C to stop.");
+  await new Promise(() => {});
+}
+
+sensor.dispose();
+warnLed.write(0);
+errLed.write(0);
+console.log("done.");
