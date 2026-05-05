@@ -836,6 +836,50 @@ function decodeMp3(bytes: Uint8Array): WavData {
   return native.decodeMp3(bytes);
 }
 
+// Lazy require so the ffmpeg probe doesn't fire until a file-codec
+// path actually runs.
+const ffmpegMod = require("./audio/ffmpeg.ts");
+
+/**
+ * Decode any audio file ffmpeg understands (MP3, FLAC, AAC, OGG,
+ * M4A, WMA, WAV, …) into raw 16-bit PCM. WAV + MP3 already have
+ * native paths in this module (zero subprocess overhead) — call
+ * `readWav` / `decodeMp3` for those when you have the format
+ * statically. `decodeFile` is the catch-all for everything else.
+ *
+ * Defaults preserve the source rate + channel count; pass `opts`
+ * to resample / remix.
+ */
+async function decodeFile(
+  bytes: Uint8Array,
+  opts?: { sampleRate?: number; channels?: 1 | 2 },
+): Promise<{ samples: Int16Array; sampleRate: number; channels: number; durationMs: number }> {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("parabun:audio.decodeFile: expected Uint8Array");
+  }
+  return ffmpegMod.decode(bytes, opts);
+}
+
+/**
+ * Encode 16-bit PCM into a chosen container/codec via ffmpeg.
+ * Supported formats: "mp3", "flac", "aac", "ogg" (vorbis), "wav".
+ * Returns the encoded byte stream.
+ */
+async function encodeFile(
+  samples: Int16Array,
+  opts: {
+    format: "mp3" | "flac" | "aac" | "ogg" | "wav";
+    sampleRate: number;
+    channels: 1 | 2;
+    bitrate?: number;
+  },
+): Promise<Uint8Array> {
+  if (!(samples instanceof Int16Array)) {
+    throw new TypeError("parabun:audio.encodeFile: samples must be an Int16Array");
+  }
+  return ffmpegMod.encode(samples, opts);
+}
+
 // ─── Opus codec ────────────────────────────────────────────────────────────
 // libopus encoder + decoder, what every WebRTC client uses for voice. Class
 // wrappers hide the bigint-handle plumbing and back-stop forgotten close()
@@ -2236,6 +2280,8 @@ export default {
   melSpectrogram,
   detectVoice,
   decodeMp3,
+  decodeFile,
+  encodeFile,
   OpusEncoder,
   OpusDecoder,
   Denoiser,
