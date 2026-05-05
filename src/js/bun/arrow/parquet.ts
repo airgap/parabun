@@ -279,6 +279,22 @@ const PQ_CT_UTF8 = 0;
 const PQ_CODEC_UNCOMPRESSED = 0;
 const PQ_CODEC_SNAPPY = 1;
 const PQ_CODEC_GZIP = 2;
+// Codes 3 (LZO) / 4 (BROTLI) / 5 (LZ4 legacy) / 7 (LZ4_RAW) are not
+// supported — Bun doesn't ship the corresponding decoders. Anything
+// emitted as those falls into the explicit "not supported" branch
+// below with a clear message rather than silently producing garbage.
+const PQ_CODEC_ZSTD = 6;
+
+// ConvertedType — pre-2.4 logical-type annotation (PQ_CT_UTF8 declared
+// up by the type constants above). Every parquet reader since 2.0
+// understands these; the newer LogicalType union is more expressive
+// but not yet wired here. Date / timestamp columns round-trip via the
+// ConvertedType field only for now.
+const PQ_CT_LIST = 3;
+const PQ_CT_DECIMAL = 5;
+const PQ_CT_DATE = 6;
+const PQ_CT_TIMESTAMP_MILLIS = 9;
+const PQ_CT_TIMESTAMP_MICROS = 10;
 
 // PageType
 const PQ_PAGE_DATA_PAGE = 0;
@@ -303,6 +319,21 @@ interface SchemaElement {
   name: string;
   numChildren: number; // 0 for leaf
   convertedType: number | undefined;
+  // Decimal-only: total digit count (precision) and digits-after-decimal-
+  // point (scale). Both undefined for non-decimal columns.
+  scale: number | undefined;
+  precision: number | undefined;
+}
+
+interface ColumnStatistics {
+  /** PLAIN-encoded bytes of the maximum value in the chunk; absent → unknown. */
+  maxValue: Uint8Array | undefined;
+  /** PLAIN-encoded bytes of the minimum value in the chunk; absent → unknown. */
+  minValue: Uint8Array | undefined;
+  /** Count of nulls in the chunk; absent → unknown (treat as ≥0). */
+  nullCount: bigint | undefined;
+  /** Count of distinct values; absent → unknown. We don't compute this. */
+  distinctCount: bigint | undefined;
 }
 
 interface ColumnMetaData {
@@ -313,6 +344,14 @@ interface ColumnMetaData {
   numValues: bigint;
   dataPageOffset: bigint;
   dictionaryPageOffset: bigint | undefined;
+  /**
+   * Per-column-chunk min/max + null-count. Populated by writers that
+   * compute them (we do; older parquet emitters often don't). Downstream
+   * readers — DuckDB, Polars, pyarrow — use these for predicate
+   * pushdown: a row group whose [min, max] doesn't overlap the filter
+   * predicate is skipped without reading the data pages.
+   */
+  statistics: ColumnStatistics | undefined;
 }
 
 interface ColumnChunk {
@@ -340,6 +379,8 @@ function parseSchemaElement(r: ThriftReader): SchemaElement {
     name: "",
     numChildren: 0,
     convertedType: undefined,
+    scale: undefined,
+    precision: undefined,
   };
   r.readStruct((fid, t, rr) => {
     switch (fid) {
@@ -358,12 +399,69 @@ function parseSchemaElement(r: ThriftReader): SchemaElement {
       case 5:
         out.numChildren = rr.readZigzagI32();
         return true;
+      case 9:
+        out.scale = rr.readZigzagI32();
+        return true;
+      case 10:
+        out.precision = rr.readZigzagI32();
+        return true;
       case 6:
         out.convertedType = rr.readZigzagI32();
         return true;
     }
     return false;
   });
+  return out;
+}
+
+// Per parquet.thrift Statistics:
+//   1: optional binary max          (deprecated, signed-comparison-ambiguous)
+//   2: optional binary min          (deprecated)
+//   3: optional i64    null_count
+//   4: optional i64    distinct_count
+//   5: optional binary max_value    (preferred — well-defined comparison)
+//   6: optional binary min_value    (preferred)
+//   7: optional bool   is_max_value_exact
+//   8: optional bool   is_min_value_exact
+// We read both max/min and max_value/min_value; the v5/v6 pair is
+// preferred when both are present (newer writers). null_count is the
+// most-used field by downstream filters.
+function parseStatistics(r: ThriftReader): ColumnStatistics {
+  const out: ColumnStatistics = {
+    maxValue: undefined,
+    minValue: undefined,
+    nullCount: undefined,
+    distinctCount: undefined,
+  };
+  // Older v1/v2 fall back; newer v5/v6 win if seen later in the same
+  // struct (Thrift fields can come in any order, so capture both).
+  let legacyMax: Uint8Array | undefined;
+  let legacyMin: Uint8Array | undefined;
+  r.readStruct((fid, _t, rr) => {
+    switch (fid) {
+      case 1:
+        legacyMax = rr.readBinary();
+        return true;
+      case 2:
+        legacyMin = rr.readBinary();
+        return true;
+      case 3:
+        out.nullCount = rr.readZigzagI64();
+        return true;
+      case 4:
+        out.distinctCount = rr.readZigzagI64();
+        return true;
+      case 5:
+        out.maxValue = rr.readBinary();
+        return true;
+      case 6:
+        out.minValue = rr.readBinary();
+        return true;
+    }
+    return false;
+  });
+  if (out.maxValue === undefined) out.maxValue = legacyMax;
+  if (out.minValue === undefined) out.minValue = legacyMin;
   return out;
 }
 
@@ -376,6 +474,7 @@ function parseColumnMetaData(r: ThriftReader): ColumnMetaData {
     numValues: 0n,
     dataPageOffset: 0n,
     dictionaryPageOffset: undefined,
+    statistics: undefined,
   };
   r.readStruct((fid, t, rr) => {
     switch (fid) {
@@ -403,6 +502,9 @@ function parseColumnMetaData(r: ThriftReader): ColumnMetaData {
         return true;
       case 11:
         out.dictionaryPageOffset = rr.readZigzagI64();
+        return true;
+      case 12:
+        out.statistics = parseStatistics(rr);
         return true;
     }
     return false;
@@ -486,11 +588,22 @@ interface DictionaryPageHeader {
   encoding: number;
 }
 
+interface DataPageHeaderV2 {
+  numValues: number;
+  numNulls: number;
+  numRows: number;
+  encoding: number;
+  defLevelsByteLength: number;
+  repLevelsByteLength: number;
+  isCompressed: boolean;
+}
+
 interface PageHeader {
   type: number;
   uncompressedSize: number;
   compressedSize: number;
   dataPageHeader: DataPageHeader | undefined;
+  dataPageHeaderV2: DataPageHeaderV2 | undefined;
   dictionaryPageHeader: DictionaryPageHeader | undefined;
 }
 
@@ -537,12 +650,65 @@ function parseDictionaryPageHeader(r: ThriftReader): DictionaryPageHeader {
   return out;
 }
 
+// DataPageHeaderV2 — newer page layout used by recent pyarrow / Polars /
+// Spark writers. Differences from V1: def/rep levels are NEVER compressed
+// (only the values payload is, when is_compressed is true), and the
+// header carries explicit byte lengths for both level streams so the
+// reader doesn't have to length-decode them. Field ids per
+// parquet.thrift @ 2.10:
+//   1 numValues 2 numNulls 3 numRows 4 encoding (values)
+//   5 defLevelsByteLength 6 repLevelsByteLength
+//   7 isCompressed (default true) 8 statistics (skipped — not needed
+//   for materialization)
+function parseDataPageHeaderV2(r: ThriftReader): DataPageHeaderV2 {
+  const out: DataPageHeaderV2 = {
+    numValues: 0,
+    numNulls: 0,
+    numRows: 0,
+    encoding: PQ_ENC_PLAIN,
+    defLevelsByteLength: 0,
+    repLevelsByteLength: 0,
+    isCompressed: true,
+  };
+  r.readStruct((fid, t, rr) => {
+    switch (fid) {
+      case 1:
+        out.numValues = rr.readZigzagI32();
+        return true;
+      case 2:
+        out.numNulls = rr.readZigzagI32();
+        return true;
+      case 3:
+        out.numRows = rr.readZigzagI32();
+        return true;
+      case 4:
+        out.encoding = rr.readZigzagI32();
+        return true;
+      case 5:
+        out.defLevelsByteLength = rr.readZigzagI32();
+        return true;
+      case 6:
+        out.repLevelsByteLength = rr.readZigzagI32();
+        return true;
+      case 7:
+        // Thrift compact bool fields encode the value in the type
+        // tag itself: TC_BOOL_TRUE means true, TC_BOOL_FALSE means
+        // false. No separate value byte to consume.
+        out.isCompressed = t === TC_BOOL_TRUE;
+        return true;
+    }
+    return false;
+  });
+  return out;
+}
+
 function parsePageHeader(r: ThriftReader): PageHeader {
   const out: PageHeader = {
     type: PQ_PAGE_DATA_PAGE,
     uncompressedSize: 0,
     compressedSize: 0,
     dataPageHeader: undefined,
+    dataPageHeaderV2: undefined,
     dictionaryPageHeader: undefined,
   };
   r.readStruct((fid, t, rr) => {
@@ -561,6 +727,14 @@ function parsePageHeader(r: ThriftReader): PageHeader {
         return true;
       case 7:
         out.dictionaryPageHeader = parseDictionaryPageHeader(rr);
+        return true;
+      case 8:
+        out.dataPageHeaderV2 = parseDataPageHeaderV2(rr);
+        // V2 reuses the page-type constant PQ_PAGE_DATA_PAGE_V2 — set
+        // it explicitly here in case the writer emitted the type field
+        // out of order vs the V2 sub-struct (Thrift doesn't guarantee
+        // field order across writers).
+        out.type = PQ_PAGE_DATA_PAGE_V2;
         return true;
     }
     return false;
@@ -730,7 +904,16 @@ function decompressPage(input: Uint8Array, codec: number, expectedLen: number): 
     }
     return out;
   }
-  throw new Error(`parquet: compression codec ${codec} not supported (UNCOMPRESSED, SNAPPY, GZIP supported)`);
+  if (codec === PQ_CODEC_ZSTD) {
+    const out = (Bun as any).zstdDecompressSync(input) as Uint8Array;
+    if (out.length !== expectedLen) {
+      throw new Error(`parquet: zstd length mismatch (got ${out.length}, expected ${expectedLen})`);
+    }
+    return out;
+  }
+  throw new Error(
+    `parquet: compression codec ${codec} not supported (UNCOMPRESSED, SNAPPY, GZIP, ZSTD supported; LZO/BROTLI/LZ4 not — Bun doesn't ship the decoder)`,
+  );
 }
 
 // PLAIN encoding for a typed values array. Returns a typed array suitable
@@ -740,6 +923,7 @@ function decodePlainTyped(
   offset: number,
   numValues: number,
   type: number,
+  typeLength?: number,
 ): { values: any; consumed: number } {
   const view = new DataView(data.buffer, data.byteOffset + offset, data.byteLength - offset);
   switch (type) {
@@ -752,6 +936,20 @@ function decodePlainTyped(
       const arr = new BigInt64Array(numValues);
       for (let i = 0; i < numValues; i++) arr[i] = view.getBigInt64(i * 8, true);
       return { values: arr, consumed: numValues * 8 };
+    }
+    case PQ_TYPE_INT96: {
+      // 12 bytes per value: 8 bytes nanos-of-day (uint64 LE) +
+      // 4 bytes Julian Day (uint32 LE). Convert to nanoseconds since
+      // Unix epoch as a signed BigInt. JD 2440588 = 1970-01-01.
+      const arr = new BigInt64Array(numValues);
+      const NANOS_PER_DAY = 86_400_000_000_000n;
+      for (let i = 0; i < numValues; i++) {
+        const nanosOfDay = view.getBigUint64(i * 12, true);
+        const julianDay = view.getUint32(i * 12 + 8, true);
+        const unixDays = BigInt(julianDay) - 2440588n;
+        arr[i] = unixDays * NANOS_PER_DAY + BigInt.asIntN(64, nanosOfDay);
+      }
+      return { values: arr, consumed: numValues * 12 };
     }
     case PQ_TYPE_FLOAT: {
       const arr = new Float32Array(numValues);
@@ -775,6 +973,18 @@ function decodePlainTyped(
       }
       return { values: arr, consumed: p };
     }
+    case PQ_TYPE_FIXED_LEN_BYTE_ARRAY: {
+      // typeLength bytes per value. Concatenate into one Uint8Array
+      // — the arrow fixed_size_binary column is one contiguous
+      // buffer indexed by row × width.
+      if (typeLength === undefined || typeLength <= 0) {
+        throw new Error("parquet: FIXED_LEN_BYTE_ARRAY decode: missing or invalid typeLength");
+      }
+      const total = numValues * typeLength;
+      const arr = new Uint8Array(total);
+      arr.set(new Uint8Array(data.buffer, data.byteOffset + offset, total));
+      return { values: arr, consumed: total };
+    }
     case PQ_TYPE_BOOLEAN: {
       // PLAIN-encoded booleans are bit-packed LSB-first.
       const arr = new Uint8Array(numValues);
@@ -786,12 +996,20 @@ function decodePlainTyped(
 }
 
 // Decode a single dictionary page into a typed array.
-function decodeDictionaryPage(pageData: Uint8Array, numValues: number, type: number): { values: any } {
-  return { values: decodePlainTyped(pageData, 0, numValues, type).values };
+function decodeDictionaryPage(
+  pageData: Uint8Array,
+  numValues: number,
+  type: number,
+  typeLength?: number,
+): { values: any } {
+  return { values: decodePlainTyped(pageData, 0, numValues, type, typeLength).values };
 }
 
 // Resolve dictionary indices into the dictionary's typed-array values.
-function gatherDictionary(dict: any, indices: Int32Array, count: number): any {
+// `typeLength` is required when dict is the FLBA Uint8Array (rows are
+// contiguous typeLength-byte windows; we expand by indices into a fresh
+// rows × typeLength buffer).
+function gatherDictionary(dict: any, indices: Int32Array, count: number, typeLength?: number): any {
   if (dict instanceof Int32Array) {
     const out = new Int32Array(count);
     for (let i = 0; i < count; i++) out[i] = dict[indices[i]];
@@ -812,6 +1030,20 @@ function gatherDictionary(dict: any, indices: Int32Array, count: number): any {
     for (let i = 0; i < count; i++) out[i] = dict[indices[i]];
     return out;
   }
+  if (dict instanceof Uint8Array) {
+    // FLBA dictionary: dict is dictSize × typeLength bytes; we want
+    // count × typeLength bytes formed by copying the indexed window
+    // for each output row.
+    if (typeLength === undefined) {
+      throw new Error("parquet: gatherDictionary: FLBA dictionary requires typeLength");
+    }
+    const out = new Uint8Array(count * typeLength);
+    for (let i = 0; i < count; i++) {
+      const src = indices[i] * typeLength;
+      out.set(dict.subarray(src, src + typeLength), i * typeLength);
+    }
+    return out;
+  }
   if (Array.isArray(dict)) {
     const out: any[] = new Array(count);
     for (let i = 0; i < count; i++) out[i] = dict[indices[i]];
@@ -827,9 +1059,29 @@ function arrowKindForPhysical(type: number, convertedType: number | undefined): 
     case PQ_TYPE_BOOLEAN:
       return "bool";
     case PQ_TYPE_INT32:
+      // INT32 + ConvertedType=DATE → date32 (days since epoch). Without
+      // the annotation it stays int32; the day-count interpretation is
+      // metadata-driven, not physical.
+      if (convertedType === PQ_CT_DATE) return "date32";
       return "int32";
     case PQ_TYPE_INT64:
+      // INT64 + ConvertedType=TIMESTAMP_MILLIS / _MICROS → arrow
+      // timestamp_*. INT64 + ConvertedType=DECIMAL → decimal128 (the
+      // schema element's precision/scale fields are picked up by the
+      // caller via dataTypeForCol). Without an annotation it stays
+      // int64 (raw signed-64 column, no extra semantics).
+      if (convertedType === PQ_CT_TIMESTAMP_MILLIS) return "timestamp_millis";
+      if (convertedType === PQ_CT_TIMESTAMP_MICROS) return "timestamp_micros";
+      if (convertedType === PQ_CT_DECIMAL) return "decimal128";
       return "int64";
+    case PQ_TYPE_INT96:
+      // INT96 is the Spark/Impala-era nanosecond timestamp encoding:
+      // 8 bytes nanos-of-day (uint64 LE) + 4 bytes Julian day (uint32
+      // LE), 12 bytes total. Newer writers prefer INT64 + TIMESTAMP_*
+      // logical types; we still see INT96 from Spark <3.0 outputs and
+      // anything routed through Hive. No ConvertedType is meaningful
+      // here — the type itself implies "nanosecond timestamp".
+      return "timestamp_nanos";
     case PQ_TYPE_FLOAT:
       return "float32";
     case PQ_TYPE_DOUBLE:
@@ -840,8 +1092,17 @@ function arrowKindForPhysical(type: number, convertedType: number | undefined): 
       // sources.
       void convertedType;
       return "utf8";
+    case PQ_TYPE_FIXED_LEN_BYTE_ARRAY:
+      // FIXED_LEN_BYTE_ARRAY is the most polymorphic parquet type:
+      //   - DECIMAL → decimal128 (precision > 18 needs FLBA backing;
+      //     the bytes are big-endian signed, scaled by `scale`)
+      //   - everything else → fixed_size_binary (UUIDs, MD5, custom
+      //     binary). The width comes from the schema element's
+      //     type_length; the caller (dataTypeForCol) plumbs it in.
+      if (convertedType === PQ_CT_DECIMAL) return "decimal128";
+      return "fixed_size_binary";
   }
-  throw new Error(`parquet: physical type ${type} not supported (INT96 / FIXED_LEN_BYTE_ARRAY pending)`);
+  throw new Error(`parquet: physical type ${type} not supported`);
 }
 
 function decodeColumnChunk(
@@ -849,6 +1110,7 @@ function decodeColumnChunk(
   meta: ColumnMetaData,
   numRows: number,
   isOptional: boolean,
+  typeLength?: number,
 ): { values: any; validity: Uint8Array | undefined } {
   // Read pages from data_page_offset until num_values consumed.
   // Dictionary page (if present) sits at dictionary_page_offset.
@@ -863,7 +1125,7 @@ function decodeColumnChunk(
     const compressedStart = dictReader.pos;
     const compressed = bytes.subarray(compressedStart, compressedStart + dictHeader.compressedSize);
     const decompressed = decompressPage(compressed, meta.codec, dictHeader.uncompressedSize);
-    dict = decodeDictionaryPage(decompressed, dictHeader.dictionaryPageHeader!.numValues, meta.type).values;
+    dict = decodeDictionaryPage(decompressed, dictHeader.dictionaryPageHeader!.numValues, meta.type, typeLength).values;
   }
 
   // Read data pages.
@@ -879,61 +1141,110 @@ function decodeColumnChunk(
   while (valuesRead < totalValues) {
     const r = new ThriftReader(bytes, pos);
     const header = parsePageHeader(r);
-    if (header.type !== PQ_PAGE_DATA_PAGE) {
-      throw new Error(`parquet: only V1 data pages supported (got page type ${header.type})`);
+    if (header.type !== PQ_PAGE_DATA_PAGE && header.type !== PQ_PAGE_DATA_PAGE_V2) {
+      throw new Error(`parquet: expected data page, got page type ${header.type}`);
     }
-    const dataPage = header.dataPageHeader!;
+
+    // V1 vs V2 data pages have different physical layouts and different
+    // metadata-bearing structs. Materialize a unified shape:
+    //   { numValues, encoding, defLevels, valuesPayload }
+    // and feed both branches into the same dictionary-or-PLAIN decode.
+    const isV2 = header.type === PQ_PAGE_DATA_PAGE_V2;
+    const dataPage = isV2 ? header.dataPageHeaderV2! : header.dataPageHeader!;
+
     const compressedStart = r.pos;
     const compressed = bytes.subarray(compressedStart, compressedStart + header.compressedSize);
-    const decompressed = decompressPage(compressed, meta.codec, header.uncompressedSize);
 
-    // V1 data page layout (decompressed):
-    //   [rep levels][def levels][values]
-    // Each levels block is i32-length-prefixed RLE/bit-pack hybrid IF the
-    // level encoding is RLE (which it always is in modern files).
     let dpos = 0;
     const numValues = dataPage.numValues;
-
-    // Repetition levels (only present if this column has repeated nesting —
-    // not the case for flat schemas, so we expect rep = 0 throughout).
-    // The block is omitted when max_rep_level is 0; we don't currently
-    // know max_rep_level explicitly, but for flat schemas it's always 0.
-    // → skip the rep-level read entirely for flat schemas.
-
-    // Definition levels: present iff column is optional. Encoded as an
-    // i32-length-prefixed RLE/bit-pack stream of {0, 1} values.
     const defLevels = new Int32Array(numValues);
-    if (isOptional) {
-      const defLen = new DataView(decompressed.buffer, decompressed.byteOffset + dpos, 4).getInt32(0, true);
-      dpos += 4;
-      decodeHybridRleBitPack(decompressed, dpos, dpos + defLen, 1, numValues, defLevels);
-      dpos += defLen;
+    let valuesData: Uint8Array;
+
+    if (isV2) {
+      // V2 layout (entire page body, NEVER compressed for the level streams):
+      //   [rep levels (defLevelsByteLength=0 → omitted)]
+      //   [def levels  : raw RLE bytes, defLevelsByteLength bytes]
+      //   [values      : compressed iff is_compressed, else raw]
+      // Headers carry exact byte lengths so we don't have to length-decode.
+      const v2 = header.dataPageHeaderV2!;
+      const repLen = v2.repLevelsByteLength;
+      const defLen = v2.defLevelsByteLength;
+
+      // Rep levels — flat schema means max_rep_level = 0 → repLen = 0.
+      // We assert that here rather than walking a no-op stream; if
+      // someone hands us a nested file, we'll fail loudly upstream.
+      if (repLen !== 0) {
+        throw new Error(`parquet: data page V2 with non-zero rep levels (${repLen}B) — nested types not yet supported`);
+      }
+
+      // Def levels (uncompressed in V2). RLE-bitpack hybrid as in V1
+      // but WITHOUT the i32 length prefix.
+      if (isOptional) {
+        decodeHybridRleBitPack(compressed, repLen, repLen + defLen, 1, numValues, defLevels);
+      } else {
+        defLevels.fill(1);
+      }
+
+      // Values payload starts after the level streams.
+      const valuesStart = repLen + defLen;
+      const valuesCompressed = compressed.subarray(valuesStart);
+      if (v2.isCompressed && meta.codec !== PQ_CODEC_UNCOMPRESSED) {
+        const valuesUncompressedLen = header.uncompressedSize - repLen - defLen;
+        valuesData = decompressPage(valuesCompressed, meta.codec, valuesUncompressedLen);
+      } else {
+        valuesData = valuesCompressed;
+      }
+      dpos = 0;
     } else {
-      defLevels.fill(1);
+      // V1 layout (entire page body compressed together):
+      //   [rep levels (omitted for flat)][def levels][values]
+      // Levels are i32-length-prefixed RLE/bit-pack hybrid streams.
+      const decompressed = decompressPage(compressed, meta.codec, header.uncompressedSize);
+      valuesData = decompressed;
+
+      if (isOptional) {
+        const defLen = new DataView(decompressed.buffer, decompressed.byteOffset + dpos, 4).getInt32(0, true);
+        dpos += 4;
+        decodeHybridRleBitPack(decompressed, dpos, dpos + defLen, 1, numValues, defLevels);
+        dpos += defLen;
+      } else {
+        defLevels.fill(1);
+      }
     }
-    // Count non-nulls in this page (== number of physical values to read).
+
+    // Count non-nulls in this page (== number of physical values to
+    // read). For V2 this could also come from `numValues - numNulls`,
+    // but the def-level walk is a) consistent across V1/V2, b) defensive
+    // against writers that don't populate numNulls.
     let nonNull = 0;
     for (let i = 0; i < numValues; i++) if (defLevels[i] === 1) nonNull++;
 
     // Values
     let pageValues: any;
     if (dataPage.encoding === PQ_ENC_PLAIN) {
-      pageValues = decodePlainTyped(decompressed, dpos, nonNull, meta.type).values;
+      pageValues = decodePlainTyped(valuesData, dpos, nonNull, meta.type, typeLength).values;
     } else if (dataPage.encoding === PQ_ENC_PLAIN_DICTIONARY || dataPage.encoding === PQ_ENC_RLE_DICTIONARY) {
       if (!dict) throw new Error("parquet: dictionary-encoded page but no dictionary loaded");
       // First byte is the bit width; rest is hybrid RLE/bit-pack of indices.
-      const bitWidth = decompressed[dpos];
+      const bitWidth = valuesData[dpos];
       dpos += 1;
       const indices = new Int32Array(nonNull);
-      decodeHybridRleBitPack(decompressed, dpos, decompressed.length, bitWidth, nonNull, indices);
-      pageValues = gatherDictionary(dict, indices, nonNull);
+      decodeHybridRleBitPack(valuesData, dpos, valuesData.length, bitWidth, nonNull, indices);
+      pageValues = gatherDictionary(dict, indices, nonNull, typeLength);
     } else {
       throw new Error(`parquet: page encoding ${dataPage.encoding} not supported`);
     }
 
-    // Allocate the output array on first page based on the type.
+    // Allocate the output array on first page based on the type. FLBA
+    // is special — pageValues is one Uint8Array of nonNull*typeLength
+    // bytes, but the output is numRows*typeLength bytes (with null
+    // rows zeroed). For BOOLEAN we stay on Uint8Array of length numRows
+    // (one byte per row, 0/1). The type-keyed branch disambiguates the
+    // two Uint8Array cases.
     if (!outValues) {
-      if (pageValues instanceof Int32Array) outValues = new Int32Array(numRows);
+      if (meta.type === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+        outValues = new Uint8Array(numRows * (typeLength ?? 0));
+      } else if (pageValues instanceof Int32Array) outValues = new Int32Array(numRows);
       else if (pageValues instanceof BigInt64Array) outValues = new BigInt64Array(numRows);
       else if (pageValues instanceof Float32Array) outValues = new Float32Array(numRows);
       else if (pageValues instanceof Float64Array) outValues = new Float64Array(numRows);
@@ -942,13 +1253,29 @@ function decodeColumnChunk(
     }
 
     // Scatter into outValues by definition level (skip null slots).
-    let pageValIdx = 0;
-    for (let i = 0; i < numValues; i++) {
-      if (defLevels[i] === 1) {
-        outValues[outIdx + i] = pageValues[pageValIdx++];
-      } else if (validity) {
-        const bit = outIdx + i;
-        validity[bit >> 3] &= ~(1 << (bit & 7));
+    if (meta.type === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+      const w = typeLength!;
+      const flba = pageValues as Uint8Array;
+      let pageValIdx = 0;
+      for (let i = 0; i < numValues; i++) {
+        if (defLevels[i] === 1) {
+          (outValues as Uint8Array).set(flba.subarray(pageValIdx * w, (pageValIdx + 1) * w), (outIdx + i) * w);
+          pageValIdx++;
+        } else if (validity) {
+          const bit = outIdx + i;
+          validity[bit >> 3] &= ~(1 << (bit & 7));
+          // Null rows already zeroed by Uint8Array allocation default.
+        }
+      }
+    } else {
+      let pageValIdx = 0;
+      for (let i = 0; i < numValues; i++) {
+        if (defLevels[i] === 1) {
+          outValues[outIdx + i] = pageValues[pageValIdx++];
+        } else if (validity) {
+          const bit = outIdx + i;
+          validity[bit >> 3] &= ~(1 << (bit & 7));
+        }
       }
     }
     outIdx += numValues;
@@ -958,6 +1285,299 @@ function decodeColumnChunk(
   }
 
   return { values: outValues, validity };
+}
+
+// Decode one column chunk that's part of a List<primitive> logical
+// column. Walks every data page, decodes rep+def levels (these were
+// previously off-limits — the flat-only reader threw on non-zero
+// rep), accumulates the packed inner values, and reassembles into:
+//
+//   - offsets[] : Int32Array of length numRows + 1
+//   - validity  : Uint8Array (parent list validity); undefined when
+//                 the list itself is REQUIRED (never null)
+//   - childValues / childValidity : the inner element column data
+//   - childCount: total inner element count across all rows
+//
+// The `inner` ColInfo carries the per-element physicalType + the
+// element-level isOptional flag, which we need to know how def
+// levels disambiguate "null element" vs "value present".
+function decodeListColumnChunk(
+  bytes: Uint8Array,
+  meta: ColumnMetaData,
+  numRows: number,
+  outer: {
+    isOptional: boolean;
+    maxDef: number;
+    maxRep: number;
+  },
+  inner: {
+    physicalType: number | undefined;
+    isOptional: boolean;
+    typeLength: number | undefined;
+  },
+): {
+  offsets: Int32Array;
+  validity: Uint8Array | undefined;
+  childValues: any;
+  childValidity: Uint8Array | undefined;
+  childCount: number;
+} {
+  // Definition-level interpretation depends on whether outer + element
+  // are nullable. For the standard 3-level LIST shape:
+  //   element REQUIRED, list OPTIONAL: maxDef = 2
+  //     0 = list null, 1 = list empty, 2 = element present
+  //   element OPTIONAL, list OPTIONAL: maxDef = 3
+  //     0 = list null, 1 = list empty, 2 = element null, 3 = element present
+  //   element REQUIRED, list REQUIRED: maxDef = 1
+  //     0 = list empty, 1 = element present (list never null)
+  //   element OPTIONAL, list REQUIRED: maxDef = 2
+  //     0 = list empty, 1 = element null, 2 = element present
+  const maxDef = outer.maxDef;
+  const elemOptional = inner.isOptional;
+  const listOptional = outer.isOptional;
+  // The def level at which the OUTER list is non-null but empty is
+  // computed from how many "nullable contributions" precede the
+  // REPEATED level. For our schema shapes that's always 1 for
+  // OPTIONAL outer / 0 for REQUIRED outer.
+  const emptyDef = listOptional ? 1 : 0;
+  // The def level at which a value is present (not null, not empty).
+  const presentDef = maxDef;
+  // The def level at which the element is null but list was non-null.
+  // Only meaningful when element is OPTIONAL.
+  const elemNullDef = elemOptional ? maxDef - 1 : -1;
+
+  let dict: any | undefined;
+  if (meta.dictionaryPageOffset !== undefined) {
+    const dictOffset = Number(meta.dictionaryPageOffset);
+    const dictReader = new ThriftReader(bytes, dictOffset);
+    const dictHeader = parsePageHeader(dictReader);
+    if (dictHeader.type !== PQ_PAGE_DICTIONARY_PAGE) {
+      throw new Error(`parquet: expected dictionary page at offset ${dictOffset}`);
+    }
+    const compressedStart = dictReader.pos;
+    const compressed = bytes.subarray(compressedStart, compressedStart + dictHeader.compressedSize);
+    const decompressed = decompressPage(compressed, meta.codec, dictHeader.uncompressedSize);
+    dict = decodeDictionaryPage(
+      decompressed,
+      dictHeader.dictionaryPageHeader!.numValues,
+      meta.type,
+      inner.typeLength,
+    ).values;
+  }
+
+  // Buffers we accumulate across pages.
+  const repAll: number[] = [];
+  const defAll: number[] = [];
+  let valuesAll: any | undefined; // typed array or string[]; allocated lazily
+
+  let pos = Number(meta.dataPageOffset);
+  let valuesRead = 0;
+  const totalValues = Number(meta.numValues);
+
+  // Bit width for the level RLE streams.
+  const repBitWidth = bitWidthForMax(outer.maxRep);
+  const defBitWidth = bitWidthForMax(outer.maxDef);
+
+  while (valuesRead < totalValues) {
+    const r = new ThriftReader(bytes, pos);
+    const header = parsePageHeader(r);
+    if (header.type !== PQ_PAGE_DATA_PAGE && header.type !== PQ_PAGE_DATA_PAGE_V2) {
+      throw new Error(`parquet: expected data page, got page type ${header.type}`);
+    }
+    const isV2 = header.type === PQ_PAGE_DATA_PAGE_V2;
+    const dataPage = isV2 ? header.dataPageHeaderV2! : header.dataPageHeader!;
+
+    const compressedStart = r.pos;
+    const compressed = bytes.subarray(compressedStart, compressedStart + header.compressedSize);
+
+    const numValuesInPage = dataPage.numValues;
+    const repLevels = new Int32Array(numValuesInPage);
+    const defLevels = new Int32Array(numValuesInPage);
+
+    let valuesData: Uint8Array;
+    let dpos = 0;
+
+    if (isV2) {
+      const v2 = header.dataPageHeaderV2!;
+      const repLen = v2.repLevelsByteLength;
+      const defLen = v2.defLevelsByteLength;
+      if (repBitWidth > 0 && repLen > 0) {
+        decodeHybridRleBitPack(compressed, 0, repLen, repBitWidth, numValuesInPage, repLevels);
+      }
+      if (defBitWidth > 0 && defLen > 0) {
+        decodeHybridRleBitPack(compressed, repLen, repLen + defLen, defBitWidth, numValuesInPage, defLevels);
+      }
+      const valuesStart = repLen + defLen;
+      const valuesCompressed = compressed.subarray(valuesStart);
+      if (v2.isCompressed && meta.codec !== PQ_CODEC_UNCOMPRESSED) {
+        const valuesUncompressedLen = header.uncompressedSize - repLen - defLen;
+        valuesData = decompressPage(valuesCompressed, meta.codec, valuesUncompressedLen);
+      } else {
+        valuesData = valuesCompressed;
+      }
+      dpos = 0;
+    } else {
+      const decompressed = decompressPage(compressed, meta.codec, header.uncompressedSize);
+      valuesData = decompressed;
+      // V1 layout: [rep i32-len + body][def i32-len + body][values]
+      if (repBitWidth > 0) {
+        const repLen = new DataView(decompressed.buffer, decompressed.byteOffset + dpos, 4).getInt32(0, true);
+        dpos += 4;
+        decodeHybridRleBitPack(decompressed, dpos, dpos + repLen, repBitWidth, numValuesInPage, repLevels);
+        dpos += repLen;
+      }
+      if (defBitWidth > 0) {
+        const defLen = new DataView(decompressed.buffer, decompressed.byteOffset + dpos, 4).getInt32(0, true);
+        dpos += 4;
+        decodeHybridRleBitPack(decompressed, dpos, dpos + defLen, defBitWidth, numValuesInPage, defLevels);
+        dpos += defLen;
+      }
+    }
+
+    // Count present values (def === presentDef) — those are the
+    // physical values to read from the values payload.
+    let nonNull = 0;
+    for (let i = 0; i < numValuesInPage; i++) if (defLevels[i] === presentDef) nonNull++;
+
+    let pageValues: any;
+    if (dataPage.encoding === PQ_ENC_PLAIN) {
+      pageValues = decodePlainTyped(valuesData, dpos, nonNull, meta.type, inner.typeLength).values;
+    } else if (dataPage.encoding === PQ_ENC_PLAIN_DICTIONARY || dataPage.encoding === PQ_ENC_RLE_DICTIONARY) {
+      if (!dict) throw new Error("parquet: dictionary-encoded list page but no dictionary loaded");
+      const bw = valuesData[dpos];
+      dpos += 1;
+      const indices = new Int32Array(nonNull);
+      decodeHybridRleBitPack(valuesData, dpos, valuesData.length, bw, nonNull, indices);
+      pageValues = gatherDictionary(dict, indices, nonNull, inner.typeLength);
+    } else {
+      throw new Error(`parquet: list page encoding ${dataPage.encoding} not supported`);
+    }
+
+    // Accumulate.
+    for (let i = 0; i < numValuesInPage; i++) {
+      repAll.push(repLevels[i]);
+      defAll.push(defLevels[i]);
+    }
+    if (!valuesAll) valuesAll = valuesArrayLike(pageValues, 0); // empty seed of right type
+    valuesAll = concatValues(valuesAll, pageValues, nonNull);
+
+    valuesRead += numValuesInPage;
+    pos = compressedStart + header.compressedSize;
+  }
+
+  // Reassemble. Walk rep+def levels:
+  //   rep === 0 starts a new outer row
+  //   def === 0 (and listOptional) → list null at this row
+  //   def === emptyDef → empty list
+  //   def === presentDef → present element (consume one value from valuesAll)
+  //   def === elemNullDef (when elemOptional) → null element (no value, but childValidity bit cleared)
+  const offsets = new Int32Array(numRows + 1);
+  const validity = listOptional ? new Uint8Array(Math.ceil(numRows / 8)) : undefined;
+  if (validity) validity.fill(0xff, 0, validity.length);
+
+  // Pre-count child rows so we can size the inner column.
+  let childCount = 0;
+  for (let i = 0; i < defAll.length; i++) {
+    const def = defAll[i];
+    if (def === presentDef || def === elemNullDef) childCount++;
+  }
+  const childValidity = elemOptional ? new Uint8Array(Math.ceil(childCount / 8)) : undefined;
+  if (childValidity) childValidity.fill(0xff);
+
+  let childValues: any;
+  if (meta.type === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+    childValues = new Uint8Array(childCount * (inner.typeLength ?? 0));
+  } else if (valuesAll instanceof Int32Array) childValues = new Int32Array(childCount);
+  else if (valuesAll instanceof BigInt64Array) childValues = new BigInt64Array(childCount);
+  else if (valuesAll instanceof Float32Array) childValues = new Float32Array(childCount);
+  else if (valuesAll instanceof Float64Array) childValues = new Float64Array(childCount);
+  else if (valuesAll instanceof Uint8Array) childValues = new Uint8Array(childCount);
+  else childValues = new Array(childCount);
+
+  let row = -1;
+  let childIdx = 0;
+  let valIdx = 0;
+  const flbaW = meta.type === PQ_TYPE_FIXED_LEN_BYTE_ARRAY ? inner.typeLength! : 0;
+  for (let i = 0; i < defAll.length; i++) {
+    const rep = repAll[i];
+    const def = defAll[i];
+    if (rep === 0) {
+      row++;
+      // Fill offsets so far: row's offset starts at current childIdx.
+      offsets[row] = childIdx;
+    }
+    if (listOptional && def === 0) {
+      const bit = row;
+      validity![bit >> 3] &= ~(1 << (bit & 7));
+      // Null list: no children appended.
+    } else if (def === emptyDef && def !== presentDef) {
+      // Empty list: no children appended.
+    } else if (def === presentDef) {
+      // Present element.
+      if (meta.type === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+        (childValues as Uint8Array).set(
+          (valuesAll as Uint8Array).subarray(valIdx * flbaW, (valIdx + 1) * flbaW),
+          childIdx * flbaW,
+        );
+      } else {
+        childValues[childIdx] = valuesAll[valIdx];
+      }
+      childIdx++;
+      valIdx++;
+    } else if (def === elemNullDef) {
+      // Null element inside a non-null list: bump childIdx, mark
+      // childValidity, don't consume a physical value.
+      const bit = childIdx;
+      childValidity![bit >> 3] &= ~(1 << (bit & 7));
+      childIdx++;
+    } else {
+      throw new Error(`parquet: unexpected def level ${def} (max ${maxDef}) in list column`);
+    }
+  }
+  // Trailing offset.
+  offsets[numRows] = childIdx;
+  // Any rows past the last actual rep=0 (only possible when totalValues=0 + numRows>0)
+  // get offsets filled with childIdx already (Int32Array zeroed; childIdx=0).
+
+  return { offsets, validity, childValues, childValidity, childCount };
+}
+
+// Bit width needed to encode values in [0, max]. RLE/bit-pack hybrid
+// uses width=0 for max=0 streams (which contain no payload).
+function bitWidthForMax(max: number): number {
+  if (max === 0) return 0;
+  let w = 0;
+  let v = max;
+  while (v > 0) {
+    w++;
+    v >>>= 1;
+  }
+  return w;
+}
+
+function valuesArrayLike(template: any, count: number): any {
+  if (template instanceof Int32Array) return new Int32Array(count);
+  if (template instanceof BigInt64Array) return new BigInt64Array(count);
+  if (template instanceof Float32Array) return new Float32Array(count);
+  if (template instanceof Float64Array) return new Float64Array(count);
+  if (template instanceof Uint8Array) return new Uint8Array(count);
+  return new Array(count);
+}
+
+function concatValues(prev: any, next: any, nextCount: number): any {
+  const prevLen = prev.length;
+  const nextLen = next instanceof Uint8Array && nextCount * 1 !== next.length ? next.length : nextCount;
+  // For typed arrays we need byte-length match; compute element count
+  // for FLBA storage (where next.length might be nextCount * width).
+  const out = valuesArrayLike(prev, prevLen + nextLen);
+  if (Array.isArray(out)) {
+    for (let i = 0; i < prevLen; i++) out[i] = prev[i];
+    for (let i = 0; i < nextLen; i++) out[prevLen + i] = next[i];
+  } else {
+    (out as any).set(prev, 0);
+    (out as any).set(next, prevLen);
+  }
+  return out;
 }
 
 export function fromParquet(bytes: Uint8Array): TableLike {
@@ -985,26 +1605,160 @@ export function fromParquet(bytes: Uint8Array): TableLike {
   const footerReader = new ThriftReader(footerBytes);
   const meta = parseFileMetaData(footerReader);
 
-  // Parquet schema is a flat list traversed depth-first. The first entry
-  // is the root group; subsequent leaves are the actual columns. We only
-  // support flat (non-nested) schemas in this reader, so we walk the list
-  // and treat any element with `type` defined as a column.
-  type ColInfo = { name: string; physicalType: number; convertedType: number | undefined; isOptional: boolean };
-  const cols: ColInfo[] = [];
-  for (let i = 1; i < meta.schema.length; i++) {
-    const e = meta.schema[i];
-    if (e.numChildren > 0) {
-      throw new Error(`parquet: nested schemas not yet supported (column "${e.name}" has ${e.numChildren} children)`);
+  // Parquet schema is a flat list traversed depth-first; node[0] is the
+  // root group. parseSchemaTree consumes the depth-first stream and
+  // builds a tree of ColInfo nodes, recognizing the standard 3-level
+  // LIST pattern:
+  //
+  //   <repetition> group <name> (LIST) {
+  //     repeated group list { <repetition> <type> element; }
+  //   }
+  //
+  // and collapsing it into a single ColInfo with category="list" +
+  // an inner primitive ColInfo. Map / Struct / nested-list still
+  // throw — the columnar reassembly for those needs more rep/def
+  // bookkeeping than v1 carries.
+  type ColInfo = {
+    name: string;
+    category: "primitive" | "list";
+    /** Primitive: physical type from parquet.thrift Type enum. */
+    physicalType: number | undefined;
+    /** Primitive: pre-2.4 ConvertedType annotation. */
+    convertedType: number | undefined;
+    /** True when this column (the OUTER repetition for lists) is OPTIONAL. */
+    isOptional: boolean;
+    /** decimal128: total digit count from the schema element. */
+    precision: number | undefined;
+    /** decimal128: digits-after-decimal-point from the schema element. */
+    scale: number | undefined;
+    /** FIXED_LEN_BYTE_ARRAY width in bytes; required for FLBA columns. */
+    typeLength: number | undefined;
+    /** List: the element ColInfo. Undefined for primitives. */
+    inner: ColInfo | undefined;
+    /** Maximum definition level the page-decoder will see for this column. */
+    maxDef: number;
+    /** Maximum repetition level the page-decoder will see for this column. */
+    maxRep: number;
+  };
+
+  function parseSchemaTree(): { cols: ColInfo[]; cursor: number } {
+    let cursor = 1; // skip root
+    const cols: ColInfo[] = [];
+
+    function consume(parentDef: number, parentRep: number): ColInfo {
+      if (cursor >= meta.schema.length) {
+        throw new Error("parquet: schema underrun while parsing nested column");
+      }
+      const e = meta.schema[cursor++];
+      const localDef = e.repetitionType === PQ_REP_OPTIONAL ? 1 : e.repetitionType === PQ_REP_REPEATED ? 1 : 0;
+      const localRep = e.repetitionType === PQ_REP_REPEATED ? 1 : 0;
+      const myDef = parentDef + localDef;
+      const myRep = parentRep + localRep;
+
+      // LIST pattern: this is a group with LIST converted_type, expect
+      // a single REPEATED child group, which has a single child leaf.
+      if (e.numChildren > 0 && e.convertedType === PQ_CT_LIST) {
+        if (e.numChildren !== 1) {
+          throw new Error(`parquet: LIST group "${e.name}" must have exactly 1 child (got ${e.numChildren})`);
+        }
+        const middle = meta.schema[cursor];
+        if (middle.repetitionType !== PQ_REP_REPEATED) {
+          throw new Error(`parquet: LIST group "${e.name}" middle element must be REPEATED`);
+        }
+        if (middle.numChildren !== 1) {
+          throw new Error(`parquet: LIST group "${e.name}" middle element must have exactly 1 child`);
+        }
+        // Walk the middle group (consumes 1) then the leaf inside (consumes 1).
+        const middleDef = myDef + 1; // REPEATED contributes 1
+        const middleRep = myRep + 1;
+        cursor++; // consume middle
+        const leaf = meta.schema[cursor++];
+        if (leaf.numChildren > 0) {
+          throw new Error(`parquet: nested LIST<group> not yet supported (column "${e.name}")`);
+        }
+        if (leaf.type === undefined) {
+          throw new Error(`parquet: LIST leaf "${leaf.name}" has no physical type`);
+        }
+        const elemDef = middleDef + (leaf.repetitionType === PQ_REP_OPTIONAL ? 1 : 0);
+        const inner: ColInfo = {
+          name: leaf.name,
+          category: "primitive",
+          physicalType: leaf.type,
+          convertedType: leaf.convertedType,
+          isOptional: leaf.repetitionType === PQ_REP_OPTIONAL,
+          precision: leaf.precision,
+          scale: leaf.scale,
+          typeLength: leaf.typeLength,
+          inner: undefined,
+          maxDef: elemDef,
+          maxRep: middleRep,
+        };
+        return {
+          name: e.name,
+          category: "list",
+          physicalType: undefined,
+          convertedType: PQ_CT_LIST,
+          isOptional: e.repetitionType === PQ_REP_OPTIONAL,
+          precision: undefined,
+          scale: undefined,
+          typeLength: undefined,
+          inner,
+          maxDef: elemDef,
+          maxRep: middleRep,
+        };
+      }
+
+      if (e.numChildren > 0) {
+        throw new Error(`parquet: nested schemas (Map / Struct) not yet supported (column "${e.name}")`);
+      }
+      if (e.type === undefined) {
+        throw new Error(`parquet: leaf "${e.name}" has no physical type`);
+      }
+      return {
+        name: e.name,
+        category: "primitive",
+        physicalType: e.type,
+        convertedType: e.convertedType,
+        isOptional: e.repetitionType === PQ_REP_OPTIONAL,
+        precision: e.precision,
+        scale: e.scale,
+        typeLength: e.typeLength,
+        inner: undefined,
+        maxDef: myDef,
+        maxRep: myRep,
+      };
     }
-    if (e.type === undefined) {
-      throw new Error(`parquet: leaf "${e.name}" has no physical type`);
+
+    while (cursor < meta.schema.length) {
+      cols.push(consume(0, 0));
     }
-    cols.push({
-      name: e.name,
-      physicalType: e.type,
-      convertedType: e.convertedType,
-      isOptional: e.repetitionType === PQ_REP_OPTIONAL,
-    });
+    return { cols, cursor };
+  }
+  const { cols } = parseSchemaTree();
+
+  // Resolve a ColInfo into a full arrow DataType. Pulls precision /
+  // scale into decimal128's type object; falls back to a bare-kind
+  // type for everything else. Fails loudly when a decimal column
+  // arrives without precision in the schema (corrupt or
+  // non-conformant writer).
+  function dataTypeForCol(c: ColInfo): any {
+    if (c.category === "list") {
+      return { kind: "list", child: dataTypeForCol(c.inner!) };
+    }
+    const kind = arrowKindForPhysical(c.physicalType!, c.convertedType);
+    if (kind === "decimal128") {
+      if (c.precision === undefined) {
+        throw new Error(`parquet: decimal column "${c.name}" missing precision in schema`);
+      }
+      return { kind, precision: c.precision, scale: c.scale ?? 0 };
+    }
+    if (kind === "fixed_size_binary") {
+      if (c.typeLength === undefined || c.typeLength <= 0) {
+        throw new Error(`parquet: FIXED_LEN_BYTE_ARRAY column "${c.name}" missing type_length in schema`);
+      }
+      return { kind, width: c.typeLength };
+    }
+    return { kind };
   }
 
   // Build one RecordBatch per row group.
@@ -1015,14 +1769,32 @@ export function fromParquet(bytes: Uint8Array): TableLike {
     for (let i = 0; i < cols.length; i++) {
       const colInfo = cols[i];
       const chunk = rg.columns[i];
-      const { values, validity } = decodeColumnChunk(bytes, chunk.metaData, numRows, colInfo.isOptional);
-      const kind = arrowKindForPhysical(colInfo.physicalType, colInfo.convertedType);
-      batchColumns.push(new Column({ kind }, numRows, values, validity));
+      if (colInfo.category === "list") {
+        // List columns: rep+def levels disambiguate row boundaries +
+        // null lists + empty lists. The page decoder gives us the
+        // packed inner values + the level streams; we reassemble the
+        // arrow ListColumn (offsets[] + child + validity) here.
+        const inner = colInfo.inner!;
+        const decoded = decodeListColumnChunk(bytes, chunk.metaData, numRows, colInfo, inner);
+        const innerType = dataTypeForCol(inner);
+        const child = new Column(innerType, decoded.childCount, decoded.childValues, decoded.childValidity);
+        batchColumns.push(new Column(dataTypeForCol(colInfo), numRows, decoded.offsets, decoded.validity, child));
+      } else {
+        const { values, validity } = decodeColumnChunk(
+          bytes,
+          chunk.metaData,
+          numRows,
+          colInfo.isOptional,
+          colInfo.typeLength,
+        );
+        const dataType = dataTypeForCol(colInfo);
+        batchColumns.push(new Column(dataType, numRows, values, validity));
+      }
     }
     const schemaForBatch = {
       fields: cols.map(c => ({
         name: c.name,
-        type: { kind: arrowKindForPhysical(c.physicalType, c.convertedType) },
+        type: dataTypeForCol(c),
         nullable: c.isOptional,
       })),
     };
@@ -1032,7 +1804,7 @@ export function fromParquet(bytes: Uint8Array): TableLike {
   const tableSchema = {
     fields: cols.map(c => ({
       name: c.name,
-      type: { kind: arrowKindForPhysical(c.physicalType, c.convertedType) },
+      type: dataTypeForCol(c),
       nullable: c.isOptional,
     })),
   };
@@ -1323,7 +2095,7 @@ function snappyCompress(input: Uint8Array): Uint8Array {
 
 // ─── Page writer ──────────────────────────────────────────────────────────
 
-function encodePlainTyped(values: any, count: number, type: number): Uint8Array {
+function encodePlainTyped(values: any, count: number, type: number, typeLength?: number): Uint8Array {
   const w = new ByteWriter();
   switch (type) {
     case PQ_TYPE_INT32:
@@ -1332,6 +2104,26 @@ function encodePlainTyped(values: any, count: number, type: number): Uint8Array 
     case PQ_TYPE_INT64:
       for (let i = 0; i < count; i++) w.writeI64LE(values[i]);
       break;
+    case PQ_TYPE_INT96: {
+      // values is a BigInt64Array of nanoseconds since Unix epoch.
+      // Decompose each into (julianDay, nanosOfDay) and emit
+      // 8 bytes nanos + 4 bytes JD, little-endian. JD 2440588 = 1970-01-01.
+      const NANOS_PER_DAY = 86_400_000_000_000n;
+      for (let i = 0; i < count; i++) {
+        const nanos: bigint = values[i];
+        // BigInt math: floored division for negative timestamps.
+        let unixDays = nanos / NANOS_PER_DAY;
+        let nanosOfDay = nanos - unixDays * NANOS_PER_DAY;
+        if (nanosOfDay < 0n) {
+          unixDays -= 1n;
+          nanosOfDay += NANOS_PER_DAY;
+        }
+        const julianDay = unixDays + 2440588n;
+        w.writeI64LE(BigInt.asIntN(64, nanosOfDay));
+        w.writeI32LE(Number(BigInt.asUintN(32, julianDay)));
+      }
+      break;
+    }
     case PQ_TYPE_FLOAT:
       for (let i = 0; i < count; i++) w.writeF32LE(values[i]);
       break;
@@ -1345,6 +2137,16 @@ function encodePlainTyped(values: any, count: number, type: number): Uint8Array 
         w.writeI32LE(bytes.length);
         w.writeBytes(bytes);
       }
+      break;
+    }
+    case PQ_TYPE_FIXED_LEN_BYTE_ARRAY: {
+      // values is a single Uint8Array of count × typeLength bytes
+      // — the contiguous fixed_size_binary backing buffer. Just
+      // copy the prefix verbatim.
+      if (typeLength === undefined) {
+        throw new Error("parquet writer: FIXED_LEN_BYTE_ARRAY encode: missing typeLength");
+      }
+      w.writeBytes((values as Uint8Array).subarray(0, count * typeLength));
       break;
     }
     case PQ_TYPE_BOOLEAN: {
@@ -1395,15 +2197,47 @@ function encodeDefLevelsRle(defLevels: Uint8Array, count: number): Uint8Array {
   return w.finish();
 }
 
+// Generalized RLE-only level encoder for arbitrary bitWidth (>= 1).
+// Body is `ceil(bitWidth/8)` little-endian bytes per run value. We
+// don't emit bit-packed runs — RLE alone is correct and decodes
+// identically; bit-packing is just smaller for short runs.
+function encodeLevelsRle(levels: Int32Array | Uint8Array, count: number, bitWidth: number): Uint8Array {
+  const w = new ByteWriter();
+  if (bitWidth === 0) return w.finish(); // nothing to encode
+  const bytesPerValue = Math.max(1, (bitWidth + 7) >> 3);
+  let i = 0;
+  while (i < count) {
+    const v = levels[i];
+    let runLen = 1;
+    while (i + runLen < count && levels[i + runLen] === v) runLen++;
+    w.writeVarint(runLen << 1);
+    for (let b = 0; b < bytesPerValue; b++) {
+      w.writeU8((v >>> (b * 8)) & 0xff);
+    }
+    i += runLen;
+  }
+  return w.finish();
+}
+
 // Build a V1 data page: [def levels (i32-prefixed RLE)] [values (PLAIN)]
-function buildDataPageBody(values: any, count: number, type: number, defLevels: Uint8Array | undefined): Uint8Array {
+function buildDataPageBody(
+  values: any,
+  count: number,
+  type: number,
+  defLevels: Uint8Array | undefined,
+  numNonNull: number,
+  typeLength?: number,
+): Uint8Array {
   const w = new ByteWriter();
   if (defLevels !== undefined) {
     const enc = encodeDefLevelsRle(defLevels, count);
     w.writeI32LE(enc.length);
     w.writeBytes(enc);
   }
-  const plain = encodePlainTyped(values, values.length, type);
+  // For FLBA `values` is one Uint8Array of nonNull*typeLength bytes —
+  // length doesn't equal the row count so the caller passes the row
+  // count explicitly.
+  const plain = encodePlainTyped(values, numNonNull, type, typeLength);
   w.writeBytes(plain);
   return w.finish();
 }
@@ -1413,12 +2247,191 @@ function buildDataPageBody(values: any, count: number, type: number, defLevels: 
 interface ColumnPlan {
   name: string;
   physicalType: number;
+  // Pre-2.4 logical-type annotation (utf8, date32, timestamp, etc.).
+  // Optional — only set when the arrow kind needs an annotation that
+  // the physical type alone can't carry (date32 → INT32 + DATE).
+  convertedType: number | undefined;
+  // Decimal-only: total digit count and digits-after-decimal-point.
+  // Both undefined for non-decimal columns; both required when
+  // convertedType is DECIMAL.
+  precision: number | undefined;
+  scale: number | undefined;
+  // FIXED_LEN_BYTE_ARRAY width — required for FLBA columns. Goes into
+  // the SchemaElement's type_length (field 2).
+  typeLength: number | undefined;
   isOptional: boolean;
+  // List columns: when set, the writer emits 3 schema elements per
+  // logical column (outer LIST group → repeated middle group → leaf
+  // primitive) instead of 1, and the page contains rep+def levels.
+  // The fields above describe the LEAF primitive in that case.
+  listOuterOptional: boolean | undefined;
+  listElemOptional: boolean | undefined;
   // Page bytes (already compressed if codec != UNCOMPRESSED).
   compressedPage: Uint8Array;
   uncompressedSize: number;
   numValues: number;
   numNonNull: number;
+  // Optional column-chunk statistics. Populated by toParquet when
+  // there's at least one non-null value; downstream readers
+  // (DuckDB / Polars / pyarrow) use these for predicate pushdown.
+  stats:
+    | {
+        minBytes: Uint8Array;
+        maxBytes: Uint8Array;
+        nullCount: bigint;
+      }
+    | undefined;
+}
+
+// Compute min/max + null count for a typed-array column. The min/max
+// are emitted as PLAIN-encoded bytes (matching what downstream readers
+// expect for a column-chunk Statistics record). For BYTE_ARRAY (utf8)
+// columns we do lexicographic UTF-8 byte comparison — same definition
+// the parquet spec uses.
+function computeColumnStats(
+  values: any,
+  numNonNull: number,
+  numTotal: number,
+  physicalType: number,
+): { minBytes: Uint8Array; maxBytes: Uint8Array; nullCount: bigint } | undefined {
+  if (numNonNull === 0) return undefined;
+  // INT96 + FLBA: stats are optional in the spec and the comparison
+  // semantics (especially for INT96, which is signed-comparison-
+  // ambiguous historically) aren't worth the complexity here. Skip
+  // them; readers handle missing stats as "unknown" already.
+  if (physicalType === PQ_TYPE_INT96 || physicalType === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) {
+    return undefined;
+  }
+  const nullCount = BigInt(numTotal - numNonNull);
+
+  switch (physicalType) {
+    case PQ_TYPE_INT32: {
+      const arr = values as Int32Array;
+      let mn = arr[0];
+      let mx = arr[0];
+      for (let i = 1; i < numNonNull; i++) {
+        const v = arr[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      const minBytes = new Uint8Array(4);
+      const maxBytes = new Uint8Array(4);
+      new DataView(minBytes.buffer).setInt32(0, mn, true);
+      new DataView(maxBytes.buffer).setInt32(0, mx, true);
+      return { minBytes, maxBytes, nullCount };
+    }
+    case PQ_TYPE_INT64: {
+      const arr = values as BigInt64Array;
+      let mn = arr[0];
+      let mx = arr[0];
+      for (let i = 1; i < numNonNull; i++) {
+        const v = arr[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      const minBytes = new Uint8Array(8);
+      const maxBytes = new Uint8Array(8);
+      new DataView(minBytes.buffer).setBigInt64(0, mn, true);
+      new DataView(maxBytes.buffer).setBigInt64(0, mx, true);
+      return { minBytes, maxBytes, nullCount };
+    }
+    case PQ_TYPE_FLOAT: {
+      const arr = values as Float32Array;
+      let mn = arr[0];
+      let mx = arr[0];
+      for (let i = 1; i < numNonNull; i++) {
+        const v = arr[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      const minBytes = new Uint8Array(4);
+      const maxBytes = new Uint8Array(4);
+      new DataView(minBytes.buffer).setFloat32(0, mn, true);
+      new DataView(maxBytes.buffer).setFloat32(0, mx, true);
+      return { minBytes, maxBytes, nullCount };
+    }
+    case PQ_TYPE_DOUBLE: {
+      const arr = values as Float64Array;
+      let mn = arr[0];
+      let mx = arr[0];
+      for (let i = 1; i < numNonNull; i++) {
+        const v = arr[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      const minBytes = new Uint8Array(8);
+      const maxBytes = new Uint8Array(8);
+      new DataView(minBytes.buffer).setFloat64(0, mn, true);
+      new DataView(maxBytes.buffer).setFloat64(0, mx, true);
+      return { minBytes, maxBytes, nullCount };
+    }
+    case PQ_TYPE_BOOLEAN: {
+      // Single byte: 0 = false, 1 = true. min = any false present,
+      // else true; max = any true present, else false.
+      const arr = values as Uint8Array;
+      let anyTrue = false;
+      let anyFalse = false;
+      for (let i = 0; i < numNonNull && !(anyTrue && anyFalse); i++) {
+        if (arr[i]) anyTrue = true;
+        else anyFalse = true;
+      }
+      const mn = anyFalse ? 0 : 1;
+      const mx = anyTrue ? 1 : 0;
+      return {
+        minBytes: new Uint8Array([mn]),
+        maxBytes: new Uint8Array([mx]),
+        nullCount,
+      };
+    }
+    case PQ_TYPE_BYTE_ARRAY: {
+      // utf8 strings. JS string `<` compares by UTF-16 code unit; for
+      // BMP code points (anything except surrogate pairs) that order
+      // matches the UTF-8 byte order parquet specifies. Track the min
+      // and max as JS strings to avoid a per-row TextEncoder + byte
+      // compare — encode only the two winners at the end.
+      const arr = values as string[];
+      let mn = arr[0];
+      let mx = arr[0];
+      for (let i = 1; i < numNonNull; i++) {
+        const v = arr[i];
+        if (v < mn) mn = v;
+        else if (v > mx) mx = v;
+      }
+      const enc = new TextEncoder();
+      return { minBytes: enc.encode(mn), maxBytes: enc.encode(mx), nullCount };
+    }
+  }
+  return undefined;
+}
+
+function cmpBytesLex(a: Uint8Array, b: Uint8Array): number {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+// Writes a Statistics struct using the v5/v6 (max_value/min_value)
+// fields — newer than the deprecated v1/v2 max/min. Downstream readers
+// have understood v5/v6 since parquet 2.6 (~2017).
+function writeStatistics(s: { minBytes: Uint8Array; maxBytes: Uint8Array; nullCount: bigint }): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 3: null_count
+  lf = tw.writeI64(lf, 3, s.nullCount);
+  // 5: max_value (binary)
+  tw.writeFieldHeader(lf, 5, TC_BINARY);
+  lf = 5;
+  tw.out.writeVarint(s.maxBytes.length);
+  tw.out.writeBytes(s.maxBytes);
+  // 6: min_value (binary)
+  tw.writeFieldHeader(lf, 6, TC_BINARY);
+  lf = 6;
+  tw.out.writeVarint(s.minBytes.length);
+  tw.out.writeBytes(s.minBytes);
+  tw.writeStop();
+  return tw.finish();
 }
 
 function writePageHeader(
@@ -1474,13 +2487,20 @@ function writeColumnMetaData(
   tw.writeListHeader(TC_I32, 2);
   tw.out.writeZigzagI32(PQ_ENC_PLAIN);
   tw.out.writeZigzagI32(PQ_ENC_RLE);
-  // 3: path_in_schema list of strings
+  // 3: path_in_schema list of strings. For primitive columns this
+  // is just [name]; for List<primitive> it's [name, "list",
+  // "element"] — the Dremel-style nested path identifying the leaf
+  // inside the LIST → repeated → leaf pattern.
   tw.writeFieldHeader(lf, 3, TC_LIST);
   lf = 3;
-  tw.writeListHeader(TC_BINARY, 1);
-  const nameBytes = new TextEncoder().encode(plan.name);
-  tw.out.writeVarint(nameBytes.length);
-  tw.out.writeBytes(nameBytes);
+  const path = plan.listOuterOptional !== undefined ? [plan.name, "list", "element"] : [plan.name];
+  tw.writeListHeader(TC_BINARY, path.length);
+  const enc = new TextEncoder();
+  for (const seg of path) {
+    const segBytes = enc.encode(seg);
+    tw.out.writeVarint(segBytes.length);
+    tw.out.writeBytes(segBytes);
+  }
   // 4: codec
   lf = tw.writeI32(lf, 4, codec);
   // 5: num_values
@@ -1491,6 +2511,14 @@ function writeColumnMetaData(
   lf = tw.writeI64(lf, 7, BigInt(compressedSize));
   // 9: data_page_offset
   lf = tw.writeI64(lf, 9, dataPageOffset);
+  // 12: statistics (Statistics struct) — only emitted when we have at
+  // least one non-null value in the column. Downstream readers ignore
+  // missing stats (treat as "unknown").
+  if (plan.stats) {
+    tw.writeFieldHeader(lf, 12, TC_STRUCT);
+    lf = 12;
+    tw.out.writeBytes(writeStatistics(plan.stats));
+  }
   tw.writeStop();
   return tw.finish();
 }
@@ -1531,11 +2559,21 @@ function writeSchemaElement(
   physicalType: number | undefined,
   numChildren: number,
   repetitionType: number | undefined,
+  convertedType: number | undefined,
+  scale: number | undefined,
+  precision: number | undefined,
+  typeLength?: number,
 ): Uint8Array {
   const tw = new ThriftWriter();
   let lf = 0;
   if (physicalType !== undefined) {
     lf = tw.writeI32(lf, 1, physicalType);
+  }
+  // 2: type_length — required for FIXED_LEN_BYTE_ARRAY, ignored for
+  // everything else. Goes BEFORE field 3 (repetition_type) per the
+  // Thrift delta-encoded ordering.
+  if (typeLength !== undefined) {
+    lf = tw.writeI32(lf, 2, typeLength);
   }
   if (repetitionType !== undefined) {
     lf = tw.writeI32(lf, 3, repetitionType);
@@ -1544,9 +2582,20 @@ function writeSchemaElement(
   if (numChildren > 0) {
     lf = tw.writeI32(lf, 5, numChildren);
   }
-  // 6: converted_type for utf8 strings.
-  if (physicalType === PQ_TYPE_BYTE_ARRAY) {
-    lf = tw.writeI32(lf, 6, PQ_CT_UTF8);
+  // 6: converted_type — pre-2.4 logical-type annotation. We emit it for
+  // utf8 (physical BYTE_ARRAY), date32 (physical INT32 + DATE),
+  // timestamp_*, and decimal.
+  if (convertedType !== undefined) {
+    lf = tw.writeI32(lf, 6, convertedType);
+  }
+  // 9: scale, 10: precision — required for ConvertedType=DECIMAL,
+  // unused for everything else. Field ids per parquet.thrift's
+  // SchemaElement.
+  if (scale !== undefined) {
+    lf = tw.writeI32(lf, 9, scale);
+  }
+  if (precision !== undefined) {
+    lf = tw.writeI32(lf, 10, precision);
   }
   tw.writeStop();
   return tw.finish();
@@ -1560,11 +2609,63 @@ function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: U
   // 2: schema list of SchemaElement (root + leaves)
   tw.writeFieldHeader(lf, 2, TC_LIST);
   lf = 2;
-  tw.writeListHeader(TC_STRUCT, 1 + cols.length);
+  // Total schema-list length: 1 (root) + sum over columns of
+  // (3 for list, 1 for primitive). The reader's depth-first walker
+  // uses each element's numChildren to navigate.
+  let totalSchemaEntries = 1;
+  for (const c of cols) totalSchemaEntries += c.listOuterOptional !== undefined ? 3 : 1;
+  tw.writeListHeader(TC_STRUCT, totalSchemaEntries);
   // Root group
-  tw.out.writeBytes(writeSchemaElement("root", undefined, cols.length, undefined));
+  tw.out.writeBytes(writeSchemaElement("root", undefined, cols.length, undefined, undefined, undefined, undefined));
   for (const c of cols) {
-    tw.out.writeBytes(writeSchemaElement(c.name, c.physicalType, 0, c.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED));
+    if (c.listOuterOptional !== undefined) {
+      // Standard 3-level LIST shape:
+      //   <repetition> group <name> (LIST) {
+      //     repeated group list {
+      //       <repetition> <type> element;
+      //     }
+      //   }
+      // Outer group: repetition from listOuterOptional, numChildren=1, ConvertedType=LIST.
+      tw.out.writeBytes(
+        writeSchemaElement(
+          c.name,
+          undefined,
+          1,
+          c.listOuterOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          PQ_CT_LIST,
+          undefined,
+          undefined,
+        ),
+      );
+      // Middle group: REPEATED, numChildren=1, no converted type.
+      tw.out.writeBytes(writeSchemaElement("list", undefined, 1, PQ_REP_REPEATED, undefined, undefined, undefined));
+      // Leaf primitive.
+      tw.out.writeBytes(
+        writeSchemaElement(
+          "element",
+          c.physicalType,
+          0,
+          c.listElemOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          c.convertedType,
+          c.scale,
+          c.precision,
+          c.typeLength,
+        ),
+      );
+      continue;
+    }
+    tw.out.writeBytes(
+      writeSchemaElement(
+        c.name,
+        c.physicalType,
+        0,
+        c.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+        c.convertedType,
+        c.scale,
+        c.precision,
+        c.typeLength,
+      ),
+    );
   }
   // 3: num_rows
   lf = tw.writeI64(lf, 3, BigInt(numRows));
@@ -1577,16 +2678,196 @@ function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: U
   return tw.finish();
 }
 
+// Encode all batches of one List<primitive> column into a single
+// data page. Concats child values + validity across batches, walks
+// row offsets to build per-element rep+def levels, packs non-null
+// child values, and emits the V1 page body:
+//
+//   [rep RLE i32-prefixed][def RLE i32-prefixed][values PLAIN]
+//
+// Returns the compressed body, total numLevels (= page numValues),
+// and meta needed to populate the ColumnPlan.
+function encodeListColumnAcrossBatches(
+  field: any,
+  ci: number,
+  batches: RecordBatchLike[],
+  numRows: number,
+  codec: number,
+): {
+  compressed: Uint8Array;
+  uncompressedSize: number;
+  numLevels: number;
+  numNonNull: number;
+  innerPhysical: number;
+  innerConverted: number | undefined;
+  innerTypeLength: number | undefined;
+  elemOptional: boolean;
+} {
+  const listOptional = field.nullable;
+  const innerType = field.type.child;
+  const elemOptional = field.type.elemNullable === true; // explicit opt-in; default REQUIRED
+  const innerKind = innerType.kind;
+  if (innerKind === "list") {
+    throw new Error("para:arrow.toParquet: nested List<List<...>> not yet supported");
+  }
+  const innerPhysical = parquetPhysicalForKind(innerKind);
+  const innerConverted = parquetConvertedForKind(innerKind);
+  const innerTypeLength = innerKind === "fixed_size_binary" ? (innerType as any).width : undefined;
+
+  // Concat across batches.
+  type RowSpec = {
+    offsets: Int32Array;
+    childValues: any;
+    childValidity: Uint8Array | undefined;
+    rowValidity: Uint8Array | undefined;
+  };
+  const specs: RowSpec[] = [];
+  let totalChild = 0;
+  for (const b of batches) {
+    const c = b.columns[ci] as any;
+    const offsets = c.values as Int32Array;
+    const child = c.child;
+    if (!child) throw new Error(`para:arrow.toParquet: list column "${field.name}" missing child`);
+    const lastOffset = offsets[b.numRows];
+    totalChild += lastOffset;
+    specs.push({
+      offsets,
+      childValues: child.values,
+      childValidity: child.validity,
+      rowValidity: c.validity,
+    });
+  }
+
+  // Build flat rep/def streams. Worst-case length = numRows + totalChild
+  // (one entry per element, plus one entry for each null/empty list).
+  const maxLevels = numRows + totalChild;
+  const repLevels = new Int32Array(maxLevels);
+  const defLevels = new Int32Array(maxLevels);
+  // Compute level constants.
+  const presentDef = (listOptional ? 1 : 0) + 1 + (elemOptional ? 1 : 0);
+  const elemNullDef = (listOptional ? 1 : 0) + 1; // outer non-null + REPEATED
+  const emptyDef = listOptional ? 1 : 0;
+
+  // Allocate child value collector. For typed-array kinds we don't know
+  // the exact non-null count yet; over-allocate then slice.
+  let nonNullValues: any;
+  let nonNullCount = 0;
+  function appendNonNull(child: any, k: number, sample: any) {
+    if (!nonNullValues) {
+      // Allocate based on the sample (first batch's child storage).
+      const cap = totalChild;
+      if (innerTypeLength !== undefined) nonNullValues = new Uint8Array(cap * innerTypeLength);
+      else if (sample instanceof Int32Array) nonNullValues = new Int32Array(cap);
+      else if (sample instanceof BigInt64Array) nonNullValues = new BigInt64Array(cap);
+      else if (sample instanceof Float32Array) nonNullValues = new Float32Array(cap);
+      else if (sample instanceof Float64Array) nonNullValues = new Float64Array(cap);
+      else if (sample instanceof Uint8Array) nonNullValues = new Uint8Array(cap);
+      else nonNullValues = new Array(cap);
+    }
+    if (innerTypeLength !== undefined) {
+      const w = innerTypeLength;
+      (nonNullValues as Uint8Array).set((child as Uint8Array).subarray(k * w, (k + 1) * w), nonNullCount * w);
+    } else {
+      nonNullValues[nonNullCount] = child[k];
+    }
+    nonNullCount++;
+  }
+
+  let levelIdx = 0;
+  for (const spec of specs) {
+    const { offsets, childValues, childValidity, rowValidity } = spec;
+    const batchRows = offsets.length - 1;
+    for (let r = 0; r < batchRows; r++) {
+      const start = offsets[r];
+      const end = offsets[r + 1];
+      const rowNull = listOptional && rowValidity && !((rowValidity[r >> 3] >> (r & 7)) & 1);
+      if (rowNull) {
+        repLevels[levelIdx] = 0;
+        defLevels[levelIdx] = 0;
+        levelIdx++;
+      } else if (start === end) {
+        repLevels[levelIdx] = 0;
+        defLevels[levelIdx] = emptyDef;
+        levelIdx++;
+      } else {
+        for (let k = start; k < end; k++) {
+          const isElemNull = elemOptional && childValidity && !((childValidity[k >> 3] >> (k & 7)) & 1);
+          repLevels[levelIdx] = k === start ? 0 : 1;
+          defLevels[levelIdx] = isElemNull ? elemNullDef : presentDef;
+          if (!isElemNull) appendNonNull(childValues, k, childValues);
+          levelIdx++;
+        }
+      }
+    }
+  }
+
+  // Trim if we over-allocated nonNullValues.
+  if (nonNullValues && innerTypeLength === undefined && nonNullValues.length > nonNullCount) {
+    if (Array.isArray(nonNullValues)) {
+      nonNullValues = nonNullValues.slice(0, nonNullCount);
+    } else {
+      // For typed arrays, slice copies — fine for write-once, throw away.
+      nonNullValues = (nonNullValues as any).slice(0, nonNullCount);
+    }
+  } else if (
+    nonNullValues &&
+    innerTypeLength !== undefined &&
+    (nonNullValues as Uint8Array).length > nonNullCount * innerTypeLength
+  ) {
+    nonNullValues = (nonNullValues as Uint8Array).slice(0, nonNullCount * innerTypeLength);
+  }
+  if (!nonNullValues) {
+    // No non-null elements at all (every row was null/empty). Emit
+    // an empty values payload.
+    if (innerTypeLength !== undefined) nonNullValues = new Uint8Array(0);
+    else nonNullValues = new Int32Array(0);
+  }
+
+  const repBitWidth = bitWidthForMax((listOptional ? 1 : 0) + 1); // == 1 (REPEATED contributes 1)
+  const defBitWidth = bitWidthForMax(presentDef);
+
+  const repBody = encodeLevelsRle(repLevels, levelIdx, repBitWidth);
+  const defBody = encodeLevelsRle(defLevels, levelIdx, defBitWidth);
+  const valuesBody = encodePlainTyped(nonNullValues, nonNullCount, innerPhysical, innerTypeLength);
+
+  const w = new ByteWriter();
+  w.writeI32LE(repBody.length);
+  w.writeBytes(repBody);
+  w.writeI32LE(defBody.length);
+  w.writeBytes(defBody);
+  w.writeBytes(valuesBody);
+  const pageBody = w.finish();
+
+  let compressed: Uint8Array;
+  if (codec === PQ_CODEC_UNCOMPRESSED) compressed = pageBody;
+  else if (codec === PQ_CODEC_SNAPPY) compressed = snappyCompress(pageBody);
+  else if (codec === PQ_CODEC_GZIP) compressed = (Bun as any).gzipSync(pageBody) as Uint8Array;
+  else if (codec === PQ_CODEC_ZSTD) compressed = (Bun as any).zstdCompressSync(pageBody) as Uint8Array;
+  else throw new Error(`parquet: writer codec ${codec} has no compressor wired`);
+
+  return {
+    compressed,
+    uncompressedSize: pageBody.length,
+    numLevels: levelIdx,
+    numNonNull: nonNullCount,
+    innerPhysical,
+    innerConverted,
+    innerTypeLength,
+    elemOptional,
+  };
+}
+
 // ─── Public writer entry point ────────────────────────────────────────────
 
 export function toParquet(
   source: TableLike | RecordBatchLike,
-  opts?: { compression?: "uncompressed" | "snappy" | "gzip" },
+  opts?: { compression?: "uncompressed" | "snappy" | "gzip" | "zstd" },
 ): Uint8Array {
   const compression = opts?.compression ?? "snappy";
   let codec = PQ_CODEC_UNCOMPRESSED;
   if (compression === "snappy") codec = PQ_CODEC_SNAPPY;
   else if (compression === "gzip") codec = PQ_CODEC_GZIP;
+  else if (compression === "zstd") codec = PQ_CODEC_ZSTD;
   else if (compression !== "uncompressed") {
     throw new RangeError(`para:arrow.toParquet: unknown compression "${compression}"`);
   }
@@ -1606,14 +2887,60 @@ export function toParquet(
   for (let ci = 0; ci < schema.fields.length; ci++) {
     const field = schema.fields[ci];
     const isOptional = field.nullable;
+
+    // List columns route to a separate page builder that emits
+    // rep+def levels alongside the (packed) inner values. The schema
+    // emission also branches: 3 elements per list column (outer LIST
+    // group → repeated middle → leaf primitive) instead of 1.
+    if (field.type.kind === "list") {
+      const result = encodeListColumnAcrossBatches(field, ci, batches, numRows, codec);
+      const compressedSize = result.compressed.length;
+      const pageHeader = writePageHeader(PQ_PAGE_DATA_PAGE, result.uncompressedSize, compressedSize, {
+        numValues: result.numLevels,
+      });
+      const pageStartOffset = BigInt(out.pos);
+      out.writeBytes(pageHeader);
+      out.writeBytes(result.compressed);
+      const plan: ColumnPlan = {
+        name: field.name,
+        physicalType: result.innerPhysical,
+        convertedType: result.innerConverted,
+        precision: undefined,
+        scale: undefined,
+        typeLength: result.innerTypeLength,
+        isOptional,
+        listOuterOptional: isOptional,
+        listElemOptional: result.elemOptional,
+        compressedPage: result.compressed,
+        uncompressedSize: result.uncompressedSize + pageHeader.length,
+        numValues: result.numLevels,
+        numNonNull: result.numNonNull,
+        // Stats on list columns aren't well-defined with the current
+        // schema (per-element vs per-list). Skip — readers treat
+        // missing stats as unknown.
+        stats: undefined,
+      };
+      colPlans.push(plan);
+      columnChunks.push(writeColumnChunk(plan, codec, compressedSize + pageHeader.length, pageStartOffset));
+      continue;
+    }
+
     const physicalType = parquetPhysicalForKind(field.type.kind);
+
+    // FLBA columns store width bytes per row in a single contiguous
+    // Uint8Array — the per-row stride is W, not 1, so the merge math
+    // for that case scales offsets by W.
+    const flbaW = field.type.kind === "fixed_size_binary" ? (field.type as any).width : undefined;
 
     // Concat batches' values + validity for this column.
     let mergedValues: any;
     let mergedValidity: Uint8Array | undefined;
     {
       const sample = batches[0].columns[ci];
-      if (sample.values instanceof Int32Array) mergedValues = new Int32Array(numRows);
+      if (flbaW !== undefined) {
+        // FLBA: numRows × width bytes total.
+        mergedValues = new Uint8Array(numRows * flbaW);
+      } else if (sample.values instanceof Int32Array) mergedValues = new Int32Array(numRows);
       else if (sample.values instanceof BigInt64Array) mergedValues = new BigInt64Array(numRows);
       else if (sample.values instanceof Float32Array) mergedValues = new Float32Array(numRows);
       else if (sample.values instanceof Float64Array) mergedValues = new Float64Array(numRows);
@@ -1622,7 +2949,10 @@ export function toParquet(
       let off = 0;
       for (const b of batches) {
         const c = b.columns[ci];
-        if (mergedValues.length > 0 && c.values && c.values.length === b.numRows) {
+        if (flbaW !== undefined) {
+          // FLBA: copy b.numRows × flbaW bytes at byte-offset off*flbaW.
+          (mergedValues as Uint8Array).set(c.values as Uint8Array, off * flbaW);
+        } else if (mergedValues.length > 0 && c.values && c.values.length === b.numRows) {
           if (Array.isArray(mergedValues)) {
             for (let i = 0; i < b.numRows; i++) mergedValues[off + i] = c.values[i];
           } else {
@@ -1649,6 +2979,9 @@ export function toParquet(
       }
     }
 
+    // FLBA width is `flbaW` from the merge step above.
+    const flbaWidth = flbaW;
+
     // Compute def levels (0/1 per row) and a packed values array (only non-nulls).
     let defLevels: Uint8Array | undefined;
     let nonNullValues: any;
@@ -1663,7 +2996,18 @@ export function toParquet(
       }
       numNonNull = nn;
       // Pack non-null values into a fresh array.
-      if (mergedValues instanceof Int32Array) {
+      if (flbaWidth !== undefined && mergedValues instanceof Uint8Array) {
+        // FLBA: width bytes per row. Pack window-wise.
+        const out = new Uint8Array(nn * flbaWidth);
+        let j = 0;
+        for (let i = 0; i < numRows; i++) {
+          if (defLevels[i]) {
+            out.set(mergedValues.subarray(i * flbaWidth, (i + 1) * flbaWidth), j * flbaWidth);
+            j++;
+          }
+        }
+        nonNullValues = out;
+      } else if (mergedValues instanceof Int32Array) {
         const out = new Int32Array(nn);
         let j = 0;
         for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
@@ -1700,15 +3044,22 @@ export function toParquet(
       defLevels = undefined;
     }
 
-    const pageBody = buildDataPageBody(nonNullValues, numRows, physicalType, defLevels);
+    const pageBody = buildDataPageBody(nonNullValues, numRows, physicalType, defLevels, numNonNull, flbaWidth);
     const uncompressedSize = pageBody.length;
     let compressedBody: Uint8Array;
     if (codec === PQ_CODEC_UNCOMPRESSED) {
       compressedBody = pageBody;
     } else if (codec === PQ_CODEC_SNAPPY) {
       compressedBody = snappyCompress(pageBody);
-    } else {
+    } else if (codec === PQ_CODEC_GZIP) {
       compressedBody = (Bun as any).gzipSync(pageBody) as Uint8Array;
+    } else if (codec === PQ_CODEC_ZSTD) {
+      compressedBody = (Bun as any).zstdCompressSync(pageBody) as Uint8Array;
+    } else {
+      // Should be unreachable — toParquet validates the option string
+      // before mapping to a codec code. Defensive throw to surface any
+      // future codec addition that forgets to update this branch.
+      throw new Error(`parquet: writer codec ${codec} has no compressor wired`);
     }
     const compressedSize = compressedBody.length;
 
@@ -1719,14 +3070,35 @@ export function toParquet(
     out.writeBytes(pageHeader);
     out.writeBytes(compressedBody);
 
+    // Decimal columns carry precision + scale on the type object —
+    // pull them through onto the column plan so the schema writer
+    // can emit fields 9 + 10. Other kinds leave both undefined.
+    let precision: number | undefined;
+    let scale: number | undefined;
+    if (field.type.kind === "decimal128") {
+      const dt = field.type as any as { precision: number; scale: number };
+      precision = dt.precision;
+      scale = dt.scale;
+    }
     const plan: ColumnPlan = {
       name: field.name,
       physicalType,
+      convertedType: parquetConvertedForKind(field.type.kind),
+      precision,
+      scale,
+      typeLength: flbaWidth,
       isOptional,
+      listOuterOptional: undefined,
+      listElemOptional: undefined,
       compressedPage: compressedBody,
       uncompressedSize: uncompressedSize + pageHeader.length,
       numValues: numRows,
       numNonNull,
+      // Stats over the *non-null* packed values — that's what the
+      // computeColumnStats helper expects. Empty / all-null columns
+      // get undefined stats (downstream readers handle "missing
+      // stats" as "unknown" already).
+      stats: computeColumnStats(nonNullValues, numNonNull, numRows, physicalType),
     };
     colPlans.push(plan);
     columnChunks.push(writeColumnChunk(plan, codec, compressedSize + pageHeader.length, pageStartOffset));
@@ -1749,15 +3121,48 @@ function parquetPhysicalForKind(kind: string): number {
     case "bool":
       return PQ_TYPE_BOOLEAN;
     case "int32":
+    case "date32":
       return PQ_TYPE_INT32;
     case "int64":
+    case "timestamp_millis":
+    case "timestamp_micros":
+    case "decimal128":
+      // decimal128 with precision ≤ 18 fits in INT64. Higher
+      // precisions (≤ 38) need FIXED_LEN_BYTE_ARRAY backing — pending
+      // follow-up; the writer rejects them in toParquet.
       return PQ_TYPE_INT64;
+    case "timestamp_nanos":
+      // Spark/Impala-era encoding. Newer pipelines use INT64 +
+      // TIMESTAMP_NANOS (not yet wired here), but writing INT96
+      // round-trips through every parquet reader since 1.x.
+      return PQ_TYPE_INT96;
     case "float32":
       return PQ_TYPE_FLOAT;
     case "float64":
       return PQ_TYPE_DOUBLE;
     case "utf8":
       return PQ_TYPE_BYTE_ARRAY;
+    case "fixed_size_binary":
+      return PQ_TYPE_FIXED_LEN_BYTE_ARRAY;
   }
   throw new Error(`para:arrow.toParquet: type "${kind}" not supported (list / nested types pending)`);
+}
+
+// ConvertedType to attach to a column's SchemaElement (field 6) for an
+// arrow kind. Returns undefined when no annotation is needed (the
+// physical type is unambiguous on its own — int32, float64, etc.).
+function parquetConvertedForKind(kind: string): number | undefined {
+  switch (kind) {
+    case "utf8":
+      return PQ_CT_UTF8;
+    case "date32":
+      return PQ_CT_DATE;
+    case "timestamp_millis":
+      return PQ_CT_TIMESTAMP_MILLIS;
+    case "timestamp_micros":
+      return PQ_CT_TIMESTAMP_MICROS;
+    case "decimal128":
+      return PQ_CT_DECIMAL;
+  }
+  return undefined;
 }

@@ -37,13 +37,59 @@
 
 // ─── Type system ───────────────────────────────────────────────────────────
 
-type ArrowKind = "int32" | "int64" | "float32" | "float64" | "bool" | "utf8" | "list";
+type ArrowKind =
+  | "int32"
+  | "int64"
+  | "float32"
+  | "float64"
+  | "bool"
+  | "utf8"
+  | "list"
+  | "date32"
+  | "timestamp_millis"
+  | "timestamp_micros"
+  | "timestamp_nanos"
+  | "decimal128"
+  | "fixed_size_binary";
 
 // `DataType` is a discriminated union: list types carry a `child` field
 // describing the element type; primitive types just have `kind`.
+//
+// `date32` stores days since 1970-01-01 UTC in an Int32Array. Range is
+// ±~5.8M years from epoch, so the arrow physical layer will outlive
+// civilisation; we round to whole UTC days when ingesting JS `Date`s.
+// Round-trips through parquet as physical INT32 + ConvertedType=DATE.
+//
+// `timestamp_millis` / `timestamp_micros` store milliseconds /
+// microseconds since 1970-01-01 UTC in a BigInt64Array. JS `Date`
+// natively has millisecond precision; the micros variant is for ingest
+// from sources (parquet files, telemetry) that already carry sub-ms
+// resolution. Round-trip through parquet as INT64 +
+// ConvertedType=TIMESTAMP_MILLIS / TIMESTAMP_MICROS.
+//
+// `decimal128` stores fixed-point values as scaled bigints in a
+// BigInt64Array (precision ≤ 18). The `precision` and `scale` live on
+// the type; the value at row i is `bigints[i] / 10^scale` semantically.
+// Round-trips through parquet as physical INT64 + ConvertedType=DECIMAL
+// + the schema element's precision/scale fields. Higher precisions
+// (≤ 38) require FIXED_LEN_BYTE_ARRAY backing — pending follow-up.
 type DataType =
-  | { kind: "int32" | "int64" | "float32" | "float64" | "bool" | "utf8" }
-  | { kind: "list"; child: DataType };
+  | {
+      kind:
+        | "int32"
+        | "int64"
+        | "float32"
+        | "float64"
+        | "bool"
+        | "utf8"
+        | "date32"
+        | "timestamp_millis"
+        | "timestamp_micros"
+        | "timestamp_nanos";
+    }
+  | { kind: "decimal128"; precision: number; scale: number }
+  | { kind: "list"; child: DataType }
+  | { kind: "fixed_size_binary"; width: number };
 
 type Field = {
   name: string;
@@ -66,7 +112,7 @@ type Schema = {
 // Length-bytes is ceil(length/8). Absent means no nulls.
 type ColumnValues = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array | string[];
 
-type ColumnGetResult = number | bigint | boolean | string | null | unknown[];
+type ColumnGetResult = number | bigint | boolean | string | Date | null | unknown[] | Uint8Array;
 
 class Column {
   type: DataType;
@@ -107,6 +153,47 @@ class Column {
         return ((this.values as Uint8Array)[i] & 1) === 1;
       case "utf8":
         return (this.values as string[])[i];
+      case "date32": {
+        // Days since 1970-01-01 UTC → JS Date at UTC midnight.
+        const days = (this.values as Int32Array)[i];
+        return new Date(days * 86400000);
+      }
+      case "timestamp_millis": {
+        // BigInt millis → JS Date. JS Date itself is millisecond-
+        // precision so this is lossless. Number(ms) is safe up to
+        // ±2⁵³ ≈ 285,427 years from epoch.
+        const ms = (this.values as BigInt64Array)[i];
+        return new Date(Number(ms));
+      }
+      case "timestamp_micros": {
+        // BigInt micros → JS Date with µs floored to ms. Sub-ms
+        // precision is lost when surfaced through Date — callers that
+        // need it should read the raw bigint via the typed-array
+        // values directly.
+        const us = (this.values as BigInt64Array)[i];
+        return new Date(Number(us / 1000n));
+      }
+      case "timestamp_nanos": {
+        // BigInt nanos → JS Date floored to ms. Same precision-loss
+        // caveat as timestamp_micros; the raw bigint is the
+        // authoritative form.
+        const ns = (this.values as BigInt64Array)[i];
+        return new Date(Number(ns / 1_000_000n));
+      }
+      case "fixed_size_binary": {
+        // values is a single contiguous Uint8Array of length N×width.
+        // Slice out the i-th window. Returns a *view*, not a copy —
+        // mutating it will mutate the underlying column.
+        const w = this.type.width;
+        const buf = this.values as Uint8Array;
+        return buf.subarray(i * w, (i + 1) * w);
+      }
+      case "decimal128":
+        // Raw scaled bigint — caller knows precision/scale from
+        // this.type. Surfacing as a number would silently lose
+        // precision past 2⁵³; surfacing as a string would force a
+        // formatting choice; bigint preserves the wire value exactly.
+        return (this.values as BigInt64Array)[i];
       case "list": {
         if (!this.child) {
           throw new Error("para:arrow Column.get: list column has no child");
@@ -320,6 +407,21 @@ function inferColumn(name: string, input: ColumnInput): { field: Field; column: 
         column: new Column({ kind: "utf8" }, input.length, input as string[]),
       };
     }
+    // Date[] → date32 column. Stores days since epoch in an Int32Array;
+    // round to floor(getTime / 86400000) so partial-day timestamps land
+    // on the UTC day they fall in. Caller wanting sub-day precision
+    // should use a timestamp_micros column (coming next).
+    if (sample instanceof Date) {
+      const arr = new Int32Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const d = input[i] as Date;
+        arr[i] = Math.floor(d.getTime() / 86400000);
+      }
+      return {
+        field: { name, type: { kind: "date32" }, nullable: false },
+        column: new Column({ kind: "date32" }, input.length, arr),
+      };
+    }
     // Array-of-arrays → list<T>. Flatten all elements into a single child
     // input, infer the child column from that flattened view, build offsets
     // describing per-row list lengths.
@@ -424,20 +526,74 @@ function table(batches: RecordBatch[]): Table {
 // cross-import bun:* — so it lives at the call site, with these helpers
 // taking the boilerplate.
 
-type RowSchema = Partial<Record<string, ArrowKind>>;
+// Schema overrides can be either a bare ArrowKind (`"int64"`) or a
+// full DataType object (e.g. `{ kind: "decimal128", precision: 18,
+// scale: 2 }`) when the type carries extra metadata that a kind alone
+// can't express.
+type RowSchema = Partial<Record<string, ArrowKind | DataType>>;
 
 type FromRowsOptions = {
   /**
    * Override the auto-inferred type for one or more columns. Inference
    * picks `int32` for whole numbers in [-2³¹, 2³¹), `float64` for other
-   * numbers, `bool` for booleans, and `utf8` for strings. Pass entries
-   * here to widen ints to int64 (large values), narrow floats to float32,
-   * etc. Columns not listed are inferred as usual.
+   * numbers, `bool` for booleans, `utf8` for strings, and `date32` for
+   * `Date`s. Pass entries here to widen ints to int64 (large values),
+   * narrow floats to float32, pin a `Date` column as `timestamp_millis`
+   * instead of `date32`, declare a `decimal128` column (via the
+   * `DataType` object form, since precision/scale are required), etc.
+   * Columns not listed are inferred as usual.
    */
   schema?: RowSchema;
   /** Drop rows where any required field is null/undefined. Default false. */
   skipNulls?: boolean;
 };
+
+// Parse a decimal-formatted string ("123.45", "-0.01", "1e3") into a
+// scaled bigint at the column's `scale` digit count. Rejects garbage
+// rather than silently producing 0 — decimals are usually money / IDs
+// where a silent miscount is worse than a noisy crash.
+function parseDecimalString(s: string, scale: number, columnName: string): bigint {
+  const trimmed = s.trim();
+  if (!/^-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/.test(trimmed)) {
+    throw new TypeError(
+      `para:arrow.fromRows: decimal128 string ${JSON.stringify(s)} not a valid decimal in column ${JSON.stringify(columnName)}`,
+    );
+  }
+  // Path 1: no exponent — split on '.' and pad-or-truncate to scale.
+  if (!/[eE]/.test(trimmed)) {
+    const negative = trimmed.startsWith("-");
+    const body = negative ? trimmed.slice(1) : trimmed;
+    const dot = body.indexOf(".");
+    let whole: string;
+    let frac: string;
+    if (dot < 0) {
+      whole = body;
+      frac = "";
+    } else {
+      whole = body.slice(0, dot);
+      frac = body.slice(dot + 1);
+    }
+    if (frac.length > scale) {
+      // Truncate (round-toward-zero) — surfacing it as an error would
+      // be too strict for downstream tools that fold higher-precision
+      // numbers in. Document the lossy direction with a comment, not
+      // a throw.
+      frac = frac.slice(0, scale);
+    } else {
+      frac = frac.padEnd(scale, "0");
+    }
+    const combined = (whole === "" ? "0" : whole) + frac;
+    const v = BigInt(combined === "" ? "0" : combined);
+    return negative ? -v : v;
+  }
+  // Path 2: exponent form — parse via JS number then re-encode. Loses
+  // precision past 2⁵³ but covers the rare scientific-notation case.
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) {
+    throw new TypeError(`para:arrow.fromRows: decimal128 string ${JSON.stringify(s)} produced non-finite`);
+  }
+  return BigInt(Math.round(n * Math.pow(10, scale)));
+}
 
 function inferKindFromValue(v: unknown): ArrowKind | null {
   if (typeof v === "number") {
@@ -446,6 +602,7 @@ function inferKindFromValue(v: unknown): ArrowKind | null {
   if (typeof v === "bigint") return "int64";
   if (typeof v === "boolean") return "bool";
   if (typeof v === "string") return "utf8";
+  if (v instanceof Date) return "date32";
   return null;
 }
 
@@ -485,12 +642,22 @@ function fromRows<T extends Record<string, any>>(rows: T[], opts: FromRowsOption
   }
 
   // Resolve per-column types: explicit schema first, else infer from first
-  // non-null value seen.
+  // non-null value seen. Track both the bare ArrowKind (for the switch
+  // statements below) and the full DataType (so kinds with extra
+  // metadata — decimal128's precision/scale — make it onto the column's
+  // schema field).
   const kinds: Record<string, ArrowKind> = {};
+  const types: Record<string, DataType> = {};
   for (const name of colNames) {
     const pinned = opts.schema?.[name];
     if (pinned) {
-      kinds[name] = pinned;
+      if (typeof pinned === "string") {
+        kinds[name] = pinned;
+        types[name] = { kind: pinned } as DataType;
+      } else {
+        kinds[name] = pinned.kind;
+        types[name] = pinned;
+      }
       continue;
     }
     let inferred: ArrowKind | null = null;
@@ -504,6 +671,7 @@ function fromRows<T extends Record<string, any>>(rows: T[], opts: FromRowsOption
     // If every row is null/missing for this column, default to utf8 (the
     // most permissive type — the column will be all-null anyway).
     kinds[name] = inferred ?? "utf8";
+    types[name] = { kind: kinds[name] } as DataType;
   }
 
   // Filter rows if requested.
@@ -616,10 +784,137 @@ function fromRows<T extends Record<string, any>>(rows: T[], opts: FromRowsOption
         validity = hasNull ? v : undefined;
         break;
       }
+      case "date32": {
+        const arr = new Int32Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else if (raw instanceof Date) {
+            arr[i] = Math.floor(raw.getTime() / 86400000);
+            v[i >> 3] |= 1 << (i & 7);
+          } else if (typeof raw === "number") {
+            // Already days since epoch — pass through. Lets users
+            // pin a date32 column via opts.schema and provide raw
+            // day-numbers without constructing JS Dates.
+            arr[i] = raw | 0;
+            v[i >> 3] |= 1 << (i & 7);
+          } else {
+            // Last-resort: try to parse strings + everything else
+            // through Date(). Throws on garbage rather than silently
+            // producing 0 / NaN.
+            const d = new Date(raw as any);
+            if (isNaN(d.getTime())) {
+              throw new TypeError(
+                `para:arrow.fromRows: cannot coerce ${JSON.stringify(raw)} to date32 in column ${JSON.stringify(name)}`,
+              );
+            }
+            arr[i] = Math.floor(d.getTime() / 86400000);
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+      case "decimal128": {
+        // Caller passes either bigint (already-scaled, exact), number
+        // (scaled at ingest — may lose precision past 2⁵³ / 10^scale),
+        // or string ("12.34" — parsed by scaling the parsed integer
+        // by 10^scale). Storage is BigInt64Array.
+        const t = types[name];
+        if (t.kind !== "decimal128") {
+          throw new TypeError(
+            `para:arrow.fromRows: decimal128 column ${JSON.stringify(name)} missing precision/scale on type`,
+          );
+        }
+        if (!Number.isInteger(t.precision) || t.precision <= 0 || t.precision > 18) {
+          throw new RangeError(
+            `para:arrow.fromRows: decimal128 precision must be 1..18 (FIXED_LEN_BYTE_ARRAY pending for higher); got ${t.precision} on column ${JSON.stringify(name)}`,
+          );
+        }
+        if (!Number.isInteger(t.scale) || t.scale < 0 || t.scale > t.precision) {
+          throw new RangeError(
+            `para:arrow.fromRows: decimal128 scale must be 0..precision (${t.precision}); got ${t.scale} on column ${JSON.stringify(name)}`,
+          );
+        }
+        const scaleFactor = 10n ** BigInt(t.scale);
+        const arr = new BigInt64Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else if (typeof raw === "bigint") {
+            arr[i] = raw;
+            v[i >> 3] |= 1 << (i & 7);
+          } else if (typeof raw === "number") {
+            // Scale + round-half-away-from-zero. Loses precision past
+            // 2⁵³; pinned-precision callers should pass bigint or
+            // string for safety.
+            const scaled = Math.round(raw * Number(scaleFactor));
+            arr[i] = BigInt(scaled);
+            v[i >> 3] |= 1 << (i & 7);
+          } else if (typeof raw === "string") {
+            arr[i] = parseDecimalString(raw, t.scale, name);
+            v[i >> 3] |= 1 << (i & 7);
+          } else {
+            throw new TypeError(
+              `para:arrow.fromRows: cannot coerce ${JSON.stringify(raw)} to decimal128 in column ${JSON.stringify(name)}`,
+            );
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
+      case "timestamp_millis":
+      case "timestamp_micros": {
+        // Both store BigInt64 (millis or micros since epoch). JS Date
+        // is ms-resolution; for micros we multiply by 1000n. Bigint
+        // pass-through is allowed — useful when the value already
+        // came from a parquet read or another timestamp source and
+        // doesn't need to round-trip through Date.
+        const scale = kind === "timestamp_millis" ? 1n : 1000n;
+        const arr = new BigInt64Array(n);
+        const v = new Uint8Array(Math.ceil(n / 8));
+        for (let i = 0; i < n; i++) {
+          const row = useRows[i];
+          const raw = row == null ? undefined : (row as any)[name];
+          if (raw == null) {
+            hasNull = true;
+          } else if (raw instanceof Date) {
+            arr[i] = BigInt(raw.getTime()) * scale;
+            v[i >> 3] |= 1 << (i & 7);
+          } else if (typeof raw === "bigint") {
+            arr[i] = raw;
+            v[i >> 3] |= 1 << (i & 7);
+          } else if (typeof raw === "number") {
+            arr[i] = BigInt(Math.trunc(raw)) * scale;
+            v[i >> 3] |= 1 << (i & 7);
+          } else {
+            const d = new Date(raw as any);
+            if (isNaN(d.getTime())) {
+              throw new TypeError(
+                `para:arrow.fromRows: cannot coerce ${JSON.stringify(raw)} to ${kind} in column ${JSON.stringify(name)}`,
+              );
+            }
+            arr[i] = BigInt(d.getTime()) * scale;
+            v[i >> 3] |= 1 << (i & 7);
+          }
+        }
+        values = arr;
+        validity = hasNull ? v : undefined;
+        break;
+      }
     }
 
-    fields.push({ name, type: { kind }, nullable: hasNull });
-    cols.push(new Column({ kind }, n, values, validity));
+    const colType = types[name];
+    fields.push({ name, type: colType, nullable: hasNull });
+    cols.push(new Column(colType, n, values, validity));
   }
 
   return new RecordBatch({ fields }, cols, n);
@@ -1347,7 +1642,7 @@ function fromParquet(bytes: Uint8Array): Table {
 
 function toParquet(
   source: Table | RecordBatch,
-  opts?: { compression?: "uncompressed" | "snappy" | "gzip" },
+  opts?: { compression?: "uncompressed" | "snappy" | "gzip" | "zstd" },
 ): Uint8Array {
   if (!(source instanceof Table) && !(source instanceof RecordBatch)) {
     throw new TypeError("para:arrow.toParquet: source must be a Table or RecordBatch");
