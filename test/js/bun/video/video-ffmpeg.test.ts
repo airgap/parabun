@@ -445,6 +445,90 @@ describe.skipIf(SKIP)("parabun:video — ffmpeg decode", () => {
     expect(audioStream.channels).toBe(2);
   });
 
+  test("accel: 'none' forces software decode regardless of HW availability", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-accel-none", {});
+    const mp4Path = join(String(dir), "sw.mp4");
+    // 128×128 is above the 64px HW-auto threshold, so this would
+    // pick HW under "auto" on this box. Force software.
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:size=128x128:duration=0.4:rate=10",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(mp4Path);
+    const dec = await video.decode(new Uint8Array(bytes), { accel: "none" });
+    expect(dec.width).toBe(128);
+    let count = 0;
+    for await (const _ of dec.frames()) count++;
+    await dec.close();
+    expect(count).toBe(4);
+  });
+
+  test("accel: 'cuda' throws cleanly if cuvid isn't available", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-accel-cuda", {});
+    const mp4Path = join(String(dir), "test.mp4");
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:size=128x128:duration=0.1:rate=10",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+    const bytes = await readFile(mp4Path);
+    // If cuvid IS available on this box, the call succeeds — our
+    // assertion is the throw IF it's not. Probe ffmpeg for h264_cuvid
+    // first so we only assert the error path when applicable.
+    await using dec = Bun.spawn({ cmd: ["ffmpeg", "-hide_banner", "-decoders"], stdout: "pipe", stderr: "ignore" });
+    const decList = await dec.stdout.text();
+    const hasCuvid = decList.includes("h264_cuvid");
+    if (!hasCuvid) {
+      await expect(video.decode(new Uint8Array(bytes), { accel: "cuda" })).rejects.toThrow(
+        /cuda HW decode for "h264" not available/,
+      );
+    } else {
+      // Box has cuvid — accept either success OR a known cuvid
+      // error (e.g. dimension constraint with a slightly-too-small
+      // frame). We just want NO unhandled crash.
+      try {
+        const d = await video.decode(new Uint8Array(bytes), { accel: "cuda" });
+        await d.close();
+      } catch (e: any) {
+        expect(String(e?.message ?? e)).toMatch(/h264|cuvid|cuda/);
+      }
+    }
+  });
+
   test("close() before iterating doesn't leak the subprocess", async () => {
     const video = (await import("parabun:video")).default;
     using dir = tempDir("video-close", {});

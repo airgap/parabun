@@ -37,6 +37,66 @@ async function probe(): Promise<boolean> {
   return available;
 }
 
+// Cache of ffmpeg's codec / hwaccel surface — lets accel="auto" /
+// "cuda" / "v4l2m2m" pick the right flags without re-spawning
+// ffmpeg for every decode.
+let codecCacheReady = false;
+let hwDecodersAvailable: Set<string> = new Set();
+
+async function ensureHwCodecs(): Promise<void> {
+  if (codecCacheReady) return;
+  codecCacheReady = true;
+  if (!(await probe())) return;
+  try {
+    const proc = Bun.spawn({
+      cmd: ["ffmpeg", "-hide_banner", "-decoders"],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await proc.stdout.text();
+    await proc.exited;
+    // Look for known hardware decoder names. ffmpeg lists each as
+    // `V..... h264_cuvid             Nvidia CUVID H264 decoder`.
+    for (const name of [
+      "h264_cuvid",
+      "hevc_cuvid",
+      "vp9_cuvid",
+      "av1_cuvid",
+      "h264_v4l2m2m",
+      "hevc_v4l2m2m",
+      "h264_qsv",
+      "hevc_qsv",
+      "h264_vaapi",
+      "hevc_vaapi",
+    ]) {
+      if (out.includes(name)) hwDecodersAvailable.add(name);
+    }
+  } catch {
+    // No-op — `auto` falls through to software, explicit accel
+    // throws with the right install hint at decode time.
+  }
+}
+
+// Pick the right ffmpeg hardware-decoder name for a (codec,
+// accel) pair. Returns undefined if no HW path is available; the
+// caller should fall back to software.
+function hwDecoderFor(codec: string, accel: "cuda" | "v4l2m2m" | "qsv" | "vaapi"): string | undefined {
+  const suffix = accel === "cuda" ? "cuvid" : accel;
+  const name = `${codec}_${suffix}`;
+  return hwDecodersAvailable.has(name) ? name : undefined;
+}
+
+// Auto-detect the best available HW accel for a given codec.
+// Order of preference: cuda (Jetson + dGPU) → v4l2m2m (Pi 4 +
+// older ARM boards) → qsv (Intel) → vaapi (Intel/AMD on Linux) →
+// software. Returns "none" when nothing's wired.
+function autoAccelFor(codec: string): "cuda" | "v4l2m2m" | "qsv" | "vaapi" | "none" {
+  for (const a of ["cuda", "v4l2m2m", "qsv", "vaapi"] as const) {
+    if (hwDecoderFor(codec, a)) return a;
+  }
+  return "none";
+}
+
 type ProbeResult = {
   width: number;
   height: number;
@@ -110,11 +170,20 @@ async function probeBytes(bytes: Uint8Array): Promise<ProbeResult> {
 // iterator that yields one Uint8Array per frame (length = w*h*4) plus
 // an explicit close() so the caller can stop early without leaking the
 // child process.
+type AccelMode = "auto" | "cuda" | "v4l2m2m" | "qsv" | "vaapi" | "none";
+
 type StreamOptions = {
   /** Drop frames whose presentation timestamp is below this (ms). */
   startMs?: number;
   /** Stop decoding past this presentation timestamp (ms). */
   endMs?: number;
+  /**
+   * Hardware acceleration policy. "auto" (default) probes the
+   * running ffmpeg's `-decoders` list and picks the first
+   * supported HW decoder for the input codec; falls through to
+   * software when nothing's wired. "none" forces software.
+   */
+  accel?: AccelMode;
 };
 
 type FrameIterator = {
@@ -124,6 +193,8 @@ type FrameIterator = {
   durationMs: number;
   fps: number;
   frameCount: number | undefined;
+  /** Which path the decoder actually used. */
+  accelUsed: "cuda" | "v4l2m2m" | "qsv" | "vaapi" | "none";
   frames(): AsyncIterableIterator<{ data: Uint8Array; index: number; ptsMs: number }>;
   close(): Promise<void>;
 };
@@ -131,8 +202,46 @@ type FrameIterator = {
 async function decode(bytes: Uint8Array, opts?: StreamOptions): Promise<FrameIterator> {
   if (!(await probe())) throw new Error(NOT_INSTALLED_MSG);
   const meta = await probeBytes(bytes);
+  await ensureHwCodecs();
+
+  // Decide which HW decoder to use. "auto" picks the best
+  // available; explicit accel modes throw with an install hint
+  // when the running ffmpeg doesn't have that path compiled in.
+  const accelReq: AccelMode = opts?.accel ?? "auto";
+  let hwDecoder: string | undefined;
+  let accelUsed: FrameIterator["accelUsed"] = "none";
+  if (accelReq !== "none") {
+    if (accelReq === "auto") {
+      // HW decoders typically have minimum dimensions (cuvid: 48px,
+      // qsv: 16px, vaapi: 32px). Auto-pick stays software for
+      // sub-thumbnail inputs where the HW path can't run anyway.
+      // 64px is the safe floor that satisfies every backend.
+      if (meta.width >= 64 && meta.height >= 64) {
+        const pick = autoAccelFor(meta.codec);
+        if (pick !== "none") {
+          hwDecoder = hwDecoderFor(meta.codec, pick);
+          accelUsed = pick;
+        }
+      }
+    } else {
+      hwDecoder = hwDecoderFor(meta.codec, accelReq);
+      if (!hwDecoder) {
+        throw new Error(
+          `parabun:video.decode: ${accelReq} HW decode for "${meta.codec}" not available in this ffmpeg build. ` +
+            `Install ffmpeg with ${accelReq === "cuda" ? "--enable-cuvid --enable-nvdec" : "--enable-" + accelReq} ` +
+            `support, or pass accel: "none" / "auto".`,
+        );
+      }
+      accelUsed = accelReq;
+    }
+  }
+
   const tmpPath = await writeTmp(bytes, "video-decode");
   const ffArgs: string[] = ["-v", "error"];
+  // HW-accel flags go BEFORE -i so they apply to the input.
+  if (hwDecoder) {
+    ffArgs.push("-c:v", hwDecoder);
+  }
   if (opts?.startMs !== undefined && opts.startMs > 0) {
     // -ss before -i is fast (seeks at the container level).
     ffArgs.push("-ss", (opts.startMs / 1000).toString());
@@ -232,6 +341,7 @@ async function decode(bytes: Uint8Array, opts?: StreamOptions): Promise<FrameIte
     durationMs: meta.durationMs,
     fps: meta.fps,
     frameCount: meta.frameCount,
+    accelUsed,
     frames,
     close,
   };

@@ -1464,9 +1464,13 @@ const ffmpegMod = require("./video/ffmpeg.ts");
  * Throws "install ffmpeg" when the binary isn't on PATH.
  */
 async function ffmpegDecodeFallback(bytes: Uint8Array, opts: DecodeOptions | undefined): Promise<VideoDecoder> {
+  // Map our AccelMode union to the ffmpeg helper's. They mostly
+  // overlap; "auto" is the default both sides understand.
+  const accel = opts?.accel ?? "auto";
   const stream = await ffmpegMod.decode(bytes, {
     startMs: opts?.startMs,
     endMs: opts?.endMs,
+    accel: accel === "auto" || accel === "none" || accel === "cuda" || accel === "v4l2m2m" ? accel : "auto",
   });
   // Map ffmpeg's codec_name to our Codec union; fall back to the raw
   // string for anything we don't have a tag for (still reaches users
