@@ -1847,7 +1847,69 @@ export function readBloomFilters(bytes: Uint8Array): ParquetBloomFilters {
   return out;
 }
 
-export function fromParquet(bytes: Uint8Array): TableLike {
+// Decode PLAIN-encoded statistic bytes into a JS-native value. Used by
+// the predicate-pushdown filter API to surface min/max in their native
+// form so users can compare against typed JS values directly.
+function decodeStatBytes(bytes: Uint8Array | undefined, physicalType: number, typeLength?: number): any {
+  if (bytes === undefined) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  switch (physicalType) {
+    case PQ_TYPE_BOOLEAN:
+      return bytes.length > 0 && bytes[0] !== 0;
+    case PQ_TYPE_INT32:
+      return bytes.length >= 4 ? view.getInt32(0, true) : undefined;
+    case PQ_TYPE_INT64:
+      return bytes.length >= 8 ? view.getBigInt64(0, true) : undefined;
+    case PQ_TYPE_FLOAT:
+      return bytes.length >= 4 ? view.getFloat32(0, true) : undefined;
+    case PQ_TYPE_DOUBLE:
+      return bytes.length >= 8 ? view.getFloat64(0, true) : undefined;
+    case PQ_TYPE_BYTE_ARRAY:
+      // BYTE_ARRAY stats are raw bytes (no length prefix). UTF-8 decode
+      // for the string case; callers reading raw bytes should use the
+      // ColumnMetaData directly.
+      return new TextDecoder().decode(bytes);
+    case PQ_TYPE_FIXED_LEN_BYTE_ARRAY:
+      // Return a fresh Uint8Array of typeLength bytes (or whatever's
+      // there) so the caller can compare byte-wise.
+      void typeLength;
+      return bytes.slice();
+    case PQ_TYPE_INT96: {
+      // 12 bytes (8 LE nanos-of-day + 4 LE Julian day) → unix nanos.
+      if (bytes.length < 12) return undefined;
+      const NANOS_PER_DAY = 86_400_000_000_000n;
+      const nanosOfDay = view.getBigUint64(0, true);
+      const julianDay = view.getUint32(8, true);
+      return (BigInt(julianDay) - 2440588n) * NANOS_PER_DAY + BigInt.asIntN(64, nanosOfDay);
+    }
+  }
+  return undefined;
+}
+
+export type ParquetRowGroupSummary = {
+  /** 0-based index of this row group in the file. */
+  index: number;
+  /** Number of rows in this row group. */
+  numRows: number;
+  /**
+   * Per-column statistics keyed by top-level column name. Missing
+   * entries mean the writer didn't emit stats for that column. min /
+   * max are JS-native (Number / BigInt / string / Uint8Array depending
+   * on the physical type); nullCount is a Number for ergonomics
+   * (capped at safe-integer range — column chunks past 2⁵³ rows are
+   * not real).
+   */
+  stats: Map<string, { min: any; max: any; nullCount: number | undefined }>;
+  /**
+   * Per-column bloom filters keyed by top-level column name. Missing
+   * entries mean no filter was emitted for that column.
+   */
+  bloomFilters: Map<string, { mightContain(value: any): boolean; numBytes: number }>;
+};
+
+export type ParquetFilter = (rg: ParquetRowGroupSummary) => boolean;
+
+export function fromParquet(bytes: Uint8Array, opts?: { filter?: ParquetFilter }): TableLike {
   const { Column, RecordBatch, Table } = getTypes();
 
   // Magic + footer.
@@ -2253,9 +2315,76 @@ export function fromParquet(bytes: Uint8Array): TableLike {
     return { col: new Column(dataTypeForCol(c), numRows, values, validity), consumed: 1 };
   }
 
-  // Build one RecordBatch per row group.
+  // Build a row-group summary on-demand for the filter callback. We
+  // pull stats + bloom filter offsets from the row-group's column
+  // chunks, scoped to top-level column names (matching the keys
+  // readBloomFilters returns and what users expect to filter on).
+  function summarizeRowGroup(rg: RowGroup, rgIndex: number): ParquetRowGroupSummary {
+    const stats = new Map<string, { min: any; max: any; nullCount: number | undefined }>();
+    const bloom = new Map<string, { mightContain(v: any): boolean; numBytes: number }>();
+    let chunkIdx = 0;
+    for (const colInfo of cols) {
+      // Map the leading chunk back to this top-level column. For
+      // struct/map/list there are extra chunks; we only attach
+      // stats/bloom for the FIRST chunk under the column (matches
+      // readBloomFilters' behaviour for primitives + lists, and
+      // gives a reasonable default for the inner-key chunk on
+      // maps).
+      const chunk = rg.columns[chunkIdx];
+      if (chunk && chunk.metaData) {
+        const md = chunk.metaData;
+        if (md.statistics && (md.statistics.minValue !== undefined || md.statistics.maxValue !== undefined)) {
+          // typeLength only matters for FLBA; fall back to the col
+          // typeLength when present.
+          const tl = colInfo.typeLength;
+          stats.set(colInfo.name, {
+            min: decodeStatBytes(md.statistics.minValue, md.type, tl),
+            max: decodeStatBytes(md.statistics.maxValue, md.type, tl),
+            nullCount: md.statistics.nullCount === undefined ? undefined : Number(md.statistics.nullCount),
+          });
+        }
+        if (md.bloomFilterOffset !== undefined) {
+          const off = Number(md.bloomFilterOffset);
+          const r = new ThriftReader(bytes, off);
+          const header = parseBloomFilterHeader(r);
+          const numBytes = header.numBytes;
+          const numBlocks = numBytes / SBBF_BLOCK_BYTES;
+          const bitmapStart = r.pos;
+          const aligned = new Uint8Array(numBytes);
+          aligned.set(bytes.subarray(bitmapStart, bitmapStart + numBytes));
+          const blocks = new Uint32Array(aligned.buffer, 0, numBlocks * 8);
+          const physicalType = md.type;
+          let bloomTl: number | undefined;
+          if (physicalType === PQ_TYPE_FIXED_LEN_BYTE_ARRAY) bloomTl = colInfo.typeLength;
+          bloom.set(colInfo.name, {
+            numBytes,
+            mightContain(value: any): boolean {
+              const h = bloomHashValue(value, physicalType, bloomTl);
+              return sbbfMightContain(blocks, numBlocks, h);
+            },
+          });
+        }
+      }
+      chunkIdx += leafChunkCount(colInfo);
+    }
+    return {
+      index: rgIndex,
+      numRows: Number(rg.numRows),
+      stats,
+      bloomFilters: bloom,
+    };
+  }
+
+  // Build one RecordBatch per kept row group. The optional `filter`
+  // callback runs before any data-page decoding so a `false` result
+  // skips the entire row group's I/O.
   const batches: RecordBatchLike[] = [];
-  for (const rg of meta.rowGroups) {
+  for (let rgIdx = 0; rgIdx < meta.rowGroups.length; rgIdx++) {
+    const rg = meta.rowGroups[rgIdx];
+    if (opts?.filter) {
+      const summary = summarizeRowGroup(rg, rgIdx);
+      if (!opts.filter(summary)) continue;
+    }
     const numRows = Number(rg.numRows);
     const batchColumns: ColumnLike[] = [];
     let chunkIdx = 0;
@@ -2264,7 +2393,6 @@ export function fromParquet(bytes: Uint8Array): TableLike {
       batchColumns.push(r.col);
       chunkIdx += r.consumed;
     }
-    void leafChunkCount; // reserved for future row-group filter pushdown
     const schemaForBatch = {
       fields: cols.map(c => ({
         name: c.name,

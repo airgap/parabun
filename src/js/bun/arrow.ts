@@ -1693,11 +1693,31 @@ function toIPC(source: Table | RecordBatch, format: "stream" | "file" = "stream"
   return ipc.toIPC(source, format) as Uint8Array;
 }
 
-function fromParquet(bytes: Uint8Array): Table {
+function fromParquet(
+  bytes: Uint8Array,
+  opts?: {
+    /**
+     * Per-row-group predicate. Called once per row group BEFORE any
+     * data-page decoding; returning `false` skips the entire row
+     * group, returning `true` (or omitting the option) keeps it.
+     * The callback receives a summary with index + numRows + per-
+     * column min/max/nullCount stats + per-column bloom filters,
+     * which is enough for typical predicate pushdown ("definitely
+     * not present" / "out of range") without cracking the data
+     * pages open.
+     */
+    filter?: (rg: {
+      index: number;
+      numRows: number;
+      stats: Map<string, { min: any; max: any; nullCount: number | undefined }>;
+      bloomFilters: Map<string, { mightContain(v: any): boolean; numBytes: number }>;
+    }) => boolean;
+  },
+): Table {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError("para:arrow.fromParquet: bytes must be a Uint8Array");
   }
-  return parquet.fromParquet(bytes) as Table;
+  return parquet.fromParquet(bytes, opts) as Table;
 }
 
 function toParquet(

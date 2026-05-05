@@ -1197,6 +1197,123 @@ describe("para:arrow parquet — Map", () => {
   });
 });
 
+describe("para:arrow parquet — predicate pushdown", () => {
+  test("filter receives stats + bloom for each row group", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1000,
+      tag: `t${i % 4}`,
+    }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "uncompressed",
+      bloomFilters: ["id"],
+    });
+    let summarySeen: any = null;
+    arrow.fromParquet(bytes, {
+      filter: rg => {
+        summarySeen = rg;
+        return true;
+      },
+    });
+    expect(summarySeen).toBeDefined();
+    expect(summarySeen.index).toBe(0);
+    expect(summarySeen.numRows).toBe(100);
+    // Stats: id is INT32, min=1000, max=1099, no nulls.
+    const idStats = summarySeen.stats.get("id");
+    expect(idStats).toBeDefined();
+    expect(idStats.min).toBe(1000);
+    expect(idStats.max).toBe(1099);
+    expect(idStats.nullCount).toBe(0);
+    // Bloom: id has one; tag does not (we didn't request it).
+    expect(summarySeen.bloomFilters.has("id")).toBe(true);
+    expect(summarySeen.bloomFilters.get("id").mightContain(1042)).toBe(true);
+    expect(summarySeen.bloomFilters.get("id").mightContain(99)).toBe(false);
+    expect(summarySeen.bloomFilters.has("tag")).toBe(false);
+  });
+
+  test("returning false skips the row group entirely", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 50 }, (_, i) => ({ id: i, name: `r${i}` }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "snappy" });
+    const t = arrow.fromParquet(bytes, { filter: () => false });
+    expect(t.numRows).toBe(0);
+    expect(t.batches).toHaveLength(0);
+  });
+
+  test("returning true keeps the row group (default behaviour)", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 50 }, (_, i) => ({ id: i, name: `r${i}` }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "snappy" });
+    const t = arrow.fromParquet(bytes, { filter: () => true });
+    expect(t.numRows).toBe(50);
+    expect(arrow.toRows(t)).toEqual(rows);
+  });
+
+  test("stats-based pushdown: skip when value is outside [min, max]", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 30 }, (_, i) => ({ score: i * 10 }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "uncompressed" });
+    // Looking for score === 999 — definitely not in [0..290].
+    const tSkipped = arrow.fromParquet(bytes, {
+      filter: rg => {
+        const s = rg.stats.get("score");
+        if (!s) return true;
+        return 999 >= s.min && 999 <= s.max;
+      },
+    });
+    expect(tSkipped.numRows).toBe(0);
+    // Looking for score === 50 — within [0..290], keep the row group.
+    const tKept = arrow.fromParquet(bytes, {
+      filter: rg => {
+        const s = rg.stats.get("score");
+        if (!s) return true;
+        return 50 >= s.min && 50 <= s.max;
+      },
+    });
+    expect(tKept.numRows).toBe(30);
+  });
+
+  test("bloom-based pushdown: skip when filter says definitely-not-present", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 50 }, (_, i) => ({ uid: 100 * i, label: `x${i}` }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows), {
+      compression: "uncompressed",
+      bloomFilters: ["uid"],
+    });
+    // 12345 is not a multiple of 100 → definitely not in the bloom filter.
+    const t = arrow.fromParquet(bytes, {
+      filter: rg => rg.bloomFilters.get("uid")?.mightContain(12345) ?? true,
+    });
+    expect(t.numRows).toBe(0);
+    // 1500 IS in the set (i=15) → bloom says might-contain → keep.
+    const t2 = arrow.fromParquet(bytes, {
+      filter: rg => rg.bloomFilters.get("uid")?.mightContain(1500) ?? true,
+    });
+    expect(t2.numRows).toBe(50);
+  });
+
+  test("missing stats / missing bloom → keep when caller defaults that way", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = [{ note: "only one row" }];
+    const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "uncompressed" });
+    // No bloom filters were requested — get() returns undefined.
+    const t = arrow.fromParquet(bytes, {
+      filter: rg => {
+        const bf = rg.bloomFilters.get("note");
+        return bf ? bf.mightContain("not-present") : true;
+      },
+    });
+    expect(t.numRows).toBe(1);
+  });
+
+  test("no filter option = keep all rows (regression)", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const rows = Array.from({ length: 8 }, (_, i) => ({ k: i }));
+    const bytes = arrow.toParquet(arrow.fromRows(rows));
+    expect(arrow.fromParquet(bytes).numRows).toBe(8);
+  });
+});
+
 describe("para:arrow parquet — scale", () => {
   test("25K-row table round-trips through zstd", async () => {
     const arrow = (await import("para:arrow")).default;
