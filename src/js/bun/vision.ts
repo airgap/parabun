@@ -94,12 +94,52 @@ type FramesOptions = {
   maxFps?: number;
 };
 
+/**
+ * One contiguous moving region in source-frame coordinates. Output of
+ * connected-components labeling on the per-frame motion mask, scaled
+ * back up from downsampled space. A frame with two unrelated movers
+ * (someone walking left, fan spinning right) yields two regions.
+ */
+type MotionRegion = {
+  /** Top-left x in source-frame pixels. */
+  x: number;
+  /** Top-left y in source-frame pixels. */
+  y: number;
+  /** Bounding-box width in source-frame pixels. */
+  width: number;
+  /** Bounding-box height in source-frame pixels. */
+  height: number;
+  /**
+   * Component pixel count in the *downsampled* space (the units the CC
+   * pass actually counted). Multiply by `downsample²` for an estimate
+   * of source-frame pixel coverage.
+   */
+  pixels: number;
+};
+
 type MotionFrame = {
   frame: RgbaFrame;
   /** Fraction of luma-changed pixels in [0, 1]. */
   motionScore: number;
   /** True when motionScore > sensitivity. */
   moving: boolean;
+  /**
+   * Bounding boxes for each contiguous changed-pixel cluster, in
+   * source-frame coordinates. Populated only when `opts.regions` is
+   * enabled (otherwise undefined to keep the no-regions fast path
+   * allocation-free).
+   */
+  regions?: MotionRegion[];
+};
+
+type RegionsOptions = {
+  /**
+   * Minimum component size (in *downsampled* pixels) to be reported as
+   * a region. Smaller blobs are dropped as sensor noise. Default 4 —
+   * at the default downsample of 4× this corresponds to a single
+   * source-frame 8×8 area.
+   */
+  minPixels?: number;
 };
 
 type MotionOptions = {
@@ -117,6 +157,17 @@ type MotionOptions = {
    * frozen. Default 0.3 (mild smoothing — kills single-frame noise spikes).
    */
   smoothing?: number;
+  /**
+   * Per-frame connected-components labeling on the motion mask. When
+   * enabled, each yielded `MotionFrame` carries a `regions` array of
+   * bounding boxes for distinct moving clusters (4-connected, two-pass
+   * union-find on the downsampled mask, scaled back to source coords).
+   *
+   * `true` enables with default options; an object overrides the
+   * defaults. Off by default — the CC pass adds a per-frame Map
+   * allocation and one extra mask scan.
+   */
+  regions?: boolean | RegionsOptions;
 };
 
 // ─── frames() — decode any camera stream to RGBA ───────────────────────────
@@ -284,6 +335,10 @@ async function* detectMotionGenerator(
   const sensitivity = opts.sensitivity ?? 0.02;
   const downsample = Math.max(1, opts.downsample ?? 4);
   const smoothing = Math.min(1, Math.max(0, opts.smoothing ?? 0.3));
+  const regionsEnabled = opts.regions != null && opts.regions !== false;
+  const regionsOpts: RegionsOptions =
+    typeof opts.regions === "object" && opts.regions !== null ? (opts.regions as RegionsOptions) : {};
+  const regionsMinPixels = Math.max(1, regionsOpts.minPixels ?? 4);
 
   let prevLuma: Uint8Array | null = null;
   let prevW = 0;
@@ -302,11 +357,27 @@ async function* detectMotionGenerator(
       const luma = downsampledLuma(frame.rgba, frame.width, frame.height, lumaW, lumaH);
 
       let rawScore = 0;
+      // If regions are enabled we need the per-pixel mask, not just a
+      // running count, so the CC pass has something to label. Build it
+      // lazily — most frames have no prevLuma yet (first frame) or no
+      // motion (skip the alloc entirely below).
+      let mask: Uint8Array | null = null;
       if (prevLuma && prevW === lumaW && prevH === lumaH) {
         let changed = 0;
-        for (let i = 0; i < luma.length; i++) {
-          const d = luma[i] - prevLuma[i];
-          if (d > pixelThresh || d < -pixelThresh) changed++;
+        if (regionsEnabled) {
+          mask = new Uint8Array(luma.length);
+          for (let i = 0; i < luma.length; i++) {
+            const d = luma[i] - prevLuma[i];
+            if (d > pixelThresh || d < -pixelThresh) {
+              mask[i] = 1;
+              changed++;
+            }
+          }
+        } else {
+          for (let i = 0; i < luma.length; i++) {
+            const d = luma[i] - prevLuma[i];
+            if (d > pixelThresh || d < -pixelThresh) changed++;
+          }
         }
         rawScore = changed / luma.length;
       }
@@ -333,10 +404,20 @@ async function* detectMotionGenerator(
         lastScoreEmitMs = now;
       }
 
+      // CC labeling on the mask. Skip when no motion was seen this
+      // frame (no mask, or zero changed pixels) — there's nothing to
+      // label, save the allocation. `regions` stays an empty array so
+      // consumers can `if (m.regions?.length) ...` without nullish dance.
+      let regions: MotionRegion[] | undefined;
+      if (regionsEnabled) {
+        regions = mask ? labelMotionRegions(mask, lumaW, lumaH, downsample, regionsMinPixels) : [];
+      }
+
       yield {
         frame,
         motionScore: smoothed,
         moving,
+        regions,
       };
     }
   } finally {
@@ -350,19 +431,57 @@ async function* detectMotionGenerator(
 // ─── Detector / OCR engine surface (stubs) ─────────────────────────────────
 
 type DetectOptions = {
-  /** Engine identifier. "yolo" / "ssd" / "rtdetr" planned. */
+  /**
+   * Detection engine. Today: `"yolo"` is wired (YOLOv8/YOLOv11 ONNX
+   * models, COCO 80-class default). `"ssd"` and `"rtdetr"` are reserved.
+   */
   engine: "yolo" | "ssd" | "rtdetr";
-  /** Path to an ONNX (or future GGUF) detector model. */
+  /** Path to the ONNX model (e.g. yolov8n.onnx). */
   model: string;
-  /** Score threshold for accepting a detection. Default 0.5. */
+  /** Per-detection score threshold in [0, 1]. Default 0.25 (YOLO default). */
   scoreThreshold?: number;
+  /** IoU threshold for NMS in [0, 1]. Default 0.45. */
+  iouThreshold?: number;
+  /**
+   * Override the class label list. Default: 80-class COCO. Length must
+   * match the model's classifier output dimension (override for custom-
+   * trained models).
+   */
+  classes?: string[];
+  /**
+   * Square input edge for the letterbox preprocess. Default 640 (the
+   * standard YOLOv8 export). Set to 320 / 416 / 1280 for the smaller /
+   * larger model variants.
+   */
+  inputSize?: number;
 };
 
 type RecognizeOptions = {
-  /** Engine identifier. */
+  /**
+   * OCR engine. Today: `"tesseract"` is wired (libtesseract.so.5 via
+   * FFI; system-installed). `"easyocr"` is reserved — pending an ONNX
+   * runtime vendor add.
+   */
   engine: "tesseract" | "easyocr";
-  /** Path to model files. */
-  model: string;
+  /**
+   * Tesseract language code(s), e.g. `"eng"` or `"eng+spa"`. Default
+   * `"eng"`. Each language needs its corresponding `*.traineddata` file
+   * present in the tessdata directory (`apt install tesseract-ocr-spa`,
+   * etc.).
+   */
+  language?: string;
+  /**
+   * Override the tessdata directory. Default: lets Tesseract probe
+   * `$TESSDATA_PREFIX` or its compiled-in default
+   * (`/usr/share/tesseract-ocr/5/tessdata` on Debian-class Linux).
+   */
+  datapath?: string;
+  /**
+   * Drop words/regions below this confidence in [0, 1]. Default 0.5 —
+   * filters Tesseract's noise floor without throwing away mid-quality
+   * reads.
+   */
+  minConfidence?: number;
 };
 
 type Detection = {
@@ -372,20 +491,58 @@ type Detection = {
   bbox: { x: number; y: number; width: number; height: number };
 };
 
-const DETECT_NOT_IMPL =
-  "parabun:vision.detect: object-detection engines (YOLO / SSD / RT-DETR) require ONNX runtime as a " +
-  "vendored dep — not yet wired. Tracked in the roadmap as parabun:vision (Tier 2).";
+const tesseractMod = require("./vision/tesseract.ts");
+const onnxMod = require("./vision/onnx.ts");
+const yoloMod = require("./vision/yolo.ts");
+const trackMod = require("./vision/track.ts");
 
-const RECOGNIZE_NOT_IMPL =
-  "parabun:vision.recognize: OCR engines (Tesseract / EasyOCR-class) need a vendored OCR runtime — " +
-  "not yet wired. Tracked in the roadmap as parabun:vision (Tier 2).";
-
-async function detect(_frame: RgbaFrame, _opts: DetectOptions): Promise<Detection[]> {
-  throw new Error(DETECT_NOT_IMPL);
+// Run object detection on one frame. Engine dispatch — `"yolo"` is
+// shipped today (YOLOv8/YOLOv11 ONNX models via vision/yolo.ts on top
+// of vision/onnx.ts). `"ssd"` and `"rtdetr"` are reserved — they fit
+// the same Session pipeline with model-specific decode + NMS, follow-
+// ups when a real model is wired.
+async function detect(frame: RgbaFrame, opts: DetectOptions): Promise<Detection[]> {
+  if (opts.engine === "yolo") {
+    return yoloMod.detect(frame, {
+      model: opts.model,
+      scoreThreshold: opts.scoreThreshold,
+      iouThreshold: opts.iouThreshold,
+      classes: opts.classes,
+      inputSize: opts.inputSize,
+    });
+  }
+  if (opts.engine === "ssd" || opts.engine === "rtdetr") {
+    throw new Error(
+      `parabun:vision.detect: ${opts.engine} engine is not wired yet. ` +
+        `Use { engine: "yolo" } today; ssd / rtdetr decode + NMS land as follow-ups.`,
+    );
+  }
+  throw new Error(`parabun:vision.detect: unsupported engine "${(opts as DetectOptions).engine}"`);
 }
 
-async function recognize(_frame: RgbaFrame, _opts: RecognizeOptions): Promise<string> {
-  throw new Error(RECOGNIZE_NOT_IMPL);
+// Run OCR on one frame. Engine dispatch — tesseract is shipped today
+// (libtesseract.so.5 via FFI, system-installed). easyocr is reserved for
+// a future ONNX-runtime path. Returns one Detection per recognized word
+// with its confidence and bounding box, in source-frame pixel coords.
+//
+// Sync work runs on the JS thread (Tesseract has no async API). Wrapped
+// in an async function to keep the public contract stable when an
+// off-thread variant lands.
+async function recognize(frame: RgbaFrame, opts: RecognizeOptions): Promise<Detection[]> {
+  if (opts.engine === "tesseract") {
+    return tesseractMod.recognize(frame, {
+      language: opts.language,
+      datapath: opts.datapath,
+      minConfidence: opts.minConfidence,
+    });
+  }
+  if (opts.engine === "easyocr") {
+    throw new Error(
+      "parabun:vision.recognize: easyocr engine is not wired yet (needs ONNX runtime as a system " +
+        'FFI binding). Use { engine: "tesseract" } today.',
+    );
+  }
+  throw new Error(`parabun:vision.recognize: unsupported engine "${(opts as RecognizeOptions).engine}"`);
 }
 
 // ─── Pixel helpers (mirrored from parabun:camera.toRgba) ───────────────────────
@@ -478,9 +635,136 @@ function downsampledLuma(rgba: Uint8Array, w: number, h: number, dw: number, dh:
   return out;
 }
 
+// Two-pass connected-components labeling on the binary motion mask
+// (4-connected). First pass assigns provisional labels and unions
+// equivalent ones via union-find; second pass collapses to roots and
+// accumulates per-component bounding boxes + pixel counts. Returns
+// regions that meet `minPixels`, scaled from the downsampled mask
+// space back to source-frame coordinates.
+//
+// O(n) for n = mask.length given path-compressed UF (effectively
+// linear in practice). Allocates one Int32Array(n), one parent[]
+// growing to ~max-label, and a per-root Map.
+function labelMotionRegions(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  downsample: number,
+  minPixels: number,
+): MotionRegion[] {
+  // labels[0] = sentinel for unlabeled. parent[0] same — never read.
+  const labels = new Int32Array(mask.length);
+  const parent: number[] = [0];
+  let nextLabel = 1;
+
+  // Pass 1: forward sweep. Look at the up + left already-labeled
+  // neighbors. New label only when both neighbors are 0; otherwise
+  // adopt one and (if both differ) union them.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!mask[i]) continue;
+      const upL = y > 0 ? labels[i - w] : 0;
+      const lfL = x > 0 ? labels[i - 1] : 0;
+      let lab: number;
+      if (upL && lfL) {
+        lab = upL < lfL ? upL : lfL;
+        unionLabels(parent, upL, lfL);
+      } else if (upL) {
+        lab = upL;
+      } else if (lfL) {
+        lab = lfL;
+      } else {
+        lab = nextLabel++;
+        parent.push(lab);
+      }
+      labels[i] = lab;
+    }
+  }
+
+  // Pass 2: per-pixel root lookup → bbox accumulation.
+  const bboxes = new Map<number, { minX: number; minY: number; maxX: number; maxY: number; count: number }>();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const lab = labels[i];
+      if (!lab) continue;
+      const root = findRoot(parent, lab);
+      let b = bboxes.get(root);
+      if (!b) {
+        bboxes.set(root, { minX: x, minY: y, maxX: x, maxY: y, count: 1 });
+      } else {
+        if (x < b.minX) b.minX = x;
+        if (y < b.minY) b.minY = y;
+        if (x > b.maxX) b.maxX = x;
+        if (y > b.maxY) b.maxY = y;
+        b.count++;
+      }
+    }
+  }
+
+  const regions: MotionRegion[] = [];
+  for (const b of bboxes.values()) {
+    if (b.count < minPixels) continue;
+    regions.push({
+      x: b.minX * downsample,
+      y: b.minY * downsample,
+      width: (b.maxX - b.minX + 1) * downsample,
+      height: (b.maxY - b.minY + 1) * downsample,
+      pixels: b.count,
+    });
+  }
+  return regions;
+}
+
+function findRoot(parent: number[], x: number): number {
+  while (parent[x] !== x) {
+    parent[x] = parent[parent[x]]; // path compression — half-path-compaction is enough for this scale
+    x = parent[x];
+  }
+  return x;
+}
+
+function unionLabels(parent: number[], a: number, b: number): void {
+  const ra = findRoot(parent, a);
+  const rb = findRoot(parent, b);
+  if (ra === rb) return;
+  // Union-by-min-label: the smaller label becomes the root, so labels
+  // monotonically point downward and `findRoot` is fast.
+  if (ra < rb) parent[rb] = ra;
+  else parent[ra] = rb;
+}
+
+// Lower-level escape hatch for users with custom ONNX models that don't
+// fit the YOLO/SSD/RT-DETR pre/post-processing in vision.detect. Returns
+// an onnx Session bound to the given model — `.run({ name: { data,
+// shape } })` performs inference, `.dispose()` (or `using`) releases it.
+// Same Tesseract-style FFI: requires a system-installed libonnxruntime
+// (see /runtime docs for the install paths).
+function onnx(modelPath: string) {
+  return new onnxMod.Session(modelPath);
+}
+function onnxIsAvailable(): boolean {
+  return onnxMod.isAvailable();
+}
+
 export default {
   frames,
   detectMotion,
   detect,
   recognize,
+  onnx,
+  onnxIsAvailable,
+  // YOLO-side primitives exposed for users with custom heads or
+  // non-YOLO models. `vision.detect` covers the standard YOLOv8 path;
+  // these are the building blocks if you need to mix and match.
+  yolo: yoloMod,
+  // Multi-frame object tracker. Stateful — instantiate one per stream:
+  //   const tk = vision.track();
+  //   for await (const frame of cam) {
+  //     const dets = await vision.detect(frame, …);
+  //     for (const t of tk.step(dets)) console.log(t.id, t.label, t.bbox);
+  //   }
+  track: trackMod.track,
+  Tracker: trackMod.Tracker,
 };

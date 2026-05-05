@@ -213,3 +213,149 @@ describe("parabun:vision motion signals (LYK-742/762)", () => {
     expect(m.alive.get()).toBe(false);
   });
 });
+
+// Connected-components motion regions: opt-in per-frame bbox segmentation
+// on the motion mask. Drives the detector with synthesized frames where
+// we know exactly which pixels changed so the bbox math is checkable.
+function withSquares(seq: number, w: number, h: number, squares: { bx: number; by: number; size: number }[]) {
+  const rgba = new Uint8Array(w * h * 4);
+  for (const { bx, by, size } of squares) {
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = ((by + y) * w + (bx + x)) * 4;
+        rgba[i] = 255;
+        rgba[i + 1] = 255;
+        rgba[i + 2] = 255;
+        rgba[i + 3] = 255;
+      }
+    }
+  }
+  return { rgba, width: w, height: h, timestampMs: seq * 33, sequence: seq };
+}
+
+async function* twoFrameStream(w: number, h: number, before: any[], after: any[]) {
+  yield withSquares(0, w, h, before);
+  yield withSquares(1, w, h, after);
+}
+
+describe("parabun:vision motion regions (CC labeling)", () => {
+  test("regions: undefined → MotionFrame.regions is undefined (default fast path)", async () => {
+    const vision = (await import("parabun:vision")).default;
+    const m = vision.detectMotion(twoFrameStream(32, 32, [], [{ bx: 4, by: 4, size: 8 }]), {
+      pixelThreshold: 32,
+      sensitivity: 0,
+      downsample: 1,
+      smoothing: 0,
+    });
+    const frames = [];
+    for await (const f of m) frames.push(f);
+    expect(frames).toHaveLength(2);
+    for (const f of frames) expect(f.regions).toBeUndefined();
+  });
+
+  test("two non-touching squares yield two regions in source-frame coords", async () => {
+    const vision = (await import("parabun:vision")).default;
+    const m = vision.detectMotion(
+      twoFrameStream(
+        64,
+        64,
+        [],
+        [
+          { bx: 10, by: 10, size: 8 },
+          { bx: 40, by: 40, size: 8 },
+        ],
+      ),
+      {
+        pixelThreshold: 32,
+        sensitivity: 0,
+        downsample: 1,
+        smoothing: 0,
+        regions: { minPixels: 4 },
+      },
+    );
+    const frames = [];
+    for await (const f of m) frames.push(f);
+    // Frame 0: no prevLuma yet → empty regions array.
+    expect(frames[0].regions).toEqual([]);
+    // Frame 1: two changed squares. Sort by x for stable comparison.
+    const r = [...(frames[1].regions ?? [])].sort((a, b) => a.x - b.x);
+    expect(r).toEqual([
+      { x: 10, y: 10, width: 8, height: 8, pixels: 64 },
+      { x: 40, y: 40, width: 8, height: 8, pixels: 64 },
+    ]);
+  });
+
+  test("two squares stacked vertically with adjacent edges merge into one region (4-connected)", async () => {
+    // Square at (10,10)+size 8 spans rows 10..17. Second at (10,18)+size 8
+    // spans rows 18..25. Row 17 (bottom of first) is 4-connected to row 18
+    // (top of second) at every shared column → one component.
+    const vision = (await import("parabun:vision")).default;
+    const m = vision.detectMotion(
+      twoFrameStream(
+        48,
+        48,
+        [],
+        [
+          { bx: 10, by: 10, size: 8 },
+          { bx: 10, by: 18, size: 8 },
+        ],
+      ),
+      {
+        pixelThreshold: 32,
+        sensitivity: 0,
+        downsample: 1,
+        smoothing: 0,
+        regions: true,
+      },
+    );
+    const frames = [];
+    for await (const f of m) frames.push(f);
+    expect(frames[1].regions).toHaveLength(1);
+    expect(frames[1].regions![0]).toEqual({ x: 10, y: 10, width: 8, height: 16, pixels: 128 });
+  });
+
+  test("downsample=4 scales region coords back to source-frame pixels", async () => {
+    const vision = (await import("parabun:vision")).default;
+    const m = vision.detectMotion(twoFrameStream(64, 64, [], [{ bx: 16, by: 16, size: 16 }]), {
+      pixelThreshold: 32,
+      sensitivity: 0,
+      downsample: 4,
+      smoothing: 0,
+      regions: { minPixels: 1 },
+    });
+    const frames = [];
+    for await (const f of m) frames.push(f);
+    expect(frames[1].regions).toHaveLength(1);
+    expect(frames[1].regions![0]).toMatchObject({ x: 16, y: 16, width: 16, height: 16 });
+  });
+
+  test("minPixels filter drops tiny noise blobs", async () => {
+    const vision = (await import("parabun:vision")).default;
+    const tinyFrame = (seq: number) => {
+      const rgba = new Uint8Array(32 * 32 * 4);
+      // one 2-pixel horizontal segment at (0,0)
+      for (let x = 0; x < 2; x++) {
+        const i = x * 4;
+        rgba[i] = 255;
+        rgba[i + 1] = 255;
+        rgba[i + 2] = 255;
+        rgba[i + 3] = 255;
+      }
+      return { rgba, width: 32, height: 32, timestampMs: seq * 33, sequence: seq };
+    };
+    async function* tinyStream() {
+      yield withSquares(0, 32, 32, []);
+      yield tinyFrame(1);
+    }
+    const m = vision.detectMotion(tinyStream(), {
+      pixelThreshold: 32,
+      sensitivity: 0,
+      downsample: 1,
+      smoothing: 0,
+      regions: { minPixels: 10 },
+    });
+    const frames = [];
+    for await (const f of m) frames.push(f);
+    expect(frames[1].regions).toEqual([]);
+  });
+});
