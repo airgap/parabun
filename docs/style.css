@@ -96,6 +96,34 @@ footer#footer a[href*="mintlify.com"] {
   width: 100% !important;
 }
 
+/* ─── Mobile scroll safety net ─────────────────────────────────────
+ *
+ * Mintlify's mobile drawer toggles inline `overflow: hidden` on
+ * <body> via Radix's scroll-lock. If route navigation interrupts
+ * the close animation (e.g. tapping a link while the drawer slides
+ * shut), the inline style sticks and touch scrolling on /docs/
+ * appears to "randomly stop working" until full reload.
+ *
+ * Defense: when no element on the page reports an open Radix state,
+ * force body scroll back. The `:has()` is the cheapest selector
+ * available (modern Mobile Safari + Chrome both support it). If
+ * support is missing the rule no-ops and we're back to the default
+ * (still-broken) Mintlify behavior — never worse.
+ *
+ * Also applies overscroll-behavior to keep iOS rubber-band from
+ * chaining into ancestor elements that have their own scroll. */
+html,
+body {
+  overscroll-behavior-y: contain;
+}
+
+@media (max-width: 768px) {
+  body:not(:has([data-state="open"])) {
+    overflow: auto !important;
+    padding-right: 0 !important;
+  }
+}
+
 a[href="/guides"],
 a[href="/docs/guides"] {
   margin-left: auto !important;
