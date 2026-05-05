@@ -186,6 +186,135 @@ describe.skipIf(SKIP)("parabun:video — ffmpeg decode", () => {
     await enc.close();
   });
 
+  test("extractAudio pulls 16 kHz mono PCM from a video with a sine soundtrack", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-audio", {});
+    const mp4Path = join(String(dir), "tone.mp4");
+    // 1 second of 440 Hz sine at 44.1 kHz mono, paired with a 32×32
+    // green video so we have a real container with both streams.
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=green:size=32x32:duration=1:rate=10",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1:sample_rate=44100",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(mp4Path);
+    const out = await video.extractAudio(new Uint8Array(bytes));
+    expect(out.sampleRate).toBe(16000);
+    expect(out.channels).toBe(1);
+    // 1-second clip resampled to 16 kHz mono → ~16000 samples; ffmpeg
+    // can drop a few at the edges so allow a 5% margin.
+    expect(out.samples.length).toBeGreaterThan(15000);
+    expect(out.samples.length).toBeLessThan(17000);
+    expect(out.durationMs).toBeGreaterThan(900);
+    expect(out.durationMs).toBeLessThan(1100);
+    // Confirm we got non-silent audio: peak should exceed a few
+    // thousand. (sine at 440 Hz at unit amplitude → samples in the
+    // tens of thousands range.)
+    let peak = 0;
+    for (let i = 0; i < out.samples.length; i++) {
+      const v = Math.abs(out.samples[i]);
+      if (v > peak) peak = v;
+    }
+    expect(peak).toBeGreaterThan(2000);
+  });
+
+  test("extractAudio respects custom sampleRate + stereo channels", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-audio-stereo", {});
+    const mp4Path = join(String(dir), "stereo.mp4");
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=blue:size=16x16:duration=1:rate=5",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=220:duration=1:sample_rate=44100,pan=stereo|c0=c0|c1=c0",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(mp4Path);
+    const out = await video.extractAudio(new Uint8Array(bytes), { sampleRate: 22050, channels: 2 });
+    expect(out.sampleRate).toBe(22050);
+    expect(out.channels).toBe(2);
+    // 22050 Hz × 2 channels × 1 second ≈ 44100 samples. Allow ±5%
+    // for resampler tail / encoder padding.
+    expect(out.samples.length).toBeGreaterThan(42000);
+    expect(out.samples.length).toBeLessThan(46500);
+  });
+
+  test("extractAudio rejects video-only input with a clean error", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-audio-none", {});
+    const mp4Path = join(String(dir), "silent.mp4");
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:size=16x16:duration=1:rate=5",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(mp4Path);
+    await expect(video.extractAudio(new Uint8Array(bytes))).rejects.toThrow(
+      /no audio track|Output file does not contain any stream/i,
+    );
+  });
+
   test("close() before iterating doesn't leak the subprocess", async () => {
     const video = (await import("parabun:video")).default;
     using dir = tempDir("video-close", {});

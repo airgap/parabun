@@ -1538,9 +1538,26 @@ async function decodeAll(bytes: Uint8Array | ArrayBuffer | string, opts?: Decode
   return out;
 }
 
+/**
+ * Pull the audio track of a video file as raw signed-16-bit PCM
+ * (interleaved per channel). Default 16 kHz mono — the canonical
+ * input shape for Whisper / parabun:speech.transcribe. Routes
+ * through the ffmpeg subprocess; throws "install ffmpeg" when the
+ * binary isn't on PATH or "input has no audio track" when the
+ * source is video-only.
+ */
+async function extractAudio(
+  bytes: Uint8Array | ArrayBuffer,
+  opts?: { sampleRate?: number; channels?: 1 | 2 },
+): Promise<{ samples: Int16Array; sampleRate: number; channels: number; durationMs: number }> {
+  const u8 = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
+  return ffmpegMod.extractAudio(u8, opts);
+}
+
 export default {
   probe,
   decode,
   encode,
   decodeAll,
+  extractAudio,
 };

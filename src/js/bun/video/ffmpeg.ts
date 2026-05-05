@@ -391,6 +391,95 @@ async function encode(opts: EncodeOptions): Promise<EncoderHandle> {
   };
 }
 
+// Extract the audio track of a video file as raw PCM. Returns
+// signed 16-bit interleaved samples — call .samples for an
+// Int16Array. The caller picks sample rate (default 16000, the
+// canonical Whisper input) and channel count (default 1).
+type ExtractAudioOptions = {
+  /** Target sample rate. Default 16000 (Whisper). */
+  sampleRate?: number;
+  /** Target channel count (1 = mono, 2 = stereo). Default 1. */
+  channels?: number;
+};
+
+async function extractAudio(
+  bytes: Uint8Array,
+  opts?: ExtractAudioOptions,
+): Promise<{ samples: Int16Array; sampleRate: number; channels: number; durationMs: number }> {
+  if (!(await probe())) throw new Error(NOT_INSTALLED_MSG);
+  const sampleRate = opts?.sampleRate ?? 16000;
+  const channels = opts?.channels ?? 1;
+  if (sampleRate <= 0) throw new RangeError("video.extractAudio: sampleRate must be > 0");
+  if (channels !== 1 && channels !== 2) throw new RangeError("video.extractAudio: channels must be 1 or 2");
+
+  const tmpPath = await writeTmp(bytes, "video-audio");
+  try {
+    // -vn drops the video stream; -f s16le -acodec pcm_s16le emits
+    // headerless little-endian 16-bit PCM. -ac and -ar resample +
+    // remix to the target shape so the caller doesn't have to.
+    const proc = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        tmpPath,
+        "-vn",
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "-ac",
+        String(channels),
+        "-ar",
+        String(sampleRate),
+        "pipe:1",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // Drain stdout chunks and stderr / exitCode in parallel. Using
+    // the reader API directly because proc.stdout's higher-level
+    // helpers (.bytes / .arrayBuffer) aren't available on the
+    // Bun.spawn ReadableStream shape that builtin modules see.
+    const stdoutChunks: Uint8Array[] = [];
+    let stdoutTotal = 0;
+    const stdoutPromise = (async () => {
+      const reader = proc.stdout.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        stdoutChunks.push(value);
+        stdoutTotal += value.length;
+      }
+    })();
+    const [, stderr, exitCode] = await Promise.all([stdoutPromise, proc.stderr.text(), proc.exited]);
+    if (exitCode !== 0) {
+      throw new Error(`video.extractAudio: ffmpeg exited ${exitCode}: ${stderr.trim()}`);
+    }
+    if (stdoutTotal === 0) {
+      throw new Error("video.extractAudio: input has no audio track");
+    }
+    // Concat into a fresh aligned ArrayBuffer so DataView attaches
+    // safely (chunk byteOffsets aren't guaranteed 2-byte aligned).
+    const aligned = new Uint8Array(stdoutTotal);
+    let off = 0;
+    for (const c of stdoutChunks) {
+      aligned.set(c, off);
+      off += c.length;
+    }
+    const view = new DataView(aligned.buffer);
+    const samples = new Int16Array(stdoutTotal / 2);
+    for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true);
+    const durationMs = Math.round((samples.length / channels / sampleRate) * 1000);
+    return { samples, sampleRate, channels, durationMs };
+  } finally {
+    try {
+      await nodeFs.unlink(tmpPath);
+    } catch {}
+  }
+}
+
 // Helper: write bytes to a fresh temp file and return its path.
 async function writeTmp(bytes: Uint8Array, prefix: string): Promise<string> {
   const path = nodePath.join(
@@ -405,4 +494,4 @@ const nodeOs = require("node:os");
 const nodePath = require("node:path");
 const nodeFs = require("node:fs/promises");
 
-export default { decode, encode, probeBytes, isAvailable: probe };
+export default { decode, encode, extractAudio, probeBytes, isAvailable: probe };
