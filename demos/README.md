@@ -14,6 +14,7 @@ Not everyone wants to leave TypeScript and that's 100% ok — every demo runs wi
 | `iot-http-state` ([.pts](iot-http-state.pts) / [.ts](iot-http-state.ts)) | Live GPIO state over HTTP — `/state` (JSON), `/events` (SSE), `POST /led/0\|1\|auto` for override. One `effect` writes the LED AND broadcasts to SSE clients | Linux SBC + GPIO + HTTP. |
 | `iot-sensor` ([.pts](iot-sensor.pts) / [.ts](iot-sensor.ts)) | Periodic sensor read → derived threshold → reactive log via `signals.fromInterval` + `derived` + `effect`. Same shape as a real i2c sensor with `sensor.smbus.readWord(...)` | None — simulated sensor. |
 | `iot-temp-warn` ([.pts](iot-temp-warn.pts) / [.ts](iot-temp-warn.ts)) | Pi CPU temp → warn / error thresholds → 2 LEDs + transition log. `--warn 65 --error 75` defaults; logs only when level changes | Linux SBC + GPIO (BCM17 warn / BCM27 err). Reads `/sys/class/thermal/thermal_zone0/temp` — no extra wiring on the sensor side. |
+| `iot-waterer` ([.pts](iot-waterer.pts) / [.ts](iot-waterer.ts)) | Multi-plant auto waterer: per-plant moisture signal → dry-threshold → pump pulse → cooldown FSM. Status row at 1 Hz, 3 example plants (basil / fern / succulent). `--simulate` works on any host; `--i2c <bus>` switches to ADS1115 reads | Optional. Real mode: I²C ADS1115 @ 0x48 + GPIO relay per plant (BCM17 / 27 / 22). |
 | `iot-dashboard` ([.pts](iot-dashboard.pts) / [.ts](iot-dashboard.ts)) | Simulated IoT control panel — `signal` declarations, auto-derived state, `effect`, `~> ... when ...` reactive binding (or `signals.effect(...)` writing into a property in TypeScript form) | None — pure simulation. |
 | `gpio-blink` ([.pts](gpio-blink.pts) / [.ts](gpio-blink.ts)) | Imperative LED blink + button-press exit using `for await (e of button.edges())` | Linux SBC + GPIO. `--seconds N` runs non-interactively. |
 | `i2c-scan` ([.pts](i2c-scan.pts) / [.ts](i2c-scan.ts)) | List every i2c bus + scan for ack'ing devices | Linux + `i2c-dev`. Skips buses the user doesn't have permission for. |
@@ -53,6 +54,7 @@ bun bd run demos/<demo>.pts [args]
 | `iot-http-state` | Pi 5 | ✅ Bun.serve + parabun signals; GET /state, POST /led/{0,1,auto}, override flow validated. SIGINT stops cleanly. |
 | `iot-sensor` | dev box | ✅ fromInterval drives signal at 5 Hz, derived recomputes isHot, effect logs threshold crossings. |
 | `iot-temp-warn` | dev box | ✅ both .pts and .ts parse + run; gpio.open() correctly errors out when the chip path is invalid. Pi-side validation pending hardware run. |
+| `iot-waterer` | dev box | ✅ both .pts and .ts run in `--simulate` mode; per-plant FSM correctly transitions ok→watering→cooldown→ok with the 0.05/tick oscillator (succulent triggers at 18%). Pi-side validation with a real ADS1115 + relays pending hardware run. |
 | `iot-dashboard` | dev box | ✅ derived signals + effect + ~> binding fire as expected through a 9-step sensor sweep. |
 | `csv-pipeline` | dev box | ✅ summarises numeric columns end-to-end |
 | `image-batch-resize` | dev box | ✅ 3-image fixture resize, 4.6 img/s |
