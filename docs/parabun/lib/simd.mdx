@@ -1,43 +1,93 @@
 ---
 title: para:simd
-description: Cross-runtime SIMD facade. Routes to parabun:simd on Parabun (native AVX2/NEON), to WebAssembly SIMD in browsers, and to a scalar fallback elsewhere.
+description: Cross-runtime SIMD primitives over typed arrays. Native AVX2/NEON via Highway in Parabun, WebAssembly SIMD in browsers, scalar fallback elsewhere.
 ---
 
 ```ts
 import simd from "para:simd";
 
 const xs = new Float32Array(1_000_000);
-const total = simd.sum(xs);     // dispatches to parabun:simd on Parabun, wasm SIMD in browsers
+const total = simd.sum(xs);
+const dot = simd.dot(xs, ys);
 ```
-
-## Routing
-
-| Runtime | Backend |
-|---|---|
-| Parabun | [`parabun:simd`](/parabun/runtime/simd) — native AVX2 / NEON via Highway |
-| Modern browser | WebAssembly 128-bit SIMD |
-| Node / Deno | npm `@para/simd-wasm` (WebAssembly SIMD) |
-| Fallback | scalar loop |
-
-The same call works everywhere; performance varies by backend.
 
 ## API
 
-Same surface as [`parabun:simd`](/parabun/runtime/simd):
+### Reductions
 
 ```ts
-simd.sum, simd.min, simd.max, simd.mean, simd.dot, simd.norm;
-simd.map, simd.filter, simd.zip, simd.scale, simd.affine;
-simd.add, simd.sub, simd.mul, simd.div;
+simd.sum(typed): number;
+simd.dot(a, b): number;
 ```
 
-## When to use which
+### Element-wise
 
-- **Inside Parabun**: prefer importing `parabun:simd` directly — same API, no facade indirection.
-- **Cross-runtime libraries**: import `para:simd` so callers in Node / browser get the right backend automatically.
-- **Browser-only code**: skip the facade, use `WebAssembly` SIMD directly (or [`@para/simd-wasm`](https://www.npmjs.com/package/@para/simd-wasm)).
+```ts
+simd.add(a, b): typeof a;
+simd.mul(a, b): typeof a;
+simd.addScalar(typed, k): typeof typed;
+simd.mulScalar(typed, k): typeof typed;
+simd.simdMap(typed, fn): typeof typed;     // pure + affine kernels
+```
+
+### Linear algebra
+
+```ts
+simd.matVec(matrix: Float32Array, vec: Float32Array, M: number, N: number): Float32Array;
+simd.topK(values: Float32Array, k: number): { indices: Int32Array; values: Float32Array };
+```
+
+### Memory
+
+```ts
+simd.alloc(byteLength): SharedArrayBuffer | ArrayBuffer;
+```
+
+Picks SAB when available so workers can share without copy; falls back to plain ArrayBuffer.
+
+### Capability probes
+
+```ts
+simd.hasDiscreteGPU(): boolean;          // true on Linux+NVIDIA / Windows+NVIDIA
+simd.hasUnifiedMemoryGPU(): boolean;     // true on Apple Silicon / Jetson
+simd.isWasmAvailable(): boolean;
+simd.isWasmBacked(): boolean;            // true when running on the wasm backend
+simd.wasmWinsForSize(n): boolean;        // heuristic: wasm faster than scalar at this N?
+```
+
+Useful for adaptive code paths in cross-runtime libraries — see [`para:parallel`](/parabun/lib/parallel) for similar adaptive crossover logic.
+
+## Backends
+
+| Runtime | Backend | Vector width |
+|---|---|---|
+| Parabun (x86_64 with AVX2) | Highway native | 256-bit |
+| Parabun (ARM64 NEON, Apple Silicon) | Highway native | 128-bit |
+| Modern browser | WebAssembly 128-bit SIMD | 128-bit |
+| Node / Deno | npm `@para/simd-wasm` | varies |
+| Fallback | scalar loop | scalar |
+
+Throughput is typically 4-8× scalar Float32 on the native backends. See the [streaming-etl demo](https://github.com/airgap/parabun/blob/main/demos/streaming-etl.ts) for a measured 5.8× speedup over `.map().reduce()`.
+
+## Pipeline pattern
+
+When chained with `|>` (Para syntax) or just sequential calls, each `mulScalar` / `addScalar` is one SIMD pass over the typed array:
+
+```ts
+// Para syntax
+const out = readings
+  |> simd.mulScalar(_, 1.8)
+  |> simd.addScalar(_, 32);
+
+// Plain TypeScript
+const stage1 = simd.mulScalar(readings, 1.8);
+const out = simd.addScalar(stage1, 32);
+```
+
+For maximum throughput on long chains, use [`para:pipeline`](/parabun/lib/pipeline) — its `compile()` helper detects affine sequences and collapses them into one pass.
 
 ## See also
 
-- [`parabun:simd`](/parabun/runtime/simd) — Parabun-native primitives
-- [`parabun:pipeline`](/parabun/runtime/pipeline) — `|>` operator fusion (Parabun-only)
+- [`para:parallel`](/parabun/lib/parallel) — for problems too big for one core
+- [`parabun:gpu`](/parabun/runtime/gpu) — for problems that fit a CUDA / Metal kernel
+- [`para:pipeline`](/parabun/lib/pipeline) — pipeline fusion runtime

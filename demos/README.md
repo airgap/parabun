@@ -22,6 +22,11 @@ Not everyone wants to leave TypeScript and that's 100% ok — every demo runs wi
 | `llm-chat` ([.pts](llm-chat.pts) / [.ts](llm-chat.ts)) | Stream tokens from a GGUF Llama checkpoint, report tokens-per-second | `LLM_FIXTURE=<path>.gguf`. |
 | `whisper-transcribe` ([.pts](whisper-transcribe.pts) / [.ts](whisper-transcribe.ts)) | Transcribe a WAV via `parabun:speech` (Whisper backend). | `WHISPER_MODEL=<path>/ggml-*.bin`, plus a 16 kHz mono WAV. |
 | `assistant-3line` ([.pts](assistant-3line.pts) / [.ts](assistant-3line.ts)) | Voice assistant with tools dispatch (mic → STT → LLM → TTS → speaker) | LLM gguf + Whisper bin + Piper onnx. |
+| `video-transcribe` ([.ts](video-transcribe.ts)) | End-to-end video → text: `video.extractAudio` → Whisper → stdout. Works on any container ffmpeg knows | `WHISPER_MODEL=<path>/ggml-*.bin` + `ffmpeg`. |
+| `camera-motion` ([.ts](camera-motion.ts)) | Smart-camera surveillance: V4L2 capture → `vision.detectMotion` → save JPEG snapshots when motion fires | Linux + `/dev/video0` USB cam. |
+| `parquet-etl` ([.ts](parquet-etl.ts)) | Synthetic 100K-row → Parquet (zstd + bloom on `user_id`/`region`) → 3 queries demonstrating bloom skip + stats pushdown | None — self-contained. |
+| `llm-serve` ([.ts](llm-serve.ts)) | OpenAI-compatible HTTP proxy in 12 lines (ollama-default port 11434). Drop-in for any OpenAI SDK / curl client | `LLM_FIXTURE=<path>.gguf`. |
+| `streaming-etl` ([.pts](streaming-etl.pts) / [.ts](streaming-etl.ts)) | 10M-element ETL pipeline: showcases `\|>` operator fusion collapsing 2 affine transforms + sum into one SIMD pass; reports speedup vs naive `.map().reduce()` | None — synthetic. |
 
 Four of the demos (`gpio-blink`, `i2c-scan`, `llm-chat`, `image-batch-resize`) use no parabun-specific sugar at all, so the `.pts` and `.ts` files are byte-identical apart from the extension — the dual listing is just so you can pick either one without breaking convention.
 

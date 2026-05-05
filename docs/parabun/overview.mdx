@@ -50,9 +50,9 @@ Everything Bun does, Parabun does. The Parabun additions are the differentiator.
 | Module | What it does |
 |---|---|
 | [`parabun:gpu`](/parabun/runtime/gpu) | CUDA + Metal: matVec / matmul / conv2D / scan / reduce / quantile / argmin/max / histogram / variance / custom MSL+CUDA kernels |
-| [`parabun:parallel`](/parabun/runtime/parallel) | pmap / preduce / psort (radix sort, parallel above thresholds), Mutex / Semaphore / pool |
-| [`parabun:simd`](/parabun/runtime/simd) | SIMD primitives over typed arrays |
-| [`parabun:pipeline`](/parabun/runtime/pipeline) | Pipeline runtime supporting `|>` operator fusion |
+| [`para:parallel`](/parabun/lib/parallel) | pmap / preduce / psort (radix sort, parallel above thresholds), Mutex / Semaphore / pool |
+| [`para:simd`](/parabun/lib/simd) | SIMD primitives over typed arrays (cross-runtime: native, wasm, scalar) |
+| [`para:pipeline`](/parabun/lib/pipeline) | Pipeline runtime supporting `|>` operator chains |
 
 ### Para libraries
 
@@ -60,9 +60,11 @@ Everything Bun does, Parabun does. The Parabun additions are the differentiator.
 |---|---|
 | [`para:arrow`](/parabun/lib/arrow) | In-memory Arrow + IPC reader/writer + Parquet (incl. INT96, FLBA, List, Struct, Map, bloom filters, predicate pushdown, multi-row-group) |
 | [`para:csv`](/parabun/lib/csv) | RFC 4180 CSV with parallel-mode option |
-| [`para:decimal`](/parabun/lib/decimal) | Exact-decimal arithmetic backing the `0.1d` literal |
+| [`para:decimal`](/parabun/lib/decimal) | Exact-decimal arithmetic backing the `0.1d` literal (npm package; not a runtime builtin) |
+| [`para:parallel`](/parabun/lib/parallel) | Worker-pool primitives: pmap / preduce / psort + Mutex / Semaphore |
+| [`para:pipeline`](/parabun/lib/pipeline) | `\|>` operator runtime helpers + affine-chain compile |
 | [`para:signals`](/parabun/lib/signals) | Reactive signals (Solid-style) |
-| [`para:simd`](/parabun/lib/simd) | Cross-runtime SIMD facade |
+| [`para:simd`](/parabun/lib/simd) | Cross-runtime SIMD primitives |
 
 ## Installation
 

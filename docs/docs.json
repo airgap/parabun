@@ -227,12 +227,7 @@
           {
             "group": "Compute",
             "icon": "zap",
-            "pages": [
-              "/parabun/runtime/gpu",
-              "/parabun/runtime/parallel",
-              "/parabun/runtime/simd",
-              "/parabun/runtime/pipeline"
-            ]
+            "pages": ["/parabun/runtime/gpu"]
           },
           {
             "group": "Para libraries",
@@ -241,6 +236,8 @@
               "/parabun/lib/arrow",
               "/parabun/lib/csv",
               "/parabun/lib/decimal",
+              "/parabun/lib/parallel",
+              "/parabun/lib/pipeline",
               "/parabun/lib/signals",
               "/parabun/lib/simd",
               "/parabun/lib/parabun-benches"

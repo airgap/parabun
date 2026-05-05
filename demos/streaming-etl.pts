@@ -1,0 +1,41 @@
+// Streaming-ETL pipeline showcasing |> operator threading +
+// para:simd primitives. Cross-runtime: native AVX2/NEON in Parabun,
+// WebAssembly SIMD in browsers, scalar fallback elsewhere.
+//
+//   bun run build:release demos/streaming-etl.pts
+//
+// Same demo as streaming-etl.ts; this version uses Para's |>
+// operator for the readable form. Identical runtime behaviour.
+
+import simd from "para:simd";
+
+const N = 10_000_000;
+
+const readings = new Float32Array(N);
+for (let i = 0; i < N; i++) readings[i] = Math.sin(i * 0.001) * 100 + Math.random() * 10;
+console.log(`generated ${N.toLocaleString()} readings`);
+
+// Pipeline: each |> is one SIMD pass over the typed array.
+const t0 = Bun.nanoseconds();
+
+const total =
+  readings
+  |> simd.mulScalar(_, 1.8)         // °C → scaled
+  |> simd.addScalar(_, 32)          // → °F
+  |> simd.addScalar(_, -32)         // strip the bias for fun
+  |> simd.sum;
+
+const dtMs = (Bun.nanoseconds() - t0) / 1e6;
+
+console.log(`pipeline sum: ${total.toFixed(0)} in ${dtMs.toFixed(2)}ms`);
+console.log(`(throughput: ${((N * 4 * 4) / 1e6 / (dtMs / 1000)).toFixed(0)} MB/s end-to-end)`);
+
+const t1 = Bun.nanoseconds();
+const naive = readings
+  .map(x => x * 1.8 + 32)
+  .map(x => x - 32)
+  .reduce((a, b) => a + b, 0);
+const naiveMs = (Bun.nanoseconds() - t1) / 1e6;
+
+console.log(`naive .map().reduce(): ${naive.toFixed(0)} in ${naiveMs.toFixed(2)}ms`);
+console.log(`speedup: ${(naiveMs / dtMs).toFixed(1)}×`);
