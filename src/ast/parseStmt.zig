@@ -1804,6 +1804,141 @@ pub fn ParseStmt(
             }, parallel_range.loc);
         }
 
+        // Parabun: parse `parallel using NAME = EXPR, NAME = EXPR, …;` and
+        // `parallel await using NAME = EXPR, NAME = EXPR, …;`. Each RHS
+        // runs in parallel via `Promise.all([...])`; resolved values are
+        // then bound as `using` / `await using` so `Symbol.dispose` /
+        // `Symbol.asyncDispose` run at scope exit.
+        //
+        //   parallel await using a = f(), b = g();
+        //     → const [__pu_0, __pu_1] = await Promise.all([f(), g()]);
+        //       await using a = __pu_0, b = __pu_1;
+        //
+        // Both lowered statements need to land in the *enclosing* scope
+        // (so subsequent code can reference `a`, `b`), so we wrap them
+        // in a transparent `S.Block` that the visit pass splices into
+        // its parent without pushing a new scope.
+        //
+        // At entry: `parallel`/`para` and `using`/`await using` have
+        // both been consumed; p.lexer is on the first identifier of the
+        // binding list.
+        fn parseParallelUsingStmt(p: *P, parallel_range: logger.Range, opts: *ParseStatementOptions, is_await_using: bool) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(parallel_range.loc);
+            }
+
+            // Collect: ordered list of (name_loc, name_ref, RHS expr).
+            var names = ListManaged(struct { loc: logger.Loc, ref: js_ast.Ref }).init(p.allocator);
+            var values = ListManaged(Expr).init(p.allocator);
+
+            while (true) {
+                if (p.lexer.token != .t_identifier) {
+                    try p.lexer.expect(.t_identifier);
+                    return error.SyntaxError;
+                }
+                const name_loc = p.lexer.loc();
+                const name = p.lexer.identifier;
+                try p.lexer.next();
+
+                if (comptime is_typescript_enabled) {
+                    if (p.lexer.token == .t_colon) {
+                        try p.lexer.next();
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                }
+
+                try p.lexer.expect(.t_equals);
+                const rhs = try p.parseExpr(.comma);
+
+                // The user-visible name is bound by the `using` decl
+                // below, so register it as a `using` symbol (matching
+                // the kind for correct dispose-tracking by the visit
+                // pass).
+                const sym_kind: js_ast.Symbol.Kind = if (is_await_using) .constant else .constant;
+                const ref = try p.declareSymbol(sym_kind, name_loc, name);
+                try names.append(.{ .loc = name_loc, .ref = ref });
+                try values.append(rhs);
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (names.items.len == 0) {
+                const which = if (is_await_using) "`parallel await using`" else "`parallel using`";
+                try p.log.addRangeErrorFmt(p.source, parallel_range, p.allocator, "{s} requires at least one declaration", .{which});
+                return error.SyntaxError;
+            }
+
+            // Synthesize one temp ref per binding: __pu_<i>.
+            const temps = bun.handleOom(p.allocator.alloc(js_ast.Ref, names.items.len));
+            for (0..names.items.len) |i| {
+                const temp_name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__pu_{d}", .{i}));
+                temps[i] = try p.declareSymbol(.constant, parallel_range.loc, temp_name);
+            }
+
+            // Build:  await Promise.all([rhs0, rhs1, ...])
+            const promise_id = p.newExpr(E.Identifier{ .ref = try p.storeNameInRef("Promise") }, parallel_range.loc);
+            const promise_all_dot = p.newExpr(E.Dot{
+                .target = promise_id,
+                .name = "all",
+                .name_loc = parallel_range.loc,
+            }, parallel_range.loc);
+            const values_array = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(try values.toOwnedSlice()),
+            }, parallel_range.loc);
+            const promise_all_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            promise_all_args[0] = values_array;
+            const promise_all_call = p.newExpr(E.Call{
+                .target = promise_all_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(promise_all_args),
+            }, parallel_range.loc);
+            const await_expr = p.newExpr(E.Await{ .value = promise_all_call }, parallel_range.loc);
+
+            // Statement 1:  const [__pu_0, __pu_1, ...] = <await Promise.all>
+            const temp_items = bun.handleOom(p.allocator.alloc(js_ast.ArrayBinding, temps.len));
+            for (temps, 0..) |t, i| {
+                temp_items[i] = .{ .binding = p.b(B.Identifier{ .ref = t }, parallel_range.loc) };
+            }
+            const temp_array_binding = p.b(B.Array{
+                .items = temp_items,
+                .has_spread = false,
+                .is_single_line = true,
+            }, parallel_range.loc);
+            const temp_decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            temp_decls[0] = .{ .binding = temp_array_binding, .value = await_expr };
+            const temp_const_stmt = p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(temp_decls),
+            }, parallel_range.loc);
+
+            // Statement 2:  using NAME0 = __pu_0, NAME1 = __pu_1, ...
+            //          (or  await using NAME0 = __pu_0, NAME1 = __pu_1, ...)
+            const using_decls = bun.handleOom(p.allocator.alloc(G.Decl, names.items.len));
+            for (names.items, temps, 0..) |entry, t, i| {
+                using_decls[i] = .{
+                    .binding = p.b(B.Identifier{ .ref = entry.ref }, entry.loc),
+                    .value = p.newExpr(E.Identifier{ .ref = t }, entry.loc),
+                };
+            }
+            const using_stmt = p.s(S.Local{
+                .kind = if (is_await_using) .k_await_using else .k_using,
+                .decls = G.Decl.List.fromOwnedSlice(using_decls),
+                .is_export = opts.is_export,
+            }, parallel_range.loc);
+
+            // Wrap both in a transparent block so the visit pass splices
+            // them into the enclosing scope instead of creating a new one.
+            const inner = bun.handleOom(p.allocator.alloc(Stmt, 2));
+            inner[0] = temp_const_stmt;
+            inner[1] = using_stmt;
+            return p.s(S.Block{
+                .stmts = inner,
+                .is_transparent = true,
+            }, parallel_range.loc);
+        }
+
         // Parabun: best-effort walk of `expr` looking for any `e_identifier`
         // whose name appears in `p.signal_bound_names`. Stops at nested
         // arrows/functions/classes — those introduce new scopes and it's
@@ -2260,6 +2395,35 @@ pub fn ParseStmt(
                 if (is_let_form or is_const_form) {
                     try p.lexer.next();
                     return try parseParallelLetStmt(p, parallel_range, opts);
+                }
+                // Parabun: `parallel using NAME = …` and
+                // `parallel await using NAME = …`. Each RHS runs via
+                // Promise.all, but the resolved values are bound as
+                // `using`/`await using` so Symbol.dispose / asyncDispose
+                // run at scope exit. `await using` is the safer default
+                // for resources that may need async cleanup.
+                const is_using_form = !p.lexer.has_newline_before and
+                    p.lexer.token == .t_identifier and
+                    strings.eqlComptime(p.lexer.raw(), "using");
+                const is_await_using_form = !p.lexer.has_newline_before and
+                    p.lexer.token == .t_identifier and
+                    strings.eqlComptime(p.lexer.raw(), "await");
+                if (is_using_form) {
+                    try p.lexer.next();
+                    return try parseParallelUsingStmt(p, parallel_range, opts, false);
+                }
+                if (is_await_using_form) {
+                    const await_saved = p.lexer;
+                    try p.lexer.next();
+                    if (!p.lexer.has_newline_before and
+                        p.lexer.token == .t_identifier and
+                        strings.eqlComptime(p.lexer.raw(), "using"))
+                    {
+                        try p.lexer.next();
+                        return try parseParallelUsingStmt(p, parallel_range, opts, true);
+                    }
+                    // Was just `parallel await foo` — not a using form.
+                    p.lexer.restore(&await_saved);
                 }
                 p.lexer.restore(&saved);
             }

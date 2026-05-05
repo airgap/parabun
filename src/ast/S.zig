@@ -1,6 +1,15 @@
 pub const Block = struct {
     stmts: StmtNodeList,
     close_brace_loc: logger.Loc = logger.Loc.Empty,
+
+    // Parabun: a synthetic block that should not introduce a lexical
+    // scope. Set by desugarings that need to emit multiple statements
+    // at the parent's scope (e.g. `parallel using a = …, b = …;` lowers
+    // to a temp const + a using decl, both of which must bind in the
+    // surrounding scope so subsequent code can see them). The visit
+    // pass splices these inner statements into the parent's stmt list
+    // and drops the block wrapper.
+    is_transparent: bool = false,
 };
 
 pub const SExpr = struct {

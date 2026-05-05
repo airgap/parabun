@@ -100,6 +100,84 @@ describe("Parabun parallel — statement form", () => {
   });
 });
 
+describe("Parabun parallel — using statement form", () => {
+  // Native `using` only — JSC supports them, but the default downlevel
+  // path rewrites them as try/finally + __using helper which moves the
+  // bindings into the inner try block. The desugaring is correct in
+  // either case; the bun-target output is just easier to assert against.
+  const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
+
+  it("`parallel using` lowers to const-destructure + using", () => {
+    const out = transpiler.transformSync("async function f() { parallel using a = g(), b = h(); return a; }");
+    // 1. fan-out via Promise.all
+    expect(out).toContain("await Promise.all([");
+    // 2. temps land in a const destructure, NOT the user names
+    expect(out).toMatch(/const \[__pu_0, __pu_1\]\s*=\s*await Promise\.all/);
+    // 3. user names bound by a single `using` decl, two declarators
+    expect(out).toMatch(/using a = __pu_0, b = __pu_1/);
+    // 4. `using` (sync), not `await using`
+    expect(out).not.toMatch(/await using a/);
+  });
+
+  it("`parallel await using` lowers to const-destructure + await using", () => {
+    const out = transpiler.transformSync("async function f() { parallel await using a = g(), b = h(); return a; }");
+    expect(out).toContain("await Promise.all([");
+    expect(out).toMatch(/const \[__pu_0, __pu_1\]\s*=\s*await Promise\.all/);
+    expect(out).toMatch(/await using a = __pu_0, b = __pu_1/);
+  });
+
+  it("transparent block — names are bound in the enclosing scope", () => {
+    // Critical: `use(a, b)` after the parallel-using stmt must be able
+    // to reference `a`/`b`. If we wrap the desugaring in an opaque
+    // `{ … }` block, the names get scoped to the block and `use(a, b)`
+    // becomes a ReferenceError.
+    const out = transpiler.transformSync("async function f() { parallel using a = g(), b = h(); use(a, b); }");
+    // No extra { } wrapping the const+using block.
+    expect(out).toMatch(/using a = __pu_0, b = __pu_1;\s*use\(a, b\)/);
+  });
+
+  it("three-binding form (the README example)", () => {
+    const out = transpiler.transformSync(`
+      async function main() {
+        parallel await using mic  = audio.capture(),
+                              wsp  = WhisperModel.load("x"),
+                              chat = LLM.load("y");
+        await bot.run({ mic, wsp, chat });
+      }
+    `);
+    expect(out).toMatch(/const \[__pu_0, __pu_1, __pu_2\] = await Promise\.all/);
+    expect(out).toMatch(/await using mic = __pu_0, wsp = __pu_1, chat = __pu_2/);
+    expect(out).toContain("audio.capture()");
+    expect(out).toContain('WhisperModel.load("x")');
+    expect(out).toContain('LLM.load("y")');
+  });
+
+  it("`para await using` shorthand", () => {
+    const out = transpiler.transformSync("async function f() { para await using a = g(), b = h(); return a; }");
+    expect(out).toMatch(/const \[__pu_0, __pu_1\]\s*=\s*await Promise\.all/);
+    expect(out).toMatch(/await using a = __pu_0, b = __pu_1/);
+  });
+
+  it("typescript annotation on the binding is allowed and stripped", () => {
+    const out = transpiler.transformSync(
+      "async function f() { parallel await using x: Disposable = make(); return x; }",
+    );
+    expect(out).toMatch(/await using x = __pu_0/);
+    expect(out).not.toContain(": Disposable");
+  });
+
+  it("`parallel using` (no decls) errors", () => {
+    expect(() => transpiler.transformSync("async function f() { parallel using; }")).toThrow();
+  });
+
+  it("`parallel await foo` (no `using` after) is not the using form", () => {
+    // Should leave `parallel` as an identifier (call) since `await foo`
+    // doesn't match the parallel-using shape.
+    const out = transpiler.transformSync("async function f() { parallel(await foo()); }");
+    expect(out).toContain("parallel(");
+  });
+});
+
 describe("Parabun parallel — runtime end-to-end", () => {
   test("expression form resolves three Promise.resolve values", async () => {
     using dir = tempDir("parallel-exprform-runtime", {

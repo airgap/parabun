@@ -951,6 +951,17 @@ pub fn VisitStmt(
                 try stmts.append(stmt.*);
             }
             pub fn s_block(noalias p: *P, noalias stmts: *ListManaged(Stmt), noalias stmt: *Stmt, noalias data: *S.Block) !void {
+                // Parabun: transparent block — no scope, splice inner
+                // stmts directly into the parent stmt list. Used by the
+                // `parallel using`/`parallel await using` desugaring,
+                // which needs to emit a temp const + a using decl at
+                // the parent's scope without introducing a fresh block.
+                if (data.is_transparent) {
+                    var _stmts = ListManaged(Stmt).fromOwnedSlice(p.allocator, data.stmts);
+                    p.visitStmts(&_stmts, .none) catch unreachable;
+                    for (_stmts.items) |inner| stmts.append(inner) catch unreachable;
+                    return;
+                }
                 {
                     p.pushScopeForVisitPass(.block, stmt.loc) catch unreachable;
 

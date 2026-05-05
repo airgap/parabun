@@ -66,6 +66,7 @@ pub fn NewParser_(
         const parse_zig = @import("./parse.zig").Parse(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only);
         pub const parsePrefix = parse_zig.parsePrefix;
         pub const parseSuffix = parse_zig.parseSuffix;
+        pub const parseLeadingDotLambda = parse_zig.parseLeadingDotLambda;
         pub const parseStmt = parse_zig.parseStmt;
         pub const parseProperty = parse_zig.parseProperty;
         pub const parseFn = parse_zig.parseFn;

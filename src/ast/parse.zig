@@ -10,6 +10,10 @@ pub fn Parse(
 
         pub const parsePrefix = @import("./parsePrefix.zig").ParsePrefix(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parsePrefix;
         pub const parseSuffix = @import("./parseSuffix.zig").ParseSuffix(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseSuffix;
+        // Parabun: bare-dot lambda sugar — exposed so parseCallArgs can
+        // synthesize `(__pcv) => __pcv.<chain>` when an argument starts
+        // with `.`. Same machinery used by chain-op handlers.
+        pub const parseLeadingDotLambda = @import("./parseSuffix.zig").ParseSuffix(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseLeadingDotChainHandler;
         pub const parseStmt = @import("./parseStmt.zig").ParseStmt(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseStmt;
         pub const parseProperty = @import("./parseProperty.zig").ParseProperty(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseProperty;
         pub const parseFn = @import("./parseFn.zig").ParseFn(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseFn;
@@ -276,7 +280,17 @@ pub fn Parse(
                     // p.mark_syntax_feature(compat.rest_argument, p.lexer.range());
                     try p.lexer.next();
                 }
-                var arg = try p.parseExpr(.comma);
+                // Parabun: bare-dot lambda sugar in argument position —
+                // `map(.score)` desugars to `map(__pcv => __pcv.score)`.
+                // Same rule used after chain operators (`..> .json()`).
+                // Only triggered when a non-spread arg starts with `.`,
+                // which is otherwise a syntax error so this disambiguates
+                // cleanly. Numeric literals like `.5` lex as a single
+                // t_numeric_literal, not t_dot, so they're unaffected.
+                var arg = if (!is_spread and p.lexer.token == .t_dot)
+                    try p.parseLeadingDotLambda(loc)
+                else
+                    try p.parseExpr(.comma);
                 if (is_spread) {
                     arg = p.newExpr(E.Spread{ .value = arg }, loc);
                 }

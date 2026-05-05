@@ -837,21 +837,33 @@ pub fn ParseSuffix(
             return .next;
         }
         // Parabun: leading-dot sugar for chain-op handlers — `..> .json()` /
-        // `..! .message`. The leading `.` is unambiguous in chain-op handler
-        // position (the chain operator already consumed everything to the
-        // left), so we synthesize an arrow `(__pcv) => __pcv.<chain>` whose
-        // body is the dot-prefixed property/call chain. The synthesized param
-        // name is `__pcv` (Para chain value) — chosen to match the `__pb0`
-        // family of Parabun synthetic identifiers and to be unlikely to
-        // collide with any user identifier.
+        // `..! .message`, AND for general argument positions —
+        // `map(.score)` / `filter(.active)`. The leading `.` is unambiguous
+        // in either position (a chain operator or a comma/open-paren has
+        // already consumed everything to the left), so we synthesize an
+        // arrow `(__pcv) => __pcv.<chain>` whose body is the dot-prefixed
+        // property/call chain. The synthesized param name is `__pcv` (Para
+        // chain value) — chosen to match the `__pb0` family of Parabun
+        // synthetic identifiers and to be unlikely to collide with any user
+        // identifier.
         //
         // The lexer is positioned at the leading `.` on entry; on return the
         // arrow body has consumed the full member/call chain via parseSuffix
         // run with `in_chain_op_arrow_rhs = true`, so the next chain op (if
         // any) terminates the body.
-        fn parseLeadingDotChainHandler(p: *P, op_loc: logger.Loc) anyerror!Expr {
-            const arrow_loc = op_loc;
+        pub fn parseLeadingDotChainHandler(p: *P, op_loc: logger.Loc) anyerror!Expr {
             const dot_loc = p.lexer.loc();
+            // Scope locations must be strictly increasing
+            // (pushScopeForParsePass enforces it). Chain-op callers pass
+            // op_loc = chain-operator loc, naturally < dot_loc. Arg-
+            // position callers pass op_loc = dot_loc (no separate
+            // operator); fabricate an arrow_loc one byte before the dot
+            // — that's the `(` / `,` / whitespace immediately preceding
+            // it, which no other path pushes a scope at.
+            const arrow_loc: logger.Loc = if (op_loc.start < dot_loc.start)
+                op_loc
+            else
+                .{ .start = if (dot_loc.start > 0) dot_loc.start - 1 else 0 };
 
             // Push the arrow's scopes for the visit pass — same dance as the
             // ~> / -> arrow synthesis above.

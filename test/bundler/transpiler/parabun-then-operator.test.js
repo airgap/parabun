@@ -195,6 +195,72 @@ describe("Parabun ..> (then operator)", () => {
         expect(out).not.toContain("__pcv");
       });
     });
+
+    describe("bare-dot lambda in argument position", () => {
+      // Generalizes the chain-op leading-dot sugar to all call-argument
+      // positions: `map(.score)` desugars to `map(__pcv => __pcv.score)`,
+      // same as `..> .json()`. Disambiguation rule: a leading `.` at
+      // expression start is otherwise a syntax error, so promoting it to
+      // a unary lambda is unambiguous.
+
+      it("map(.score) lowers to map(__pcv => __pcv.score)", () => {
+        const out = transpiler.transformSync("const ys = map(xs, .score);");
+        expect(out).toContain("map(xs,");
+        expect(out).toMatch(/=>\s*\S+\.score/);
+      });
+
+      it("filter(.active) lowers to a property-access predicate", () => {
+        const out = transpiler.transformSync("const ys = filter(xs, .active);");
+        expect(out).toContain("filter(xs,");
+        expect(out).toMatch(/=>\s*\S+\.active/);
+      });
+
+      it(".score() — argless method call works as the whole arg", () => {
+        const out = transpiler.transformSync("const r = run(.start());");
+        expect(out).toMatch(/=>\s*\S+\.start\(\)/);
+      });
+
+      it(".users[0].id — chained property + index + property", () => {
+        const out = transpiler.transformSync("const r = pick(.users[0].id);");
+        expect(out).toMatch(/=>\s*\S+\.users\[0\]\.id/);
+      });
+
+      it("multiple bare-dot args in one call", () => {
+        const out = transpiler.transformSync("zip(xs, .a, .b);");
+        // Two synthetic arrows, one per bare-dot arg.
+        const arrowMatches = out.match(/=>\s*\S+\.(a|b)/g) || [];
+        expect(arrowMatches.length).toBe(2);
+      });
+
+      it("mixed: bare-dot arg next to a normal expression arg", () => {
+        const out = transpiler.transformSync("reduce(xs, .price, 0);");
+        expect(out).toMatch(/=>\s*\S+\.price/);
+        expect(out).toContain("0");
+      });
+
+      it("numeric literal .5 is unaffected (not a leading-dot lambda)", () => {
+        // `.5` lexes as a single numeric-literal token, not t_dot, so the
+        // sugar must not fire. This is the disambiguation invariant.
+        const out = transpiler.transformSync("const r = round(.5);");
+        // The arg should still be a number, not an arrow.
+        expect(out).not.toContain("=>");
+        expect(out).toContain("0.5");
+      });
+
+      it("spread arg ...xs is unaffected by the sugar", () => {
+        const out = transpiler.transformSync("const r = f(...xs);");
+        expect(out).toContain("...");
+        expect(out).not.toContain("=>");
+      });
+
+      it("nested call: outer arg uses bare-dot, inner uses normal arrow", () => {
+        const out = transpiler.transformSync("map(xs, .filter(y => y > 0));");
+        // Outer arg: __pcv => __pcv.filter(...)
+        expect(out).toMatch(/=>\s*\S+\.filter\(/);
+        // Inner arrow `y => y > 0` is preserved literally.
+        expect(out).toContain("y > 0");
+      });
+    });
   });
 
   describe("end-to-end runtime", () => {
