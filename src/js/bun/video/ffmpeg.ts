@@ -237,6 +237,160 @@ async function decode(bytes: Uint8Array, opts?: StreamOptions): Promise<FrameIte
   };
 }
 
+// Spawn ffmpeg in encoder mode: receives raw RGBA over stdin,
+// writes the encoded container to disk (or to a temp file we read
+// back when no path is supplied). Returns a writer with pushFrame
+// + finalize.
+type EncodeOptions = {
+  codec: string; // ffmpeg codec name, e.g. "libx264", "libvpx-vp9"
+  containerExt: string; // file extension, e.g. "mp4", "webm"
+  width: number;
+  height: number;
+  fps: number;
+  bitrate?: number; // bps; default leaves ffmpeg's CRF default
+  preset?: string; // x264 preset; default "medium"
+  pixFmt?: string; // output pixel format; default "yuv420p"
+  /** Output file path. If omitted, encode buffers to a temp file. */
+  path?: string;
+};
+
+type EncoderHandle = {
+  pushFrame(rgba: Uint8Array): Promise<void>;
+  finalize(): Promise<Uint8Array | undefined>;
+  close(): Promise<void>;
+  framesPushed: number;
+};
+
+async function encode(opts: EncodeOptions): Promise<EncoderHandle> {
+  if (!(await probe())) throw new Error(NOT_INSTALLED_MSG);
+  const expectedFrameSize = opts.width * opts.height * 4;
+  // Final destination: caller-provided path or a temp file we'll
+  // read + delete on finalize.
+  const ownsPath = opts.path === undefined;
+  const outPath =
+    opts.path ??
+    nodePath.join(
+      nodeOs.tmpdir(),
+      `video-encode-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.${opts.containerExt}`,
+    );
+
+  const args: string[] = [
+    "-v",
+    "error",
+    "-y",
+    // Input: raw RGBA over stdin.
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "rgba",
+    "-s",
+    `${opts.width}x${opts.height}`,
+    "-r",
+    String(opts.fps),
+    "-i",
+    "pipe:0",
+    // Output: caller's chosen codec + container, derived pix_fmt.
+    "-c:v",
+    opts.codec,
+    "-pix_fmt",
+    opts.pixFmt ?? "yuv420p",
+  ];
+  if (opts.bitrate !== undefined && opts.bitrate > 0) {
+    args.push("-b:v", String(opts.bitrate));
+  }
+  if (opts.preset && opts.codec === "libx264") {
+    args.push("-preset", opts.preset);
+  }
+  args.push(outPath);
+
+  const proc = Bun.spawn({
+    cmd: ["ffmpeg", ...args],
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+
+  let stderrAccum = "";
+  void (async () => {
+    try {
+      const reader = proc.stderr.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        stderrAccum += decoder.decode(value, { stream: true });
+        if (stderrAccum.length > 32 * 1024) stderrAccum = "…" + stderrAccum.slice(-32 * 1024);
+      }
+    } catch {}
+  })();
+
+  let framesPushed = 0;
+  let closed = false;
+  // Bun.spawn's `stdin` is a FileSink (write + flush + end) when set
+  // to "pipe" — not a WritableStream. No getWriter().
+  const stdin = proc.stdin as any;
+
+  async function pushFrame(rgba: Uint8Array): Promise<void> {
+    if (closed) throw new Error("parabun:video.encode: pushFrame after finalize/close");
+    if (rgba.length !== expectedFrameSize) {
+      throw new RangeError(`parabun:video.encode: frame length ${rgba.length} ≠ width*height*4 (${expectedFrameSize})`);
+    }
+    stdin.write(rgba);
+    if (typeof stdin.flush === "function") await stdin.flush();
+    framesPushed++;
+  }
+
+  async function finalize(): Promise<Uint8Array | undefined> {
+    if (closed) return undefined;
+    closed = true;
+    try {
+      if (typeof stdin.end === "function") await stdin.end();
+      else if (typeof stdin.close === "function") await stdin.close();
+    } catch {}
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      throw new Error(`parabun:video.encode: ffmpeg exited ${exitCode}: ${stderrAccum.trim()}`);
+    }
+    if (ownsPath) {
+      const bytes = await nodeFs.readFile(outPath);
+      try {
+        await nodeFs.unlink(outPath);
+      } catch {}
+      return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    }
+    return undefined;
+  }
+
+  async function close(): Promise<void> {
+    if (closed) return;
+    closed = true;
+    try {
+      if (typeof stdin.end === "function") await stdin.end();
+      else if (typeof stdin.close === "function") await stdin.close();
+    } catch {}
+    try {
+      proc.kill();
+    } catch {}
+    try {
+      await proc.exited;
+    } catch {}
+    if (ownsPath) {
+      try {
+        await nodeFs.unlink(outPath);
+      } catch {}
+    }
+  }
+
+  return {
+    pushFrame,
+    finalize,
+    close,
+    get framesPushed() {
+      return framesPushed;
+    },
+  };
+}
+
 // Helper: write bytes to a fresh temp file and return its path.
 async function writeTmp(bytes: Uint8Array, prefix: string): Promise<string> {
   const path = nodePath.join(
@@ -251,4 +405,4 @@ const nodeOs = require("node:os");
 const nodePath = require("node:path");
 const nodeFs = require("node:fs/promises");
 
-export default { decode, probeBytes, isAvailable: probe };
+export default { decode, encode, probeBytes, isAvailable: probe };

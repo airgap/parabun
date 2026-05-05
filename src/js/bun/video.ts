@@ -994,18 +994,16 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
  * libavcodec native binding.
  */
 async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
-  if (opts.codec !== "mjpeg") {
-    throw new Error(
-      `parabun:video.encode: codec "${opts.codec}" needs the libavcodec native binding (only "mjpeg" is unstubbed today)`,
-    );
+  // Non-MJPEG codecs route through the ffmpeg subprocess encoder.
+  // MJPEG keeps its pure-JS muxer (it's the only path that doesn't
+  // need libavcodec). For consistency with the decoder, we ALSO
+  // accept MJPEG over ffmpeg when no encodeJpg callback is provided —
+  // this lets callers without parabun:image still use the module.
+  if (opts.codec !== "mjpeg" || !opts.encodeJpg) {
+    return ffmpegEncodeFallback(opts);
   }
   if (opts.container !== "mp4") {
     throw new Error(`parabun:video.encode: container "${opts.container}" not supported on the MJPEG path (only "mp4")`);
-  }
-  if (!opts.encodeJpg) {
-    throw new Error(
-      "parabun:video.encode: MJPEG outputs require opts.encodeJpg — pass `image.encode` from parabun:image",
-    );
   }
   if (!opts.fps || opts.fps <= 0) throw new RangeError("parabun:video.encode: fps must be > 0");
   if (!opts.width || !opts.height) throw new RangeError("parabun:video.encode: width and height required");
@@ -1437,6 +1435,90 @@ async function ffmpegDecodeFallback(bytes: Uint8Array, opts: DecodeOptions | und
     },
     async [Symbol.asyncDispose](): Promise<void> {
       await stream.close();
+    },
+  };
+}
+
+/**
+ * libavcodec-class encode by spawning ffmpeg. Used by `encode()` for
+ * any non-MJPEG codec or any caller that doesn't supply
+ * `opts.encodeJpg`. Throws "install ffmpeg" when the binary isn't on
+ * PATH.
+ */
+async function ffmpegEncodeFallback(opts: EncodeOptions): Promise<VideoEncoder> {
+  if (!opts.fps || opts.fps <= 0) throw new RangeError("parabun:video.encode: fps must be > 0");
+  if (!opts.width || !opts.height) throw new RangeError("parabun:video.encode: width and height required");
+  // Map our Codec union → ffmpeg encoder name.
+  const codecMap: Record<string, string> = {
+    h264: "libx264",
+    h265: "libx265",
+    hevc: "libx265",
+    vp8: "libvpx",
+    vp9: "libvpx-vp9",
+    av1: "libsvtav1",
+    mjpeg: "mjpeg",
+  };
+  const ffCodec = codecMap[opts.codec];
+  if (!ffCodec) {
+    throw new Error(`parabun:video.encode: codec "${opts.codec}" not mapped to an ffmpeg encoder`);
+  }
+  // Container → file extension. Default ".mp4" if "auto".
+  const containerExtMap: Record<string, string> = { mp4: "mp4", mkv: "mkv", webm: "webm", ts: "ts", auto: "mp4" };
+  const containerExt = containerExtMap[opts.container] ?? "mp4";
+
+  const handle = await ffmpegMod.encode({
+    codec: ffCodec,
+    containerExt,
+    width: opts.width,
+    height: opts.height,
+    fps: opts.fps,
+    bitrate: opts.bitrate,
+    preset: opts.preset,
+    path: opts.path,
+  });
+
+  let bytesWritten = 0;
+
+  return {
+    get bytesWritten() {
+      return bytesWritten;
+    },
+    get duration() {
+      return Math.round((handle.framesPushed * 1000) / opts.fps);
+    },
+    async pushFrame(frame: any): Promise<void> {
+      // Accept the same three shapes as the MJPEG path. For RGB
+      // (3-channel) inputs, pad to RGBA.
+      let rgba: Uint8Array;
+      if (frame.pixelFormat === "rgba" || frame.format === "rgba" || frame.channels === 4) {
+        rgba = frame.data;
+      } else if (frame.channels === 3 || frame.format === "rgb24") {
+        const n = opts.width * opts.height;
+        rgba = new Uint8Array(n * 4);
+        const src = frame.data as Uint8Array;
+        for (let i = 0; i < n; i++) {
+          rgba[i * 4] = src[i * 3];
+          rgba[i * 4 + 1] = src[i * 3 + 1];
+          rgba[i * 4 + 2] = src[i * 3 + 2];
+          rgba[i * 4 + 3] = 255;
+        }
+      } else {
+        throw new RangeError(
+          `parabun:video.encode: unsupported frame format (need rgba or rgb24/3-channel; got ${frame.pixelFormat ?? frame.format ?? frame.channels})`,
+        );
+      }
+      bytesWritten += rgba.length;
+      await handle.pushFrame(rgba);
+    },
+    async finalize(): Promise<Uint8Array | void> {
+      const out = await handle.finalize();
+      return out as Uint8Array | undefined;
+    },
+    async close(): Promise<void> {
+      await handle.close();
+    },
+    async [Symbol.asyncDispose](): Promise<void> {
+      await handle.close();
     },
   };
 }
