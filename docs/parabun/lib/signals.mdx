@@ -1,0 +1,86 @@
+---
+title: para:signals
+description: Reactive signals — primitives + derived + effect. Solid-style. Cross-runtime. Self-contained (no npm dep on @preact/signals-core).
+---
+
+```ts
+import { signal, derived, effect } from "para:signals";
+
+const count = signal(0);
+const doubled = derived(() => count.value * 2);
+effect(() => console.log(`count=${count.value}, doubled=${doubled.value}`));
+// logs immediately: "count=0, doubled=0"
+
+count.value = 1;
+// logs: "count=1, doubled=2"
+```
+
+## API
+
+### `signal(initial)`
+
+```ts
+signal<T>(initial: T): Signal<T>
+
+interface Signal<T> {
+  value: T;                          // get + set
+  peek(): T;                         // read without subscribing
+  subscribe(fn: (val: T) => void): () => void;
+}
+```
+
+### `derived(compute)`
+
+```ts
+derived<T>(compute: () => T): Signal<T>
+```
+
+Memoized — only re-runs when an upstream signal it READ in the previous run changes.
+
+### `effect(fn)` — side-effect subscription
+
+```ts
+effect(() => { /* runs whenever any signal it reads changes */ }): () => void
+```
+
+Returns an unsubscribe function.
+
+### `batch(fn)` — coalesce updates
+
+```ts
+batch(() => {
+  count.value = 1;
+  count.value = 2;
+  count.value = 3;
+});
+// effects fire ONCE at the end with count=3, not three times.
+```
+
+### `untrack(fn)` — read without subscribing
+
+```ts
+const peeked = untrack(() => someSignal.value);
+```
+
+## Where signals show up in Parabun
+
+Many Parabun runtime modules expose reactive signals — read once for the current value or `subscribe` for live updates:
+
+```ts
+import gpu from "parabun:gpu";
+gpu.activeBackendSignal.subscribe(b => console.log("backend now:", b));
+
+import audio from "parabun:audio";
+await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
+mic.peakLevel.subscribe(p => updateUI(p));
+
+import vision from "parabun:vision";
+vision.motionSignals(stream).detected.subscribe(d => alert(d));
+```
+
+The convention: any module that reports observable state (camera FPS, mic peak, motion score, LLM busy/device, GPU active backend) exposes a `Signal<T>` directly.
+
+## See also
+
+- [`para:arrow`](/parabun/lib/arrow) — for analytical / batch data (signals are for live state, arrow is for tabular)
+- The signals package on npm is also available as [`@para/signals`](https://www.npmjs.com/package/@para/signals) for use outside Parabun.

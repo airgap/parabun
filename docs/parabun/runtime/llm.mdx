@@ -1,0 +1,88 @@
+---
+title: parabun:llm
+description: LLM inference + Whisper STT, CUDA + Metal accelerated, with an OpenAI-compatible HTTP server.
+---
+
+```ts
+import llm from "parabun:llm";
+
+await using model = await llm.loadModel("./models/llama-3.1-8b.Q4_K_M.gguf");
+for await (const tok of model.chat([{ role: "user", content: "Say hi" }])) {
+  process.stdout.write(tok);
+}
+```
+
+## Models
+
+`parabun:llm` reads GGUF quantized weights — the same format llama.cpp uses. Quantizations supported: Q4_0, Q4_K_M, Q5_0, Q5_1, Q6_K, Q8_0, F16, F32. CUDA matVec kernels run at parity with ollama on Q4_K and Q6_K (1-warp-per-row, 4-warps-per-block design).
+
+| Class | Examples |
+|---|---|
+| Llama | Llama 3.1 / 3.2 / 3.3 |
+| Mistral | Mistral 7B, Mixtral 8x7B |
+| Whisper | tiny.en, base.en, small.en (encoder-decoder STT) |
+
+## API
+
+### `loadModel(path, opts?)`
+
+```ts
+llm.loadModel(path: string, opts?: {
+  device?: "auto" | "cuda" | "metal" | "cpu";
+  maxContextTokens?: number;
+}): Promise<Model>
+
+interface Model {
+  busy: Signal<boolean>;            // true while generating
+  device: Signal<"cuda" | "metal" | "cpu">;
+  chat(messages, opts?): AsyncIterableIterator<string>;
+  complete(prompt, opts?): AsyncIterableIterator<string>;
+  ask(prompt, opts?): Promise<string>;     // non-streaming
+  embed(text): Promise<Float32Array>;
+  close(): Promise<void>;
+}
+```
+
+### `WhisperModel` (STT)
+
+```ts
+const whisper = await llm.WhisperModel.load("./models/ggml-base.en.bin");
+const transcript = await whisper.transcribe({
+  samples: int16,
+  sampleRate: 16000,
+});
+```
+
+Loads whisper.cpp `ggml-*.bin` checkpoints (F32 / F16 / Q4_0 / Q5_0 / Q5_1 / Q8_0). CUDA-accelerated: encoder im2col conv + matmuls + per-head batched attention; decoder per-token matVecs + LM head. Per-process model cache.
+
+JFK sample timings (release CUDA build):
+- tiny.en: 1.6 s for 11 s of audio
+- base.en: 3.07 s for 11 s of audio
+
+### `serve(opts)` — OpenAI-compatible HTTP
+
+```ts
+await llm.serve({
+  engine: model,            // any Model from loadModel()
+  modelId: "llama-3.1-8b",  // surfaced as the OpenAI model name
+  port: 11434,              // ollama-compatible default
+  apiKey?: "secret",
+  maxConcurrent?: 4,
+});
+```
+
+Endpoints: `/v1/models`, `/v1/chat/completions` (sync + SSE), `/v1/completions`, `/v1/embeddings`. FIFO concurrency gate. Drop-in for ollama clients.
+
+## Hardware
+
+| Backend | When |
+|---|---|
+| CUDA | Linux + NVIDIA GPU (compute capability ≥ 6.1) |
+| Metal | macOS Apple Silicon |
+| CPU | Fallback; matMul kernels use AVX2 / NEON SIMD |
+
+## See also
+
+- [`parabun:speech`](/parabun/runtime/speech) — `transcribe()` is `WhisperModel` under the hood
+- [`parabun:assistant`](/parabun/runtime/assistant) — composes `llm` + `speech` into a turn-taking bot
+- [`parabun:gpu`](/parabun/runtime/gpu) — primitives like `matMul`, `softmax` that the LLM kernels build on

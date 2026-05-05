@@ -1,0 +1,103 @@
+---
+title: parabun:image
+description: Image decode / encode / resize / filter — JPEG, PNG, WebP via native codec; AVIF, HEIC, JPEG XL via system FFI; animated GIF / WebP / APNG via ffmpeg.
+---
+
+```ts
+import image from "parabun:image";
+
+const bytes = await Bun.file("photo.jpg").bytes();
+const img = image.decode(bytes);
+// { data: Uint8Array, width, height, channels, format: "jpeg" }
+
+const blurred = image.blur(img, { radius: 3 });
+const out = image.encode(blurred, { format: "webp", quality: 85 });
+await Bun.write("out.webp", out);
+```
+
+## Format support
+
+| Format | Decode | Encode | Backend |
+|---|---|---|---|
+| JPEG | ✓ | ✓ | libjpeg-turbo (native) |
+| PNG | ✓ | ✓ | libpng (native) |
+| WebP | ✓ | ✓ | libwebp (native) |
+| AVIF | ✓ | ✓ | libavif via FFI (`apt install libavif16` / `brew install libavif`) |
+| HEIC / HEIF | ✓ | — | libheif via FFI (`apt install libheif1` / `brew install libheif`) |
+| JPEG XL | ✓ | — | libjxl via FFI (`apt install libjxl0.7` / `brew install jpeg-xl`) |
+| Animated GIF / WebP / APNG | ✓ | — | ffmpeg subprocess (`apt install ffmpeg`) |
+
+`image.decode` auto-routes by magic byte. AVIF / HEIF / JPEG XL throw a clear "install libXXX" error when the system library isn't present.
+
+## API
+
+### `decode(bytes)`
+
+```ts
+image.decode(bytes: Uint8Array): {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  channels: number;
+  format: "jpeg" | "png" | "webp" | "avif" | "heic" | "jxl";
+}
+```
+
+### `encode(img, opts)`
+
+```ts
+image.encode(img, opts: {
+  format: "jpeg" | "png" | "webp" | "avif";
+  quality?: number;       // 1-100, default 85; ignored for PNG
+  lossless?: boolean;     // WebP only
+}): Uint8Array
+```
+
+### `decodeFrames(bytes)` — animated formats
+
+```ts
+image.decodeFrames(bytes: Uint8Array): Promise<{
+  frames: { data: Uint8Array; durationMs: number }[];
+  width: number;
+  height: number;
+}>
+```
+
+Animated GIF, animated WebP, APNG. Static images return a single-frame array. Per-frame timing comes from `ffprobe -show_frames` (variable timing supported).
+
+### Filters
+
+```ts
+image.resize(img, { width, height, kernel?: "bilinear" | "lanczos" });
+image.blur(img, { radius, gpu?: boolean });        // Gaussian; GPU via parabun:gpu
+image.boxBlur(img, { radius });
+image.sharpen(img, { amount?, radius? });
+image.edgeDetect(img);
+image.rotate(img, { degrees: 90 | 180 | 270 });
+image.flip(img, { axis: "horizontal" | "vertical" });
+image.crop(img, { x, y, width, height });
+image.toGrayscale(img);
+image.adjust(img, { brightness?, contrast?, saturation? });
+image.hueShift(img, { degrees });
+image.histogram(img);
+image.composite(base, overlay, { x?, y? });
+image.invert(img);
+image.threshold(img, { value? });
+```
+
+### `pipeline(bytes)` — chained transforms
+
+```ts
+const out = await image.pipeline(bytes)
+  .resize({ width: 400, height: 400, kernel: "lanczos" })
+  .blur({ radius: 1 })
+  .encode({ format: "webp", quality: 80 });
+```
+
+The pipeline fuses adjacent ops where possible (matches sharp's lazy-decode→transform→encode behaviour).
+
+## See also
+
+- [`parabun:vision`](/parabun/runtime/vision) — frames + motion + detection on top of `image.decode`
+- [`parabun:video`](/parabun/runtime/video) — `extractAudio` + `thumbnail` for video → frame workflows
+- [`parabun:gpu`](/parabun/runtime/gpu) — GPU-backed conv2D used by `image.blur({ gpu: true })`

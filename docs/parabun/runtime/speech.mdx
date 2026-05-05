@@ -1,0 +1,86 @@
+---
+title: parabun:speech
+description: VAD-gated utterance segmentation, Whisper STT, and Piper TTS. Composes parabun:audio (capture / playback) + parabun:llm (Whisper) into a streaming voice pipeline.
+---
+
+```ts
+import audio from "parabun:audio";
+import speech from "parabun:speech";
+
+await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
+for await (const utt of speech.listen(mic.frames(), { sampleRate: 16000 })) {
+  const text = await speech.transcribe(utt, {
+    engine: "whisper",
+    model: "./models/ggml-base.en.bin",
+  });
+  console.log("heard:", text);
+}
+```
+
+## API
+
+### `listen(stream, opts)` — utterance segmentation
+
+```ts
+speech.listen(stream: AsyncIterable<{samples: Float32Array; timestampMs?: number}>, opts: {
+  sampleRate: number;            // required
+  channels?: number;             // default 1; >1 downmixes to mono
+  frameSize?: number;            // VAD frame length (samples); default 480 = 30ms@16k
+  ratio?: number;                // RMS-vs-noise-floor activation; default 3.0
+  preRollMs?: number;            // capture before voice trigger; default 200
+  hangoverMs?: number;           // silence to seal an utterance; default 600
+  minUtteranceMs?: number;       // drop blips; default 200
+}): AsyncIterableIterator<Utterance>
+
+interface Utterance {
+  samples: Float32Array;
+  durationMs, startedAtMs, endedAtMs;
+}
+
+// Plus reactive signals:
+const l = speech.listenSignals(stream, opts);
+l.active          // Signal<boolean>
+l.noiseFloor      // Signal<number>
+l.lastUtterance   // Signal<Utterance | null>
+```
+
+Pure-JS VAD on top of `audio.detectVoice`. Adaptive RMS-vs-noise-floor classifier; pre-roll captures word onsets; hangover seals utterances on silence.
+
+### `transcribe(utt, opts)` — STT
+
+```ts
+speech.transcribe(utt: { samples: Float32Array | Int16Array; sampleRate?: number }, opts: {
+  engine: "whisper";
+  model: string;             // path to ggml-*.bin
+  language?: string;         // default "auto"
+  initialPrompt?: string;    // bias the decoder
+}): Promise<string>
+```
+
+Dispatches to `parabun:llm.WhisperModel`. Loads whisper.cpp `ggml-*.bin` (F32 / F16 / Q4_0 / Q5_0 / Q5_1 / Q8_0). Encoder-decoder forward pass with KV cache + greedy decode + chunked long-audio support. Per-process model cache.
+
+### `speak(text, opts)` — TTS
+
+```ts
+speech.speak(text: string, opts: {
+  engine: "piper";
+  model: string;             // path to .onnx voice
+  binPath?: string;          // path to piper binary; default "piper" on PATH
+  speakingRate?: number;     // 1.0 = normal
+}): Promise<{ samples: Int16Array; sampleRate: number }>
+```
+
+Long-running `piper --json-input --output_raw` subprocess, cached per (binPath, model). First call ~120 ms (voice load); subsequent ~30-50 ms for short sentences on the lessac voice. Pipe straight into `audio.play`:
+
+```ts
+const wav = await speech.speak("hello world", { engine: "piper", model: "./en_US-lessac-medium.onnx" });
+await using spk = await audio.play({ sampleRate: wav.sampleRate, channels: 1 });
+await spk.write(wav.samples);
+```
+
+## See also
+
+- [`parabun:llm`](/parabun/runtime/llm) — `WhisperModel` is what `transcribe` runs under
+- [`parabun:audio`](/parabun/runtime/audio) — `capture` + `play` for live I/O
+- [`parabun:assistant`](/parabun/runtime/assistant) — full voice-bot composition (listen → llm → speak)
+- [`parabun:video`](/parabun/runtime/video) — `extractAudio` returns the same Int16 PCM shape `transcribe` consumes

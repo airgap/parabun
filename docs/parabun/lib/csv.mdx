@@ -1,0 +1,64 @@
+---
+title: para:csv
+description: RFC 4180 CSV reader / writer with optional parallel decode.
+---
+
+```ts
+import csv from "para:csv";
+
+const rows = csv.parse(text);
+const back = csv.stringify(rows);
+```
+
+## API
+
+### Parse
+
+```ts
+csv.parse(text: string, opts?: {
+  delimiter?: string;        // default ","
+  quote?: string;            // default '"'
+  header?: boolean;          // default true (use first row as keys)
+  skipEmpty?: boolean;
+  parallel?: boolean;        // off-the-main-thread; see perf notes
+}): Record<string, string>[] | string[][]
+```
+
+### Stringify
+
+```ts
+csv.stringify(rows: Record<string, any>[] | any[][], opts?: {
+  delimiter?: string;
+  quote?: string;
+  header?: boolean;
+  columns?: string[];
+}): string
+```
+
+### Streaming
+
+```ts
+for await (const row of csv.parseStream(readable, opts)) {
+  // row by row, no memory bloat
+}
+
+const writer = csv.stringifyStream(writable, opts);
+await writer.write(row);
+await writer.close();
+```
+
+## Performance notes
+
+`parallel: true` runs the parser off-the-main-thread. Honest perf data (5950X release):
+
+| Input size | Single-thread | Parallel | Speedup |
+|---|---|---|---|
+| 5 MB | baseline | 1.18× | small win |
+| 50 MB | baseline | 0.95× | small loss |
+| 200 MB | baseline | 0.93× | bigger loss |
+
+So the option is best framed as "off-the-main-thread", not "faster" — useful when you want the main thread free, not when you want raw throughput. See [csv-parallel bench](/parabun/lib/parabun-benches#csv-parallel) for the full sweep.
+
+## See also
+
+- [`para:arrow`](/parabun/lib/arrow) — for analytical queries on top of CSV-loaded data

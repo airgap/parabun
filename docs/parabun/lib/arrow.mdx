@@ -1,0 +1,159 @@
+---
+title: para:arrow
+description: In-memory Arrow tables + IPC reader/writer + Parquet read/write. Wire-compatible with apache-arrow + every parquet reader since 1.x. Cross-runtime — works in Node, Deno, and the browser too.
+---
+
+```ts
+import arrow from "para:arrow";
+
+// Build a Table from rows
+const table = arrow.fromRows([
+  { id: 1, name: "alpha", score: 97.3 },
+  { id: 2, name: "beta",  score: 88.1 },
+]);
+
+// Write Parquet (default: snappy)
+const bytes = arrow.toParquet(table);
+
+// Read it back
+const decoded = arrow.fromParquet(bytes);
+console.log(arrow.toRows(decoded));
+```
+
+## API surface
+
+### Construction
+
+```ts
+arrow.fromRows(rows: Record<string, any>[], opts?: { schema? }): Table
+arrow.toRows(table: Table): Record<string, any>[]
+arrow.recordBatch(schema, columns, numRows): RecordBatch
+arrow.table(schema, batches): Table
+new arrow.Column(type, length, values, validity?, child?, children?)
+```
+
+### Types
+
+```ts
+type DataType =
+  | { kind: "int32" | "int64" | "float32" | "float64" | "bool" | "utf8"
+       | "date32" | "timestamp_millis" | "timestamp_micros" | "timestamp_nanos" }
+  | { kind: "decimal128", precision, scale }
+  | { kind: "fixed_size_binary", width }
+  | { kind: "list", child: DataType }
+  | { kind: "struct", fields: { name, type, nullable }[] }
+  | { kind: "map", keyType, valueType, valueNullable }
+```
+
+### IPC (Arrow's binary format)
+
+```ts
+arrow.toIPC(table): Uint8Array
+arrow.fromIPC(bytes): Table
+arrow.toIPCStream(table): ReadableStream<Uint8Array>
+arrow.fromIPCStream(stream): Promise<Table>
+```
+
+Round-trip-compatible with apache-arrow 21.x. Hand-rolled FlatBuffers, dictionary-batch decode, narrow-int widening, Date / Timestamp coercion.
+
+### Parquet
+
+```ts
+arrow.fromParquet(bytes, opts?: {
+  filter?: (rg: RowGroupSummary) => boolean    // predicate pushdown
+}): Table
+
+arrow.toParquet(table, opts?: {
+  compression?: "uncompressed" | "snappy" | "gzip" | "zstd";
+  bloomFilters?: string[];                     // per-column SBBF
+  multiRowGroup?: boolean;                     // one row group per input batch
+}): Uint8Array
+
+arrow.readBloomFilters(bytes): Array<Map<colName, BloomFilter>>
+```
+
+#### Supported physical types
+
+| Type | Decode | Encode |
+|---|---|---|
+| BOOLEAN | ✓ | ✓ |
+| INT32 / INT64 | ✓ | ✓ |
+| INT96 (nanosecond timestamp) | ✓ | ✓ |
+| FLOAT / DOUBLE | ✓ | ✓ |
+| BYTE_ARRAY (utf8) | ✓ | ✓ |
+| FIXED_LEN_BYTE_ARRAY | ✓ | ✓ |
+
+#### Supported logical types
+
+date32, timestamp_millis, timestamp_micros, timestamp_nanos, decimal128, list, struct, map.
+
+#### Nested combinations
+
+`Struct<primitive>`, `Struct<Struct>`, `Struct<List>`, `List<primitive>`, `List<Struct>`, `Map<scalar, primitive>` all work end-to-end. List-of-list / list-of-map / map-of-complex documented as "flatten to List<Struct<key, value>>".
+
+#### Bloom filters
+
+```ts
+const bytes = arrow.toParquet(table, {
+  bloomFilters: ["user_id", "sku"],
+});
+
+const filters = arrow.readBloomFilters(bytes);
+if (filters[0].get("user_id")?.mightContain(12345) === false) {
+  // definitely not in this row group, skip
+}
+```
+
+Split-Block Bloom Filter (SBBF) per parquet 2.7. ~32 KB per filter (~10⁻⁵ FPR at 10⁵ NDV). XxHash64 (Bun.hash native).
+
+#### Predicate pushdown
+
+```ts
+const filtered = arrow.fromParquet(bytes, {
+  filter: rg => {
+    // Skip if value outside [min, max]
+    const s = rg.stats.get("score");
+    if (s && (target < s.min || target > s.max)) return false;
+    // Skip if bloom filter says definitely-not-present
+    return rg.bloomFilters.get("user_id")?.mightContain(target) ?? true;
+  },
+});
+```
+
+The callback runs per row group BEFORE any data-page decoding — `false` skips the entire row group's I/O.
+
+#### Multi-row-group
+
+```ts
+const bytes = arrow.toParquet(table, { multiRowGroup: true });
+// → one parquet row group per input batch.
+```
+
+Default is single-row-group (legacy behaviour).
+
+### Computes
+
+```ts
+arrow.sum(col), arrow.mean(col), arrow.min(col), arrow.max(col);
+arrow.argMin(col), arrow.argMax(col);
+arrow.count(col);
+arrow.variance(col), arrow.stddev(col);
+arrow.quantile(col, q), arrow.median(col);
+arrow.distinct(col);
+arrow.filter(table, predicate);
+arrow.groupBy(table, keys, aggs);
+```
+
+12 computes. Float ones use Kahan compensation; bigint ones preserve precision.
+
+## Wire compatibility
+
+- **apache-arrow 21.x**: bidirectional IPC + Parquet round-trip verified.
+- **pyarrow / DuckDB / Polars / arrow-rs**: read every file Parabun writes.
+
+Round-trip suite at [`bench/parabun-arrow-ipc-interop/`](https://github.com/airgap/parabun/tree/main/bench/parabun-arrow-ipc-interop).
+
+## See also
+
+- [`para:csv`](/parabun/lib/csv) — RFC 4180 CSV with parallel mode
+- [`para:decimal`](/parabun/lib/decimal) — backs the `decimal128` arrow kind

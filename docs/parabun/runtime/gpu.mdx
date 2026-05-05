@@ -1,0 +1,134 @@
+---
+title: parabun:gpu
+description: GPU compute primitives — matVec / matmul / conv2D / scan / reduce / quantile / argmin/max / histogram / variance — backed by CUDA on Linux/Windows and Metal on macOS, with a CPU fallback. Plus a custom-kernel API.
+---
+
+```ts
+import gpu from "parabun:gpu";
+
+console.log(gpu.activeBackend());     // "cuda" / "metal" / "cpu"
+
+const a = new Float32Array([1, 2, 3, 4]);
+const b = new Float32Array([5, 6, 7, 8]);
+const dot = gpu.reduce(a, "sum") * 1;       // example primitive
+```
+
+Auto-selects the best backend at startup. Set `BUN_GPU_BACKEND=metal|cuda|cpu` to override.
+
+## Primitive surface
+
+### Reduce
+
+```ts
+gpu.reduce(values: Float32Array | Uint32Array, op: "sum" | "min" | "max"): number;
+```
+
+Float sums use Kahan compensation; integer sums wrap at 2³².
+
+### Scan (inclusive prefix sum)
+
+```ts
+gpu.scan(values: Float32Array | Uint32Array): typeof values;
+```
+
+Recursive multi-stage scan handles 1M+ elements. Useful for compaction (Uint32 predicate → write-index scan).
+
+### Argmin / Argmax
+
+```ts
+gpu.argMin(values), gpu.argMax(values): number;     // index of first occurrence
+```
+
+NaN propagates: argMin/argMax on NaN-containing inputs returns the index of the first NaN (numpy semantics).
+
+### Histogram
+
+```ts
+gpu.histogram(values: Uint32Array, numBuckets: number): Uint32Array;
+```
+
+### Variance
+
+```ts
+gpu.variance(values: Float32Array): { mean: number; variance: number };
+```
+
+Welford's algorithm; numerically stable.
+
+### Quantile
+
+```ts
+gpu.quantile(values: Float32Array, q: number): number;
+```
+
+CUDA bitonic-sort path for power-of-2 lengths; non-pow-2 padded with +Inf.
+
+### conv2D — 2D convolution
+
+```ts
+gpu.conv2D({
+  input: { data: Float32Array, width, height, channels };
+  kernel: Float32Array;        // square, odd dimensions
+}): Float32Array;
+```
+
+Used by `parabun:image.blur({ gpu: true })`.
+
+### matMul / matVec
+
+```ts
+gpu.matMul(a: Float32Array, b: Float32Array, M: number, N: number, K: number): Float32Array;
+gpu.matVec(matrix: Float32Array, vec: Float32Array, M: number, N: number): Float32Array;
+```
+
+Powers `parabun:llm`'s per-token kernels.
+
+### imageBlurRGBA — fused blur kernel
+
+```ts
+gpu.imageBlurRGBA(rgba, width, height, sigma): Uint8Array;
+```
+
+Tuned MSL + CUDA implementations.
+
+### Custom kernels
+
+```ts
+const kernel = gpu.compile({
+  cuda: `
+    extern "C" __global__ void scale(float* x, float k, int n) {
+      int i = blockIdx.x * blockDim.x + threadIdx.x;
+      if (i < n) x[i] *= k;
+    }`,
+  metal: `
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void scale(device float* x, constant float& k, constant uint& n,
+                      uint i [[thread_position_in_grid]]) {
+      if (i < n) x[i] *= k;
+    }`,
+});
+await kernel.run({ args: [buffer, 2.0, buffer.length], grid: [Math.ceil(buffer.length / 256), 1, 1], block: [256, 1, 1] });
+```
+
+## Diagnostic signals
+
+```ts
+gpu.activeBackendSignal       // Signal<"cuda" | "metal" | "cpu">
+gpu.availableSignal           // Signal<readonly Backend[]>  — what the runtime can use
+gpu.setBackend("cpu");        // force a backend
+```
+
+## Hardware
+
+| Backend | When |
+|---|---|
+| CUDA | Linux + NVIDIA (compute capability ≥ 6.1) |
+| Metal | macOS Apple Silicon |
+| CPU | Fallback (still SIMD-accelerated where applicable) |
+
+## See also
+
+- [`parabun:llm`](/parabun/runtime/llm) — heaviest user of `gpu.matVec` + `gpu.matMul`
+- [`parabun:image`](/parabun/runtime/image) — `image.blur({ gpu: true })` routes through `conv2D`
+- [`parabun:parallel.psort`](/parabun/runtime/parallel) — CPU-side parallel radix sort (different from GPU `gpu.sort`)

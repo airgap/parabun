@@ -1,0 +1,113 @@
+---
+title: parabun:vision
+description: Frame normalization + motion detection + YOLO object detection + Tesseract OCR + multi-frame tracker. Composes parabun:camera (capture) + parabun:image (decode) + system FFI bindings.
+---
+
+```ts
+import vision from "parabun:vision";
+import camera from "parabun:camera";
+import image  from "parabun:image";
+
+await using cam = await camera.open("/dev/video0", { format: "mjpg", width: 1280, height: 720 });
+const frames = vision.frames(cam.frames(), { decodeMjpg: image.decode });
+
+for await (const det of vision.detect(frames, {
+  engine: "yolo",
+  modelPath: "./yolov8n.onnx",
+})) {
+  for (const box of det.boxes) {
+    console.log(box.label, box.score, box.bbox);
+  }
+}
+```
+
+## API
+
+### `frames(source, opts?)`
+
+```ts
+vision.frames(stream: AsyncIterable<RawFrame>, opts?: {
+  decodeMjpg?: (bytes) => DecodedImage;   // pass image.decode for MJPEG inputs
+}): AsyncIterableIterator<RgbaFrame>
+```
+
+Converts any RawFrame iterator (yuyv / nv12 / rgb24 / mjpg) into packed-RGBA8 frames. The MJPEG decoder is injected by the caller because cross-builtin imports between `bun:*` modules don't work in the internal bundler.
+
+### `detectMotion(stream, opts?)`
+
+```ts
+vision.detectMotion(stream, opts?: {
+  thresholdRatio?: number;
+  smoothing?: number;
+}): AsyncIterableIterator<MotionEvent>
+
+// Plus reactive signals:
+const m = vision.motionSignals(stream);
+m.detected   // Signal<boolean>
+m.score      // Signal<number>
+```
+
+Frame-diff motion estimator with downsampled luma + temporal smoothing. Pure JS.
+
+### `detect(stream, opts)` — object detection
+
+```ts
+vision.detect(stream, opts: {
+  engine: "yolo";       // ssd / rtdetr reserved
+  modelPath: string;    // YOLOv8 / YOLOv11 ONNX
+  confidenceThreshold?: number;
+  iouThreshold?: number;
+}): AsyncIterableIterator<{ frame, boxes: Detection[] }>
+
+interface Detection {
+  label: string;
+  score: number;
+  bbox: { x, y, width, height };
+}
+```
+
+YOLOv8 / YOLOv11 ONNX models via `vision/yolo.ts` on top of `vision/onnx.ts` (libonnxruntime FFI). Runs on CUDA when available, falls back to CPU.
+
+### `recognize(frame, opts)` — OCR
+
+```ts
+vision.recognize(frame, opts: {
+  engine: "tesseract";    // easyocr reserved
+  language?: string;      // default "eng"
+}): Promise<TextRegion[]>
+```
+
+libtesseract.so.5 via FFI. Requires `apt install libtesseract-dev tesseract-ocr-eng` on Linux or `brew install tesseract` on macOS. Per-language data files via TESSDATA_PREFIX or compile-time default.
+
+### `track(detections, opts?)` — multi-frame tracking
+
+```ts
+vision.track(stream, opts?: {
+  iouThreshold?: number;       // default 0.3
+  maxAge?: number;             // frames to keep losing track
+}): AsyncIterableIterator<{ tracks: Track[] }>
+
+interface Track {
+  id: number;            // stable across frames
+  label: string;
+  bbox, score, age, hits;
+}
+```
+
+SORT-style greedy IoU matching. Persistent IDs across frames so callers can compute trajectories.
+
+### `onnx(modelPath)` — direct ONNX session
+
+```ts
+const session = vision.onnx("./model.onnx");
+const out = await session.run({ input: { data: float32, shape: [1, 3, 224, 224] } });
+session.close();
+```
+
+For users who want raw ONNX inference outside the detect/OCR taxonomy.
+
+## See also
+
+- [`parabun:camera`](/parabun/runtime/camera) — V4L2 frame source
+- [`parabun:image`](/parabun/runtime/image) — for the MJPEG decoder injection
+- [`parabun:speech`](/parabun/runtime/speech) — pair with `vision` for audio + visual perception

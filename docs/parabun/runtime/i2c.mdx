@@ -1,0 +1,82 @@
+---
+title: parabun:i2c
+description: Linux I²C bus access via /dev/i2c-N. Raw read/write plus SMBus convenience methods (byte / word / block).
+---
+
+```ts
+import i2c from "parabun:i2c";
+
+await using bus = await i2c.open("/dev/i2c-1");
+
+// SMBus byte read from device 0x40, register 0x00
+const value = await bus.readByte(0x40, 0x00);
+console.log(`temp: ${value}`);
+
+// Block write
+await bus.writeBlock(0x40, 0x06, new Uint8Array([0x80, 0x00]));
+```
+
+Linux-only. Most ARM boards expose `/dev/i2c-N` with the `i2c-dev` kernel module loaded. Permissions: `i2c` group or root.
+
+## API
+
+### `open(path)`
+
+```ts
+i2c.open(path: string): Promise<Bus>
+
+interface Bus {
+  // Raw read/write — no register addressing
+  read(addr: number, length: number): Promise<Uint8Array>;
+  write(addr: number, bytes: Uint8Array): Promise<void>;
+
+  // SMBus byte (8-bit)
+  readByte(addr: number, reg: number): Promise<number>;
+  writeByte(addr: number, reg: number, value: number): Promise<void>;
+
+  // SMBus word (16-bit, little-endian)
+  readWord(addr: number, reg: number): Promise<number>;
+  writeWord(addr: number, reg: number, value: number): Promise<void>;
+
+  // SMBus block (variable length, 1-32 bytes)
+  readBlock(addr: number, reg: number, length: number): Promise<Uint8Array>;
+  writeBlock(addr: number, reg: number, bytes: Uint8Array): Promise<void>;
+
+  // Process call (write word, read word back)
+  processCall(addr: number, reg: number, value: number): Promise<number>;
+
+  // Multi-byte read with register restart
+  readRegisters(addr: number, reg: number, length: number): Promise<Uint8Array>;
+
+  close(): Promise<void>;
+}
+```
+
+### Device scan
+
+```ts
+const present = await bus.scan();    // returns array of 7-bit addresses with ACKs
+console.log("devices:", present.map(a => "0x" + a.toString(16)));
+```
+
+## Common patterns
+
+**Read a sensor with a register-mapped interface (e.g. BME280):**
+
+```ts
+const TEMP_REG = 0xfa;
+const raw = await bus.readBlock(0x76, TEMP_REG, 3);
+const temp = ((raw[0] << 12) | (raw[1] << 4) | (raw[2] >> 4)) * 0.01;
+```
+
+**Write a config register pair:**
+
+```ts
+await bus.writeWord(0x40, 0x06, 0x8000);   // INA219 config: bus reset
+```
+
+## See also
+
+- [`parabun:spi`](/parabun/runtime/spi) — for higher-speed devices
+- [`parabun:gpio`](/parabun/runtime/gpio) — for chip-enable / interrupt lines
+- [`parabun:camera`](/parabun/runtime/camera) — many CSI cameras need an I²C config register dance before V4L2 capture works

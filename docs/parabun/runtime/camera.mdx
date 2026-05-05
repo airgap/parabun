@@ -1,0 +1,98 @@
+---
+title: parabun:camera
+description: V4L2 video capture from /dev/videoN. Supports yuyv / nv12 / rgb24 / mjpg formats with backpressure-safe async iteration.
+---
+
+```ts
+import camera from "parabun:camera";
+
+await using cam = await camera.open("/dev/video0", {
+  format: "mjpg",
+  width: 1280,
+  height: 720,
+  fps: 30,
+});
+
+for await (const frame of cam.frames()) {
+  // frame: { data: Uint8Array, format: "mjpg", width, height, timestampMs }
+  if (someStopCondition) break;
+}
+```
+
+Linux-only (V4L2). Validated on the OBSBOT Tiny + most USB webcams. Permissions: `video` group or root.
+
+## API
+
+### `open(path, opts)`
+
+```ts
+camera.open(path: string, opts: {
+  format: "yuyv" | "nv12" | "rgb24" | "mjpg";
+  width: number;
+  height: number;
+  fps?: number;          // default 30; clamped to a supported rate
+  bufferCount?: number;  // V4L2 mmap buffers; default 4
+}): Promise<Camera>
+
+interface Camera {
+  // Reactive signals
+  active: Signal<boolean>;
+  fps: Signal<number>;
+  cameraFormat: Signal<{ format, width, height }>;
+
+  // Stream
+  frames(): AsyncIterableIterator<RawFrame>;
+
+  // Probe what the device supports
+  capabilities(): Promise<Capabilities>;
+
+  close(): Promise<void>;
+}
+
+interface RawFrame {
+  data: Uint8Array;
+  format: "yuyv" | "nv12" | "rgb24" | "mjpg";
+  width: number;
+  height: number;
+  timestampMs: number;
+  sequence: number;
+}
+```
+
+### `enumerate()` — list devices
+
+```ts
+const devices = await camera.enumerate();
+// [{ path: "/dev/video0", name: "OBSBOT Tiny", capabilities: [...] }, ...]
+```
+
+### `capabilities()` — supported formats
+
+```ts
+const caps = await cam.capabilities();
+// {
+//   formats: [{ format: "mjpg", resolutions: [{ width: 1280, height: 720, fps: [30, 60] }, ...] }],
+//   controls: [{ name: "brightness", min, max, default, ... }, ...]
+// }
+```
+
+### Format pairing with `parabun:vision`
+
+V4L2 frames are usually NOT packed RGBA. Pipe through `parabun:vision.frames()` for normalization:
+
+```ts
+import vision from "parabun:vision";
+import image  from "parabun:image";
+
+const rgba = vision.frames(cam.frames(), { decodeMjpg: image.decode });
+for await (const frame of rgba) { /* frame.data is RGBA8 */ }
+```
+
+The `decodeMjpg` callback is required for MJPEG cameras (cross-builtin imports between `bun:*` modules don't work in the bundler, so the dependency is injected).
+
+## See also
+
+- [`parabun:vision`](/parabun/runtime/vision) — frame normalization + motion + detection on top of camera
+- [`parabun:image`](/parabun/runtime/image) — for the MJPEG decoder
+- [`parabun:video`](/parabun/runtime/video) — encode the live feed to a file with `video.encode().pushFrame`
+- [`parabun:i2c`](/parabun/runtime/i2c) — many CSI cameras need an I²C config dance before V4L2 capture works

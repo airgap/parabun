@@ -191,6 +191,64 @@
         ]
       },
       {
+        "tab": "Parabun",
+        "icon": "sparkles",
+        "groups": [
+          {
+            "group": "Overview",
+            "icon": "book-open",
+            "pages": ["/parabun/overview", "/parabun/language"]
+          },
+          {
+            "group": "Codecs",
+            "icon": "image",
+            "pages": ["/parabun/runtime/image", "/parabun/runtime/video", "/parabun/runtime/audio"]
+          },
+          {
+            "group": "Machine learning",
+            "icon": "brain",
+            "pages": [
+              "/parabun/runtime/llm",
+              "/parabun/runtime/vision",
+              "/parabun/runtime/speech",
+              "/parabun/runtime/assistant"
+            ]
+          },
+          {
+            "group": "Hardware (Linux)",
+            "icon": "cpu",
+            "pages": [
+              "/parabun/runtime/gpio",
+              "/parabun/runtime/i2c",
+              "/parabun/runtime/spi",
+              "/parabun/runtime/camera"
+            ]
+          },
+          {
+            "group": "Compute",
+            "icon": "zap",
+            "pages": [
+              "/parabun/runtime/gpu",
+              "/parabun/runtime/parallel",
+              "/parabun/runtime/simd",
+              "/parabun/runtime/pipeline"
+            ]
+          },
+          {
+            "group": "Para libraries",
+            "icon": "package",
+            "pages": [
+              "/parabun/lib/arrow",
+              "/parabun/lib/csv",
+              "/parabun/lib/decimal",
+              "/parabun/lib/signals",
+              "/parabun/lib/simd",
+              "/parabun/lib/parabun-benches"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Package Manager",
         "icon": "box",
         "groups": [

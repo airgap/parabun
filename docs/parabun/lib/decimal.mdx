@@ -1,0 +1,60 @@
+---
+title: para:decimal
+description: Exact-decimal arithmetic. Backs the Para language's `0.1d` literal. Cross-runtime — works in Node, Deno, browsers, and Parabun alike.
+---
+
+```ts
+import { Decimal } from "para:decimal";
+
+const price = new Decimal("0.1").add("0.2");
+console.log(price.toString());     // "0.3" — not "0.30000000000000004"
+```
+
+In Para code, the `d` suffix is the literal form:
+
+```ts
+const total = 0.1d + 0.2d;         // exactly 0.3
+const tax = total * 0.0825d;       // exact
+```
+
+The transpiler rewrites `0.1d` to `new Decimal("0.1")` calls.
+
+## Why exact decimal
+
+Standard JS `Number` is IEEE-754 double-precision binary float. Decimal fractions like 0.1 / 0.2 / 0.0825 don't have exact binary representations, so arithmetic on them silently accumulates error. For money / financial / pricing math that's not acceptable.
+
+`@para/decimal` uses a high-precision Decimal128-style representation under the hood — every operation is exact (within the precision budget; default 34 significant digits per IEEE 754-2008 decimal128).
+
+## API
+
+```ts
+import { Decimal } from "para:decimal";
+
+new Decimal(value: string | number | bigint | Decimal): Decimal
+
+dec.add(other), dec.sub(other), dec.mul(other), dec.div(other), dec.mod(other);
+dec.neg(), dec.abs(), dec.sign();
+dec.pow(n), dec.sqrt();
+dec.round(decimals?, mode?): Decimal;     // mode: "half-even" | "half-up" | "down" | ...
+dec.toFixed(decimals?): string;
+dec.toString(): string;
+dec.toNumber(): number;                   // lossy by definition; use sparingly
+dec.equals(other), dec.compare(other), dec.gt(other), dec.lt(other), …
+dec.isZero(), dec.isFinite(), dec.isNaN();
+```
+
+## Aggregation
+
+```ts
+import { sum, mean, min, max } from "para:decimal";
+
+const total = sum([new Decimal("0.1"), new Decimal("0.2"), new Decimal("0.3")]);
+// → "0.6"
+```
+
+Aggregation helpers preserve exactness across N values without intermediate rounding.
+
+## See also
+
+- [Para language → Exact-decimal literals](/parabun/language#exact-decimal-literals-01d)
+- [`para:arrow`](/parabun/lib/arrow) — `decimal128` arrow kind uses `@para/decimal` for read/write

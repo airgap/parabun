@@ -1,0 +1,118 @@
+---
+title: parabun:video
+description: Video decode / encode / thumbnail / extractAudio for H.264, H.265, VP9, AV1, MJPEG. Software path via ffmpeg subprocess; hardware via cuda / v4l2m2m / qsv / vaapi when the running ffmpeg has them.
+---
+
+```ts
+import video from "parabun:video";
+
+const dec = await video.decode(mp4Bytes);
+console.log(dec.width, dec.height, dec.codec, dec.accelUsed);
+for await (const frame of dec.frames()) {
+  // frame: { data: Uint8Array (RGBA), width, height, ptsMs, index, keyframe }
+}
+await dec.close();
+```
+
+## Backends
+
+| Path | When |
+|---|---|
+| MJPEG-in-MP4 (pure JS) | Caller passes `decodeMjpg` (image.decode); zero subprocess |
+| ffmpeg subprocess | Everything else; auto when MJPEG path doesn't apply |
+
+## API
+
+### `decode(bytes, opts?)`
+
+```ts
+video.decode(bytes: Uint8Array | ArrayBuffer | string, opts?: {
+  pixelFormat?: "rgba" | "rgb24" | "yuv420p";
+  startMs?: number;       // seek to this presentation timestamp before decode
+  endMs?: number;         // stop decoding past this PTS
+  accel?: "auto" | "cuda" | "v4l2m2m" | "qsv" | "vaapi" | "none";
+  decodeMjpg?: (bytes) => DecodedImage;  // routes via image.decode
+}): Promise<VideoDecoder>
+
+interface VideoDecoder {
+  width, height, codec, durationMs;
+  accelUsed: "cuda" | "v4l2m2m" | "qsv" | "vaapi" | "none";
+  frames(): AsyncIterableIterator<DecodedFrame>;
+  seek(ptsMs): Promise<void>;       // MJPEG path only; ffmpeg path requires re-open with startMs
+  close(): Promise<void>;
+}
+```
+
+`accel: "auto"` probes the running ffmpeg's `-decoders` list once and picks the first available HW path for the input codec. Auto stays on software for inputs <64px (HW backends have minimum dimensions).
+
+### `encode(opts)`
+
+```ts
+video.encode(opts: {
+  codec: "h264" | "h265" | "vp9" | "av1" | "mjpeg";
+  container: "mp4" | "mkv" | "webm";
+  width: number; height: number; fps: number;
+  bitrate?: number;
+  preset?: "fast" | "medium" | "slow";
+  path?: string;          // if omitted, finalize() returns the encoded bytes
+}): Promise<VideoEncoder>
+
+interface VideoEncoder {
+  pushFrame(frame): Promise<void>;
+  finalize(): Promise<Uint8Array | void>;
+}
+```
+
+`pushFrame` accepts a `parabun:camera` Frame, a `parabun:image` DecodedImage, or `{ data, width, height, pixelFormat }`. 3-channel RGB inputs auto-pad to RGBA.
+
+### `thumbnail(bytes, ptsMs?)`
+
+```ts
+video.thumbnail(bytes, ptsMs?): Promise<{
+  data: Uint8Array; width: number; height: number; ptsMs: number;
+}>
+```
+
+Single RGBA frame at a presentation timestamp (default: clip midpoint). Container-level seek, lands on nearest preceding keyframe.
+
+### `extractAudio(bytes, opts?)`
+
+```ts
+video.extractAudio(bytes, opts?: {
+  sampleRate?: number;       // default 16000 (Whisper-friendly)
+  channels?: 1 | 2;          // default 1 (mono)
+}): Promise<{
+  samples: Int16Array; sampleRate: number; channels: number; durationMs: number;
+}>
+```
+
+Pulls the audio track as raw signed-16-bit PCM. Pairs with [`parabun:speech.transcribe`](/parabun/runtime/speech) for video → text pipelines.
+
+### `probe(bytes)`
+
+```ts
+video.probe(bytes): Promise<{
+  container: "mp4" | "mkv" | "webm" | "ts" | "auto";
+  streams: Array<VideoStream | AudioStream>;
+}>
+```
+
+MP4 + Matroska use a pure-JS box walker; everything else (MOV / AVI / FLV / MPEG-TS / OGG) falls back to ffprobe.
+
+## Hardware acceleration matrix
+
+| Platform | Path | Note |
+|---|---|---|
+| Linux + NVIDIA | `cuda` | Needs ffmpeg built with `--enable-cuvid --enable-nvdec` |
+| Jetson | `cuda` | Same; install ffmpeg manually (JetPack ships gstreamer-only) |
+| Pi 4 | `v4l2m2m` | h264_v4l2m2m for H.264 1080p |
+| Pi 5 | — | BCM2712 dropped the dedicated codec block; software only |
+| Intel | `qsv` / `vaapi` | qsv preferred when available |
+
+Decoder reports the `accelUsed` field so callers can confirm which path actually ran.
+
+## See also
+
+- [`parabun:image`](/parabun/runtime/image) — for the MJPEG-fast-path's `decodeMjpg` callback
+- [`parabun:speech`](/parabun/runtime/speech) — `transcribe` consumes `extractAudio` output directly
+- [`parabun:camera`](/parabun/runtime/camera) — live capture frames feed straight into `encode().pushFrame`

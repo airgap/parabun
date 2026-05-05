@@ -1,0 +1,43 @@
+---
+title: para:simd
+description: Cross-runtime SIMD facade. Routes to parabun:simd on Parabun (native AVX2/NEON), to WebAssembly SIMD in browsers, and to a scalar fallback elsewhere.
+---
+
+```ts
+import simd from "para:simd";
+
+const xs = new Float32Array(1_000_000);
+const total = simd.sum(xs);     // dispatches to parabun:simd on Parabun, wasm SIMD in browsers
+```
+
+## Routing
+
+| Runtime | Backend |
+|---|---|
+| Parabun | [`parabun:simd`](/parabun/runtime/simd) — native AVX2 / NEON via Highway |
+| Modern browser | WebAssembly 128-bit SIMD |
+| Node / Deno | npm `@para/simd-wasm` (WebAssembly SIMD) |
+| Fallback | scalar loop |
+
+The same call works everywhere; performance varies by backend.
+
+## API
+
+Same surface as [`parabun:simd`](/parabun/runtime/simd):
+
+```ts
+simd.sum, simd.min, simd.max, simd.mean, simd.dot, simd.norm;
+simd.map, simd.filter, simd.zip, simd.scale, simd.affine;
+simd.add, simd.sub, simd.mul, simd.div;
+```
+
+## When to use which
+
+- **Inside Parabun**: prefer importing `parabun:simd` directly — same API, no facade indirection.
+- **Cross-runtime libraries**: import `para:simd` so callers in Node / browser get the right backend automatically.
+- **Browser-only code**: skip the facade, use `WebAssembly` SIMD directly (or [`@para/simd-wasm`](https://www.npmjs.com/package/@para/simd-wasm)).
+
+## See also
+
+- [`parabun:simd`](/parabun/runtime/simd) — Parabun-native primitives
+- [`parabun:pipeline`](/parabun/runtime/pipeline) — `|>` operator fusion (Parabun-only)

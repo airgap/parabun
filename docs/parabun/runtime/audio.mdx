@@ -1,0 +1,115 @@
+---
+title: parabun:audio
+description: Audio codecs (WAV, MP3, FLAC, AAC, OGG, Opus), DSP primitives (FFT, filters, resample), spectrogram + mel-spectrogram, and ALSA capture / playback. File I/O via ffmpeg subprocess for non-native formats.
+---
+
+```ts
+import audio from "parabun:audio";
+
+const bytes = await Bun.file("song.flac").bytes();
+const { samples, sampleRate, channels } = await audio.decodeFile(bytes, {
+  sampleRate: 16000,
+  channels: 1,
+});
+const lpf = audio.lowpass(samples, { sampleRate, cutoffHz: 4000 });
+const wav = audio.writeWav(lpf, { sampleRate, channels });
+await Bun.write("filtered.wav", wav);
+```
+
+## Codec coverage
+
+| Format | Decode | Encode | Path | Native? |
+|---|---|---|---|---|
+| WAV | ✓ | ✓ | `readWav` / `writeWav` | Pure JS |
+| MP3 | ✓ | ✓ | `decodeMp3` (in) / `encodeFile` (out via ffmpeg) | minimp3 native (decode) |
+| Opus | ✓ | ✓ | `OpusDecoder` / `OpusEncoder` | libopus FFI |
+| FLAC / AAC / OGG / M4A | ✓ | ✓ | `decodeFile` / `encodeFile` | ffmpeg subprocess |
+
+`decodeFile` / `encodeFile` are the catch-all for everything ffmpeg knows. The WAV / MP3 / Opus native paths win when the format is known statically (no subprocess overhead).
+
+## API
+
+### File I/O
+
+```ts
+audio.decodeFile(bytes, opts?: {
+  sampleRate?: number;     // resample target (default: source rate)
+  channels?: 1 | 2;        // remix target (default: source)
+}): Promise<{ samples: Int16Array; sampleRate: number; channels: number; durationMs: number }>
+
+audio.encodeFile(samples, opts: {
+  format: "mp3" | "flac" | "aac" | "ogg" | "wav";
+  sampleRate: number;
+  channels: 1 | 2;
+  bitrate?: number;        // for lossy codecs
+}): Promise<Uint8Array>
+
+audio.probe(bytes): Promise<{
+  format, codec, sampleRate, channels, durationMs, bitrate?
+}>
+```
+
+### Native fast-paths
+
+```ts
+audio.readWav(bytes): WavData;          // pure JS, no subprocess
+audio.writeWav(samples, opts): Uint8Array;
+audio.decodeMp3(bytes): WavData;        // minimp3
+new audio.OpusEncoder({ sampleRate, channels, bitrate? })
+new audio.OpusDecoder({ sampleRate, channels })
+```
+
+### DSP
+
+```ts
+audio.fft(samples): { real, imag };
+audio.ifft(real, imag): Float32Array;
+audio.spectrogram(samples, { fftSize, hopSize, sampleRate });
+audio.melSpectrogram(samples, { fftSize, hopSize, sampleRate, nMels });
+audio.lowpass(samples, { sampleRate, cutoffHz });
+audio.highpass(samples, { sampleRate, cutoffHz });
+audio.bandpass(samples, { sampleRate, lowHz, highHz });
+audio.notch(samples, { sampleRate, freqHz, q });
+audio.resample(samples, { fromRate, toRate });
+audio.detectVoice(samples, { sampleRate, ratio? });
+```
+
+### Conversions
+
+```ts
+audio.i16ToF32(samples): Float32Array;
+audio.f32ToI16(samples): Int16Array;
+audio.interleave(channels: Float32Array[]): Float32Array;
+audio.deinterleave(samples, channelCount): Float32Array[];
+```
+
+### Effects
+
+```ts
+new audio.Denoiser({ sampleRate });
+new audio.Gain({ db });
+new audio.Compressor({ threshold, ratio, attack, release });
+new audio.Limiter({ threshold });
+audio.normalize(samples, { peak? });
+audio.peak(samples);
+audio.rms(samples);
+audio.envelope(samples, { window? });
+audio.mix(...sources): Float32Array;
+```
+
+### Capture / playback (ALSA on Linux)
+
+```ts
+const devices = await audio.devices();
+await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
+for await (const chunk of mic.frames()) { /* chunk.samples */ }
+
+await using spk = await audio.play({ sampleRate: 16000, channels: 1 });
+await spk.write(samples);
+```
+
+## See also
+
+- [`parabun:speech`](/parabun/runtime/speech) — `transcribe` consumes Int16 PCM directly
+- [`parabun:video`](/parabun/runtime/video) — `extractAudio` returns the same shape
+- [`parabun:llm`](/parabun/runtime/llm) — Whisper STT in `WhisperModel`

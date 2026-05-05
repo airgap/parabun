@@ -1,0 +1,83 @@
+---
+title: parabun:spi
+description: Linux SPI bus access via /dev/spidevN.M. Single + multi-segment full-duplex transfers, configurable mode / bits-per-word / max speed.
+---
+
+```ts
+import spi from "parabun:spi";
+
+await using bus = await spi.open("/dev/spidev0.0", {
+  mode: 0,
+  bitsPerWord: 8,
+  speedHz: 1_000_000,
+});
+
+// Single transfer — write 4 bytes, read 4 back
+const rx = await bus.transfer(new Uint8Array([0x01, 0x02, 0x03, 0x04]));
+```
+
+Linux-only. Boards with SPI exposed via `/dev/spidevN.M` (Pi, Jetson, most ARM SBCs).
+
+## API
+
+### `open(path, opts?)`
+
+```ts
+spi.open(path: string, opts?: {
+  mode?: 0 | 1 | 2 | 3;
+  bitsPerWord?: number;       // default 8
+  speedHz?: number;           // default 500_000
+  csHigh?: boolean;
+  lsbFirst?: boolean;
+}): Promise<Bus>
+
+interface Bus {
+  // Single full-duplex: write `tx`, get same-length `rx`
+  transfer(tx: Uint8Array): Promise<Uint8Array>;
+
+  // Multi-segment: each segment may have its own speed / cs hold
+  transferAll(segments: SpiSegment[]): Promise<Uint8Array[]>;
+
+  // Convenience: write-only / read-only
+  write(bytes: Uint8Array): Promise<void>;
+  read(length: number): Promise<Uint8Array>;
+
+  // Reconfigure on the fly
+  setSpeedHz(hz: number): Promise<void>;
+  setMode(mode: 0 | 1 | 2 | 3): Promise<void>;
+  setBitsPerWord(n: number): Promise<void>;
+
+  close(): Promise<void>;
+}
+
+interface SpiSegment {
+  tx: Uint8Array;
+  speedHz?: number;       // override per segment
+  delayUs?: number;       // delay after this segment
+  csHold?: boolean;       // keep CS asserted between segments
+}
+```
+
+## Multi-segment example (LCD with command + data phases)
+
+```ts
+await bus.transferAll([
+  { tx: new Uint8Array([0x36]), csHold: true, delayUs: 10 },     // command byte
+  { tx: pixelData, csHold: false },                               // data pixels
+]);
+```
+
+## Speed limits
+
+| Board | Max speed |
+|---|---|
+| Pi 5 | ~125 MHz on bus 0 |
+| Pi 4 | ~62.5 MHz |
+| Jetson Orin Nano | per pinmux; commonly 50 MHz |
+
+The kernel clamps `speedHz` to the closest divider it can synthesize, so you get the best-effort rate at or below your request.
+
+## See also
+
+- [`parabun:i2c`](/parabun/runtime/i2c) — slower, more devices, no chip-select
+- [`parabun:gpio`](/parabun/runtime/gpio) — for additional control lines (DC/RST/BUSY on e-paper, etc.)

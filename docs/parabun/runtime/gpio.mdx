@@ -1,0 +1,87 @@
+---
+title: parabun:gpio
+description: Linux GPIO via the v2 character-device uAPI (/dev/gpiochipN). Digital input / output and edge events. Validated end-to-end on Pi 5.
+---
+
+```ts
+import gpio from "parabun:gpio";
+
+await using chip = await gpio.open("/dev/gpiochip0");
+await using led = await chip.requestOutput([17], { initial: [0] });
+
+// Blink
+for (let i = 0; i < 10; i++) {
+  await led.set([i & 1]);
+  await Bun.sleep(500);
+}
+```
+
+Linux-only. The same code works on Pi 5, Jetson, and any Linux board exposing `/dev/gpiochipN`. Permissions: add the running user to the `gpio` group, or run as root.
+
+## API
+
+### `open(path)`
+
+```ts
+gpio.open(path: string): Promise<Chip>
+
+interface Chip {
+  info(): Promise<ChipInfo>;
+  lineInfo(offset: number): Promise<LineInfo>;
+  requestOutput(offsets: number[], opts?: RequestOptions): Promise<OutputLine>;
+  requestInput(offsets: number[], opts?: RequestOptions): Promise<InputLine>;
+  watchEdges(offsets: number[], opts?: EdgeOptions): Promise<EdgeWatcher>;
+  close(): Promise<void>;
+}
+```
+
+### Output lines
+
+```ts
+const led = await chip.requestOutput([17, 27], {
+  consumer?: "my-app",        // appears in /sys/kernel/debug/gpio
+  initial?: [0, 1],
+  driveMode?: "push-pull" | "open-drain" | "open-source";
+  bias?: "pull-up" | "pull-down" | "disabled";
+});
+await led.set([1, 0]);
+await led.toggle([17]);
+```
+
+### Input lines
+
+```ts
+const button = await chip.requestInput([22], {
+  bias?: "pull-up" | "pull-down" | "disabled";
+});
+const values = await button.get();    // [0|1, ...]
+```
+
+### Edge events
+
+```ts
+const watch = await chip.watchEdges([22], {
+  edge?: "rising" | "falling" | "both";
+  debounceUs?: number;
+});
+for await (const event of watch.events()) {
+  console.log(event.offset, event.edge, event.timestampNs);
+}
+```
+
+Backed by the v2 uAPI line-event mechanism. Per-line debounce in microseconds when supported by the kernel (≥ 5.10).
+
+## Boards
+
+| Board | Status | Notes |
+|---|---|---|
+| Raspberry Pi 5 | ✓ Validated | Use `/dev/gpiochip4` (the BCM2712 main chip) |
+| Raspberry Pi 4 | ✓ | `/dev/gpiochip0` |
+| Jetson Orin Nano | ✓ Validated | Various `/dev/gpiochipN` per pinmux |
+| Other Linux | ✓ | Whatever `gpiochipN` your board exposes |
+
+## See also
+
+- [`parabun:i2c`](/parabun/runtime/i2c) — companion bus for sensor + display ICs
+- [`parabun:spi`](/parabun/runtime/spi) — high-speed serial for SD cards, displays, sensors
+- [`parabun:camera`](/parabun/runtime/camera) — V4L2 capture (often co-driven with GPIO for camera enable / strobe)

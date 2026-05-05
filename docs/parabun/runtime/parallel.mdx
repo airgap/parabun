@@ -1,0 +1,96 @@
+---
+title: parabun:parallel
+description: Worker-pool primitives — pmap / preduce / psort / pool — plus thread-safe Mutex and Semaphore over SharedArrayBuffer. psort uses radix sort with parallel fan-out above per-kind thresholds.
+---
+
+```ts
+import parallel from "parabun:parallel";
+
+// Map a pure function across an array on N workers
+const sums = await parallel.pmap([1, 2, 3, 4, 5], x => x * x);
+
+// Sort a 10M-element typed array with parallel radix
+const sorted = await parallel.psort(new Uint32Array(10_000_000));
+```
+
+## API
+
+### `pmap(items, fn, opts?)`
+
+```ts
+parallel.pmap<T, R>(items: T[] | TypedArray, fn: (item, idx) => R, opts?: {
+  concurrency?: number;       // default = navigator.hardwareConcurrency, capped at 8
+  chunkSize?: number;
+}): Promise<R[]>
+```
+
+Adaptive: small inputs / cheap functions stay on the main thread (LYK-712 — no perf cliff at small N). Pure functions (`pure function …`) get a dispatch hint.
+
+### `preduce(items, fn, init, opts?)`
+
+```ts
+parallel.preduce<T, A>(items, fn: (acc, item, idx) => A, init: A, opts?: {
+  concurrency?, mapFn?
+}): Promise<A>
+```
+
+Per-worker partial accumulators merged on the main thread. Optional `mapFn` for fused map+reduce (`item → mappedValue → acc`).
+
+### `psort(array, comparator?, opts?)`
+
+```ts
+parallel.psort<T>(
+  array: T[] | TypedArray,
+  comparator?: (a, b) => number,
+  opts?: {
+    concurrency?, serial?, strategy?: "auto" | "merge" | "sample"
+  }
+): Promise<T[] | TypedArray>
+```
+
+Two paths:
+
+- **Typed-array radix** — Uint8 / Int8 / Uint8Clamped / Uint16 / Int16 / Uint32 / Int32 / Float32 / Float64 / BigInt64 / BigUint64. LSD radix (1 to 8 passes depending on key width). Beats native `TypedArray.sort()` 2-4× from N≈100K up. **No comparator allowed** — radix is sort-by-value.
+- **Object-array merge** — generic JS arrays with a comparator. Worker chunk-sort + k-way merge; sample sort opt-in via `strategy: "sample"`.
+
+For typed arrays at N ≥ 4M (u32) / 5M (i32) / 6M (f32), psort fans the radix histogram + scatter across workers via SharedArrayBuffer scratch. ~1.4-2.0× over single-threaded radix at scale.
+
+Bench: [`bench/parabun-psort-radix/`](https://github.com/airgap/parabun/tree/main/bench/parabun-psort-radix).
+
+### `pool(opts)` — explicit worker pool
+
+```ts
+const p = parallel.pool({ size: 4, modulePath: "./worker.ts" });
+const result = await p.dispatch({ kind: "doWork", payload });
+await p.close();
+```
+
+For long-running work where the implicit pmap pool's lifecycle isn't a fit. Workers run real ESM modules (not stringified functions).
+
+### Mutex + Semaphore (LYK-728)
+
+```ts
+const m = new parallel.Mutex();      // SharedArrayBuffer-backed
+await m.lock();
+try { /* critical section */ } finally { m.unlock(); }
+
+const s = new parallel.Semaphore(3); // 3 permits
+await s.acquire();
+try { /* up to 3 concurrent */ } finally { s.release(); }
+```
+
+Cross-worker safe via Atomics.waitAsync. Permits-out-of-band: `s.tryAcquire()` for non-blocking poll.
+
+### `disposeWorkers()`
+
+```ts
+await parallel.disposeWorkers();    // terminate the implicit pmap pool
+```
+
+Use in tests / scripts to let the event loop exit cleanly. `pool()` instances need their own `.close()`.
+
+## See also
+
+- [`parabun:simd`](/parabun/runtime/simd) — for fused-on-typed-array primitives that often beat parallel for memory-bound work
+- [`parabun:gpu`](/parabun/runtime/gpu) — GPU primitives win when the problem fits a CUDA / Metal kernel
+- [Bench writeup](/parabun/lib/parabun-benches) — when parallel wins vs loses

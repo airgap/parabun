@@ -1,0 +1,99 @@
+---
+title: parabun:assistant
+description: Conversational-bot harness composing parabun:speech (listen + speak) and parabun:llm (chat) into a turn-taking voice agent. Drop-in for "build a smart speaker" use cases.
+---
+
+```ts
+import audio     from "parabun:audio";
+import llm       from "parabun:llm";
+import speech    from "parabun:speech";
+import assistant from "parabun:assistant";
+
+await using model = await llm.loadModel("./models/llama-3.1-8b.Q4_K_M.gguf");
+await using mic   = await audio.capture({ sampleRate: 16000, channels: 1 });
+await using spk   = await audio.play({ sampleRate: 22050, channels: 1 });
+
+const bot = assistant.create({
+  model,
+  systemPrompt: "You're a helpful, terse assistant. Keep replies under two sentences.",
+  stt: { engine: "whisper", model: "./models/ggml-base.en.bin" },
+  tts: { engine: "piper", model: "./en_US-lessac-medium.onnx" },
+});
+
+await bot.run(mic.frames(), spk);
+```
+
+That's a full voice loop in 12 lines.
+
+## API
+
+### `create(opts)`
+
+```ts
+assistant.create(opts: {
+  model: Model;                            // from parabun:llm.loadModel
+  systemPrompt?: string;
+  stt: { engine: "whisper"; model: string };
+  tts: { engine: "piper"; model: string };
+  vad?: { ratio?, hangoverMs?, … };        // forwarded to speech.listen
+  maxHistoryTurns?: number;                // truncate context
+}): Bot
+
+interface Bot {
+  // Reactive signals
+  listening: Signal<boolean>;
+  thinking: Signal<boolean>;
+  speaking: Signal<boolean>;
+  lastUtterance: Signal<string | null>;
+
+  // Imperative
+  run(input, output): Promise<void>;       // full loop until input ends
+  turns(input): AsyncIterableIterator<{ user: string; assistant: string }>;
+  ask(text): Promise<string>;              // one-shot (text in, text out)
+  say(text, output): Promise<void>;        // speak text without LLM
+}
+```
+
+### `run(input, output)`
+
+Runs the full listen → transcribe → chat → speak loop until the input iterator ends. `input` is anything `speech.listen` accepts (typically a mic frames iterator). `output` is anything `audio.play` returns (or any `{ write(samples) }` sink).
+
+### `turns(input)` — programmatic per-turn iteration
+
+```ts
+for await (const { user, assistant: reply } of bot.turns(mic.frames())) {
+  console.log(`USER: ${user}`);
+  console.log(`BOT:  ${reply}`);
+  // synthesise + play yourself, or ignore
+}
+```
+
+For when you want logging / branching / custom routing per turn instead of `run()`'s end-to-end loop.
+
+### `ask(text)` / `say(text, output)`
+
+Skip the audio path: `ask` runs LLM with the conversation history, `say` synthesizes + plays without going through the LLM. Useful for hybrid CLI + voice flows.
+
+## Composition pattern
+
+`parabun:assistant` is intentionally thin — it's just a coordinator over `speech` + `llm` + `audio`. If you need different behaviour (interruption, barge-in, RAG retrieval per turn, custom wakeword), build your own loop using the same primitives:
+
+```ts
+for await (const utt of speech.listen(mic.frames(), { sampleRate: 16000 })) {
+  const text = await speech.transcribe(utt, sttOpts);
+  const replyTokens = model.chat([...history, { role: "user", content: text }]);
+  let reply = "";
+  for await (const tok of replyTokens) {
+    reply += tok;
+    if (someInterruptCondition) break;
+  }
+  const wav = await speech.speak(reply, ttsOpts);
+  await spk.write(wav.samples);
+}
+```
+
+## See also
+
+- [`parabun:speech`](/parabun/runtime/speech) — `listen` + `transcribe` + `speak` primitives
+- [`parabun:llm`](/parabun/runtime/llm) — `Model` instance for the chat brain
+- [`parabun:audio`](/parabun/runtime/audio) — `capture` + `play` for I/O

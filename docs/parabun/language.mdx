@@ -1,0 +1,109 @@
+---
+title: Para language
+description: Parabun adds a small set of language extensions to JavaScript / TypeScript — purity declarations, error chaining, pipelines, parallel composition, exact-decimal literals, and bare-dot lambda sugar. Everything desugars to standard JS at parse time.
+---
+
+The Para language is a strict superset of JavaScript / TypeScript. Files using the extensions end in `.pts` (or `.pjs`) and are parsed by Parabun's built-in transpiler. All extensions desugar to standard JS at parse time — no runtime cost, no shape changes for downstream tools.
+
+## Purity (`pure function`)
+
+Mark a function as side-effect-free. The transpiler enforces purity at compile time (no captures of mutable outer state, no DOM / network / filesystem calls, no `await` of impure work).
+
+```ts
+pure function distance(p1: Point, p2: Point) {
+  return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+}
+```
+
+Pure functions are eligible for memoization, parallel dispatch via `pmap`, and other optimizations.
+
+## Error chaining (`..>`, `..!`, `..&`)
+
+Three chain operators that thread a value through a transformation, surfacing errors without try/catch towers:
+
+```ts
+// `..>` — happy-path: passes the value through if non-null/non-error.
+const json = response ..> .json();
+
+// `..!` — error short-circuit: the chain stops at the first error.
+const text = await fetch(url)
+  ..! .text()
+  ..! .toUpperCase();
+
+// `..&` — collects errors AND values: returns a Result-like.
+const results = items
+  ..& .validate()
+  ..& .save();
+```
+
+Leading-dot sugar (`.json()` / `.text()` / `.validate()`) synthesizes `(__pcv) => __pcv.json()` etc. — see [bare-dot sugar](#bare-dot-lambda-sugar) below.
+
+## Pipelines (`|>`)
+
+The `|>` operator threads a value through a pipeline. Compatible with the [TC39 hack-pipe proposal](https://github.com/tc39/proposal-pipeline-operator):
+
+```ts
+const total = orders
+  |> _.filter(o => o.status === "paid")
+  |> _.map(o => o.total)
+  |> _.reduce((a, b) => a + b, 0);
+```
+
+The transpiler fuses adjacent affine transforms — chained `.map()` calls collapse into one SIMD pass when the upstream is a typed array.
+
+## Parallel composition (`parallel` / `para`)
+
+```ts
+// parallel block — fan-out promises, await all
+parallel {
+  const user = await fetchUser(id);
+  const orders = await fetchOrders(id);
+  const prefs = await fetchPrefs(id);
+}
+// equivalent to: const [user, orders, prefs] = await Promise.all([…]);
+
+// parallel let / const — same idea, in declaration form
+parallel let
+  user = fetchUser(id),
+  orders = fetchOrders(id),
+  prefs = fetchPrefs(id);
+
+// parallel using / await using — disposes all at scope exit
+parallel await using
+  db = openDatabase(),
+  cache = openCache();
+```
+
+`para` is a 2-letter shorthand for `parallel`.
+
+## Exact-decimal literals (`0.1d`)
+
+Numeric literals with a `d` suffix are exact-decimal values backed by [`@para/decimal`](/parabun/lib/decimal):
+
+```ts
+const price = 0.1d + 0.2d;  // exactly 0.3, not 0.30000000000000004
+const tax = price * 0.0825d;  // exact
+```
+
+Falls back to a high-precision Decimal128 representation. Standard `Number` arithmetic is unchanged.
+
+## Bare-dot lambda sugar
+
+Argument-position dots synthesize `(_) => _.foo`:
+
+```ts
+items.map(.score)         // → items.map(_ => _.score)
+items.filter(.active)     // → items.filter(_ => _.active)
+result ..> .json()        // → result ..> (_ => _.json())
+```
+
+Works in chain-op handlers (`..>`, `..!`, `..&`) AND in any argument position.
+
+## File extensions
+
+- `.pts` — Para TypeScript
+- `.pjs` — Para JavaScript
+
+The transpiler ships as `@para/transpile` (npm) for use outside the Parabun runtime — same transforms, standard-JS output. Inside Parabun, all `.ts` and `.js` files also get the Para parser, so `.pts` is just a convention.
+
+See [`@para/transpile`](https://github.com/airgap/para-transpile) for the standalone parser and the parity test suite.

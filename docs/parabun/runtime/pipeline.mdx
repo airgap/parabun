@@ -1,0 +1,47 @@
+---
+title: parabun:pipeline
+description: Runtime helpers for the `|>` pipeline operator. Fuses adjacent affine transforms over typed arrays into a single SIMD pass.
+---
+
+The `|>` operator is a Para language extension parsed by Parabun's transpiler (see [Para language](/parabun/language)). At runtime, fused pipelines route through `parabun:pipeline` which detects affine chains and collapses them into one pass.
+
+```ts
+import simd from "parabun:simd";
+
+// Affine chain — collapses to one fused SIMD pass at runtime
+const result = data
+  |> simd.affine(_, 2, 0)        // ×2
+  |> simd.affine(_, 1, 5);       // +5
+// equivalent to one pass: simd.affine(data, 2, 5)
+```
+
+## What gets fused
+
+| Pattern | Behaviour |
+|---|---|
+| `arr |> simd.affine(_, k1, b1) |> simd.affine(_, k2, b2)` | One pass: k = k1 × k2, b = k2 × b1 + b2 |
+| `arr |> simd.scale(_, k1) |> simd.scale(_, k2)` | One pass: scale by k1 × k2 |
+| `arr |> simd.map(_, x => x * 2) |> simd.map(_, x => x + 1)` | Affine-detected, one pass |
+| `arr |> simd.sum(_)` | Direct dispatch to `simd.sum` |
+| `arr |> _.filter(p)` | Element-wise filter, one pass |
+| `K * simd.sum(arr) + C * arr.length` | Constant-folded reductions |
+
+For the pure ETL case `K * simd.sum(source) + C * n` the pipeline collapses to one SIMD pass plus two scalar mults.
+
+## API
+
+You normally don't import `parabun:pipeline` directly — the `|>` operator + `simd.*` calls do it under the hood. The module surface is mostly for testing the fusion behaviour:
+
+```ts
+import pipeline from "parabun:pipeline";
+
+// Inspect what would fuse
+const plan = pipeline.analyze(data |> _.scale(2) |> _.scale(3));
+// { steps: [{ kind: "affine", k: 6, b: 0 }] }   // already fused
+```
+
+## See also
+
+- [Para language → Pipelines](/parabun/language#pipelines) — the operator syntax
+- [`parabun:simd`](/parabun/runtime/simd) — the primitives that fuse
+- [Streaming-ETL benchmark](/parabun/lib/parabun-benches#streaming-etl) — 50× over `.map().reduce()` chains
