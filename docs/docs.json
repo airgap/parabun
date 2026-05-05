@@ -197,15 +197,39 @@
           {
             "group": "Overview",
             "icon": "book-open",
-            "pages": ["/parabun/overview", "/parabun/language"]
+            "pages": ["/parabun/overview"]
           },
           {
-            "group": "Codecs",
+            "group": "Para language (.pts)",
+            "icon": "code",
+            "pages": ["/parabun/language"]
+          },
+          {
+            "group": "Para libraries (cross-runtime)",
+            "icon": "package",
+            "pages": [
+              "/parabun/lib/signals",
+              "/parabun/lib/parallel",
+              "/parabun/lib/arena",
+              "/parabun/lib/simd",
+              "/parabun/lib/csv",
+              "/parabun/lib/arrow",
+              "/parabun/lib/rtp",
+              "/parabun/lib/mcp"
+            ]
+          },
+          {
+            "group": "Language helpers",
+            "icon": "wrench",
+            "pages": ["/parabun/lib/pipeline", "/parabun/lib/decimal"]
+          },
+          {
+            "group": "Runtime: Codecs",
             "icon": "image",
             "pages": ["/parabun/runtime/image", "/parabun/runtime/video", "/parabun/runtime/audio"]
           },
           {
-            "group": "Machine learning",
+            "group": "Runtime: Machine learning",
             "icon": "brain",
             "pages": [
               "/parabun/runtime/llm",
@@ -215,7 +239,7 @@
             ]
           },
           {
-            "group": "Hardware (Linux)",
+            "group": "Runtime: Hardware (Linux)",
             "icon": "cpu",
             "pages": [
               "/parabun/runtime/gpio",
@@ -225,23 +249,14 @@
             ]
           },
           {
-            "group": "Compute",
+            "group": "Runtime: Compute",
             "icon": "zap",
             "pages": ["/parabun/runtime/gpu"]
           },
           {
-            "group": "Para libraries",
-            "icon": "package",
-            "pages": [
-              "/parabun/lib/arrow",
-              "/parabun/lib/csv",
-              "/parabun/lib/decimal",
-              "/parabun/lib/parallel",
-              "/parabun/lib/pipeline",
-              "/parabun/lib/signals",
-              "/parabun/lib/simd",
-              "/parabun/lib/parabun-benches"
-            ]
+            "group": "Benchmarks",
+            "icon": "gauge",
+            "pages": ["/parabun/lib/parabun-benches"]
           }
         ]
       },

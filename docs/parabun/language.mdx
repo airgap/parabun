@@ -3,7 +3,9 @@ title: Para language
 description: Parabun adds a small set of language extensions to JavaScript / TypeScript — purity declarations, error chaining, pipelines, parallel composition, exact-decimal literals, and bare-dot lambda sugar. Everything desugars to standard JS at parse time.
 ---
 
-The Para language is a strict superset of JavaScript / TypeScript. Files using the extensions end in `.pts` (or `.pjs`) and are parsed by Parabun's built-in transpiler. All extensions desugar to standard JS at parse time — no runtime cost, no shape changes for downstream tools.
+The Para language (`.pts` / `.pjs`) is a strict superset of JavaScript / TypeScript. It compiles to standard JS at parse time, and the compiled output imports from the [`@para/*` libraries](/parabun/overview#the-libraries) — so `.pts` is sugar over the same eight packages, not a separate ecosystem. The Para language is **optional**: every demo on this site has a `.ts` form that uses the libraries directly.
+
+Inside Parabun, `.pts` is parsed by the built-in transpiler with no build step. A standalone transpiler (`@para/transpile`) for non-Parabun toolchains is in development.
 
 ## Purity (`pure function`)
 

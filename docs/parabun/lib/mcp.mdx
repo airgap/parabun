@@ -1,0 +1,95 @@
+---
+title: "@para/mcp"
+description: Model Context Protocol client. stdio (subprocess JSON-RPC 2.0) and ws (WebSocket) transports. Lists tools / resources / prompts a server exposes; structurally compatible with parabun:assistant's tools option.
+---
+
+```bash
+npm install @para/mcp
+```
+
+`@para/mcp` is a Model Context Protocol **client**. Connects to any MCP server over stdio or WebSocket, lists what the server exposes, and proxies tool / resource / prompt calls back through one connection object. Server-side hosting is deliberately out of scope — for that, use the standard MCP SDK.
+
+## Connecting
+
+```ts
+import mcp from "para:mcp";
+
+await using conn = await mcp.connect("stdio", "node", {
+  args: ["./my-mcp-server.js"],
+});
+```
+
+Two transports:
+
+- **`"stdio"`** — spawns a subprocess and speaks newline-delimited JSON-RPC 2.0 on stdin/stdout. Pass argv as the third argument; `env` and `cwd` flow through.
+- **`"ws"`** — opens a WebSocket. Pass a `ws://` or `wss://` URL.
+
+`await using` calls `.close()` automatically — sends a JSON-RPC shutdown if the spec defines one, then ends the transport.
+
+## What the server exposes
+
+```ts
+console.log(conn.tools);     // ToolDescriptor[]
+console.log(conn.resources); // ResourceDescriptor[]
+console.log(conn.prompts);   // PromptDescriptor[]
+```
+
+Populated during `connect()` by sending the relevant `list` JSON-RPC requests. Auto-refreshed when the server pushes `notifications/{tools,resources,prompts}/list_changed`. Force a re-fetch with `conn.refreshTools()` / `refreshResources()` / `refreshPrompts()`.
+
+## Calling tools
+
+```ts
+const result = await conn.call("read_file", { path: "/etc/hostname" });
+// result.content: ContentBlock[]
+```
+
+Throws `mcp.MCPError` on a JSON-RPC error response — the `code` / `message` / `data` fields propagate through.
+
+## Resources
+
+```ts
+const res = await conn.readResource("file:///etc/hostname");
+// res.contents: Array<{ uri, mimeType, text? | blob? }>
+
+const off = conn.on("notifications/resources/updated", ({ uri }) => {
+  console.log("resource changed:", uri);
+});
+const unsubscribe = await conn.subscribeResource("file:///watched");
+// later…
+await unsubscribe();
+off();
+```
+
+## Prompts
+
+```ts
+const p = await conn.getPrompt("summarize", { length: "short" });
+// p.messages: PromptMessage[]
+```
+
+## Composing with parabun:assistant
+
+The connection is structurally compatible with `parabun:assistant`'s `tools:` option. The assistant flattens every tool the connection exposes into its catalog and routes calls back through `conn.call`:
+
+```ts
+import assistant from "parabun:assistant";
+const bot = assistant.create({ llm, tools: [conn] });
+```
+
+Multiple MCP servers can be passed in the same `tools` array — the assistant disambiguates by tool name.
+
+## Errors
+
+Throw `new mcp.MCPError({ code, message, data? })` from your own code to mimic a JSON-RPC error shape; `MCPError` instances thrown by the server are surfaced verbatim.
+
+## Out of scope
+
+- MCP server hosting — use the standard MCP SDK
+- HTTP / SSE transports
+- OAuth — pass credentials through `env` on stdio, or in the WS URL
+- Sampling (server-initiated `sampling/createMessage`)
+- Completions (`completion/complete`)
+
+## See also
+
+- [`parabun:assistant`](/parabun/runtime/assistant) — pass an `mcp.connect()` result as a tool source

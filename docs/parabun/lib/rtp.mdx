@@ -1,0 +1,75 @@
+---
+title: "@para/rtp"
+description: RFC 3550 RTP packet pack/parse + sequence-aware jitter buffer with reactive signals. Pure JS, no native deps. Build voice/video transport over UDP / WebSocket / raw TCP without a full WebRTC stack.
+---
+
+```bash
+npm install @para/rtp
+```
+
+`@para/rtp` is the framing-and-reorder layer that every higher-level real-time stack builds on. It does packet pack/parse and sequence-aware reorder; it does **not** do SRTP, RTCP, FEC, or rate adaptation — those belong above this layer.
+
+## Packet pack / parse
+
+```ts
+import rtp from "para:rtp";
+
+const wire = rtp.pack({
+  payloadType: 111,         // Opus default in many SDP configurations
+  sequence: 1234,
+  timestamp: 96000,         // tick at the codec sample rate
+  ssrc: 0xdeadbeef,
+  marker: false,
+  payload: opusPacket,      // Uint8Array
+});
+
+const { sequence, timestamp, payload, marker, ssrc } = rtp.parse(wire);
+```
+
+`pack()` writes a 12-byte RTP header followed by `payload`. `parse()` validates the version field and surfaces the standard fields. CSRC list and header-extension parsing are not included in v1.
+
+## JitterBuffer
+
+```ts
+import rtp from "para:rtp";
+
+const jb = new rtp.JitterBuffer({ depth: 8 });
+jb.push(packet);            // out-of-order is fine
+const next = jb.pop();      // returns the next in-sequence packet, or undefined
+```
+
+A bounded reorder window. `depth` is the maximum lag (in sequence numbers) the buffer will wait before treating a packet as lost.
+
+| Method / property | What |
+|---|---|
+| `push(packet)` | Insert a parsed packet (out-of-order tolerated) |
+| `pop()` | Pull the next in-sequence packet, or `undefined` |
+| `pending()` | Count of buffered packets not yet popped |
+| `nextSequence()` | The sequence number `pop()` is waiting for |
+| `lossCount()` | Total packets given up on as lost |
+| `maxLag` | Same value as the constructor's `depth` |
+
+## Reactive signals
+
+Three [`@para/signals`](/parabun/lib/signals) Signals on every JitterBuffer instance:
+
+```ts
+const jb = new rtp.JitterBuffer({ depth: 8 });
+jb.pendingSignal.subscribe(n => console.log(`buffered: ${n}`));
+jb.lossCountSignal.subscribe(n => console.log(`total losses: ${n}`));
+jb.lossRateSignal.subscribe(r => console.log(`loss rate: ${(r * 100).toFixed(1)}%`));
+```
+
+Wire them into a UI / metrics surface without polling.
+
+## Out of scope (v1)
+
+- SRTP encryption
+- RTCP control packets
+- Forward error correction (FEC)
+- Rate-adaptive depth
+
+## See also
+
+- [`@para/signals`](/parabun/lib/signals) — the reactive layer the JitterBuffer's signals come from
+- [`parabun:audio`](/parabun/runtime/audio) — Opus encode/decode that pairs naturally with `rtp.pack`

@@ -1,70 +1,77 @@
 ---
 title: Parabun overview
-description: Parabun is a fork of Bun adding language extensions for purity / error chaining / pipelines, plus a hardware-and-codec-rich runtime module suite (image, video, audio, vision, llm, gpu, gpio/i2c/spi).
+description: Parabun bundles three things that ship independently — Para's eight cross-runtime libraries, the optional .pts language sugar, and a Bun-fork runtime that adds native modules for codecs / ML / hardware / GPU.
 ---
 
-Parabun is [Bun](https://bun.com), with two additions:
+Para is two products. **Parabun** is the runtime that bundles them and adds native modules.
 
-1. **The Para language** — purity (`pure function`), error-chaining (`..!`, `..&`), pipelines (`|>`), parallel composition (`parallel`/`para`), exact-decimal literals (`0.1d`), and leading-dot lambda sugar (`.score`). All extensions desugar to standard JS at parse time. See [the language guide](/parabun/language).
+| Product | What it is | Where it runs |
+|---|---|---|
+| **Para libraries** | Eight `@para/*` npm packages — pure JS / Wasm, no native deps | Any JS runtime: Node, Deno, Bun, browsers, Parabun |
+| **The `.pts` language** | Optional sugar that compiles to standard JavaScript at parse time | Same — once compiled, the output runs anywhere |
+| **Parabun** (the runtime) | A fork of [Bun](https://bun.com) that ships Para preinstalled and adds native modules | Linux / macOS / Windows |
 
-2. **A Parabun-runtime module suite** under the `parabun:` namespace — codecs (image, video, audio), ML (llm, vision, speech, assistant), I/O (gpio, i2c, spi, camera), compute (gpu, parallel, simd), and library code (`para:arrow`, `para:csv`, etc.) under `para:`.
+You can use any of the three on its own. Install one `@para/*` library from npm in a Node project — never touch `.pts` or Parabun. Use `.pts` syntax with plain Node — the compiled output imports from npm. Or use Parabun and get all three preinstalled with native modules on top.
 
-Everything Bun does, Parabun does. The Parabun additions are the differentiator.
+## The libraries
 
-## Two namespaces
+Eight `@para/*` packages on npm. Each is independent — install only the ones your code uses.
 
-- **`parabun:*`** — runtime modules baked into the binary. Native code, FFI bindings, system libraries. Examples: `parabun:image`, `parabun:video`, `parabun:llm`. Cross-runtime compatibility isn't a goal — these only work in Parabun.
-
-- **`para:*`** — pure-JS / TS library modules. Cross-runtime by design (Node, Deno, browser). Examples: `para:arrow`, `para:csv`, `para:decimal`. Many `para:*` modules have a "normalizer" pattern that routes to the Parabun-native path when available and falls back to a JS implementation elsewhere (e.g. `@para/gpu` routes to `parabun:gpu` on Parabun, WebGPU in browsers, CPU otherwise).
-
-## Module map
-
-### Codecs
-
-| Module | What it does |
+| Package | What it does |
 |---|---|
-| [`parabun:image`](/parabun/runtime/image) | JPEG / PNG / WebP / AVIF / HEIC / JPEG-XL decode + encode + filters |
-| [`parabun:video`](/parabun/runtime/video) | H.264 / H.265 / VP9 / AV1 decode + encode (via ffmpeg subprocess) + thumbnail + extractAudio |
-| [`parabun:audio`](/parabun/runtime/audio) | WAV / MP3 / FLAC / AAC / OGG / Opus codec, FFT, filters, ALSA capture / playback |
+| [`@para/signals`](/parabun/lib/signals) | Reactive state — Signal / Computed / Effect, Solid-style fine-grained reactivity |
+| [`@para/parallel`](/parabun/lib/parallel) | Worker-pool primitives — pmap / preduce / psort + Mutex / Semaphore over SharedArrayBuffer |
+| [`@para/arena`](/parabun/lib/arena) | Buffer-pool free list for typed-array hot loops + a `scope()` helper that defers GC inside Parabun |
+| [`@para/simd`](/parabun/lib/simd) | SIMD primitives over typed arrays — sum / dot / matVec / topK / scalar+vector arithmetic |
+| [`@para/csv`](/parabun/lib/csv) | RFC 4180 CSV parse / stringify with optional parallel-mode |
+| [`@para/arrow`](/parabun/lib/arrow) | In-memory Arrow + Arrow IPC + Parquet (bloom filters, predicate pushdown, multi-row-group, recursive nesting) |
+| [`@para/rtp`](/parabun/lib/rtp) | RFC 3550 RTP packet pack/parse + jitter buffer with reactive signals |
+| [`@para/mcp`](/parabun/lib/mcp) | Model Context Protocol client — stdio + WebSocket transports |
 
-### Machine learning
+Pure JS / Wasm. No native deps. Same exports under `para:*` inside Parabun. Same exports under `@para/*` on npm.
 
-| Module | What it does |
+## The .pts language
+
+[The Para language guide](/parabun/language) covers the full spec. Headline features:
+
+- `signal x = 0` — reactive cell
+- `effect { … }` — block sugar for `signals.effect(() => …)`
+- `~>` / `->` — reactive assignment / call binding
+- `|>` — pipeline operator
+- `..!` / `..&` — error chaining
+- `pure function …` — parse-time purity check
+- `parallel` / `para` — fan-out composition
+- `0.1d` — exact-decimal literals
+- `arena { … }` — GC-deferred scope
+- `.score` — leading-dot lambda sugar (selector → `x => x.score`)
+
+All extensions desugar to standard JavaScript at parse time — the compiled output imports from the same `@para/*` libraries. Two ancillary packages back the language layer:
+
+| Package | Backs which feature |
 |---|---|
-| [`parabun:llm`](/parabun/runtime/llm) | LLM inference (Llama / Mistral / Whisper) via CUDA + Metal; OpenAI-compatible HTTP serve |
-| [`parabun:vision`](/parabun/runtime/vision) | Frame + motion + YOLO detect + tesseract OCR + multi-frame tracker + ONNX runtime |
-| [`parabun:speech`](/parabun/runtime/speech) | VAD-gated utterance segmentation + Whisper STT + Piper TTS |
-| [`parabun:assistant`](/parabun/runtime/assistant) | Bot harness composing speech + llm into a turn-taking conversational agent |
+| [`@para/pipeline`](/parabun/lib/pipeline) | `\|>` runtime helpers + affine-chain `compile()` |
+| [`@para/decimal`](/parabun/lib/decimal) | Exact-decimal arithmetic for `0.1d` literals |
 
-### Hardware abstraction layer
+You don't import these directly — `para-transpile` references them when desugaring.
 
-| Module | What it does |
+## Parabun (the runtime)
+
+A fork of Bun that:
+
+1. **Ships Para preinstalled.** All eight `@para/*` libraries are bundled — `import "para:signals"` works without `npm install`.
+2. **Compiles `.pts` natively.** No build step — Parabun parses `.pts` files directly.
+3. **Adds twelve native modules** under the `parabun:*` namespace. These are runtime-only — they only work in Parabun, by design.
+
+### parabun:* native modules
+
+| Group | Modules |
 |---|---|
-| [`parabun:gpio`](/parabun/runtime/gpio) | Linux uAPI v2 GPIO — digital in/out, edge events |
-| [`parabun:i2c`](/parabun/runtime/i2c) | Linux i2c-dev with SMBus convenience methods |
-| [`parabun:spi`](/parabun/runtime/spi) | Linux spidev with multi-segment transfers |
-| [`parabun:camera`](/parabun/runtime/camera) | V4L2 frame capture (yuyv / nv12 / rgb24 / mjpg) |
+| **Codecs** | [`parabun:image`](/parabun/runtime/image) (JPEG / PNG / WebP / AVIF / HEIC / JPEG-XL), [`parabun:video`](/parabun/runtime/video), [`parabun:audio`](/parabun/runtime/audio) |
+| **Machine learning** | [`parabun:llm`](/parabun/runtime/llm) (Llama / Mistral / Whisper via CUDA + Metal), [`parabun:vision`](/parabun/runtime/vision) (motion / YOLO / OCR / ONNX), [`parabun:speech`](/parabun/runtime/speech) (VAD + Whisper STT + Piper TTS), [`parabun:assistant`](/parabun/runtime/assistant) |
+| **Hardware (Linux)** | [`parabun:gpio`](/parabun/runtime/gpio), [`parabun:i2c`](/parabun/runtime/i2c), [`parabun:spi`](/parabun/runtime/spi), [`parabun:camera`](/parabun/runtime/camera) |
+| **Compute** | [`parabun:gpu`](/parabun/runtime/gpu) — CUDA + Metal kernels for matVec / matmul / conv2D / scan / reduce / quantile / variance / argmin/max / histogram / custom MSL+CUDA |
 
-### Compute
-
-| Module | What it does |
-|---|---|
-| [`parabun:gpu`](/parabun/runtime/gpu) | CUDA + Metal: matVec / matmul / conv2D / scan / reduce / quantile / argmin/max / histogram / variance / custom MSL+CUDA kernels |
-| [`para:parallel`](/parabun/lib/parallel) | pmap / preduce / psort (radix sort, parallel above thresholds), Mutex / Semaphore / pool |
-| [`para:simd`](/parabun/lib/simd) | SIMD primitives over typed arrays (cross-runtime: native, wasm, scalar) |
-| [`para:pipeline`](/parabun/lib/pipeline) | Pipeline runtime supporting `|>` operator chains |
-
-### Para libraries
-
-| Module | What it does |
-|---|---|
-| [`para:arrow`](/parabun/lib/arrow) | In-memory Arrow + IPC reader/writer + Parquet (incl. INT96, FLBA, List, Struct, Map, bloom filters, predicate pushdown, multi-row-group) |
-| [`para:csv`](/parabun/lib/csv) | RFC 4180 CSV with parallel-mode option |
-| [`para:decimal`](/parabun/lib/decimal) | Exact-decimal arithmetic backing the `0.1d` literal (npm package; not a runtime builtin) |
-| [`para:parallel`](/parabun/lib/parallel) | Worker-pool primitives: pmap / preduce / psort + Mutex / Semaphore |
-| [`para:pipeline`](/parabun/lib/pipeline) | `\|>` operator runtime helpers + affine-chain compile |
-| [`para:signals`](/parabun/lib/signals) | Reactive signals (Solid-style) |
-| [`para:simd`](/parabun/lib/simd) | Cross-runtime SIMD primitives |
+Cross-runtime compatibility isn't a goal here — these are native modules linked into the binary. If you want code that runs on Node / Deno / browsers, stay in the `@para/*` libraries.
 
 ## Installation
 
@@ -74,6 +81,12 @@ curl -fsSL https://script.dev/parabun | bash
 
 Same install pattern as Bun. The binary identifies as `parabun` on the CLI; existing Bun scripts (`bun bd`, `bunx`) work unchanged.
 
+To use the libraries without Parabun:
+
+```bash
+npm install @para/signals @para/parallel @para/arrow      # whichever you need
+```
+
 ## License
 
-Parabun is dual-licensed under MIT and Apache 2.0, matching upstream Bun. The Para language additions and the `parabun:*` / `para:*` modules are first-party Parabun work.
+Parabun is dual-licensed under MIT and Apache 2.0, matching upstream Bun. The Para language additions and the `@para/*` / `parabun:*` modules are first-party Parabun work.

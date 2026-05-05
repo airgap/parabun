@@ -1,0 +1,51 @@
+---
+title: "@para/arena"
+description: Buffer-pool helpers for typed-array hot loops, plus a no-op scope() so .pts code with arena { … } blocks compiles cleanly outside Parabun.
+---
+
+```bash
+npm install @para/arena
+```
+
+`@para/arena` is the cross-runtime backing for two .pts constructs — `arena { … }` blocks and explicit `Pool` reuse. The pool is a real typed-array free list everywhere; `scope` is a passthrough on Node / Deno / browsers (where GC isn't user-controllable) and defers JSC garbage collection inside Parabun.
+
+## Pool
+
+```ts
+import { Pool } from "@para/arena";
+
+const buf = new Pool(Float32Array, 1024, { prewarm: 4 });
+
+const a = buf.acquire();   // recycled if free, else allocated
+// ... use a ...
+buf.release(a);            // back to the free list
+```
+
+`Pool(TypedArray, size, opts?)`:
+- `prewarm` — number of buffers to allocate up front
+- `limit` — cap on the free-list size; over-released buffers are dropped to GC
+- `clear: true` — zero recycled buffers before handing them out (security-sensitive callers)
+
+`pool.use(fn)` wraps `acquire` / `fn(buf)` / `release` in a try/finally for the common pattern.
+
+## scope
+
+```ts
+import { scope } from "@para/arena";
+
+scope(() => {
+  // hot inner loop with no GC pauses inside Parabun
+});
+```
+
+In Parabun (where `parabun:arena` is wired), `scope` is **not** a no-op — it pauses JSC's incremental GC for the synchronous body, then resumes. Outside Parabun, it's a passthrough. .pts `arena { … }` blocks lower to `scope(() => { … })` so the same source file works either way.
+
+## Cross-runtime
+
+- Node / Deno / Bun — Pool is real; scope is a passthrough.
+- Browser — Pool is real; scope is a passthrough.
+- Parabun — Pool is real; scope routes to `parabun:arena`.
+
+## See also
+
+- [Para language — arena blocks](/parabun/language) — the `arena { … }` syntax that lowers to `scope(() => { … })`
