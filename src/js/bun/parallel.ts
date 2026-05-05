@@ -44,6 +44,17 @@ function defaultConcurrency(): number {
 // Handles pmap (regular + SAB TypedArray) and preduce messages.
 const WORKER_SRC = `
 const __cache = new Map();
+// SAB → cached Uint32Array view spanning the whole buffer. Avoids
+// allocating a fresh view per message when the orchestrator pools and
+// reuses scratch SABs across calls (parallelRadixSortU32 fans 4 passes
+// × 2 ops × P workers = 64+ messages per call referencing the same
+// few SABs). WeakMap so views drop when the SAB is freed.
+const __viewU32 = new WeakMap();
+function __getU32(sab) {
+  let v = __viewU32.get(sab);
+  if (!v) { v = new Uint32Array(sab); __viewU32.set(sab, v); }
+  return v;
+}
 const __ctors = {
   f32: Float32Array, f64: Float64Array,
   i32: Int32Array, u32: Uint32Array,
@@ -52,11 +63,19 @@ const __ctors = {
   u8c: Uint8ClampedArray,
 };
 self.onmessage = async ({ data }) => {
-  const { id, fnSrc } = data;
-  let fn = __cache.get(fnSrc);
-  if (!fn) {
-    fn = (0, eval)("(" + fnSrc + ")");
-    __cache.set(fnSrc, fn);
+  const id = data.id;
+  const fnSrc = data.fnSrc;
+  let fn;
+  // Radix ops don't carry a fn — skip the eval+cache lookup that
+  // otherwise re-evaluates "(undefined)" on every message (the
+  // existing if(!fn) check treats the cached undefined as a miss
+  // and re-evals indefinitely).
+  if (fnSrc !== undefined) {
+    fn = __cache.get(fnSrc);
+    if (!fn) {
+      fn = (0, eval)("(" + fnSrc + ")");
+      __cache.set(fnSrc, fn);
+    }
   }
   try {
     if (data.op === "reduce") {
@@ -92,6 +111,70 @@ self.onmessage = async ({ data }) => {
         output[i] = fn(input[i], data.baseIndex + i);
       }
       self.postMessage({ id, ok: true });
+    } else if (data.op === "sort") {
+      // Sort one chunk locally and post the sorted copy back. fn is
+      // the user's comparator (optional — undefined → default sort).
+      // The chunk is a JS array (structured-cloned over from the main
+      // thread); sort in place and ship it back.
+      var items = data.items;
+      if (fn) items.sort(fn);
+      else items.sort();
+      self.postMessage({ id, ok: true, out: items });
+    } else if (data.op === "radix-histogram") {
+      // Histogram one chunk into hist[workerIdx*256 + b] for b in 0..256.
+      // Caller provides shift (= pass * 8). The histogram SAB is
+      // pre-zeroed by the orchestrator before each pass.
+      var inU = __getU32(data.inSab);
+      var hist = __getU32(data.histSab);
+      var hbase = data.workerIdx * 256;
+      var off = data.byteStart >>> 2;
+      var n = data.count;
+      var s = data.shift;
+      for (var i = 0; i < n; i++) hist[hbase + ((inU[off + i] >>> s) & 0xff)]++;
+      self.postMessage({ id, ok: true });
+    } else if (data.op === "radix-scatter") {
+      // Scatter chunk → output using per-worker per-bucket starting
+      // offsets prefix-summed by the orchestrator. We keep a local
+      // copy of the 256 starts so the inner loop doesn't pingpong
+      // off the SAB cache line.
+      var inU = __getU32(data.inSab);
+      var outU = __getU32(data.outSab);
+      var offs = __getU32(data.offsetsSab);
+      var hbase = data.workerIdx * 256;
+      var off = data.byteStart >>> 2;
+      var n = data.count;
+      var s = data.shift;
+      var local = new Uint32Array(256);
+      for (var i = 0; i < 256; i++) local[i] = offs[hbase + i];
+      for (var i = 0; i < n; i++) {
+        var v = inU[off + i];
+        var b = (v >>> s) & 0xff;
+        outU[local[b]++] = v;
+      }
+      self.postMessage({ id, ok: true });
+    } else if (data.op === "bucketize") {
+      // Split items into P buckets using P-1 splitters. Element x lands
+      // in bucket b if splitters[b-1] <= x < splitters[b] (left-most
+      // bucket: x < splitters[0]; right-most: splitters[P-2] <= x).
+      // Binary search per element → O(log P). Stable: walking the input
+      // in order and appending preserves intra-slice order; the merge
+      // phase will preserve cross-slice order via worker id ordering.
+      var items = data.items;
+      var splitters = data.splitters;
+      var P = splitters.length + 1;
+      var buckets = new Array(P);
+      for (var b = 0; b < P; b++) buckets[b] = [];
+      for (var i = 0; i < items.length; i++) {
+        var x = items[i];
+        var lo = 0, hi = splitters.length;
+        while (lo < hi) {
+          var mid = (lo + hi) >>> 1;
+          if (fn(x, splitters[mid]) < 0) hi = mid;
+          else lo = mid + 1;
+        }
+        buckets[lo].push(x);
+      }
+      self.postMessage({ id, ok: true, buckets });
     } else {
       var items = data.items, baseIndex = data.baseIndex;
       var out = new Array(items.length);
@@ -1320,4 +1403,871 @@ class Semaphore {
   }
 }
 
-export default { pmap, preduce, disposeWorkers, _heuristicState, _resetHeuristic, Mutex, Semaphore, pool };
+// ---------------------------------------------------------------------------
+// psort — parallel chunk-and-merge sort
+// ---------------------------------------------------------------------------
+//
+// Splits the array into N chunks (N ≈ defaultConcurrency()), sorts each
+// chunk in a worker via native Array.sort, then k-way merges the sorted
+// chunks back into one array using a binary min-heap.
+//
+// **When parallel sort wins**:
+//   - Arrays of objects with a non-trivial comparator (date parsing,
+//     deep field access, locale-aware string compare). Per-comparison
+//     cost is high enough that splitting work N ways amortises the
+//     postMessage round-trip and the heap-based merge phase.
+//   - Typical crossover: ~10K elements with a comparator that costs
+//     a few hundred ns per call.
+//
+// **When parallel sort LOSES** (and we should fall back to native):
+//   - JS arrays of numbers (V8/JSC native sort runs at memory-bandwidth
+//     speeds; structured-clone of a 1M-element array to a worker easily
+//     costs more than the entire sort). Convert to a TypedArray first
+//     to take the radix path instead.
+//   - Small arrays (< ~5K elements) — dispatch overhead alone exceeds
+//     the sort.
+//   - No comparator + simple types — Array.sort()'s default ToString
+//     compare in the engine is faster than anything we can build.
+//
+// **TypedArray inputs take a separate single-threaded LSD radix path**
+// (not the chunk-and-merge worker path described above). It's
+// non-comparison and runs in O(n·k/B) bit operations, so it beats
+// native `TypedArray.sort()` by 2–4× without needing workers. See
+// the `radixSortTyped` block below.
+//
+// The `serial:` option short-circuits the dispatch decision for cases
+// where the caller already knows parallelism would lose. The default
+// auto-falls-back to native sort under those conditions.
+
+const PSORT_SERIAL_THRESHOLD = 5_000; // arrays smaller than this stay on the main thread
+
+interface PSortOptions {
+  /** Worker count override (defaults to defaultConcurrency()). */
+  concurrency?: number;
+  /**
+   * Force the serial code path (native sort on the main thread). Useful
+   * when benchmarking or when the caller knows a particular sort
+   * would lose under parallelism.
+   */
+  serial?: boolean;
+  /**
+   * Algorithm strategy:
+   *   - "auto"   (default) — picks "merge" for ≤ ~50K elements, "sample"
+   *               for larger inputs where the merge phase becomes the
+   *               bottleneck.
+   *   - "merge"  — chunked native sort + k-way min-heap merge in main.
+   *               Simpler, lower constant overhead, plateaus around 2-3×
+   *               speedup at large N because the merge is sequential.
+   *   - "sample" — sample sort: pick splitters from a random sample,
+   *               bucketize each chunk in workers, sort each bucket in
+   *               a worker, concatenate buckets. No global merge phase
+   *               so speedup approaches linear in worker count.
+   */
+  strategy?: "auto" | "merge" | "sample";
+}
+
+/** Crossover where sample sort starts paying off vs. chunk-merge. */
+const PSORT_SAMPLE_THRESHOLD = 50_000;
+
+// ─── Radix sort for typed arrays ─────────────────────────────────────
+//
+// LSD (least-significant-digit) radix sort with B = 8 bits per pass.
+// Histogram + exclusive prefix sum + scatter, repeated for each digit.
+// Stable: equal-key elements keep their relative order across passes.
+//
+// Type handling:
+//   - Unsigned ints (u8 / u16 / u32 / u8c): straightforward — bytes
+//     are already in lex order.
+//   - Signed ints (i8 / i16 / i32): XOR the sign bit to map [-2^(k-1),
+//     2^(k-1)) → [0, 2^k). After sort, XOR back.
+//   - f32: sign-flip trick — for non-negative floats XOR the sign bit
+//     (so they sort positive); for negative floats invert ALL bits (so
+//     a more-negative number's bit pattern comes earlier). After sort,
+//     invert the transform.
+//   - f64 / i64 / u64: same approach as 32-bit but 8 passes and the
+//     value is processed as a (low_u32, high_u32) pair (TypedArray
+//     view aliasing assumes little-endian, which holds on every
+//     platform Bun ships to). Sign/float transforms operate on the
+//     high half (where the sign bit lives).
+//
+// All ops use plain typed-array memory + integer math; no allocation
+// in the hot loop beyond the 256-slot histogram per pass.
+
+type RadixKind = "u8" | "i8" | "u8c" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64" | "i64" | "u64";
+
+function radixKindForTyped(arr: unknown): RadixKind | null {
+  if (arr instanceof Uint8Array) return "u8";
+  if (arr instanceof Int8Array) return "i8";
+  if (arr instanceof Uint8ClampedArray) return "u8c";
+  if (arr instanceof Uint16Array) return "u16";
+  if (arr instanceof Int16Array) return "i16";
+  if (arr instanceof Uint32Array) return "u32";
+  if (arr instanceof Int32Array) return "i32";
+  if (arr instanceof Float32Array) return "f32";
+  if (arr instanceof Float64Array) return "f64";
+  if (typeof BigInt64Array !== "undefined" && arr instanceof BigInt64Array) return "i64";
+  if (typeof BigUint64Array !== "undefined" && arr instanceof BigUint64Array) return "u64";
+  return null;
+}
+
+// Below this, native TypedArray.sort() beats radix because the histogram
+// + scatter alloc cost dominates the small N. Measured on x86_64 release:
+// radix wins from N≈5K up. See bench/parabun-psort-radix/run.pjs.
+const RADIX_MIN_N = 4_000;
+
+// Parallel radix kicks in here. Below these thresholds we stay
+// serial — main-thread prefix sum + worker dispatch (P × 2
+// round-trips per pass × 4 passes = 64+ messages for P=8) can dwarf
+// the algorithmic win at small N.
+//
+// Measured (release, 5950X) before SAB-pool reuse landed:
+//   - u32/i32 win 1.4-1.6× over serial above 4M.
+//   - f32 wins 1.5-1.6× over serial above 10M *robustly*. Between
+//     4-9M f32 sometimes regressed 5-6× vs serial when preceded by
+//     other large typed-array sorts. Suspected cause was GC pressure
+//     from throwaway 32MB+ SAB allocations per call; the f32 path's
+//     extra Float32/Uint32 aliased view appeared to amplify it.
+//
+// SAB-pool reuse in parallelRadixSortU32 should remove that GC
+// pressure (every call now borrows + returns scratch buffers rather
+// than allocating fresh). The f32 threshold stays at 10M until a
+// release-build re-bench confirms it can drop to 4M.
+const PARALLEL_RADIX_MIN_N_INT = 4_000_000;
+const PARALLEL_RADIX_MIN_N_F32 = 10_000_000;
+
+function radixSortTyped(arr: any, kind: RadixKind): any {
+  const N = arr.length;
+  if (N <= 1) return arr.slice();
+  if (N < RADIX_MIN_N) {
+    const copy = arr.slice();
+    copy.sort();
+    return copy;
+  }
+
+  switch (kind) {
+    case "u8":
+    case "u8c":
+      return radixSortBytes(arr, false);
+    case "i8":
+      return radixSortBytes(arr, true);
+    case "u16":
+      return radixSortU16(arr as Uint16Array, false, Uint16Array);
+    case "i16":
+      return radixSortU16(arr as Int16Array, true, Int16Array);
+    case "u32":
+      return radixSortU32(arr as Uint32Array, "u32");
+    case "i32":
+      return radixSortU32(arr as Int32Array, "i32");
+    case "f32":
+      return radixSortF32(arr as Float32Array);
+    case "f64":
+    case "i64":
+    case "u64":
+      return radixSort64(arr, kind);
+  }
+}
+
+// 1-pass radix on byte-wide keys: just histogram + scatter, no
+// per-pass loop. Cheap and beats native byte sort by 5-10× on large
+// arrays because the comparator-call cost per element dominates
+// native's TimSort.
+function radixSortBytes(arr: Uint8Array | Int8Array | Uint8ClampedArray, signed: boolean): typeof arr {
+  const N = arr.length;
+  const hist = new Uint32Array(256);
+  // For signed bytes the bit pattern is two's complement, so a +1
+  // offset to histogram index (then -1 to value at scatter) gives us
+  // correct signed ordering [-128..127] mapped to [0..255].
+  const offset = signed ? 128 : 0;
+  for (let i = 0; i < N; i++) hist[(arr[i] + offset) & 0xff]++;
+  const out = new (arr.constructor as any)(N);
+  let acc = 0;
+  for (let b = 0; b < 256; b++) {
+    const c = hist[b];
+    for (let j = 0; j < c; j++) out[acc + j] = signed ? b - offset : b;
+    acc += c;
+  }
+  return out;
+}
+
+// 2-pass radix on 16-bit keys (low byte then high byte). Signed
+// handled by XOR'ing the sign bit on input + output.
+function radixSortU16(arr: Uint16Array | Int16Array, signed: boolean, Ctor: any): typeof arr {
+  const N = arr.length;
+  const SIGN_FLIP = signed ? 0x8000 : 0;
+  let inBuf = new Uint16Array(N);
+  let outBuf = new Uint16Array(N);
+  for (let i = 0; i < N; i++) inBuf[i] = arr[i] ^ SIGN_FLIP;
+  for (let pass = 0; pass < 2; pass++) {
+    const shift = pass * 8;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < N; i++) hist[(inBuf[i] >>> shift) & 0xff]++;
+    let acc = 0;
+    for (let b = 0; b < 256; b++) {
+      const c = hist[b];
+      hist[b] = acc;
+      acc += c;
+    }
+    for (let i = 0; i < N; i++) {
+      const v = inBuf[i];
+      const b = (v >>> shift) & 0xff;
+      outBuf[hist[b]++] = v;
+    }
+    const tmp = inBuf;
+    inBuf = outBuf;
+    outBuf = tmp;
+  }
+  const result = new Ctor(N);
+  for (let i = 0; i < N; i++) result[i] = inBuf[i] ^ SIGN_FLIP;
+  return result;
+}
+
+// 4-pass radix on 32-bit keys. Signed → unsigned by XOR'ing sign bit.
+function radixSortU32(arr: Uint32Array | Int32Array, kind: "u32" | "i32"): typeof arr {
+  const N = arr.length;
+  const SIGN_FLIP = kind === "i32" ? 0x80000000 : 0;
+  let inBuf = new Uint32Array(N);
+  let outBuf = new Uint32Array(N);
+  for (let i = 0; i < N; i++) inBuf[i] = arr[i] ^ SIGN_FLIP;
+  for (let pass = 0; pass < 4; pass++) {
+    const shift = pass * 8;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < N; i++) hist[(inBuf[i] >>> shift) & 0xff]++;
+    let acc = 0;
+    for (let b = 0; b < 256; b++) {
+      const c = hist[b];
+      hist[b] = acc;
+      acc += c;
+    }
+    for (let i = 0; i < N; i++) {
+      const v = inBuf[i];
+      const b = (v >>> shift) & 0xff;
+      outBuf[hist[b]++] = v;
+    }
+    const tmp = inBuf;
+    inBuf = outBuf;
+    outBuf = tmp;
+  }
+  // After the 4 passes, inBuf holds sorted-by-unsigned-bit-pattern u32s.
+  // Undo the sign flip (no-op for unsigned).
+  if (kind === "u32") {
+    return new Uint32Array(inBuf.buffer, inBuf.byteOffset, N) as any;
+  }
+  const result = new Int32Array(N);
+  for (let i = 0; i < N; i++) result[i] = inBuf[i] ^ SIGN_FLIP;
+  return result;
+}
+
+// f32 radix. Mapping float bits to a sortable unsigned key:
+//   - non-negative: XOR sign bit (so 0.0 → 0x80000000, +Inf →
+//     0xFFFFFFFF). Order: [-Inf, -Big] > [-Small, -0] > [+0, +Inf].
+//     Wait — that's wrong; need to think again.
+//
+// Standard trick (Terdiman / Herf):
+//   if (sign bit set) → invert all bits     // negative floats reorder
+//   else              → flip only sign bit  // non-negative floats land
+//                                           //   above all negatives
+// Result: u32 lex order matches float numeric order. Stable across
+// the 4-pass radix; final pass un-transforms.
+function radixSortF32(arr: Float32Array): Float32Array {
+  const N = arr.length;
+  const u32View = new Uint32Array(arr.buffer, arr.byteOffset, N);
+  let inBuf = new Uint32Array(N);
+  let outBuf = new Uint32Array(N);
+  for (let i = 0; i < N; i++) {
+    const u = u32View[i];
+    inBuf[i] = (u & 0x80000000) === 0 ? u ^ 0x80000000 : ~u >>> 0;
+  }
+  for (let pass = 0; pass < 4; pass++) {
+    const shift = pass * 8;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < N; i++) hist[(inBuf[i] >>> shift) & 0xff]++;
+    let acc = 0;
+    for (let b = 0; b < 256; b++) {
+      const c = hist[b];
+      hist[b] = acc;
+      acc += c;
+    }
+    for (let i = 0; i < N; i++) {
+      const v = inBuf[i];
+      const b = (v >>> shift) & 0xff;
+      outBuf[hist[b]++] = v;
+    }
+    const tmp = inBuf;
+    inBuf = outBuf;
+    outBuf = tmp;
+  }
+  // Un-transform back to float bits.
+  const result = new Float32Array(N);
+  const resultU = new Uint32Array(result.buffer);
+  for (let i = 0; i < N; i++) {
+    const u = inBuf[i];
+    resultU[i] = (u & 0x80000000) === 0 ? ~u >>> 0 : u ^ 0x80000000;
+  }
+  return result;
+}
+
+// 8-pass radix on 64-bit keys. The 64-bit value lives as an
+// interleaved (low_u32, high_u32) pair in a Uint32Array of length
+// 2N. JS bitwise ops are 32-bit, so each pass picks one byte from
+// either the low half (passes 0-3) or the high half (passes 4-7).
+//
+// Sign / float transforms operate on the high half (where the sign
+// bit lives at bit 63). Endianness assumption: little-endian, which
+// holds for every platform Bun targets.
+function radixSort64(
+  arr: Float64Array | BigInt64Array | BigUint64Array,
+  kind: "f64" | "i64" | "u64",
+): Float64Array | BigInt64Array | BigUint64Array {
+  const N = arr.length;
+  const u32View = new Uint32Array(arr.buffer, arr.byteOffset, N * 2);
+  let inBuf = new Uint32Array(N * 2);
+  let outBuf = new Uint32Array(N * 2);
+
+  // Pre-transform: copy into inBuf and map to a sortable bit pattern.
+  if (kind === "f64") {
+    for (let i = 0; i < N; i++) {
+      const lo = u32View[2 * i];
+      const hi = u32View[2 * i + 1];
+      if ((hi & 0x80000000) === 0) {
+        inBuf[2 * i] = lo;
+        inBuf[2 * i + 1] = hi ^ 0x80000000;
+      } else {
+        inBuf[2 * i] = ~lo >>> 0;
+        inBuf[2 * i + 1] = ~hi >>> 0;
+      }
+    }
+  } else if (kind === "i64") {
+    for (let i = 0; i < N; i++) {
+      inBuf[2 * i] = u32View[2 * i];
+      inBuf[2 * i + 1] = u32View[2 * i + 1] ^ 0x80000000;
+    }
+  } else {
+    for (let i = 0; i < N * 2; i++) inBuf[i] = u32View[i];
+  }
+
+  for (let pass = 0; pass < 8; pass++) {
+    const halfIdx = pass < 4 ? 0 : 1;
+    const shift = (pass % 4) * 8;
+    const hist = new Uint32Array(256);
+
+    for (let i = 0; i < N; i++) {
+      hist[(inBuf[2 * i + halfIdx] >>> shift) & 0xff]++;
+    }
+    let acc = 0;
+    for (let b = 0; b < 256; b++) {
+      const c = hist[b];
+      hist[b] = acc;
+      acc += c;
+    }
+    for (let i = 0; i < N; i++) {
+      const lo = inBuf[2 * i];
+      const hi = inBuf[2 * i + 1];
+      const b = (inBuf[2 * i + halfIdx] >>> shift) & 0xff;
+      const pos = hist[b]++;
+      outBuf[2 * pos] = lo;
+      outBuf[2 * pos + 1] = hi;
+    }
+    const tmp = inBuf;
+    inBuf = outBuf;
+    outBuf = tmp;
+  }
+
+  // Materialize into the requested type, undoing the transform.
+  if (kind === "f64") {
+    const result = new Float64Array(N);
+    const ru = new Uint32Array(result.buffer);
+    for (let i = 0; i < N; i++) {
+      const lo = inBuf[2 * i];
+      const hi = inBuf[2 * i + 1];
+      if ((hi & 0x80000000) === 0) {
+        // Originally negative (transform inverted); invert back.
+        ru[2 * i] = ~lo >>> 0;
+        ru[2 * i + 1] = ~hi >>> 0;
+      } else {
+        ru[2 * i] = lo;
+        ru[2 * i + 1] = hi ^ 0x80000000;
+      }
+    }
+    return result;
+  }
+  if (kind === "i64") {
+    const result = new BigInt64Array(N);
+    const ru = new Uint32Array(result.buffer);
+    for (let i = 0; i < N; i++) {
+      ru[2 * i] = inBuf[2 * i];
+      ru[2 * i + 1] = inBuf[2 * i + 1] ^ 0x80000000;
+    }
+    return result;
+  }
+  const result = new BigUint64Array(N);
+  const ru = new Uint32Array(result.buffer);
+  for (let i = 0; i < N * 2; i++) ru[i] = inBuf[i];
+  return result;
+}
+
+// Parallel LSD radix for u32/i32/f32. 4 passes; each pass fans out
+// histogram → main-thread P×256 prefix sum → scatter. SAB-backed
+// scratch buffers (input + output) ping-pong across passes; the
+// histogram + offsets SABs are reused.
+async function parallelRadixSortU32(
+  arr: Uint32Array | Int32Array | Float32Array,
+  kind: "u32" | "i32" | "f32",
+  concurrency: number,
+): Promise<Uint32Array | Int32Array | Float32Array> {
+  const N = arr.length;
+  const P = concurrency;
+  const pool = ensurePool(P);
+
+  // Borrowed from the shared scratch pool so repeated psort calls
+  // (a benchmark loop, a streaming pipeline) don't re-allocate 8N+
+  // bytes every time. borrowSab returns a buffer that's >= the
+  // requested size — viewA.length may be larger than N, but every
+  // loop below explicitly bounds itself by N (count, prefix-sum
+  // total, post-transform iteration), so reads/writes never escape
+  // the live region.
+  const sabA = borrowSab(N * 4);
+  const sabB = borrowSab(N * 4);
+  const histSab = borrowSab(P * 256 * 4);
+  const offsetsSab = borrowSab(P * 256 * 4);
+  const viewA = new Uint32Array(sabA);
+  const viewB = new Uint32Array(sabB);
+  const hist = new Uint32Array(histSab);
+  const offs = new Uint32Array(offsetsSab);
+
+  // Pre-transform input → unsigned-sortable bit pattern in sabA.
+  if (kind === "f32") {
+    const u32View = new Uint32Array(arr.buffer, arr.byteOffset, N);
+    for (let i = 0; i < N; i++) {
+      const u = u32View[i];
+      viewA[i] = (u & 0x80000000) === 0 ? u ^ 0x80000000 : ~u >>> 0;
+    }
+  } else if (kind === "i32") {
+    for (let i = 0; i < N; i++) viewA[i] = (arr[i] >>> 0) ^ 0x80000000;
+  } else {
+    for (let i = 0; i < N; i++) viewA[i] = arr[i] >>> 0;
+  }
+
+  const chunkSize = Math.ceil(N / P);
+
+  let inSab: SharedArrayBuffer = sabA;
+  let outSab: SharedArrayBuffer = sabB;
+
+  for (let pass = 0; pass < 4; pass++) {
+    const shift = pass * 8;
+
+    // Zero the histogram SAB before each pass.
+    for (let i = 0; i < P * 256; i++) hist[i] = 0;
+
+    // Phase 1: histogram fanout.
+    await dispatchParallelRadix(pool, P, (entry, workerIdx) => {
+      const start = workerIdx * chunkSize;
+      const count = Math.min(chunkSize, N - start);
+      entry.w.postMessage({
+        id: workerIdx,
+        op: "radix-histogram",
+        inSab,
+        histSab,
+        byteStart: start * 4,
+        count,
+        shift,
+        workerIdx,
+      });
+    });
+
+    // Phase 2: main-thread P×256 → P×256 starting offsets. For each
+    // bucket b walked in ascending order, each worker w writes its
+    // bucket-b items starting at `acc`, then `acc += hist[w][b]`.
+    let acc = 0;
+    for (let b = 0; b < 256; b++) {
+      for (let w = 0; w < P; w++) {
+        offs[w * 256 + b] = acc;
+        acc += hist[w * 256 + b];
+      }
+    }
+
+    // Phase 3: scatter fanout.
+    await dispatchParallelRadix(pool, P, (entry, workerIdx) => {
+      const start = workerIdx * chunkSize;
+      const count = Math.min(chunkSize, N - start);
+      entry.w.postMessage({
+        id: workerIdx,
+        op: "radix-scatter",
+        inSab,
+        outSab,
+        offsetsSab,
+        byteStart: start * 4,
+        count,
+        shift,
+        workerIdx,
+      });
+    });
+
+    const tmp = inSab;
+    inSab = outSab;
+    outSab = tmp;
+  }
+
+  // After 4 passes (even count of swaps), the final scatter-output
+  // landed in outSab → swapped into inSab. So inSab now holds the
+  // sorted unsigned bit patterns.
+  const finalView = new Uint32Array(inSab);
+
+  let result: Uint32Array | Int32Array | Float32Array;
+  if (kind === "u32") {
+    // Explicit length N — `new Uint32Array(finalView)` would inherit
+    // finalView.length, which exceeds N when borrowSab returns an
+    // over-sized scratch buffer. Manual copy keeps the result
+    // dimensioned to the caller's input.
+    const r = new Uint32Array(N);
+    for (let i = 0; i < N; i++) r[i] = finalView[i];
+    result = r;
+  } else if (kind === "i32") {
+    const r = new Int32Array(N);
+    for (let i = 0; i < N; i++) r[i] = finalView[i] ^ 0x80000000;
+    result = r;
+  } else {
+    const r = new Float32Array(N);
+    const ru = new Uint32Array(r.buffer);
+    for (let i = 0; i < N; i++) {
+      const u = finalView[i];
+      ru[i] = (u & 0x80000000) === 0 ? ~u >>> 0 : u ^ 0x80000000;
+    }
+    result = r;
+  }
+
+  returnSab(sabA);
+  returnSab(sabB);
+  returnSab(histSab);
+  returnSab(offsetsSab);
+  return result;
+}
+
+// Fans `P` jobs onto the pool's first P workers and awaits all
+// responses. Used by both phases of parallelRadixSortU32.
+function dispatchParallelRadix(
+  pool: PoolWorker[],
+  P: number,
+  post: (entry: PoolWorker, idx: number) => void,
+): Promise<void> {
+  const promises: Promise<any>[] = new Array(P);
+  for (let w = 0; w < P; w++) {
+    const entry = pool[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    promises[w] = new Promise((resolve, reject) => {
+      entry.resolve = resolve;
+      entry.reject = reject;
+    });
+    post(entry, w);
+  }
+  return Promise.all(promises).then(() => undefined);
+}
+
+async function psort<T>(
+  array: readonly T[],
+  comparator?: (a: T, b: T) => number,
+  options?: PSortOptions,
+): Promise<T[]> {
+  // TypedArray fast path: LSD radix sort. Non-comparison, O(n·k/B)
+  // where k is the key bit width and B is the per-pass bit count
+  // (= 8 here, so 4 passes for i32/u32/f32, 2 for i16/u16, 1 for
+  // bytes). Beats engine native sort because it's not bound by
+  // comparator-call rate.
+  const typedKind = radixKindForTyped(array);
+  if (typedKind !== null) {
+    if (comparator) {
+      throw new TypeError(
+        "psort: TypedArray inputs use the radix path which doesn't accept a comparator (sort by value only). " +
+          "Wrap your typed array in a plain Array for comparator-driven sort.",
+      );
+    }
+    const N = (array as any).length;
+    // Above the parallel threshold, fan out the histogram + scatter
+    // phases across workers. Only worth it for the 32-bit kinds —
+    // byte/16-bit kinds are cheap enough serially that worker
+    // coordination eats the win. Skip if the user explicitly asked
+    // for serial.
+    const reqConc = options?.concurrency;
+    const conc =
+      typeof reqConc === "number" && reqConc > 0
+        ? Math.max(1, Math.min(N, reqConc))
+        : Math.min(N, defaultConcurrency());
+    if (!options?.serial && conc >= 2) {
+      const minN =
+        typedKind === "f32"
+          ? PARALLEL_RADIX_MIN_N_F32
+          : typedKind === "u32" || typedKind === "i32"
+            ? PARALLEL_RADIX_MIN_N_INT
+            : Infinity;
+      if (N >= minN) {
+        return (await parallelRadixSortU32(array as any, typedKind as any, conc)) as any;
+      }
+    }
+    return radixSortTyped(array as any, typedKind) as any;
+  }
+  if (!$isJSArray(array)) {
+    throw new TypeError("psort: first argument must be an Array or TypedArray");
+  }
+  const len = array.length;
+  if (len <= 1) return array.slice() as T[];
+
+  const requested = options?.concurrency;
+  const concurrency =
+    typeof requested === "number" && requested > 0
+      ? Math.max(1, Math.min(len, requested))
+      : Math.min(len, defaultConcurrency());
+
+  // Serial fallback: dispatch overhead dominates below the threshold.
+  // Also fall back when the caller asked for it explicitly, and when
+  // there's no comparator — V8/JSC's default sort is ~impossible to
+  // beat over postMessage cost.
+  if (options?.serial || concurrency === 1 || len < PSORT_SERIAL_THRESHOLD || !comparator) {
+    const out = (array as T[]).slice();
+    return comparator ? out.sort(comparator) : out.sort();
+  }
+
+  // Strategy selection. "auto" defaults to "merge" today.
+  //
+  // Empirical note: in this debug+ASAN build, sample sort loses
+  // 1.4-1.6× to chunk-merge across 10K..200K element benchmarks with
+  // a Date.parse comparator. The 2P worker round-trips
+  // (bucketize + sort) accumulate more postMessage overhead than the
+  // merge phase costs at these sizes. Sample sort theoretically wins
+  // for very large N where the sequential merge would dominate, but
+  // we don't have release-build numbers showing that crossover yet.
+  // Until we do, "auto" stays on the strictly-faster strategy and
+  // sample sort is opt-in via { strategy: "sample" } for callers who
+  // want to test it on their own data.
+  const strategy = options?.strategy === "merge" || options?.strategy === "sample" ? options.strategy : "merge";
+  void PSORT_SAMPLE_THRESHOLD; // reserved for the future auto-pick threshold
+
+  if (strategy === "sample") {
+    return sampleSort(array as T[], comparator, concurrency);
+  }
+  return chunkMergeSort(array as T[], comparator, concurrency);
+}
+
+// ─── chunk-and-merge strategy ────────────────────────────────────────
+// Each worker sorts one chunk; main thread k-way merges. Simpler, lower
+// fixed overhead than sample sort. Plateaus at large N because the
+// merge is sequential — that's what sampleSort exists to fix.
+async function chunkMergeSort<T>(array: T[], comparator: (a: T, b: T) => number, concurrency: number): Promise<T[]> {
+  const len = array.length;
+  const fnSrc = comparator.toString();
+  const chunkSize = Math.ceil(len / concurrency);
+  const pool = ensurePool(concurrency);
+
+  const pending: Promise<{ id: number; out: T[] }>[] = [];
+  for (let w = 0; w < concurrency; w++) {
+    const chunkStart = w * chunkSize;
+    if (chunkStart >= len) break;
+    const chunkEnd = Math.min(chunkStart + chunkSize, len);
+    const items = array.slice(chunkStart, chunkEnd);
+    const entry = pool[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    pending.push(
+      new Promise((resolve, reject) => {
+        entry.resolve = (data: any) => resolve({ id: w, out: data.out });
+        entry.reject = reject;
+        entry.w.postMessage({ id: w, op: "sort", fnSrc, items });
+      }),
+    );
+  }
+
+  const chunks = await Promise.all(pending);
+  chunks.sort((a, b) => a.id - b.id);
+  return kWayMerge(
+    chunks.map(c => c.out),
+    comparator,
+  );
+}
+
+// ─── sample sort strategy ────────────────────────────────────────────
+//
+// Two worker rounds:
+//   Round 1: each worker bucketizes its slice into P buckets via binary
+//            search through P-1 splitters. Returns a per-bucket array.
+//   Round 2: each worker sorts ONE concatenated bucket.
+// Final assembly: concatenate the sorted buckets in order. No global
+// merge phase — buckets are non-overlapping by construction, so each
+// bucket's sorted array can sit directly in its slot in the output.
+//
+// Speedup approaches O(P) — the bucketize step is O(n log P / P) per
+// worker (vs O(n log n) sequential), and the sort step is O((n/P)
+// log(n/P)) per worker. Sampling overhead is O(P · oversample · log
+// (P · oversample)) on the main thread, negligible for P ≤ 32.
+//
+// Stability: bucketize walks input in order and appends, preserving
+// intra-slice order. The cross-slice concat respects worker id
+// (= original slice index) order because Round 2 dispatch consumes
+// workerBucketArrays[0..P-1] in worker-id order. Each per-bucket sort
+// is stable. So the algorithm is globally stable.
+async function sampleSort<T>(array: T[], comparator: (a: T, b: T) => number, concurrency: number): Promise<T[]> {
+  const len = array.length;
+  const fnSrc = comparator.toString();
+  const P = concurrency;
+  const oversample = 16;
+  const sampleCount = Math.min(len, P * oversample);
+
+  // ── Sampling: pick `sampleCount` random elements; sort; choose
+  // `P-1` splitters at evenly-spaced positions. Uniform random sampling
+  // gives O(n/P²) bucket-size variance — within an order of magnitude
+  // of perfectly-balanced for P ≤ 32, which is all we'd realistically
+  // run on a single host.
+  const samples: T[] = new Array(sampleCount);
+  if (sampleCount === len) {
+    for (let i = 0; i < len; i++) samples[i] = array[i];
+  } else {
+    const stride = len / sampleCount;
+    for (let i = 0; i < sampleCount; i++) samples[i] = array[Math.floor(i * stride)];
+  }
+  samples.sort(comparator);
+  const splitters: T[] = new Array(P - 1);
+  for (let i = 1; i < P; i++) splitters[i - 1] = samples[Math.floor((i * sampleCount) / P)];
+
+  const pool = ensurePool(P);
+
+  // ── Round 1: bucketize each slice in a worker.
+  const chunkSize = Math.ceil(len / P);
+  const r1Pending: Promise<{ id: number; buckets: T[][] }>[] = [];
+  for (let w = 0; w < P; w++) {
+    const chunkStart = w * chunkSize;
+    if (chunkStart >= len) break;
+    const chunkEnd = Math.min(chunkStart + chunkSize, len);
+    const items = array.slice(chunkStart, chunkEnd);
+    const entry = pool[w];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    r1Pending.push(
+      new Promise((resolve, reject) => {
+        entry.resolve = (data: any) => resolve({ id: w, buckets: data.buckets });
+        entry.reject = reject;
+        entry.w.postMessage({ id: w, op: "bucketize", fnSrc, items, splitters });
+      }),
+    );
+  }
+  const r1Out = await Promise.all(r1Pending);
+  r1Out.sort((a, b) => a.id - b.id);
+
+  // Concat per-bucket arrays across workers. This walks
+  // r1Out[0..P-1].buckets[b] for each b in order — preserving
+  // global insertion order, which preserves stability across slices.
+  const buckets: T[][] = new Array(P);
+  for (let b = 0; b < P; b++) {
+    let totalLen = 0;
+    for (const r of r1Out) totalLen += r.buckets[b].length;
+    const merged: T[] = new Array(totalLen);
+    let off = 0;
+    for (const r of r1Out) {
+      const sub = r.buckets[b];
+      for (let i = 0; i < sub.length; i++) merged[off + i] = sub[i];
+      off += sub.length;
+    }
+    buckets[b] = merged;
+  }
+
+  // ── Round 2: sort each bucket in a worker. Workers are already in
+  // pool — reuse them. Some buckets may be empty (rare, but possible
+  // when splitters land in a way that excludes the empty range);
+  // skip the dispatch and treat them as already-sorted.
+  const r2Pending: Promise<{ id: number; out: T[] }>[] = [];
+  for (let b = 0; b < P; b++) {
+    if (buckets[b].length === 0) continue;
+    const entry = pool[b];
+    entry.busy = true;
+    if (typeof entry.w.ref === "function") entry.w.ref();
+    r2Pending.push(
+      new Promise((resolve, reject) => {
+        entry.resolve = (data: any) => resolve({ id: b, out: data.out });
+        entry.reject = reject;
+        entry.w.postMessage({ id: b, op: "sort", fnSrc, items: buckets[b] });
+      }),
+    );
+  }
+  const r2Out = await Promise.all(r2Pending);
+
+  // Re-slot sorted buckets into their original positions; empty buckets
+  // are already in place as `[]`.
+  const sortedBuckets: T[][] = new Array(P);
+  for (let b = 0; b < P; b++) sortedBuckets[b] = buckets[b].length === 0 ? [] : [];
+  for (const { id, out } of r2Out) sortedBuckets[id] = out;
+
+  // ── Final assembly: concat in bucket order. Buckets are
+  // non-overlapping by construction (splitters partition the value
+  // space), so concat == sorted output.
+  const result: T[] = new Array(len);
+  let off = 0;
+  for (let b = 0; b < P; b++) {
+    const sub = sortedBuckets[b];
+    for (let i = 0; i < sub.length; i++) result[off + i] = sub[i];
+    off += sub.length;
+  }
+  return result;
+}
+
+// k-way merge of K already-sorted arrays into one sorted output.
+// Uses a binary min-heap of (value, chunkIdx, posInChunk). Per-pop
+// cost is O(log K); total is O(N log K).
+function kWayMerge<T>(chunks: T[][], cmp: (a: T, b: T) => number): T[] {
+  type Entry = { v: T; chunkIdx: number; pos: number };
+  // Skip empty chunks; they'd just take up a heap slot.
+  const heap: Entry[] = [];
+  let totalLen = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    totalLen += c.length;
+    if (c.length > 0) heap.push({ v: c[0], chunkIdx: i, pos: 0 });
+  }
+  // Build min-heap.
+  for (let i = (heap.length >> 1) - 1; i >= 0; i--) siftDown(heap, i, cmp);
+
+  const out: T[] = new Array(totalLen);
+  let outIdx = 0;
+  while (heap.length > 0) {
+    const min = heap[0];
+    out[outIdx++] = min.v;
+    const nextPos = min.pos + 1;
+    if (nextPos < chunks[min.chunkIdx].length) {
+      heap[0] = { v: chunks[min.chunkIdx][nextPos], chunkIdx: min.chunkIdx, pos: nextPos };
+      siftDown(heap, 0, cmp);
+    } else {
+      // Chunk exhausted: swap the last heap entry into root, shrink, sift.
+      const last = heap.pop()!;
+      if (heap.length > 0) {
+        heap[0] = last;
+        siftDown(heap, 0, cmp);
+      }
+    }
+  }
+  return out;
+}
+
+function siftDown<T>(heap: { v: T; chunkIdx: number; pos: number }[], i: number, cmp: (a: T, b: T) => number): void {
+  const n = heap.length;
+  // Stable tie-break: when two heap entries compare equal under the
+  // user comparator, the one from the LOWER-indexed chunk wins. Chunks
+  // are numbered in the original array's slice order, so this preserves
+  // global insertion order across the merge — same stability guarantee
+  // ECMA-262 makes about Array.prototype.sort. Without this, heap
+  // structure decides ties non-deterministically.
+  const less = (a: { v: T; chunkIdx: number }, b: { v: T; chunkIdx: number }): boolean => {
+    const c = cmp(a.v, b.v);
+    if (c !== 0) return c < 0;
+    return a.chunkIdx < b.chunkIdx;
+  };
+  while (true) {
+    const l = 2 * i + 1;
+    const r = l + 1;
+    let smallest = i;
+    if (l < n && less(heap[l], heap[smallest])) smallest = l;
+    if (r < n && less(heap[r], heap[smallest])) smallest = r;
+    if (smallest === i) return;
+    const tmp = heap[i];
+    heap[i] = heap[smallest];
+    heap[smallest] = tmp;
+    i = smallest;
+  }
+}
+
+export default { pmap, preduce, psort, disposeWorkers, _heuristicState, _resetHeuristic, Mutex, Semaphore, pool };

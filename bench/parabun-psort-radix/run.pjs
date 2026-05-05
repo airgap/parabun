@@ -1,0 +1,100 @@
+// Bench: typed-array radix sort (psort path) vs native TypedArray.sort.
+//
+//   bun run build:release bench/parabun-psort-radix/run.pjs
+//
+// Single-threaded LSD radix beats native comparison sort because it
+// skips the comparator-call cost and runs in O(n·k/B). The question
+// this answers: is that win actual at array sizes anyone uses?
+
+import parallel from "para:parallel";
+
+const SIZES = [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+const WARMUP = 3;
+const ITERS = 11;
+
+function bench(fn, iters) {
+  for (let i = 0; i < WARMUP; i++) void fn();
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+async function benchAsync(fn, iters) {
+  for (let i = 0; i < WARMUP; i++) await fn();
+  const samples = [];
+  for (let i = 0; i < iters; i++) {
+    const t0 = Bun.nanoseconds();
+    await fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+// Reproducible LCG so warmup + measured runs see identical data.
+function fillRandom(buf, seed) {
+  let s = seed >>> 0;
+  for (let i = 0; i < buf.length; i++) {
+    s = (s * 1103515245 + 12345) >>> 0;
+    buf[i] = s;
+  }
+}
+
+function makeData(Ctor, N, seed) {
+  const buf = new Ctor(N);
+  if (Ctor === Float32Array) {
+    const u = new Uint32Array(buf.buffer);
+    fillRandom(u, seed);
+    // Map random u32 → reasonable f32 values, including some negatives.
+    for (let i = 0; i < N; i++) buf[i] = (u[i] / 0xffffffff - 0.5) * 1e6;
+  } else {
+    fillRandom(buf, seed);
+  }
+  return buf;
+}
+
+const KINDS = [
+  ["Uint8Array", Uint8Array],
+  ["Int8Array", Int8Array],
+  ["Uint16Array", Uint16Array],
+  ["Int16Array", Int16Array],
+  ["Uint32Array", Uint32Array],
+  ["Int32Array", Int32Array],
+  ["Float32Array", Float32Array],
+];
+
+console.log(`${"kind".padEnd(13)} ${"N".padStart(10)} ${"native (ms)".padStart(13)} ${"radix (ms)".padStart(12)} ${"speedup".padStart(8)}`);
+console.log("─".repeat(64));
+
+for (const [name, Ctor] of KINDS) {
+  for (const N of SIZES) {
+    // Skip huge byte-typed runs (uniform u8 uses just 256 buckets, the
+    // comparison is meaningful but takes seconds at 10M; keep them).
+    const src = makeData(Ctor, N, 0xdeadbeef);
+
+    // Native: copy, then sort the copy in-place. Our radix returns a new
+    // array, so to be fair we include the copy.
+    const tNative = bench(() => {
+      const c = new Ctor(src);
+      c.sort();
+      return c.length; // prevent dead-store removal
+    }, ITERS);
+
+    const tRadix = await benchAsync(async () => {
+      const out = await parallel.psort(src);
+      return out.length;
+    }, ITERS);
+
+    const speedup = tNative / tRadix;
+    console.log(
+      `${name.padEnd(13)} ${String(N).padStart(10)} ${tNative.toFixed(3).padStart(13)} ${tRadix.toFixed(3).padStart(12)} ${speedup.toFixed(2).padStart(7)}×`,
+    );
+  }
+}
+
+await parallel.disposeWorkers();

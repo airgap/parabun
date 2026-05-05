@@ -18,6 +18,7 @@ loses, in the layered diagnosis), running instructions, and a file list.
 | [parabun-image-sobel](./parabun-image-sobel/README.md)               | `pmap + SAB` on `Uint8Array` (heavier CV kernel) | 5.94× |
 | [parabun-optical-flow](./parabun-optical-flow/README.md)             | two-frame temporal: both frames in SAB       |  2.63×  |
 | [parabun-sqlite](./parabun-sqlite/README.md)                         | end-to-end analytical + zero-overhead `.pjs` |  2.71× on analytical (10% end-to-end) |
+| [parabun-psort-radix](./parabun-psort-radix/README.md)               | typed-array radix (serial + parallel) vs native | 2.0–4.2× (kind + N) |
 
 All benches are best-of-N (N ∈ {3, 5}) on release builds. Each bench
 verifies numeric equivalence with its reference variant: bit-identical

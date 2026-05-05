@@ -1,0 +1,98 @@
+// Parallel-radix vs serial-radix vs native sort for typed arrays.
+//
+//   bun run build:release bench/parabun-psort-radix/parallel-run.pjs
+//
+// `psort()` picks the parallel path automatically once N crosses
+// PARALLEL_RADIX_MIN_N (4M today). Below that the same call stays
+// single-threaded — passing `{ serial: true }` here just makes that
+// path explicit so we can compare side-by-side at the same N.
+
+import parallel from "para:parallel";
+
+const SIZES = [4_000_000, 5_000_000, 10_000_000, 25_000_000];
+const KINDS = [
+  ["Uint32Array", Uint32Array],
+  ["Int32Array", Int32Array],
+  ["Float32Array", Float32Array],
+];
+const WARMUP = 2;
+const ITERS = 7;
+
+function fillRandom(buf, seed) {
+  let s = seed >>> 0;
+  for (let i = 0; i < buf.length; i++) {
+    s = (s * 1103515245 + 12345) >>> 0;
+    buf[i] = s;
+  }
+}
+
+function makeData(Ctor, N, seed) {
+  const buf = new Ctor(N);
+  if (Ctor === Float32Array) {
+    const u = new Uint32Array(buf.buffer);
+    fillRandom(u, seed);
+    for (let i = 0; i < N; i++) buf[i] = (u[i] / 0xffffffff - 0.5) * 1e6;
+  } else {
+    fillRandom(buf, seed);
+  }
+  return buf;
+}
+
+async function benchAsync(fn) {
+  for (let i = 0; i < WARMUP; i++) await fn();
+  const samples = [];
+  for (let i = 0; i < ITERS; i++) {
+    const t0 = Bun.nanoseconds();
+    await fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+function benchSync(fn) {
+  for (let i = 0; i < WARMUP; i++) void fn();
+  const samples = [];
+  for (let i = 0; i < ITERS; i++) {
+    const t0 = Bun.nanoseconds();
+    fn();
+    samples.push((Bun.nanoseconds() - t0) / 1e6);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)];
+}
+
+console.log(
+  `${"kind".padEnd(13)} ${"N".padStart(10)} ${"native".padStart(10)} ${"radix-1t".padStart(10)} ${"radix-Pt".padStart(10)} ${"vs-1t".padStart(7)} ${"vs-native".padStart(9)}`,
+);
+console.log("─".repeat(72));
+
+for (const [name, Ctor] of KINDS) {
+  for (const N of SIZES) {
+    const src = makeData(Ctor, N, 0xdeadbeef);
+
+    const tNative = benchSync(() => {
+      const c = new Ctor(src);
+      c.sort();
+      return c.length;
+    });
+
+    const tSerial = await benchAsync(async () => {
+      const out = await parallel.psort(src, undefined, { serial: true });
+      return out.length;
+    });
+
+    const tParallel = await benchAsync(async () => {
+      const out = await parallel.psort(src);
+      return out.length;
+    });
+
+    const speedupSerial = tSerial / tParallel;
+    const speedupNative = tNative / tParallel;
+    console.log(
+      `${name.padEnd(13)} ${String(N).padStart(10)} ${tNative.toFixed(2).padStart(10)} ${tSerial.toFixed(2).padStart(10)} ${tParallel.toFixed(2).padStart(10)} ${speedupSerial.toFixed(2).padStart(6)}× ${speedupNative.toFixed(2).padStart(8)}×`,
+    );
+  }
+}
+
+await parallel.disposeWorkers();
