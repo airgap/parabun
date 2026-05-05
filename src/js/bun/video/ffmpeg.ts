@@ -391,6 +391,40 @@ async function encode(opts: EncodeOptions): Promise<EncoderHandle> {
   };
 }
 
+// Per-frame timing via ffprobe -show_frames. Returns an array of
+// pkt_duration_time values (seconds) for the video stream. Used by
+// image.decodeFrames to surface variable per-frame timing for
+// animated GIFs / WebPs that don't have a fixed frame rate. Falls
+// back to an empty array if ffprobe doesn't surface durations.
+async function frameDurationsMs(bytes: Uint8Array): Promise<number[]> {
+  if (!(await probe())) throw new Error(NOT_INSTALLED_MSG);
+  const tmpPath = await writeTmp(bytes, "anim-frames");
+  try {
+    const proc = Bun.spawn({
+      cmd: ["ffprobe", "-v", "error", "-print_format", "json", "-show_frames", "-select_streams", "v:0", tmpPath],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    if (exitCode !== 0) throw new Error(`ffmpeg.frameDurationsMs: ffprobe failed (${exitCode}): ${stderr.trim()}`);
+    const data = JSON.parse(stdout);
+    const out: number[] = [];
+    for (const f of data.frames ?? []) {
+      // Newer ffprobe uses `duration_time`; older uses
+      // `pkt_duration_time`. Accept both. Missing → 0 (caller treats
+      // 0 as "use the average fps").
+      const t = f.duration_time ?? f.pkt_duration_time;
+      const sec = t && t !== "N/A" ? parseFloat(t) : 0;
+      out.push(Math.round(sec * 1000));
+    }
+    return out;
+  } finally {
+    try {
+      await nodeFs.unlink(tmpPath);
+    } catch {}
+  }
+}
+
 // Extract a single RGBA frame at a given presentation timestamp.
 // Useful for thumbnails, scrubbing UIs, "first frame" previews.
 // `ptsMs` defaults to the midpoint of the clip — close enough to
@@ -571,4 +605,4 @@ const nodeOs = require("node:os");
 const nodePath = require("node:path");
 const nodeFs = require("node:fs/promises");
 
-export default { decode, encode, extractAudio, thumbnail, probeBytes, isAvailable: probe };
+export default { decode, encode, extractAudio, thumbnail, frameDurationsMs, probeBytes, isAvailable: probe };

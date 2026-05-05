@@ -3465,7 +3465,12 @@ function writeOneSchemaSubtree(tw: ThriftWriter, node: TopSchemaNode): void {
   }
 }
 
-function writeFileMetaData(topLevels: TopSchemaNode[], numRows: number, rowGroupBytes: Uint8Array): Uint8Array {
+function writeFileMetaData(
+  topLevels: TopSchemaNode[],
+  numRows: number,
+  rowGroupBytes: Uint8Array | Uint8Array[],
+): Uint8Array {
+  const groups = Array.isArray(rowGroupBytes) ? rowGroupBytes : [rowGroupBytes];
   const tw = new ThriftWriter();
   let lf = 0;
   // 1: version
@@ -3482,11 +3487,11 @@ function writeFileMetaData(topLevels: TopSchemaNode[], numRows: number, rowGroup
   for (const t of topLevels) writeOneSchemaSubtree(tw, t);
   // 3: num_rows
   lf = tw.writeI64(lf, 3, BigInt(numRows));
-  // 4: row_groups list
+  // 4: row_groups list — N entries instead of always 1.
   tw.writeFieldHeader(lf, 4, TC_LIST);
   lf = 4;
-  tw.writeListHeader(TC_STRUCT, 1);
-  tw.out.writeBytes(rowGroupBytes);
+  tw.writeListHeader(TC_STRUCT, groups.length);
+  for (const g of groups) tw.out.writeBytes(g);
   tw.writeStop();
   return tw.finish();
 }
@@ -4126,6 +4131,15 @@ export function toParquet(
      * INT96 columns are excluded from the spec — passing one throws.
      */
     bloomFilters?: string[];
+    /**
+     * Emit one parquet row group per input batch instead of merging
+     * every batch into a single row group. Defaults to false (legacy
+     * single-row-group behaviour). Useful for large tables — readers
+     * can parallelise across row groups + skip whole groups via the
+     * stats / bloom filters surfaced through the predicate-pushdown
+     * `filter` callback.
+     */
+    multiRowGroup?: boolean;
   },
 ): Uint8Array {
   const compression = opts?.compression ?? "snappy";
@@ -4137,24 +4151,38 @@ export function toParquet(
     throw new RangeError(`para:arrow.toParquet: unknown compression "${compression}"`);
   }
   const bloomCols = new Set<string>(opts?.bloomFilters ?? []);
+  const multiRowGroup = opts?.multiRowGroup === true;
 
-  // Materialize columns from the source. Concat batches into single
-  // typed arrays so we can write one row group.
-  const batches: RecordBatchLike[] = "batches" in source ? source.batches : [source];
+  // Materialize columns from the source.
+  const inputBatches: RecordBatchLike[] = "batches" in source ? source.batches : [source];
   const schema = source.schema;
-  const numRows = batches.reduce((sum, b) => sum + b.numRows, 0);
+  const totalNumRows = inputBatches.reduce((sum, b) => sum + b.numRows, 0);
+  // The legacy single-row-group path treats every input batch as part
+  // of one big row group; multiRowGroup emits one parquet row group
+  // per input batch. Wrap the per-row-group encoding in a loop over
+  // these "batch slices" — each slice is itself a list of batches
+  // that the existing emit logic merges together.
+  const batchSlices: RecordBatchLike[][] = multiRowGroup ? inputBatches.map(b => [b]) : [inputBatches];
 
   const out = new ByteWriter();
   out.writeBytes(new Uint8Array([0x50, 0x41, 0x52, 0x31])); // PAR1
 
-  // Column chunk metadata is emitted AFTER the bloom-filter region
-  // so each chunk can carry its bloom_filter_offset (field 14). We
-  // track the per-column data-page offset + compressed size during
-  // the page-emission pass and assemble chunks once offsets settle.
-  const colPlans: ColumnPlan[] = [];
-  const dataPageOffsets: bigint[] = [];
-  const compressedSizes: number[] = [];
-  const topLevels: TopSchemaNode[] = [];
+  // Per-iteration state — emitField + emitPrimitiveLeaf capture
+  // these via closure, so reassigning them at the top of each row-
+  // group loop iteration lets the same helpers serve every row
+  // group. `batches` + `numRows` are the per-iteration source data
+  // (subset of inputBatches).
+  let batches: RecordBatchLike[] = inputBatches;
+  let numRows: number = totalNumRows;
+  let colPlans: ColumnPlan[] = [];
+  let dataPageOffsets: bigint[] = [];
+  let compressedSizes: number[] = [];
+  let topLevels: TopSchemaNode[] = [];
+  // Aggregated across all row groups for the footer.
+  const allRowGroupBytes: Uint8Array[] = [];
+  // Schema topLevels are the same across row groups; capture from
+  // the first iteration and reuse.
+  let topLevelsForFooter: TopSchemaNode[] | undefined;
 
   // Process one logical column. For primitive / list, emits the
   // matching column chunk(s) and returns a TopSchemaNode. For struct,
@@ -4340,22 +4368,22 @@ export function toParquet(
     return emitPrimitiveLeaf(field, getCol, leafName, pathOverride);
   }
 
-  for (let ci = 0; ci < schema.fields.length; ci++) {
-    const field = schema.fields[ci];
-    const ciCaptured = ci;
-    const node = emitField(field, (b: number) => batches[b].columns[ciCaptured], field.name, undefined);
-    topLevels.push(node);
-    continue;
-  }
+  // emitPrimitiveLeaf is needed by emitField (defined at the outer
+  // scope) but its body uses per-row-group state (colPlans, etc.).
+  // Forward-declare a `let` at this outer scope so emitField's
+  // closure can see it; we assign the implementation as a function
+  // expression below, before the per-row-group loop runs.
+  let emitPrimitiveLeaf: (
+    field: any,
+    getCol: (b: number) => any,
+    leafName: string,
+    pathOverride: string[] | undefined,
+  ) => TopSchemaNode;
 
-  // Emit one primitive leaf column. Reads the source column for each
-  // batch via getCol(b), merges values + validity across batches,
-  // computes def levels, packs non-nulls, compresses, writes the
-  // page, and pushes a ColumnPlan + offset/size into the parallel
-  // arrays. `pathOverride` populates the path-in-schema list when
-  // this leaf lives inside a struct (so the metadata says
-  // [parent, …, leaf] instead of just [leaf]).
-  function emitPrimitiveLeaf(
+  // emitPrimitiveLeaf body — closes over the let'd colPlans /
+  // dataPageOffsets / compressedSizes / batches / numRows / out so
+  // it can serve every per-row-group iteration without re-binding.
+  emitPrimitiveLeaf = function emitPrimitiveLeafImpl(
     field: any,
     getCol: (b: number) => any,
     leafName: string,
@@ -4365,7 +4393,6 @@ export function toParquet(
     const physicalType = parquetPhysicalForKind(field.type.kind);
     const flbaW = field.type.kind === "fixed_size_binary" ? (field.type as any).width : undefined;
 
-    // Concat batches' values + validity for this column.
     let mergedValues: any;
     let mergedValidity: Uint8Array | undefined;
     {
@@ -4414,7 +4441,6 @@ export function toParquet(
 
     const flbaWidth = flbaW;
 
-    // Compute def levels (0/1 per row) and a packed values array.
     let defLevels: Uint8Array | undefined;
     let nonNullValues: any;
     let numNonNull: number;
@@ -4530,84 +4556,107 @@ export function toParquet(
     dataPageOffsets.push(pageStartOffset);
     compressedSizes.push(compressedSize + pageHeader.length);
     return { kind: "primitive", plan };
-  }
+  };
 
-  // ─── Bloom filter region ────────────────────────────────────────────
-  // Emit one (header + bitmap) blob per requested column, recording the
-  // file offset so the column metadata can point at it. The thrift
-  // BloomFilterHeader is the canonical SBLOCK + XXHASH + UNCOMPRESSED.
-  for (const plan of colPlans) {
-    if (!plan.bloomFilter) continue;
-    plan.bloomFilterOffset = BigInt(out.pos);
-    const tw = new ThriftWriter();
-    let lf = 0;
-    lf = tw.writeI32(lf, 1, plan.bloomFilter.length); // numBytes
-    // 2: algorithm (BloomFilterAlgorithm with field 1 = SplitBlockAlgorithm{})
-    tw.writeFieldHeader(lf, 2, TC_STRUCT);
-    lf = 2;
-    {
-      const inner = new ThriftWriter();
-      let lf2 = 0;
-      inner.writeFieldHeader(lf2, 1, TC_STRUCT);
-      lf2 = 1;
-      // SplitBlockAlgorithm is empty — just stop.
-      const empty = new ThriftWriter();
-      empty.writeStop();
-      inner.out.writeBytes(empty.finish());
-      void lf2;
-      inner.writeStop();
-      tw.out.writeBytes(inner.finish());
+  // ── Per-row-group encoding loop ─────────────────────────────────
+  // For each batch slice (one for legacy single-row-group; one per
+  // input batch for multiRowGroup), reset per-iteration state, run
+  // the existing emit path, then assemble + record the row group's
+  // encoded bytes.
+  for (const slice of batchSlices) {
+    batches = slice;
+    numRows = slice.reduce((sum, b) => sum + b.numRows, 0);
+    colPlans = [];
+    dataPageOffsets = [];
+    compressedSizes = [];
+    topLevels = [];
+    for (let ci = 0; ci < schema.fields.length; ci++) {
+      const field = schema.fields[ci];
+      const ciCaptured = ci;
+      const node = emitField(field, (b: number) => batches[b].columns[ciCaptured], field.name, undefined);
+      topLevels.push(node);
     }
-    // 3: hash (BloomFilterHash with field 1 = XxHash{})
-    tw.writeFieldHeader(lf, 3, TC_STRUCT);
-    lf = 3;
-    {
-      const inner = new ThriftWriter();
-      let lf2 = 0;
-      inner.writeFieldHeader(lf2, 1, TC_STRUCT);
-      lf2 = 1;
-      const empty = new ThriftWriter();
-      empty.writeStop();
-      inner.out.writeBytes(empty.finish());
-      void lf2;
-      inner.writeStop();
-      tw.out.writeBytes(inner.finish());
+
+    // ─── Bloom filter region ────────────────────────────────────────────
+    // Emit one (header + bitmap) blob per requested column, recording the
+    // file offset so the column metadata can point at it. The thrift
+    // BloomFilterHeader is the canonical SBLOCK + XXHASH + UNCOMPRESSED.
+    for (const plan of colPlans) {
+      if (!plan.bloomFilter) continue;
+      plan.bloomFilterOffset = BigInt(out.pos);
+      const tw = new ThriftWriter();
+      let lf = 0;
+      lf = tw.writeI32(lf, 1, plan.bloomFilter.length); // numBytes
+      // 2: algorithm (BloomFilterAlgorithm with field 1 = SplitBlockAlgorithm{})
+      tw.writeFieldHeader(lf, 2, TC_STRUCT);
+      lf = 2;
+      {
+        const inner = new ThriftWriter();
+        let lf2 = 0;
+        inner.writeFieldHeader(lf2, 1, TC_STRUCT);
+        lf2 = 1;
+        // SplitBlockAlgorithm is empty — just stop.
+        const empty = new ThriftWriter();
+        empty.writeStop();
+        inner.out.writeBytes(empty.finish());
+        void lf2;
+        inner.writeStop();
+        tw.out.writeBytes(inner.finish());
+      }
+      // 3: hash (BloomFilterHash with field 1 = XxHash{})
+      tw.writeFieldHeader(lf, 3, TC_STRUCT);
+      lf = 3;
+      {
+        const inner = new ThriftWriter();
+        let lf2 = 0;
+        inner.writeFieldHeader(lf2, 1, TC_STRUCT);
+        lf2 = 1;
+        const empty = new ThriftWriter();
+        empty.writeStop();
+        inner.out.writeBytes(empty.finish());
+        void lf2;
+        inner.writeStop();
+        tw.out.writeBytes(inner.finish());
+      }
+      // 4: compression (BloomFilterCompression with field 1 = Uncompressed{})
+      tw.writeFieldHeader(lf, 4, TC_STRUCT);
+      lf = 4;
+      {
+        const inner = new ThriftWriter();
+        let lf2 = 0;
+        inner.writeFieldHeader(lf2, 1, TC_STRUCT);
+        lf2 = 1;
+        const empty = new ThriftWriter();
+        empty.writeStop();
+        inner.out.writeBytes(empty.finish());
+        void lf2;
+        inner.writeStop();
+        tw.out.writeBytes(inner.finish());
+      }
+      tw.writeStop();
+      const headerBytes = tw.finish();
+      out.writeBytes(headerBytes);
+      out.writeBytes(plan.bloomFilter);
     }
-    // 4: compression (BloomFilterCompression with field 1 = Uncompressed{})
-    tw.writeFieldHeader(lf, 4, TC_STRUCT);
-    lf = 4;
-    {
-      const inner = new ThriftWriter();
-      let lf2 = 0;
-      inner.writeFieldHeader(lf2, 1, TC_STRUCT);
-      lf2 = 1;
-      const empty = new ThriftWriter();
-      empty.writeStop();
-      inner.out.writeBytes(empty.finish());
-      void lf2;
-      inner.writeStop();
-      tw.out.writeBytes(inner.finish());
+
+    // ─── Column chunks ──────────────────────────────────────────────────
+    // Now that bloom-filter offsets are settled, emit each chunk's
+    // metadata.
+    const columnChunks: Uint8Array[] = [];
+    for (let i = 0; i < colPlans.length; i++) {
+      columnChunks.push(writeColumnChunk(colPlans[i], codec, compressedSizes[i], dataPageOffsets[i]));
     }
-    tw.writeStop();
-    const headerBytes = tw.finish();
-    out.writeBytes(headerBytes);
-    out.writeBytes(plan.bloomFilter);
-  }
 
-  // ─── Column chunks ──────────────────────────────────────────────────
-  // Now that bloom-filter offsets are settled, emit each chunk's
-  // metadata.
-  const columnChunks: Uint8Array[] = [];
-  for (let i = 0; i < colPlans.length; i++) {
-    columnChunks.push(writeColumnChunk(colPlans[i], codec, compressedSizes[i], dataPageOffsets[i]));
-  }
+    // Row group metadata uses the totals across this row group's columns.
+    const totalByteSize = colPlans.reduce((sum, p) => sum + BigInt(p.uncompressedSize), 0n);
+    const rowGroup = writeRowGroup(columnChunks, numRows, totalByteSize);
+    allRowGroupBytes.push(rowGroup);
+    // Schema is the same across row groups; capture once.
+    if (!topLevelsForFooter) topLevelsForFooter = topLevels;
+  } // end per-row-group loop
 
-  // Row group metadata uses the totals across columns.
-  const totalByteSize = colPlans.reduce((sum, p) => sum + BigInt(p.uncompressedSize), 0n);
-  const rowGroup = writeRowGroup(columnChunks, numRows, totalByteSize);
-
-  // FileMetaData footer.
-  const meta = writeFileMetaData(topLevels, numRows, rowGroup);
+  // FileMetaData footer — N row groups in one footer.
+  const meta = writeFileMetaData(topLevelsForFooter ?? [], totalNumRows, allRowGroupBytes);
   out.writeBytes(meta);
   out.writeI32LE(meta.length);
   out.writeBytes(new Uint8Array([0x50, 0x41, 0x52, 0x31])); // PAR1

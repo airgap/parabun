@@ -767,7 +767,95 @@ async function probe(input: Uint8Array | ArrayBuffer): Promise<ProbeInfo> {
 
   if (isMp4) return probeMp4(bytes);
   if (isMatroska) return probeMatroska(bytes);
-  throw new Error("parabun:video.probe: container not recognized (supports MP4 / ISOBMFF and Matroska / WebM)");
+  // Fallback: shell out to ffprobe. Handles MOV, AVI, FLV, MPEG-TS,
+  // OGG, WMV — anything ffmpeg knows. Throws "install ffmpeg" if
+  // the system doesn't have it.
+  return probeViaFfprobe(bytes);
+}
+
+async function probeViaFfprobe(bytes: Uint8Array): Promise<ProbeInfo> {
+  // Direct ffprobe call so we get ALL streams (video + audio) in one
+  // shot — the video/ffmpeg.ts probeBytes helper only surfaces v:0
+  // since it's tuned for the decoder's needs.
+  const tmpPath = await writeTmpForProbe(bytes);
+  try {
+    const proc = Bun.spawn({
+      cmd: ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", tmpPath],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    if (exitCode !== 0) {
+      throw new Error(`parabun:video.probe: ffprobe failed (${exitCode}): ${stderr.trim()}`);
+    }
+    const data = JSON.parse(stdout);
+    const formatName = (data.format?.format_name as string) || "";
+    // ffprobe joins alternative names ("matroska,webm"); pick the
+    // first that matches a Container we know.
+    const formatTokens = formatName.split(",");
+    let container: Container = "auto";
+    for (const t of formatTokens) {
+      if (t === "mp4" || t === "mov" || t === "m4a" || t === "3gp" || t === "3g2" || t === "mj2") {
+        container = "mp4";
+        break;
+      }
+      if (t === "matroska") {
+        container = "mkv";
+        break;
+      }
+      if (t === "webm") {
+        container = "webm";
+        break;
+      }
+      if (t === "mpegts") {
+        container = "ts";
+        break;
+      }
+    }
+    const streams: ProbeInfo["streams"] = [];
+    for (const s of data.streams ?? []) {
+      if (s.codec_type === "video") {
+        const fpsRational = (s.avg_frame_rate ?? s.r_frame_rate ?? "0/1") as string;
+        const [num, den] = fpsRational.split("/").map(Number);
+        const dStr = data.format?.duration ?? s.duration ?? "0";
+        streams.push({
+          kind: "video",
+          index: Number(s.index),
+          codec: (s.codec_name as Codec) || ("auto" as Codec),
+          width: Number(s.width || 0),
+          height: Number(s.height || 0),
+          fpsNum: num | 0,
+          fpsDen: (den || 1) | 0,
+          durationMs: Math.round(parseFloat(dStr) * 1000),
+        });
+      } else if (s.codec_type === "audio") {
+        const dStr = data.format?.duration ?? s.duration ?? "0";
+        streams.push({
+          kind: "audio",
+          index: Number(s.index),
+          codec: s.codec_name as string,
+          sampleRate: Number(s.sample_rate || 0),
+          channels: Number(s.channels || 0),
+          durationMs: Math.round(parseFloat(dStr) * 1000),
+        });
+      }
+    }
+    return { container, streams };
+  } finally {
+    try {
+      const fs = require("node:fs/promises");
+      await fs.unlink(tmpPath);
+    } catch {}
+  }
+}
+
+async function writeTmpForProbe(bytes: Uint8Array): Promise<string> {
+  const os = require("node:os");
+  const path = require("node:path");
+  const fs = require("node:fs/promises");
+  const p = path.join(os.tmpdir(), `video-probe-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  await fs.writeFile(p, bytes);
+  return p;
 }
 
 /**

@@ -133,6 +133,39 @@ describe.skipIf(SKIP)("parabun:audio — ffmpeg file codec", () => {
     await expect(audio.decodeFile("not bytes" as any)).rejects.toThrow(TypeError);
   });
 
+  test("probe returns format/codec/sampleRate/channels/duration without decoding PCM", async () => {
+    const audio = (await import("parabun:audio")).default;
+    const SR = 22050;
+    const tone = sineTone(SR, 1);
+    const flac = await audio.encodeFile(tone, { format: "flac", sampleRate: SR, channels: 1 });
+    const meta = await audio.probe(flac);
+    expect(meta.format).toBe("flac");
+    expect(meta.codec).toBe("flac");
+    expect(meta.sampleRate).toBe(SR);
+    expect(meta.channels).toBe(1);
+    expect(meta.durationMs).toBeGreaterThan(900);
+    expect(meta.durationMs).toBeLessThan(1100);
+  });
+
+  test("probe surfaces lossy bitrate when the container records it", async () => {
+    const audio = (await import("parabun:audio")).default;
+    const SR = 44100;
+    const tone = sineTone(SR, 2);
+    const mp3 = await audio.encodeFile(tone, { format: "mp3", sampleRate: SR, channels: 2, bitrate: 192_000 });
+    const meta = await audio.probe(mp3);
+    expect(meta.codec).toBe("mp3");
+    expect(meta.channels).toBe(2);
+    // ffmpeg records actual bitrate near the requested target.
+    expect(meta.bitrate).toBeGreaterThan(150_000);
+    expect(meta.bitrate).toBeLessThan(250_000);
+  });
+
+  test("probe rejects non-audio input with a useful error", async () => {
+    const audio = (await import("parabun:audio")).default;
+    const garbage = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04]);
+    await expect(audio.probe(garbage)).rejects.toThrow();
+  });
+
   test("encodeFile rejects non-Int16Array input", async () => {
     const audio = (await import("parabun:audio")).default;
     await expect(

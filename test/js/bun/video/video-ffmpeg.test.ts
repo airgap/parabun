@@ -400,6 +400,51 @@ describe.skipIf(SKIP)("parabun:video — ffmpeg decode", () => {
     expect(b).toBeLessThan(25);
   });
 
+  test("probe falls back to ffprobe for non-MP4/Matroska containers (FLV)", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-probe-flv", {});
+    const flvPath = join(String(dir), "test.flv");
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:size=32x32:duration=1:rate=10",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-c:v",
+        "flv1",
+        "-c:a",
+        "mp3",
+        "-shortest",
+        flvPath,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(flvPath);
+    const info = await video.probe(new Uint8Array(bytes));
+    // FLV maps to "auto" since none of our Container constants
+    // match it; what matters is we got past the
+    // "container not recognized" rejection and parsed the streams.
+    const videoStream = info.streams.find(s => s.kind === "video") as any;
+    expect(videoStream).toBeDefined();
+    expect(videoStream.width).toBe(32);
+    expect(videoStream.height).toBe(32);
+    const audioStream = info.streams.find(s => s.kind === "audio") as any;
+    expect(audioStream).toBeDefined();
+    expect(audioStream.sampleRate).toBe(44100);
+    expect(audioStream.channels).toBe(2);
+  });
+
   test("close() before iterating doesn't leak the subprocess", async () => {
     const video = (await import("parabun:video")).default;
     using dir = tempDir("video-close", {});

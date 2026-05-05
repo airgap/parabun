@@ -1345,6 +1345,79 @@ describe("para:arrow parquet — nested combinations", () => {
   });
 });
 
+describe("para:arrow parquet — multi-row-group", () => {
+  test("multiRowGroup emits one parquet row group per input batch", async () => {
+    const arrow = (await import("para:arrow")).default;
+    // Build a Table with 3 batches of 5 rows each.
+    const schema = { fields: [{ name: "id", type: { kind: "int32" }, nullable: false }] };
+    const batches = [0, 1, 2].map(g => {
+      const ids = new Int32Array([g * 100, g * 100 + 1, g * 100 + 2, g * 100 + 3, g * 100 + 4]);
+      const col = new arrow.Column({ kind: "int32" }, 5, ids);
+      return new arrow.RecordBatch(schema, [col], 5);
+    });
+    const tbl = new arrow.Table(schema, batches);
+    const bytes = arrow.toParquet(tbl, { compression: "uncompressed", multiRowGroup: true });
+    const decoded = arrow.fromParquet(bytes);
+    expect(decoded.numRows).toBe(15);
+    expect(decoded.batches).toHaveLength(3);
+    expect(decoded.batches[0].numRows).toBe(5);
+    expect(decoded.batches[1].numRows).toBe(5);
+    expect(decoded.batches[2].numRows).toBe(5);
+    // Round-trip values intact.
+    expect(arrow.toRows(decoded)).toEqual([
+      ...[0, 1, 2, 3, 4].map(i => ({ id: i })),
+      ...[100, 101, 102, 103, 104].map(id => ({ id })),
+      ...[200, 201, 202, 203, 204].map(id => ({ id })),
+    ]);
+  });
+
+  test("default (no multiRowGroup option) still merges into a single row group", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const schema = { fields: [{ name: "v", type: { kind: "int32" }, nullable: false }] };
+    const batches = [0, 1].map(g => {
+      const arr = new Int32Array([g, g + 1, g + 2]);
+      return new arrow.RecordBatch(schema, [new arrow.Column({ kind: "int32" }, 3, arr)], 3);
+    });
+    const tbl = new arrow.Table(schema, batches);
+    const bytes = arrow.toParquet(tbl);
+    const decoded = arrow.fromParquet(bytes);
+    expect(decoded.batches).toHaveLength(1);
+    expect(decoded.batches[0].numRows).toBe(6);
+  });
+
+  test("multi-row-group filter callback runs per row group + can skip individual ones", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const schema = { fields: [{ name: "id", type: { kind: "int32" }, nullable: false }] };
+    const batches = [0, 1, 2].map(g => {
+      const ids = new Int32Array([g * 100, g * 100 + 1, g * 100 + 2]);
+      return new arrow.RecordBatch(schema, [new arrow.Column({ kind: "int32" }, 3, ids)], 3);
+    });
+    const tbl = new arrow.Table(schema, batches);
+    const bytes = arrow.toParquet(tbl, { compression: "uncompressed", multiRowGroup: true });
+    // Skip every row group whose [min, max] doesn't include 150.
+    const decoded = arrow.fromParquet(bytes, {
+      filter: rg => {
+        const s = rg.stats.get("id");
+        if (!s) return true;
+        return 150 >= s.min && 150 <= s.max;
+      },
+    });
+    // Only group 1 (ids 100, 101, 102) qualifies — 100..102 doesn't
+    // include 150 either, so all three are skipped → numRows === 0.
+    expect(decoded.numRows).toBe(0);
+    // Now query for a value that IS present (101 in group 1).
+    const decoded2 = arrow.fromParquet(bytes, {
+      filter: rg => {
+        const s = rg.stats.get("id");
+        if (!s) return true;
+        return 101 >= s.min && 101 <= s.max;
+      },
+    });
+    expect(decoded2.numRows).toBe(3); // group 1 only
+    expect(decoded2.batches[0].columns[0].get(0)).toBe(100);
+  });
+});
+
 describe("para:arrow parquet — predicate pushdown", () => {
   test("filter receives stats + bloom for each row group", async () => {
     const arrow = (await import("para:arrow")).default;

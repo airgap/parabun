@@ -850,6 +850,25 @@ const ffmpegMod = require("./audio/ffmpeg.ts");
  * Defaults preserve the source rate + channel count; pass `opts`
  * to resample / remix.
  */
+/**
+ * Quick metadata probe via ffprobe — no PCM decode. Useful for
+ * "what is this file?" routing decisions before paying the full
+ * decode cost. Throws "install ffmpeg" when ffprobe is missing.
+ */
+async function probe(bytes: Uint8Array): Promise<{
+  format: string;
+  codec: string;
+  sampleRate: number;
+  channels: number;
+  durationMs: number;
+  bitrate: number | undefined;
+}> {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("parabun:audio.probe: expected Uint8Array");
+  }
+  return ffmpegMod.probeFile(bytes);
+}
+
 async function decodeFile(
   bytes: Uint8Array,
   opts?: { sampleRate?: number; channels?: 1 | 2 },
@@ -2282,6 +2301,7 @@ export default {
   decodeMp3,
   decodeFile,
   encodeFile,
+  probe,
   OpusEncoder,
   OpusDecoder,
   Denoiser,

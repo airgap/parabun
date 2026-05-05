@@ -118,6 +118,54 @@ type SharpenOptions = {
 // actually fires. The module itself is opaque (no eager probe).
 const avifMod = require("./image/avif.ts");
 
+// Animated formats route through the video/ffmpeg helper since at
+// the codec level animated GIF / animated WebP / APNG are
+// indistinguishable from a short video. require'd lazily — first
+// decodeFrames() call probes ffmpeg.
+const ffmpegVideo = require("./video/ffmpeg.ts");
+
+/**
+ * Decode an animated image (GIF, animated WebP, APNG) into a
+ * sequence of RGBA frames. Static images decode as a single-frame
+ * array (so callers can use one path for either kind).
+ *
+ * Returns { frames: [{data, durationMs}], width, height }. Frame
+ * timing is taken from the container (uniform fps for v1; per-
+ * frame variable timing is a follow-up that needs ffprobe
+ * -show_frames).
+ *
+ * Routes through ffmpeg — throws "install ffmpeg" if missing.
+ */
+async function decodeFrames(
+  bytes: Uint8Array,
+): Promise<{ frames: { data: Uint8Array; durationMs: number }[]; width: number; height: number }> {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError("parabun:image.decodeFrames: expected Uint8Array");
+  }
+  // Pull per-frame timing in parallel with the RGBA stream — the
+  // ffprobe call is cheap and surfaces variable per-frame durations
+  // for animated WebPs / GIFs that ffmpeg's "average fps" hides.
+  // Falls back to uniform-from-fps for rows where ffprobe doesn't
+  // report a duration (some demuxers leave it N/A).
+  const [stream, perFrameTimings] = await Promise.all([
+    ffmpegVideo.decode(bytes),
+    ffmpegVideo.frameDurationsMs(bytes).catch(() => [] as number[]),
+  ]);
+  const fallbackMs = stream.fps > 0 ? Math.round(1000 / stream.fps) : 100;
+  const frames: { data: Uint8Array; durationMs: number }[] = [];
+  try {
+    let idx = 0;
+    for await (const f of stream.frames()) {
+      const reported = perFrameTimings[idx] ?? 0;
+      frames.push({ data: f.data, durationMs: reported > 0 ? reported : fallbackMs });
+      idx++;
+    }
+  } finally {
+    await stream.close();
+  }
+  return { frames, width: stream.width, height: stream.height };
+}
+
 function decode(bytes: Uint8Array): DecodedImage {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError("parabun:image.decode: expected Uint8Array");
@@ -470,6 +518,7 @@ function pipeline(bytes: Uint8Array): Pipeline {
 
 export default {
   decode,
+  decodeFrames,
   encode,
   resize,
   blur,

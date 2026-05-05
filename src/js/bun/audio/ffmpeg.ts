@@ -47,6 +47,65 @@ async function writeTmp(bytes: Uint8Array, prefix: string, ext: string): Promise
   return path;
 }
 
+type ProbeResult = {
+  /** Container format short name (e.g. "mp3", "flac", "ogg"). */
+  format: string;
+  /** Codec short name (e.g. "mp3", "flac", "vorbis", "aac"). */
+  codec: string;
+  sampleRate: number;
+  channels: number;
+  durationMs: number;
+  /** Average bitrate in bps. Some containers don't expose this — undefined when unknown. */
+  bitrate: number | undefined;
+};
+
+async function probeFile(bytes: Uint8Array): Promise<ProbeResult> {
+  if (!(await probe())) throw new Error(NOT_INSTALLED_MSG);
+  const tmpPath = await writeTmp(bytes, "audio-probe", "bin");
+  try {
+    const proc = Bun.spawn({
+      cmd: [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        "-select_streams",
+        "a:0",
+        tmpPath,
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    if (exitCode !== 0) throw new Error(`audio.probe: ffprobe failed (${exitCode}): ${stderr.trim()}`);
+    const meta = JSON.parse(stdout);
+    const stream = meta.streams?.[0];
+    if (!stream) throw new Error("audio.probe: input has no audio stream");
+    const formatName = (meta.format?.format_name as string) || "";
+    // ffprobe returns comma-joined alternative names ("mov,mp4,m4a,…");
+    // pick the first one as the canonical short tag.
+    const format = formatName.split(",")[0] || "unknown";
+    const durationS = parseFloat(meta.format?.duration ?? stream.duration ?? "0");
+    const bitrateStr = meta.format?.bit_rate ?? stream.bit_rate;
+    const bitrate = bitrateStr && bitrateStr !== "N/A" ? Number(bitrateStr) : undefined;
+    return {
+      format,
+      codec: stream.codec_name as string,
+      sampleRate: Number(stream.sample_rate),
+      channels: Number(stream.channels),
+      durationMs: Math.round(durationS * 1000),
+      bitrate,
+    };
+  } finally {
+    try {
+      await nodeFs.unlink(tmpPath);
+    } catch {}
+  }
+}
+
 type DecodeOptions = {
   /** Resample to this rate. Default: keep the source rate. */
   sampleRate?: number;
@@ -232,4 +291,4 @@ async function encode(samples: Int16Array, opts: EncodeOptions): Promise<Uint8Ar
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
-export default { decode, encode, isAvailable: probe };
+export default { decode, encode, probeFile, isAvailable: probe };
