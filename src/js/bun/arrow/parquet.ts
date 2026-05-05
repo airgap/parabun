@@ -446,6 +446,8 @@ function parseBloomFilterHeader(r: ThriftReader): { numBytes: number } {
 // understands these; the newer LogicalType union is more expressive
 // but not yet wired here. Date / timestamp columns round-trip via the
 // ConvertedType field only for now.
+const PQ_CT_MAP = 1;
+const PQ_CT_MAP_KEY_VALUE = 2;
 const PQ_CT_LIST = 3;
 const PQ_CT_DECIMAL = 5;
 const PQ_CT_DATE = 6;
@@ -1885,7 +1887,7 @@ export function fromParquet(bytes: Uint8Array): TableLike {
   // bookkeeping than v1 carries.
   type ColInfo = {
     name: string;
-    category: "primitive" | "list";
+    category: "primitive" | "list" | "struct" | "map";
     /** Primitive: physical type from parquet.thrift Type enum. */
     physicalType: number | undefined;
     /** Primitive: pre-2.4 ConvertedType annotation. */
@@ -1898,8 +1900,10 @@ export function fromParquet(bytes: Uint8Array): TableLike {
     scale: number | undefined;
     /** FIXED_LEN_BYTE_ARRAY width in bytes; required for FLBA columns. */
     typeLength: number | undefined;
-    /** List: the element ColInfo. Undefined for primitives. */
+    /** List + Map: the element ColInfo (struct of {key,value} for Map). Undefined for primitives + structs. */
     inner: ColInfo | undefined;
+    /** Struct: per-field ColInfos in declaration order. */
+    fields: ColInfo[] | undefined;
     /** Maximum definition level the page-decoder will see for this column. */
     maxDef: number;
     /** Maximum repetition level the page-decoder will see for this column. */
@@ -1955,6 +1959,7 @@ export function fromParquet(bytes: Uint8Array): TableLike {
           scale: leaf.scale,
           typeLength: leaf.typeLength,
           inner: undefined,
+          fields: undefined,
           maxDef: elemDef,
           maxRep: middleRep,
         };
@@ -1968,13 +1973,105 @@ export function fromParquet(bytes: Uint8Array): TableLike {
           scale: undefined,
           typeLength: undefined,
           inner,
+          fields: undefined,
           maxDef: elemDef,
           maxRep: middleRep,
         };
       }
 
+      // MAP pattern: outer group(MAP) → repeated group(MAP_KEY_VALUE)
+      // → 2 leaves (key REQUIRED, value OPTIONAL/REQUIRED). Same
+      // shape as LIST<STRUCT<key,value>> at the parquet level; we
+      // surface it with category="map" so the JS Column.get returns a
+      // Map instance.
+      if (e.numChildren > 0 && e.convertedType === PQ_CT_MAP) {
+        if (e.numChildren !== 1) {
+          throw new Error(`parquet: MAP group "${e.name}" must have exactly 1 child (got ${e.numChildren})`);
+        }
+        const middle = meta.schema[cursor];
+        if (middle.repetitionType !== PQ_REP_REPEATED) {
+          throw new Error(`parquet: MAP group "${e.name}" middle element must be REPEATED`);
+        }
+        if (middle.numChildren !== 2) {
+          throw new Error(`parquet: MAP group "${e.name}" middle must have exactly 2 children (key + value)`);
+        }
+        cursor++; // consume MAP_KEY_VALUE middle
+        const keyEl = meta.schema[cursor++];
+        const valEl = meta.schema[cursor++];
+        if (keyEl.type === undefined || valEl.type === undefined) {
+          throw new Error(`parquet: MAP "${e.name}" key/value must be primitive leaves`);
+        }
+        const middleDef = myDef + 1;
+        const middleRep = myRep + 1;
+        const keyDef = middleDef + (keyEl.repetitionType === PQ_REP_OPTIONAL ? 1 : 0);
+        const valDef = middleDef + (valEl.repetitionType === PQ_REP_OPTIONAL ? 1 : 0);
+        const keyInfo: ColInfo = {
+          name: keyEl.name,
+          category: "primitive",
+          physicalType: keyEl.type,
+          convertedType: keyEl.convertedType,
+          isOptional: keyEl.repetitionType === PQ_REP_OPTIONAL,
+          precision: keyEl.precision,
+          scale: keyEl.scale,
+          typeLength: keyEl.typeLength,
+          inner: undefined,
+          fields: undefined,
+          maxDef: keyDef,
+          maxRep: middleRep,
+        };
+        const valInfo: ColInfo = {
+          name: valEl.name,
+          category: "primitive",
+          physicalType: valEl.type,
+          convertedType: valEl.convertedType,
+          isOptional: valEl.repetitionType === PQ_REP_OPTIONAL,
+          precision: valEl.precision,
+          scale: valEl.scale,
+          typeLength: valEl.typeLength,
+          inner: undefined,
+          fields: undefined,
+          maxDef: valDef,
+          maxRep: middleRep,
+        };
+        return {
+          name: e.name,
+          category: "map",
+          physicalType: undefined,
+          convertedType: PQ_CT_MAP,
+          isOptional: e.repetitionType === PQ_REP_OPTIONAL,
+          precision: undefined,
+          scale: undefined,
+          typeLength: undefined,
+          inner: undefined,
+          fields: [keyInfo, valInfo],
+          maxDef: middleDef,
+          maxRep: middleRep,
+        };
+      }
+
+      // STRUCT pattern: any other group node. Each child becomes its
+      // own ColInfo (recursively); the JS surface returns
+      // { fieldName: value, ... } from get().
       if (e.numChildren > 0) {
-        throw new Error(`parquet: nested schemas (Map / Struct) not yet supported (column "${e.name}")`);
+        if (e.repetitionType === PQ_REP_OPTIONAL) {
+          throw new Error(`parquet: OPTIONAL struct "${e.name}" not yet supported — wrap fields as OPTIONAL instead`);
+        }
+        const fields: ColInfo[] = [];
+        for (let k = 0; k < e.numChildren; k++) fields.push(consume(myDef, myRep));
+        return {
+          name: e.name,
+          category: "struct",
+          physicalType: undefined,
+          convertedType: undefined,
+          isOptional: false,
+          precision: undefined,
+          scale: undefined,
+          typeLength: undefined,
+          inner: undefined,
+          fields,
+          maxDef: myDef,
+          maxRep: myRep,
+        };
       }
       if (e.type === undefined) {
         throw new Error(`parquet: leaf "${e.name}" has no physical type`);
@@ -1989,6 +2086,7 @@ export function fromParquet(bytes: Uint8Array): TableLike {
         scale: e.scale,
         typeLength: e.typeLength,
         inner: undefined,
+        fields: undefined,
         maxDef: myDef,
         maxRep: myRep,
       };
@@ -2010,6 +2108,24 @@ export function fromParquet(bytes: Uint8Array): TableLike {
     if (c.category === "list") {
       return { kind: "list", child: dataTypeForCol(c.inner!) };
     }
+    if (c.category === "struct") {
+      return {
+        kind: "struct",
+        fields: c.fields!.map(f => ({
+          name: f.name,
+          type: dataTypeForCol(f),
+          nullable: f.category === "primitive" ? f.isOptional : false,
+        })),
+      };
+    }
+    if (c.category === "map") {
+      return {
+        kind: "map",
+        keyType: dataTypeForCol(c.fields![0]),
+        valueType: dataTypeForCol(c.fields![1]),
+        valueNullable: c.fields![1].isOptional,
+      };
+    }
     const kind = arrowKindForPhysical(c.physicalType!, c.convertedType);
     if (kind === "decimal128") {
       if (c.precision === undefined) {
@@ -2026,36 +2142,129 @@ export function fromParquet(bytes: Uint8Array): TableLike {
     return { kind };
   }
 
+  // Walk the ColInfo tree to count how many parquet column chunks
+  // back this logical column. Each leaf consumes one chunk; struct
+  // expands to the sum of its fields; list/map are themselves leaves
+  // (one chunk for list, two for map's key+value pair).
+  function leafChunkCount(c: ColInfo): number {
+    if (c.category === "list") return 1;
+    if (c.category === "map") return 2;
+    if (c.category === "struct") {
+      let n = 0;
+      for (const f of c.fields!) n += leafChunkCount(f);
+      return n;
+    }
+    return 1;
+  }
+
+  // Decode one logical column starting at row-group chunk-index
+  // `chunkIdx`. Returns the assembled Column + the number of chunks
+  // consumed so the caller can advance.
+  function decodeOneColumn(
+    rg: RowGroup,
+    chunkIdx: number,
+    c: ColInfo,
+    numRows: number,
+  ): { col: ColumnLike; consumed: number } {
+    if (c.category === "list") {
+      const inner = c.inner!;
+      const decoded = decodeListColumnChunk(bytes, rg.columns[chunkIdx].metaData, numRows, c, inner);
+      const innerType = dataTypeForCol(inner);
+      const child = new Column(innerType, decoded.childCount, decoded.childValues, decoded.childValidity);
+      return {
+        col: new Column(dataTypeForCol(c), numRows, decoded.offsets, decoded.validity, child),
+        consumed: 1,
+      };
+    }
+    if (c.category === "map") {
+      // Read the two chunks (key + value) with rep+def levels and
+      // assemble into List<Struct<key, value>>. Both chunks share
+      // the same row-boundary structure, so we decode each
+      // independently and reuse the offsets from the key chunk —
+      // the value chunk's offsets must agree per spec.
+      const keyInfo = c.fields![0];
+      const valInfo = c.fields![1];
+      // For each chunk pass a synthetic "outer" with the LEAF's
+      // maxDef rather than the map's middle-group maxDef. The leaf
+      // maxDef differs between key (REQUIRED, lower) and value
+      // (OPTIONAL, higher) so each chunk needs its own.
+      const keyOuter = { isOptional: c.isOptional, maxDef: keyInfo.maxDef, maxRep: keyInfo.maxRep };
+      const valOuter = { isOptional: c.isOptional, maxDef: valInfo.maxDef, maxRep: valInfo.maxRep };
+      const keyDecoded = decodeListColumnChunk(bytes, rg.columns[chunkIdx].metaData, numRows, keyOuter, keyInfo);
+      const valDecoded = decodeListColumnChunk(bytes, rg.columns[chunkIdx + 1].metaData, numRows, valOuter, valInfo);
+      // Sanity: child counts should match. If they don't the file is
+      // malformed (writer didn't emit symmetric rep+def levels).
+      if (keyDecoded.childCount !== valDecoded.childCount) {
+        throw new Error(
+          `parquet: MAP "${c.name}" key/value child counts disagree (${keyDecoded.childCount} vs ${valDecoded.childCount})`,
+        );
+      }
+      const keysCol = new Column(
+        dataTypeForCol(keyInfo),
+        keyDecoded.childCount,
+        keyDecoded.childValues,
+        keyDecoded.childValidity,
+      );
+      const valuesCol = new Column(
+        dataTypeForCol(valInfo),
+        valDecoded.childCount,
+        valDecoded.childValues,
+        valDecoded.childValidity,
+      );
+      const structType = {
+        kind: "struct",
+        fields: [
+          { name: "key", type: dataTypeForCol(keyInfo), nullable: false },
+          { name: "value", type: dataTypeForCol(valInfo), nullable: valInfo.isOptional },
+        ],
+      };
+      const structCol = new Column(structType as any, keyDecoded.childCount, new Uint8Array(0), undefined, undefined, [
+        keysCol,
+        valuesCol,
+      ]);
+      return {
+        col: new Column(dataTypeForCol(c), numRows, keyDecoded.offsets, keyDecoded.validity, structCol),
+        consumed: 2,
+      };
+    }
+    if (c.category === "struct") {
+      // Each field is its own logical column with its own chunk(s).
+      // Recurse, accumulating consumed counts.
+      const childCols: ColumnLike[] = [];
+      let consumed = 0;
+      for (const f of c.fields!) {
+        const r = decodeOneColumn(rg, chunkIdx + consumed, f, numRows);
+        childCols.push(r.col);
+        consumed += r.consumed;
+      }
+      return {
+        col: new Column(dataTypeForCol(c), numRows, new Uint8Array(0), undefined, undefined, childCols),
+        consumed,
+      };
+    }
+    // Primitive
+    const { values, validity } = decodeColumnChunk(
+      bytes,
+      rg.columns[chunkIdx].metaData,
+      numRows,
+      c.isOptional,
+      c.typeLength,
+    );
+    return { col: new Column(dataTypeForCol(c), numRows, values, validity), consumed: 1 };
+  }
+
   // Build one RecordBatch per row group.
   const batches: RecordBatchLike[] = [];
   for (const rg of meta.rowGroups) {
     const numRows = Number(rg.numRows);
     const batchColumns: ColumnLike[] = [];
-    for (let i = 0; i < cols.length; i++) {
-      const colInfo = cols[i];
-      const chunk = rg.columns[i];
-      if (colInfo.category === "list") {
-        // List columns: rep+def levels disambiguate row boundaries +
-        // null lists + empty lists. The page decoder gives us the
-        // packed inner values + the level streams; we reassemble the
-        // arrow ListColumn (offsets[] + child + validity) here.
-        const inner = colInfo.inner!;
-        const decoded = decodeListColumnChunk(bytes, chunk.metaData, numRows, colInfo, inner);
-        const innerType = dataTypeForCol(inner);
-        const child = new Column(innerType, decoded.childCount, decoded.childValues, decoded.childValidity);
-        batchColumns.push(new Column(dataTypeForCol(colInfo), numRows, decoded.offsets, decoded.validity, child));
-      } else {
-        const { values, validity } = decodeColumnChunk(
-          bytes,
-          chunk.metaData,
-          numRows,
-          colInfo.isOptional,
-          colInfo.typeLength,
-        );
-        const dataType = dataTypeForCol(colInfo);
-        batchColumns.push(new Column(dataType, numRows, values, validity));
-      }
+    let chunkIdx = 0;
+    for (const colInfo of cols) {
+      const r = decodeOneColumn(rg, chunkIdx, colInfo, numRows);
+      batchColumns.push(r.col);
+      chunkIdx += r.consumed;
     }
+    void leafChunkCount; // reserved for future row-group filter pushdown
     const schemaForBatch = {
       fields: cols.map(c => ({
         name: c.name,
@@ -2509,8 +2718,29 @@ function buildDataPageBody(
 
 // ─── FileMetaData writer ──────────────────────────────────────────────────
 
+// Top-level schema node — describes the LOGICAL column tree the
+// writer needs to emit as parquet SchemaElements. One TopSchemaNode
+// per top-level field; struct/map/list expand to multiple
+// SchemaElements (and primitive children become their own column
+// chunks). The flat colPlans list is built in parallel with this
+// tree; each "primitive" / "list" / "map" node references the
+// 1-or-2 ColumnPlans it owns, struct nodes don't own plans
+// themselves.
+type TopSchemaNode =
+  | { kind: "primitive"; plan: ColumnPlan }
+  | { kind: "list"; plan: ColumnPlan }
+  | { kind: "struct"; name: string; isOptional: boolean; fields: TopSchemaNode[] }
+  | { kind: "map"; name: string; isOptional: boolean; keyPlan: ColumnPlan; valuePlan: ColumnPlan };
+
 interface ColumnPlan {
   name: string;
+  /**
+   * Override for the path-in-schema list emitted into
+   * ColumnMetaData (field 3). Set when the column lives inside a
+   * struct or map — then the path is [groupName, …, leafName]
+   * instead of the default [name].
+   */
+  pathOverride: string[] | undefined;
   physicalType: number;
   // Pre-2.4 logical-type annotation (utf8, date32, timestamp, etc.).
   // Optional — only set when the arrow kind needs an annotation that
@@ -2765,7 +2995,12 @@ function writeColumnMetaData(
   // inside the LIST → repeated → leaf pattern.
   tw.writeFieldHeader(lf, 3, TC_LIST);
   lf = 3;
-  const path = plan.listOuterOptional !== undefined ? [plan.name, "list", "element"] : [plan.name];
+  const path =
+    plan.pathOverride !== undefined
+      ? plan.pathOverride
+      : plan.listOuterOptional !== undefined
+        ? [plan.name, "list", "element"]
+        : [plan.name];
   tw.writeListHeader(TC_BINARY, path.length);
   const enc = new TextEncoder();
   for (const seg of path) {
@@ -2881,31 +3116,47 @@ function writeSchemaElement(
   return tw.finish();
 }
 
-function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: Uint8Array): Uint8Array {
-  const tw = new ThriftWriter();
-  let lf = 0;
-  // 1: version
-  lf = tw.writeI32(lf, 1, 1);
-  // 2: schema list of SchemaElement (root + leaves)
-  tw.writeFieldHeader(lf, 2, TC_LIST);
-  lf = 2;
-  // Total schema-list length: 1 (root) + sum over columns of
-  // (3 for list, 1 for primitive). The reader's depth-first walker
-  // uses each element's numChildren to navigate.
-  let totalSchemaEntries = 1;
-  for (const c of cols) totalSchemaEntries += c.listOuterOptional !== undefined ? 3 : 1;
-  tw.writeListHeader(TC_STRUCT, totalSchemaEntries);
-  // Root group
-  tw.out.writeBytes(writeSchemaElement("root", undefined, cols.length, undefined, undefined, undefined, undefined));
-  for (const c of cols) {
-    if (c.listOuterOptional !== undefined) {
-      // Standard 3-level LIST shape:
-      //   <repetition> group <name> (LIST) {
-      //     repeated group list {
-      //       <repetition> <type> element;
-      //     }
-      //   }
-      // Outer group: repetition from listOuterOptional, numChildren=1, ConvertedType=LIST.
+// Count the total number of SchemaElements emitted for one
+// TopSchemaNode (excluding the root which is counted once at the
+// top). Primitive = 1, list = 3, map = 4 (outer + middle + 2 leaves),
+// struct = 1 (outer group) + sum of children.
+function countSchemaNodes(node: TopSchemaNode): number {
+  switch (node.kind) {
+    case "primitive":
+      return 1;
+    case "list":
+      return 3;
+    case "map":
+      return 4;
+    case "struct": {
+      let n = 1;
+      for (const f of node.fields) n += countSchemaNodes(f);
+      return n;
+    }
+  }
+}
+
+function writeOneSchemaSubtree(tw: ThriftWriter, node: TopSchemaNode): void {
+  switch (node.kind) {
+    case "primitive": {
+      const c = node.plan;
+      tw.out.writeBytes(
+        writeSchemaElement(
+          c.name,
+          c.physicalType,
+          0,
+          c.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          c.convertedType,
+          c.scale,
+          c.precision,
+          c.typeLength,
+        ),
+      );
+      return;
+    }
+    case "list": {
+      const c = node.plan;
+      // Outer group(LIST), middle group(REPEATED), leaf primitive.
       tw.out.writeBytes(
         writeSchemaElement(
           c.name,
@@ -2917,9 +3168,7 @@ function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: U
           undefined,
         ),
       );
-      // Middle group: REPEATED, numChildren=1, no converted type.
       tw.out.writeBytes(writeSchemaElement("list", undefined, 1, PQ_REP_REPEATED, undefined, undefined, undefined));
-      // Leaf primitive.
       tw.out.writeBytes(
         writeSchemaElement(
           "element",
@@ -2932,21 +3181,86 @@ function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: U
           c.typeLength,
         ),
       );
-      continue;
+      return;
     }
-    tw.out.writeBytes(
-      writeSchemaElement(
-        c.name,
-        c.physicalType,
-        0,
-        c.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
-        c.convertedType,
-        c.scale,
-        c.precision,
-        c.typeLength,
-      ),
-    );
+    case "map": {
+      // Outer group(MAP), middle group(MAP_KEY_VALUE, REPEATED), key
+      // leaf (REQUIRED), value leaf (OPTIONAL/REQUIRED).
+      tw.out.writeBytes(
+        writeSchemaElement(
+          node.name,
+          undefined,
+          1,
+          node.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          PQ_CT_MAP,
+          undefined,
+          undefined,
+        ),
+      );
+      tw.out.writeBytes(
+        writeSchemaElement("key_value", undefined, 2, PQ_REP_REPEATED, PQ_CT_MAP_KEY_VALUE, undefined, undefined),
+      );
+      const k = node.keyPlan;
+      tw.out.writeBytes(
+        writeSchemaElement(
+          "key",
+          k.physicalType,
+          0,
+          PQ_REP_REQUIRED,
+          k.convertedType,
+          k.scale,
+          k.precision,
+          k.typeLength,
+        ),
+      );
+      const v = node.valuePlan;
+      tw.out.writeBytes(
+        writeSchemaElement(
+          "value",
+          v.physicalType,
+          0,
+          v.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          v.convertedType,
+          v.scale,
+          v.precision,
+          v.typeLength,
+        ),
+      );
+      return;
+    }
+    case "struct": {
+      tw.out.writeBytes(
+        writeSchemaElement(
+          node.name,
+          undefined,
+          node.fields.length,
+          node.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          undefined,
+          undefined,
+          undefined,
+        ),
+      );
+      for (const f of node.fields) writeOneSchemaSubtree(tw, f);
+      return;
+    }
   }
+}
+
+function writeFileMetaData(topLevels: TopSchemaNode[], numRows: number, rowGroupBytes: Uint8Array): Uint8Array {
+  const tw = new ThriftWriter();
+  let lf = 0;
+  // 1: version
+  lf = tw.writeI32(lf, 1, 1);
+  // 2: schema list of SchemaElement (root + each subtree).
+  tw.writeFieldHeader(lf, 2, TC_LIST);
+  lf = 2;
+  let totalSchemaEntries = 1;
+  for (const t of topLevels) totalSchemaEntries += countSchemaNodes(t);
+  tw.writeListHeader(TC_STRUCT, totalSchemaEntries);
+  tw.out.writeBytes(
+    writeSchemaElement("root", undefined, topLevels.length, undefined, undefined, undefined, undefined),
+  );
+  for (const t of topLevels) writeOneSchemaSubtree(tw, t);
   // 3: num_rows
   lf = tw.writeI64(lf, 3, BigInt(numRows));
   // 4: row_groups list
@@ -2967,9 +3281,241 @@ function writeFileMetaData(cols: ColumnPlan[], numRows: number, rowGroupBytes: U
 //
 // Returns the compressed body, total numLevels (= page numValues),
 // and meta needed to populate the ColumnPlan.
-function encodeListColumnAcrossBatches(
+// Encode a Map column across batches. Emits TWO compressed page
+// bodies — one for the key leaf, one for the value leaf — sharing
+// the same Dremel rep+def shape (the parquet spec requires the
+// chunks to agree per-row). Returns one result per leaf so the
+// caller can build two ColumnPlans in parallel.
+function encodeMapSourceAcrossBatches(
   field: any,
-  ci: number,
+  getCol: (b: number) => any,
+  batches: RecordBatchLike[],
+  numRows: number,
+  codec: number,
+): {
+  keyCompressed: Uint8Array;
+  valueCompressed: Uint8Array;
+  keyUncompressedSize: number;
+  valueUncompressedSize: number;
+  numLevels: number;
+  keyNumNonNull: number;
+  valueNumNonNull: number;
+  keyPhysical: number;
+  keyConverted: number | undefined;
+  keyTypeLength: number | undefined;
+  valuePhysical: number;
+  valueConverted: number | undefined;
+  valueTypeLength: number | undefined;
+  valueOptional: boolean;
+} {
+  const mapOptional = field.nullable;
+  const keyType = field.type.keyType;
+  const valueType = field.type.valueType;
+  const valueOptional = field.type.valueNullable === true;
+  if (keyType.kind === "list" || keyType.kind === "struct" || keyType.kind === "map") {
+    throw new Error(`para:arrow.toParquet: Map key type "${keyType.kind}" not supported`);
+  }
+  if (valueType.kind === "list" || valueType.kind === "struct" || valueType.kind === "map") {
+    throw new Error(`para:arrow.toParquet: Map value type "${valueType.kind}" not supported`);
+  }
+  const keyPhysical = parquetPhysicalForKind(keyType.kind);
+  const valuePhysical = parquetPhysicalForKind(valueType.kind);
+  const keyConverted = parquetConvertedForKind(keyType.kind);
+  const valueConverted = parquetConvertedForKind(valueType.kind);
+  const keyTypeLength = keyType.kind === "fixed_size_binary" ? (keyType as any).width : undefined;
+  const valueTypeLength = valueType.kind === "fixed_size_binary" ? (valueType as any).width : undefined;
+
+  // Concat across batches.
+  type RowSpec = {
+    offsets: Int32Array;
+    keyValues: any;
+    valueValues: any;
+    valueValidity: Uint8Array | undefined;
+    rowValidity: Uint8Array | undefined;
+  };
+  const specs: RowSpec[] = [];
+  let totalChild = 0;
+  for (let bi = 0; bi < batches.length; bi++) {
+    const b = batches[bi];
+    const c = getCol(bi) as any;
+    const offsets = c.values as Int32Array;
+    const struct = c.child;
+    if (!struct || !struct.children || struct.children.length !== 2) {
+      throw new Error(`para:arrow.toParquet: map column "${field.name}" missing struct{key,value} child`);
+    }
+    const keyCol = struct.children[0];
+    const valCol = struct.children[1];
+    totalChild += offsets[b.numRows];
+    specs.push({
+      offsets,
+      keyValues: keyCol.values,
+      valueValues: valCol.values,
+      valueValidity: valCol.validity,
+      rowValidity: c.validity,
+    });
+  }
+
+  const maxLevels = numRows + totalChild;
+  const repLevels = new Int32Array(maxLevels);
+  const defLevelsKey = new Int32Array(maxLevels);
+  const defLevelsValue = new Int32Array(maxLevels);
+
+  const keyPresentDef = (mapOptional ? 1 : 0) + 1; // outer + REPEATED
+  const valPresentDef = keyPresentDef + (valueOptional ? 1 : 0);
+  const valNullDef = keyPresentDef; // outer present + middle present, value missing
+  const emptyDef = mapOptional ? 1 : 0;
+
+  // Collect non-null KEY values (always non-null since key is REQUIRED)
+  // and non-null VALUE values (skipping where value is null).
+  function alloc(template: any, cap: number, w: number | undefined): any {
+    if (w !== undefined) return new Uint8Array(cap * w);
+    if (template instanceof Int32Array) return new Int32Array(cap);
+    if (template instanceof BigInt64Array) return new BigInt64Array(cap);
+    if (template instanceof Float32Array) return new Float32Array(cap);
+    if (template instanceof Float64Array) return new Float64Array(cap);
+    if (template instanceof Uint8Array) return new Uint8Array(cap);
+    return new Array(cap);
+  }
+  function append(buf: any, src: any, k: number, idx: number, w: number | undefined): void {
+    if (w !== undefined) {
+      (buf as Uint8Array).set((src as Uint8Array).subarray(k * w, (k + 1) * w), idx * w);
+    } else {
+      buf[idx] = src[k];
+    }
+  }
+
+  let keyNonNullValues: any;
+  let keyNonNullCount = 0;
+  let valueNonNullValues: any;
+  let valueNonNullCount = 0;
+  let levelIdx = 0;
+
+  for (const spec of specs) {
+    const { offsets, keyValues, valueValues, valueValidity, rowValidity } = spec;
+    const batchRows = offsets.length - 1;
+    if (!keyNonNullValues) keyNonNullValues = alloc(keyValues, totalChild, keyTypeLength);
+    if (!valueNonNullValues) valueNonNullValues = alloc(valueValues, totalChild, valueTypeLength);
+    for (let r = 0; r < batchRows; r++) {
+      const start = offsets[r];
+      const end = offsets[r + 1];
+      const rowNull = mapOptional && rowValidity && !((rowValidity[r >> 3] >> (r & 7)) & 1);
+      if (rowNull) {
+        repLevels[levelIdx] = 0;
+        defLevelsKey[levelIdx] = 0;
+        defLevelsValue[levelIdx] = 0;
+        levelIdx++;
+      } else if (start === end) {
+        repLevels[levelIdx] = 0;
+        defLevelsKey[levelIdx] = emptyDef;
+        defLevelsValue[levelIdx] = emptyDef;
+        levelIdx++;
+      } else {
+        for (let k = start; k < end; k++) {
+          const isValueNull = valueOptional && valueValidity && !((valueValidity[k >> 3] >> (k & 7)) & 1);
+          repLevels[levelIdx] = k === start ? 0 : 1;
+          defLevelsKey[levelIdx] = keyPresentDef;
+          defLevelsValue[levelIdx] = isValueNull ? valNullDef : valPresentDef;
+          // Key is always present.
+          append(keyNonNullValues, keyValues, k, keyNonNullCount, keyTypeLength);
+          keyNonNullCount++;
+          if (!isValueNull) {
+            append(valueNonNullValues, valueValues, k, valueNonNullCount, valueTypeLength);
+            valueNonNullCount++;
+          }
+          levelIdx++;
+        }
+      }
+    }
+  }
+
+  // Trim if over-allocated.
+  if (keyNonNullValues && keyTypeLength === undefined && keyNonNullValues.length > keyNonNullCount) {
+    keyNonNullValues = Array.isArray(keyNonNullValues)
+      ? keyNonNullValues.slice(0, keyNonNullCount)
+      : (keyNonNullValues as any).slice(0, keyNonNullCount);
+  } else if (
+    keyNonNullValues &&
+    keyTypeLength !== undefined &&
+    (keyNonNullValues as Uint8Array).length > keyNonNullCount * keyTypeLength
+  ) {
+    keyNonNullValues = (keyNonNullValues as Uint8Array).slice(0, keyNonNullCount * keyTypeLength);
+  }
+  if (valueNonNullValues && valueTypeLength === undefined && valueNonNullValues.length > valueNonNullCount) {
+    valueNonNullValues = Array.isArray(valueNonNullValues)
+      ? valueNonNullValues.slice(0, valueNonNullCount)
+      : (valueNonNullValues as any).slice(0, valueNonNullCount);
+  } else if (
+    valueNonNullValues &&
+    valueTypeLength !== undefined &&
+    (valueNonNullValues as Uint8Array).length > valueNonNullCount * valueTypeLength
+  ) {
+    valueNonNullValues = (valueNonNullValues as Uint8Array).slice(0, valueNonNullCount * valueTypeLength);
+  }
+  if (!keyNonNullValues) keyNonNullValues = keyTypeLength !== undefined ? new Uint8Array(0) : new Int32Array(0);
+  if (!valueNonNullValues) valueNonNullValues = valueTypeLength !== undefined ? new Uint8Array(0) : new Int32Array(0);
+
+  const repBitWidth = bitWidthForMax(1); // REPEATED contributes 1
+  const keyDefBitWidth = bitWidthForMax(keyPresentDef);
+  const valDefBitWidth = bitWidthForMax(valPresentDef);
+
+  function pageFor(
+    defs: Int32Array,
+    bw: number,
+    vals: any,
+    nn: number,
+    phys: number,
+    tl?: number,
+  ): { compressed: Uint8Array; uncompressedSize: number } {
+    const repBody = encodeLevelsRle(repLevels, levelIdx, repBitWidth);
+    const defBody = encodeLevelsRle(defs, levelIdx, bw);
+    const valuesBody = encodePlainTyped(vals, nn, phys, tl);
+    const w = new ByteWriter();
+    w.writeI32LE(repBody.length);
+    w.writeBytes(repBody);
+    w.writeI32LE(defBody.length);
+    w.writeBytes(defBody);
+    w.writeBytes(valuesBody);
+    const pageBody = w.finish();
+    let compressed: Uint8Array;
+    if (codec === PQ_CODEC_UNCOMPRESSED) compressed = pageBody;
+    else if (codec === PQ_CODEC_SNAPPY) compressed = snappyCompress(pageBody);
+    else if (codec === PQ_CODEC_GZIP) compressed = (Bun as any).gzipSync(pageBody) as Uint8Array;
+    else if (codec === PQ_CODEC_ZSTD) compressed = (Bun as any).zstdCompressSync(pageBody) as Uint8Array;
+    else throw new Error(`parquet: writer codec ${codec} has no compressor wired`);
+    return { compressed, uncompressedSize: pageBody.length };
+  }
+
+  const keyPage = pageFor(defLevelsKey, keyDefBitWidth, keyNonNullValues, keyNonNullCount, keyPhysical, keyTypeLength);
+  const valPage = pageFor(
+    defLevelsValue,
+    valDefBitWidth,
+    valueNonNullValues,
+    valueNonNullCount,
+    valuePhysical,
+    valueTypeLength,
+  );
+
+  return {
+    keyCompressed: keyPage.compressed,
+    valueCompressed: valPage.compressed,
+    keyUncompressedSize: keyPage.uncompressedSize,
+    valueUncompressedSize: valPage.uncompressedSize,
+    numLevels: levelIdx,
+    keyNumNonNull: keyNonNullCount,
+    valueNumNonNull: valueNonNullCount,
+    keyPhysical,
+    keyConverted,
+    keyTypeLength,
+    valuePhysical,
+    valueConverted,
+    valueTypeLength,
+    valueOptional,
+  };
+}
+
+function encodeListSourceAcrossBatches(
+  field: any,
+  getCol: (b: number) => any,
   batches: RecordBatchLike[],
   numRows: number,
   codec: number,
@@ -3003,8 +3549,9 @@ function encodeListColumnAcrossBatches(
   };
   const specs: RowSpec[] = [];
   let totalChild = 0;
-  for (const b of batches) {
-    const c = b.columns[ci] as any;
+  for (let bi = 0; bi < batches.length; bi++) {
+    const b = batches[bi];
+    const c = getCol(bi) as any;
     const offsets = c.values as Int32Array;
     const child = c.child;
     if (!child) throw new Error(`para:arrow.toParquet: list column "${field.name}" missing child`);
@@ -3182,17 +3729,109 @@ export function toParquet(
   const colPlans: ColumnPlan[] = [];
   const dataPageOffsets: bigint[] = [];
   const compressedSizes: number[] = [];
+  const topLevels: TopSchemaNode[] = [];
 
-  for (let ci = 0; ci < schema.fields.length; ci++) {
-    const field = schema.fields[ci];
-    const isOptional = field.nullable;
+  // Process one logical column. For primitive / list, emits the
+  // matching column chunk(s) and returns a TopSchemaNode. For struct,
+  // recurses over child fields. `getCol(b)` returns the source column
+  // for batch index `b`. `pathOverride` populates ColumnPlan for
+  // struct-nested columns where the path is [parent, …, leaf]
+  // instead of [leaf].
+  function emitField(
+    field: any,
+    getCol: (b: number) => any,
+    leafName: string,
+    pathOverride: string[] | undefined,
+  ): TopSchemaNode {
+    if (field.type.kind === "struct") {
+      if (field.nullable) {
+        throw new Error(`para:arrow.toParquet: OPTIONAL struct "${field.name}" not yet supported by writer`);
+      }
+      const subPath = pathOverride ?? [field.name];
+      const children: TopSchemaNode[] = [];
+      for (let k = 0; k < field.type.fields.length; k++) {
+        const cf = field.type.fields[k];
+        const childGet = (b: number) => getCol(b).children[k];
+        children.push(emitField(cf, childGet, cf.name, [...subPath, cf.name]));
+      }
+      return { kind: "struct", name: field.name, isOptional: false, fields: children };
+    }
+    if (field.type.kind === "map") {
+      const result = encodeMapSourceAcrossBatches(field, getCol, batches, numRows, codec);
+      const keyPageHeader = writePageHeader(
+        PQ_PAGE_DATA_PAGE,
+        result.keyUncompressedSize,
+        result.keyCompressed.length,
+        { numValues: result.numLevels },
+      );
+      const keyOffset = BigInt(out.pos);
+      out.writeBytes(keyPageHeader);
+      out.writeBytes(result.keyCompressed);
+      const keyPlan: ColumnPlan = {
+        name: "key",
+        pathOverride: [field.name, "key_value", "key"],
+        physicalType: result.keyPhysical,
+        convertedType: result.keyConverted,
+        precision: undefined,
+        scale: undefined,
+        typeLength: result.keyTypeLength,
+        isOptional: false,
+        listOuterOptional: undefined,
+        listElemOptional: undefined,
+        compressedPage: result.keyCompressed,
+        uncompressedSize: result.keyUncompressedSize + keyPageHeader.length,
+        numValues: result.numLevels,
+        numNonNull: result.keyNumNonNull,
+        stats: undefined,
+        bloomFilter: undefined,
+        bloomFilterOffset: undefined,
+      };
+      colPlans.push(keyPlan);
+      dataPageOffsets.push(keyOffset);
+      compressedSizes.push(result.keyCompressed.length + keyPageHeader.length);
 
-    // List columns route to a separate page builder that emits
-    // rep+def levels alongside the (packed) inner values. The schema
-    // emission also branches: 3 elements per list column (outer LIST
-    // group → repeated middle → leaf primitive) instead of 1.
+      const valPageHeader = writePageHeader(
+        PQ_PAGE_DATA_PAGE,
+        result.valueUncompressedSize,
+        result.valueCompressed.length,
+        { numValues: result.numLevels },
+      );
+      const valOffset = BigInt(out.pos);
+      out.writeBytes(valPageHeader);
+      out.writeBytes(result.valueCompressed);
+      const valPlan: ColumnPlan = {
+        name: "value",
+        pathOverride: [field.name, "key_value", "value"],
+        physicalType: result.valuePhysical,
+        convertedType: result.valueConverted,
+        precision: undefined,
+        scale: undefined,
+        typeLength: result.valueTypeLength,
+        isOptional: result.valueOptional,
+        listOuterOptional: undefined,
+        listElemOptional: undefined,
+        compressedPage: result.valueCompressed,
+        uncompressedSize: result.valueUncompressedSize + valPageHeader.length,
+        numValues: result.numLevels,
+        numNonNull: result.valueNumNonNull,
+        stats: undefined,
+        bloomFilter: undefined,
+        bloomFilterOffset: undefined,
+      };
+      colPlans.push(valPlan);
+      dataPageOffsets.push(valOffset);
+      compressedSizes.push(result.valueCompressed.length + valPageHeader.length);
+
+      return {
+        kind: "map",
+        name: field.name,
+        isOptional: field.nullable,
+        keyPlan,
+        valuePlan: valPlan,
+      };
+    }
     if (field.type.kind === "list") {
-      const result = encodeListColumnAcrossBatches(field, ci, batches, numRows, codec);
+      const result = encodeListSourceAcrossBatches(field, getCol, batches, numRows, codec);
       const compressedSize = result.compressed.length;
       const pageHeader = writePageHeader(PQ_PAGE_DATA_PAGE, result.uncompressedSize, compressedSize, {
         numValues: result.numLevels,
@@ -3201,51 +3840,65 @@ export function toParquet(
       out.writeBytes(pageHeader);
       out.writeBytes(result.compressed);
       const plan: ColumnPlan = {
-        name: field.name,
+        name: leafName,
+        pathOverride,
         physicalType: result.innerPhysical,
         convertedType: result.innerConverted,
         precision: undefined,
         scale: undefined,
         typeLength: result.innerTypeLength,
-        isOptional,
-        listOuterOptional: isOptional,
+        isOptional: field.nullable,
+        listOuterOptional: field.nullable,
         listElemOptional: result.elemOptional,
         compressedPage: result.compressed,
         uncompressedSize: result.uncompressedSize + pageHeader.length,
         numValues: result.numLevels,
         numNonNull: result.numNonNull,
-        // Stats on list columns aren't well-defined with the current
-        // schema (per-element vs per-list). Skip — readers treat
-        // missing stats as unknown.
         stats: undefined,
-        // Bloom filters for list columns aren't supported in v1 — the
-        // semantics ("did the LIST contain this element?") would need
-        // hashing each inner value, which is doable but a different
-        // contract than "this column has this value." Drop the column
-        // from the bloom set rather than emit an empty filter.
         bloomFilter: undefined,
         bloomFilterOffset: undefined,
       };
       colPlans.push(plan);
       dataPageOffsets.push(pageStartOffset);
       compressedSizes.push(compressedSize + pageHeader.length);
-      continue;
+      return { kind: "list", plan };
     }
+    // Primitive — fall through into the legacy per-field body via a
+    // pre-set ci-shaped sentinel.
+    return emitPrimitiveLeaf(field, getCol, leafName, pathOverride);
+  }
 
+  for (let ci = 0; ci < schema.fields.length; ci++) {
+    const field = schema.fields[ci];
+    const ciCaptured = ci;
+    const node = emitField(field, (b: number) => batches[b].columns[ciCaptured], field.name, undefined);
+    topLevels.push(node);
+    continue;
+  }
+
+  // Emit one primitive leaf column. Reads the source column for each
+  // batch via getCol(b), merges values + validity across batches,
+  // computes def levels, packs non-nulls, compresses, writes the
+  // page, and pushes a ColumnPlan + offset/size into the parallel
+  // arrays. `pathOverride` populates the path-in-schema list when
+  // this leaf lives inside a struct (so the metadata says
+  // [parent, …, leaf] instead of just [leaf]).
+  function emitPrimitiveLeaf(
+    field: any,
+    getCol: (b: number) => any,
+    leafName: string,
+    pathOverride: string[] | undefined,
+  ): TopSchemaNode {
+    const isOptional = field.nullable;
     const physicalType = parquetPhysicalForKind(field.type.kind);
-
-    // FLBA columns store width bytes per row in a single contiguous
-    // Uint8Array — the per-row stride is W, not 1, so the merge math
-    // for that case scales offsets by W.
     const flbaW = field.type.kind === "fixed_size_binary" ? (field.type as any).width : undefined;
 
     // Concat batches' values + validity for this column.
     let mergedValues: any;
     let mergedValidity: Uint8Array | undefined;
     {
-      const sample = batches[0].columns[ci];
+      const sample = getCol(0);
       if (flbaW !== undefined) {
-        // FLBA: numRows × width bytes total.
         mergedValues = new Uint8Array(numRows * flbaW);
       } else if (sample.values instanceof Int32Array) mergedValues = new Int32Array(numRows);
       else if (sample.values instanceof BigInt64Array) mergedValues = new BigInt64Array(numRows);
@@ -3254,10 +3907,10 @@ export function toParquet(
       else if (sample.values instanceof Uint8Array) mergedValues = new Uint8Array(numRows);
       else mergedValues = new Array(numRows);
       let off = 0;
-      for (const b of batches) {
-        const c = b.columns[ci];
+      for (let bi = 0; bi < batches.length; bi++) {
+        const b = batches[bi];
+        const c = getCol(bi);
         if (flbaW !== undefined) {
-          // FLBA: copy b.numRows × flbaW bytes at byte-offset off*flbaW.
           (mergedValues as Uint8Array).set(c.values as Uint8Array, off * flbaW);
         } else if (mergedValues.length > 0 && c.values && c.values.length === b.numRows) {
           if (Array.isArray(mergedValues)) {
@@ -3272,13 +3925,14 @@ export function toParquet(
         mergedValidity = new Uint8Array(Math.ceil(numRows / 8));
         mergedValidity.fill(0xff);
         let bitOff = 0;
-        for (const b of batches) {
-          const c = b.columns[ci];
+        for (let bi = 0; bi < batches.length; bi++) {
+          const b = batches[bi];
+          const c = getCol(bi);
           if (c.validity) {
             for (let i = 0; i < b.numRows; i++) {
               const valid = (c.validity[i >> 3] >> (i & 7)) & 1;
-              const out = bitOff + i;
-              if (!valid) mergedValidity[out >> 3] &= ~(1 << (out & 7));
+              const o = bitOff + i;
+              if (!valid) mergedValidity[o >> 3] &= ~(1 << (o & 7));
             }
           }
           bitOff += b.numRows;
@@ -3286,10 +3940,9 @@ export function toParquet(
       }
     }
 
-    // FLBA width is `flbaW` from the merge step above.
     const flbaWidth = flbaW;
 
-    // Compute def levels (0/1 per row) and a packed values array (only non-nulls).
+    // Compute def levels (0/1 per row) and a packed values array.
     let defLevels: Uint8Array | undefined;
     let nonNullValues: any;
     let numNonNull: number;
@@ -3302,48 +3955,46 @@ export function toParquet(
         if (v) nn++;
       }
       numNonNull = nn;
-      // Pack non-null values into a fresh array.
       if (flbaWidth !== undefined && mergedValues instanceof Uint8Array) {
-        // FLBA: width bytes per row. Pack window-wise.
-        const out = new Uint8Array(nn * flbaWidth);
+        const o = new Uint8Array(nn * flbaWidth);
         let j = 0;
         for (let i = 0; i < numRows; i++) {
           if (defLevels[i]) {
-            out.set(mergedValues.subarray(i * flbaWidth, (i + 1) * flbaWidth), j * flbaWidth);
+            o.set(mergedValues.subarray(i * flbaWidth, (i + 1) * flbaWidth), j * flbaWidth);
             j++;
           }
         }
-        nonNullValues = out;
+        nonNullValues = o;
       } else if (mergedValues instanceof Int32Array) {
-        const out = new Int32Array(nn);
+        const o = new Int32Array(nn);
         let j = 0;
-        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
-        nonNullValues = out;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) o[j++] = mergedValues[i];
+        nonNullValues = o;
       } else if (mergedValues instanceof BigInt64Array) {
-        const out = new BigInt64Array(nn);
+        const o = new BigInt64Array(nn);
         let j = 0;
-        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
-        nonNullValues = out;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) o[j++] = mergedValues[i];
+        nonNullValues = o;
       } else if (mergedValues instanceof Float32Array) {
-        const out = new Float32Array(nn);
+        const o = new Float32Array(nn);
         let j = 0;
-        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
-        nonNullValues = out;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) o[j++] = mergedValues[i];
+        nonNullValues = o;
       } else if (mergedValues instanceof Float64Array) {
-        const out = new Float64Array(nn);
+        const o = new Float64Array(nn);
         let j = 0;
-        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
-        nonNullValues = out;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) o[j++] = mergedValues[i];
+        nonNullValues = o;
       } else if (mergedValues instanceof Uint8Array) {
-        const out = new Uint8Array(nn);
+        const o = new Uint8Array(nn);
         let j = 0;
-        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
-        nonNullValues = out;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) o[j++] = mergedValues[i];
+        nonNullValues = o;
       } else {
-        const out: any[] = new Array(nn);
+        const o: any[] = new Array(nn);
         let j = 0;
-        for (let i = 0; i < numRows; i++) if (defLevels[i]) out[j++] = mergedValues[i];
-        nonNullValues = out;
+        for (let i = 0; i < numRows; i++) if (defLevels[i]) o[j++] = mergedValues[i];
+        nonNullValues = o;
       }
     } else {
       numNonNull = numRows;
@@ -3354,20 +4005,11 @@ export function toParquet(
     const pageBody = buildDataPageBody(nonNullValues, numRows, physicalType, defLevels, numNonNull, flbaWidth);
     const uncompressedSize = pageBody.length;
     let compressedBody: Uint8Array;
-    if (codec === PQ_CODEC_UNCOMPRESSED) {
-      compressedBody = pageBody;
-    } else if (codec === PQ_CODEC_SNAPPY) {
-      compressedBody = snappyCompress(pageBody);
-    } else if (codec === PQ_CODEC_GZIP) {
-      compressedBody = (Bun as any).gzipSync(pageBody) as Uint8Array;
-    } else if (codec === PQ_CODEC_ZSTD) {
-      compressedBody = (Bun as any).zstdCompressSync(pageBody) as Uint8Array;
-    } else {
-      // Should be unreachable — toParquet validates the option string
-      // before mapping to a codec code. Defensive throw to surface any
-      // future codec addition that forgets to update this branch.
-      throw new Error(`parquet: writer codec ${codec} has no compressor wired`);
-    }
+    if (codec === PQ_CODEC_UNCOMPRESSED) compressedBody = pageBody;
+    else if (codec === PQ_CODEC_SNAPPY) compressedBody = snappyCompress(pageBody);
+    else if (codec === PQ_CODEC_GZIP) compressedBody = (Bun as any).gzipSync(pageBody) as Uint8Array;
+    else if (codec === PQ_CODEC_ZSTD) compressedBody = (Bun as any).zstdCompressSync(pageBody) as Uint8Array;
+    else throw new Error(`parquet: writer codec ${codec} has no compressor wired`);
     const compressedSize = compressedBody.length;
 
     const pageHeader = writePageHeader(PQ_PAGE_DATA_PAGE, uncompressedSize, compressedSize, {
@@ -3377,9 +4019,6 @@ export function toParquet(
     out.writeBytes(pageHeader);
     out.writeBytes(compressedBody);
 
-    // Decimal columns carry precision + scale on the type object —
-    // pull them through onto the column plan so the schema writer
-    // can emit fields 9 + 10. Other kinds leave both undefined.
     let precision: number | undefined;
     let scale: number | undefined;
     if (field.type.kind === "decimal128") {
@@ -3387,11 +4026,6 @@ export function toParquet(
       precision = dt.precision;
       scale = dt.scale;
     }
-    // Optional bloom filter — built only when the caller asked for
-    // one on this column. INT96 is excluded (the spec doesn't define
-    // a canonical 12-byte hash for it). The bitmap goes into the
-    // plan now; we patch the file offset in below, after all data
-    // pages are emitted.
     let bloomBitmap: Uint8Array | undefined;
     if (bloomCols.has(field.name) && numNonNull > 0) {
       if (physicalType === PQ_TYPE_INT96) {
@@ -3402,7 +4036,8 @@ export function toParquet(
       bloomBitmap = buildSbbf(nonNullValues, numNonNull, physicalType, flbaWidth);
     }
     const plan: ColumnPlan = {
-      name: field.name,
+      name: leafName,
+      pathOverride,
       physicalType,
       convertedType: parquetConvertedForKind(field.type.kind),
       precision,
@@ -3415,10 +4050,6 @@ export function toParquet(
       uncompressedSize: uncompressedSize + pageHeader.length,
       numValues: numRows,
       numNonNull,
-      // Stats over the *non-null* packed values — that's what the
-      // computeColumnStats helper expects. Empty / all-null columns
-      // get undefined stats (downstream readers handle "missing
-      // stats" as "unknown" already).
       stats: computeColumnStats(nonNullValues, numNonNull, numRows, physicalType),
       bloomFilter: bloomBitmap,
       bloomFilterOffset: undefined,
@@ -3426,6 +4057,7 @@ export function toParquet(
     colPlans.push(plan);
     dataPageOffsets.push(pageStartOffset);
     compressedSizes.push(compressedSize + pageHeader.length);
+    return { kind: "primitive", plan };
   }
 
   // ─── Bloom filter region ────────────────────────────────────────────
@@ -3503,7 +4135,7 @@ export function toParquet(
   const rowGroup = writeRowGroup(columnChunks, numRows, totalByteSize);
 
   // FileMetaData footer.
-  const meta = writeFileMetaData(colPlans, numRows, rowGroup);
+  const meta = writeFileMetaData(topLevels, numRows, rowGroup);
   out.writeBytes(meta);
   out.writeI32LE(meta.length);
   out.writeBytes(new Uint8Array([0x50, 0x41, 0x52, 0x31])); // PAR1

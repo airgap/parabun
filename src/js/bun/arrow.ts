@@ -50,7 +50,9 @@ type ArrowKind =
   | "timestamp_micros"
   | "timestamp_nanos"
   | "decimal128"
-  | "fixed_size_binary";
+  | "fixed_size_binary"
+  | "struct"
+  | "map";
 
 // `DataType` is a discriminated union: list types carry a `child` field
 // describing the element type; primitive types just have `kind`.
@@ -89,7 +91,9 @@ type DataType =
     }
   | { kind: "decimal128"; precision: number; scale: number }
   | { kind: "list"; child: DataType }
-  | { kind: "fixed_size_binary"; width: number };
+  | { kind: "fixed_size_binary"; width: number }
+  | { kind: "struct"; fields: { name: string; type: DataType; nullable: boolean }[] }
+  | { kind: "map"; keyType: DataType; valueType: DataType; valueNullable: boolean };
 
 type Field = {
   name: string;
@@ -112,22 +116,51 @@ type Schema = {
 // Length-bytes is ceil(length/8). Absent means no nulls.
 type ColumnValues = Int32Array | BigInt64Array | Float32Array | Float64Array | Uint8Array | string[];
 
-type ColumnGetResult = number | bigint | boolean | string | Date | null | unknown[] | Uint8Array;
+type ColumnGetResult =
+  | number
+  | bigint
+  | boolean
+  | string
+  | Date
+  | null
+  | unknown[]
+  | Uint8Array
+  | Record<string, unknown>
+  | Map<unknown, unknown>;
 
 class Column {
   type: DataType;
   length: number;
   values: ColumnValues;
   validity: Uint8Array | undefined;
-  /** Child column for list-typed columns. Undefined for primitives. */
+  /**
+   * Child column for list-typed columns (and maps, since map is
+   * physically List<Struct<key,value>>). Undefined for primitives
+   * and structs.
+   */
   child: Column | undefined;
+  /**
+   * Per-field child columns for struct types. Undefined for every
+   * other kind. Each entry has length === this.length and carries
+   * the per-row value for that field; the struct's own validity
+   * bitmap (above) handles whole-row null.
+   */
+  children: Column[] | undefined;
 
-  constructor(type: DataType, length: number, values: ColumnValues, validity?: Uint8Array, child?: Column) {
+  constructor(
+    type: DataType,
+    length: number,
+    values: ColumnValues,
+    validity?: Uint8Array,
+    child?: Column,
+    children?: Column[],
+  ) {
     this.type = type;
     this.length = length;
     this.values = values;
     this.validity = validity;
     this.child = child;
+    this.children = children;
   }
 
   /**
@@ -204,6 +237,33 @@ class Column {
         const out: unknown[] = new Array(end - start);
         for (let k = 0; k < end - start; k++) out[k] = this.child.get(start + k);
         return out;
+      }
+      case "struct": {
+        // Per-field children share the row index; assemble a fresh
+        // object keyed by field name. The struct's own validity bit
+        // already gated the early return at the top of get().
+        const t = this.type;
+        const cs = this.children;
+        if (!cs) throw new Error("para:arrow Column.get: struct column has no children");
+        const out: Record<string, unknown> = {};
+        for (let k = 0; k < t.fields.length; k++) out[t.fields[k].name] = cs[k].get(i);
+        return out;
+      }
+      case "map": {
+        // Physically List<Struct<key, value>>. `child` is the struct
+        // column whose two children are the flat key + value buffers
+        // indexed by element position (not row).
+        if (!this.child || !this.child.children || this.child.children.length !== 2) {
+          throw new Error("para:arrow Column.get: map column missing key/value children");
+        }
+        const offsets = this.values as Int32Array;
+        const start = offsets[i];
+        const end = offsets[i + 1];
+        const keysCol = this.child.children[0];
+        const valuesCol = this.child.children[1];
+        const m = new Map<unknown, unknown>();
+        for (let k = start; k < end; k++) m.set(keysCol.get(k), valuesCol.get(k));
+        return m;
       }
     }
   }
