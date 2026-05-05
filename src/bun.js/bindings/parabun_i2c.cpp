@@ -226,9 +226,11 @@ JSC_DEFINE_HOST_FUNCTION(functionCloseBus,
     auto scope = DECLARE_THROW_SCOPE(vm);
     JSValue v = callFrame->argument(0);
     if (!v.isBigInt()) return JSValue::encode(jsUndefined());
-    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
 #if defined(__linux__)
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
     if (fd >= 0) ::close(fd);
+#else
+    (void)v;
 #endif
     (void)scope;
     return JSValue::encode(jsUndefined());
