@@ -1539,6 +1539,21 @@ async function decodeAll(bytes: Uint8Array | ArrayBuffer | string, opts?: Decode
 }
 
 /**
+ * Single-frame RGBA thumbnail at a given presentation timestamp.
+ * Default ptsMs picks the clip midpoint — close enough to a
+ * "representative frame" for previews / scrubbing UIs without
+ * paying the full-decode cost. Routes through ffmpeg with
+ * container-level seek (lands on the nearest preceding keyframe).
+ */
+async function thumbnail(
+  bytes: Uint8Array | ArrayBuffer,
+  ptsMs?: number,
+): Promise<{ data: Uint8Array; width: number; height: number; ptsMs: number }> {
+  const u8 = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
+  return ffmpegMod.thumbnail(u8, ptsMs);
+}
+
+/**
  * Pull the audio track of a video file as raw signed-16-bit PCM
  * (interleaved per channel). Default 16 kHz mono — the canonical
  * input shape for Whisper / parabun:speech.transcribe. Routes
@@ -1560,4 +1575,5 @@ export default {
   encode,
   decodeAll,
   extractAudio,
+  thumbnail,
 };

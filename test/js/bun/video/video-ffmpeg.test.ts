@@ -315,6 +315,91 @@ describe.skipIf(SKIP)("parabun:video — ffmpeg decode", () => {
     );
   });
 
+  test("thumbnail extracts a single RGBA frame at default midpoint", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-thumb-mid", {});
+    const mp4Path = join(String(dir), "magenta.mp4");
+    // 2-second magenta clip at 32×32, 5 fps. Midpoint = 1000 ms.
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=magenta:size=32x32:duration=2:rate=5",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(mp4Path);
+    const thumb = await video.thumbnail(new Uint8Array(bytes));
+    expect(thumb.width).toBe(32);
+    expect(thumb.height).toBe(32);
+    expect(thumb.data.length).toBe(32 * 32 * 4);
+    // Default seek = 1000 ms (midpoint of 2s clip).
+    expect(thumb.ptsMs).toBe(1000);
+    // Magenta = (255, 0, 255). Allow chroma drift.
+    const r = thumb.data[0],
+      g = thumb.data[1],
+      b = thumb.data[2],
+      a = thumb.data[3];
+    expect(Math.abs(r - 255)).toBeLessThan(20);
+    expect(g).toBeLessThan(20);
+    expect(Math.abs(b - 255)).toBeLessThan(20);
+    expect(a).toBe(255);
+  });
+
+  test("thumbnail respects an explicit ptsMs", async () => {
+    const video = (await import("parabun:video")).default;
+    using dir = tempDir("video-thumb-pts", {});
+    const mp4Path = join(String(dir), "yellow.mp4");
+    await using gen = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=yellow:size=16x16:duration=3:rate=10",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        "5",
+        mp4Path,
+      ],
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await gen.exited).toBe(0);
+
+    const bytes = await readFile(mp4Path);
+    const thumb = await video.thumbnail(new Uint8Array(bytes), 2200);
+    expect(thumb.width).toBe(16);
+    expect(thumb.height).toBe(16);
+    expect(thumb.ptsMs).toBe(2200);
+    // Yellow ≈ (255, 255, 0).
+    const r = thumb.data[0],
+      g = thumb.data[1],
+      b = thumb.data[2];
+    expect(Math.abs(r - 255)).toBeLessThan(25);
+    expect(Math.abs(g - 255)).toBeLessThan(25);
+    expect(b).toBeLessThan(25);
+  });
+
   test("close() before iterating doesn't leak the subprocess", async () => {
     const video = (await import("parabun:video")).default;
     using dir = tempDir("video-close", {});

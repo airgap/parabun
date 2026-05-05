@@ -391,6 +391,83 @@ async function encode(opts: EncodeOptions): Promise<EncoderHandle> {
   };
 }
 
+// Extract a single RGBA frame at a given presentation timestamp.
+// Useful for thumbnails, scrubbing UIs, "first frame" previews.
+// `ptsMs` defaults to the midpoint of the clip — close enough to
+// "representative frame" for a thumbnail without needing the full
+// decode.
+async function thumbnail(
+  bytes: Uint8Array,
+  ptsMs?: number,
+): Promise<{ data: Uint8Array; width: number; height: number; ptsMs: number }> {
+  if (!(await probe())) throw new Error(NOT_INSTALLED_MSG);
+  const meta = await probeBytes(bytes);
+  // Default seek = clip midpoint. Clamp into [0, durationMs).
+  let seekMs = ptsMs ?? Math.floor(meta.durationMs / 2);
+  if (seekMs < 0) seekMs = 0;
+  if (meta.durationMs > 0 && seekMs >= meta.durationMs) seekMs = meta.durationMs - 1;
+  const tmpPath = await writeTmp(bytes, "video-thumb");
+  try {
+    // -ss BEFORE -i seeks at the container level (fast — lands on
+    // the nearest preceding keyframe). -frames:v 1 emits exactly one
+    // frame; -f rawvideo -pix_fmt rgba pipes uncompressed RGBA.
+    const proc = Bun.spawn({
+      cmd: [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-ss",
+        (seekMs / 1000).toString(),
+        "-i",
+        tmpPath,
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "pipe:1",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdoutChunks: Uint8Array[] = [];
+    let stdoutTotal = 0;
+    const stdoutPromise = (async () => {
+      const reader = proc.stdout.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        stdoutChunks.push(value);
+        stdoutTotal += value.length;
+      }
+    })();
+    const [, stderr, exitCode] = await Promise.all([stdoutPromise, proc.stderr.text(), proc.exited]);
+    if (exitCode !== 0) {
+      throw new Error(`video.thumbnail: ffmpeg exited ${exitCode}: ${stderr.trim()}`);
+    }
+    const expected = meta.width * meta.height * 4;
+    if (stdoutTotal < expected) {
+      throw new Error(
+        `video.thumbnail: short read (${stdoutTotal} < ${expected} bytes) — seek may have landed past EOF`,
+      );
+    }
+    const out = new Uint8Array(expected);
+    let off = 0;
+    for (const c of stdoutChunks) {
+      const take = Math.min(c.length, expected - off);
+      out.set(c.subarray(0, take), off);
+      off += take;
+      if (off >= expected) break;
+    }
+    return { data: out, width: meta.width, height: meta.height, ptsMs: seekMs };
+  } finally {
+    try {
+      await nodeFs.unlink(tmpPath);
+    } catch {}
+  }
+}
+
 // Extract the audio track of a video file as raw PCM. Returns
 // signed 16-bit interleaved samples — call .samples for an
 // Int16Array. The caller picks sample rate (default 16000, the
@@ -494,4 +571,4 @@ const nodeOs = require("node:os");
 const nodePath = require("node:path");
 const nodeFs = require("node:fs/promises");
 
-export default { decode, encode, extractAudio, probeBytes, isAvailable: probe };
+export default { decode, encode, extractAudio, thumbnail, probeBytes, isAvailable: probe };
