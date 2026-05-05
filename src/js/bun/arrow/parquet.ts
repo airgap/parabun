@@ -1999,32 +1999,24 @@ export function fromParquet(bytes: Uint8Array, opts?: { filter?: ParquetFilter }
         if (middle.numChildren !== 1) {
           throw new Error(`parquet: LIST group "${e.name}" middle element must have exactly 1 child`);
         }
-        // Walk the middle group (consumes 1) then the leaf inside (consumes 1).
+        // Walk the middle group (consumes 1) then the inner element.
+        // The element can be a primitive leaf OR a struct group (the
+        // List<Struct<…>> case). Recursing into consume() for the
+        // element uniformly handles both — it'll set up maxDef/maxRep
+        // correctly relative to the middle's contributions.
         const middleDef = myDef + 1; // REPEATED contributes 1
         const middleRep = myRep + 1;
         cursor++; // consume middle
-        const leaf = meta.schema[cursor++];
-        if (leaf.numChildren > 0) {
-          throw new Error(`parquet: nested LIST<group> not yet supported (column "${e.name}")`);
+        const inner = consume(middleDef, middleRep);
+        if (inner.category !== "primitive" && inner.category !== "struct") {
+          throw new Error(`parquet: List<${inner.category}> not yet supported (column "${e.name}")`);
         }
-        if (leaf.type === undefined) {
-          throw new Error(`parquet: LIST leaf "${leaf.name}" has no physical type`);
-        }
-        const elemDef = middleDef + (leaf.repetitionType === PQ_REP_OPTIONAL ? 1 : 0);
-        const inner: ColInfo = {
-          name: leaf.name,
-          category: "primitive",
-          physicalType: leaf.type,
-          convertedType: leaf.convertedType,
-          isOptional: leaf.repetitionType === PQ_REP_OPTIONAL,
-          precision: leaf.precision,
-          scale: leaf.scale,
-          typeLength: leaf.typeLength,
-          inner: undefined,
-          fields: undefined,
-          maxDef: elemDef,
-          maxRep: middleRep,
-        };
+        // The List ColInfo's maxDef is the LEVEL the element-present
+        // marker sits at — for primitive inner that's `inner.maxDef`,
+        // for struct inner that's `middleDef` (the struct itself
+        // doesn't contribute to def levels; each field carries its
+        // own).
+        const listMaxDef = inner.category === "primitive" ? inner.maxDef : middleDef;
         return {
           name: e.name,
           category: "list",
@@ -2036,7 +2028,7 @@ export function fromParquet(bytes: Uint8Array, opts?: { filter?: ParquetFilter }
           typeLength: undefined,
           inner,
           fields: undefined,
-          maxDef: elemDef,
+          maxDef: listMaxDef,
           maxRep: middleRep,
         };
       }
@@ -2209,7 +2201,18 @@ export function fromParquet(bytes: Uint8Array, opts?: { filter?: ParquetFilter }
   // expands to the sum of its fields; list/map are themselves leaves
   // (one chunk for list, two for map's key+value pair).
   function leafChunkCount(c: ColInfo): number {
-    if (c.category === "list") return 1;
+    if (c.category === "list") {
+      // List<primitive> = 1 chunk; List<struct{a,b,c}> = N chunks,
+      // one per struct field. Struct elements share the list's
+      // rep+def shape across all chunks.
+      const inner = c.inner!;
+      if (inner.category === "struct") {
+        let n = 0;
+        for (const f of inner.fields!) n += leafChunkCount(f);
+        return n;
+      }
+      return 1;
+    }
     if (c.category === "map") return 2;
     if (c.category === "struct") {
       let n = 0;
@@ -2230,12 +2233,48 @@ export function fromParquet(bytes: Uint8Array, opts?: { filter?: ParquetFilter }
   ): { col: ColumnLike; consumed: number } {
     if (c.category === "list") {
       const inner = c.inner!;
-      const decoded = decodeListColumnChunk(bytes, rg.columns[chunkIdx].metaData, numRows, c, inner);
-      const innerType = dataTypeForCol(inner);
-      const child = new Column(innerType, decoded.childCount, decoded.childValues, decoded.childValidity);
+      // List<primitive>: one chunk decoded directly.
+      if (inner.category === "primitive") {
+        const decoded = decodeListColumnChunk(bytes, rg.columns[chunkIdx].metaData, numRows, c, inner);
+        const innerType = dataTypeForCol(inner);
+        const child = new Column(innerType, decoded.childCount, decoded.childValues, decoded.childValidity);
+        return {
+          col: new Column(dataTypeForCol(c), numRows, decoded.offsets, decoded.validity, child),
+          consumed: 1,
+        };
+      }
+      // List<struct>: one chunk per struct field, sharing the same
+      // rep+def shape and offsets. Decode each independently
+      // (different leaves have different maxDef when fields are
+      // OPTIONAL), take offsets/validity from the first, build the
+      // struct child from the field columns.
+      const fields = inner.fields!;
+      const fieldCols: ColumnLike[] = [];
+      let firstOffsets: Int32Array | undefined;
+      let firstValidity: Uint8Array | undefined;
+      let childCount = 0;
+      for (let k = 0; k < fields.length; k++) {
+        const f = fields[k];
+        const fieldOuter = { isOptional: c.isOptional, maxDef: f.maxDef, maxRep: f.maxRep };
+        const decoded = decodeListColumnChunk(bytes, rg.columns[chunkIdx + k].metaData, numRows, fieldOuter, f);
+        if (k === 0) {
+          firstOffsets = decoded.offsets;
+          firstValidity = decoded.validity;
+          childCount = decoded.childCount;
+        }
+        fieldCols.push(new Column(dataTypeForCol(f), decoded.childCount, decoded.childValues, decoded.childValidity));
+      }
+      const structChild = new Column(
+        dataTypeForCol(inner),
+        childCount,
+        new Uint8Array(0),
+        undefined,
+        undefined,
+        fieldCols,
+      );
       return {
-        col: new Column(dataTypeForCol(c), numRows, decoded.offsets, decoded.validity, child),
-        consumed: 1,
+        col: new Column(dataTypeForCol(c), numRows, firstOffsets!, firstValidity, structChild),
+        consumed: fields.length,
       };
     }
     if (c.category === "map") {
@@ -2857,6 +2896,12 @@ function buildDataPageBody(
 type TopSchemaNode =
   | { kind: "primitive"; plan: ColumnPlan }
   | { kind: "list"; plan: ColumnPlan }
+  | {
+      kind: "list-struct";
+      outerName: string;
+      isOptional: boolean;
+      elemFields: { name: string; plan: ColumnPlan }[];
+    }
   | { kind: "struct"; name: string; isOptional: boolean; fields: TopSchemaNode[] }
   | { kind: "map"; name: string; isOptional: boolean; keyPlan: ColumnPlan; valuePlan: ColumnPlan };
 
@@ -3254,6 +3299,9 @@ function countSchemaNodes(node: TopSchemaNode): number {
       return 1;
     case "list":
       return 3;
+    case "list-struct":
+      // Outer LIST + middle REPEATED + element struct group + N field leaves.
+      return 3 + node.elemFields.length;
     case "map":
       return 4;
     case "struct": {
@@ -3309,6 +3357,49 @@ function writeOneSchemaSubtree(tw: ThriftWriter, node: TopSchemaNode): void {
           c.typeLength,
         ),
       );
+      return;
+    }
+    case "list-struct": {
+      // Outer group(LIST), middle group(REPEATED), element struct
+      // group (numChildren = N), then N field leaves.
+      tw.out.writeBytes(
+        writeSchemaElement(
+          node.outerName,
+          undefined,
+          1,
+          node.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+          PQ_CT_LIST,
+          undefined,
+          undefined,
+        ),
+      );
+      tw.out.writeBytes(writeSchemaElement("list", undefined, 1, PQ_REP_REPEATED, undefined, undefined, undefined));
+      tw.out.writeBytes(
+        writeSchemaElement(
+          "element",
+          undefined,
+          node.elemFields.length,
+          PQ_REP_REQUIRED,
+          undefined,
+          undefined,
+          undefined,
+        ),
+      );
+      for (const f of node.elemFields) {
+        const p = f.plan;
+        tw.out.writeBytes(
+          writeSchemaElement(
+            f.name,
+            p.physicalType,
+            0,
+            p.isOptional ? PQ_REP_OPTIONAL : PQ_REP_REQUIRED,
+            p.convertedType,
+            p.scale,
+            p.precision,
+            p.typeLength,
+          ),
+        );
+      }
       return;
     }
     case "map": {
@@ -3641,6 +3732,212 @@ function encodeMapSourceAcrossBatches(
   };
 }
 
+// Encode a List<Struct<f1, f2, …>> column across batches. Emits N
+// compressed page bodies — one per struct field — sharing the same
+// rep stream + outer offsets but with each field's own def stream
+// (since fields can differ in nullability). Returns one result per
+// field plus the shared metadata.
+function encodeListOfStructAcrossBatches(
+  field: any,
+  getCol: (b: number) => any,
+  batches: RecordBatchLike[],
+  numRows: number,
+  codec: number,
+): {
+  fieldResults: Array<{
+    compressed: Uint8Array;
+    uncompressedSize: number;
+    numNonNull: number;
+    physical: number;
+    converted: number | undefined;
+    typeLength: number | undefined;
+    isOptional: boolean;
+    name: string;
+  }>;
+  numLevels: number;
+} {
+  const listOptional = field.nullable;
+  const innerType = field.type.child;
+  if (innerType.kind !== "struct") {
+    throw new Error(`para:arrow.toParquet: encodeListOfStruct called with non-struct inner ${innerType.kind}`);
+  }
+  const elemFields: { name: string; nullable: boolean; type: any }[] = innerType.fields;
+  for (const f of elemFields) {
+    if (f.type.kind === "list" || f.type.kind === "struct" || f.type.kind === "map") {
+      throw new Error(
+        `para:arrow.toParquet: List<Struct<…>> with nested ${f.type.kind} field "${f.name}" not supported`,
+      );
+    }
+  }
+
+  // Concat across batches.
+  type RowSpec = {
+    offsets: Int32Array;
+    rowValidity: Uint8Array | undefined;
+    fieldValues: any[]; // per-field values
+    fieldValidity: (Uint8Array | undefined)[]; // per-field validity
+  };
+  const specs: RowSpec[] = [];
+  let totalChild = 0;
+  for (let bi = 0; bi < batches.length; bi++) {
+    const b = batches[bi];
+    const c = getCol(bi) as any;
+    const offsets = c.values as Int32Array;
+    const struct = c.child;
+    if (!struct || !struct.children || struct.children.length !== elemFields.length) {
+      throw new Error(`para:arrow.toParquet: list-of-struct column "${field.name}" missing struct children`);
+    }
+    totalChild += offsets[b.numRows];
+    specs.push({
+      offsets,
+      rowValidity: c.validity,
+      fieldValues: struct.children.map((cc: any) => cc.values),
+      fieldValidity: struct.children.map((cc: any) => cc.validity),
+    });
+  }
+
+  // Pre-resolve per-field parquet info.
+  const fieldInfo = elemFields.map(f => ({
+    name: f.name,
+    physical: parquetPhysicalForKind(f.type.kind),
+    converted: parquetConvertedForKind(f.type.kind),
+    typeLength: f.type.kind === "fixed_size_binary" ? (f.type as any).width : undefined,
+    isOptional: f.nullable,
+  }));
+
+  const maxLevels = numRows + totalChild;
+  const repLevels = new Int32Array(maxLevels);
+  // One def-level array per field — they have different presentDef
+  // when fields differ in nullability.
+  const defLevels: Int32Array[] = elemFields.map(() => new Int32Array(maxLevels));
+
+  // Per-field level constants. Outer struct contributes 0 to def
+  // (REQUIRED), so:
+  //   listOptional + REPEATED = (lo?1:0) + 1
+  //   field present = above + (fOpt?1:0)
+  const baseDef = (listOptional ? 1 : 0) + 1;
+  const fieldPresentDef = fieldInfo.map(f => baseDef + (f.isOptional ? 1 : 0));
+  const fieldNullDef = fieldInfo.map(f => (f.isOptional ? baseDef : -1));
+  const emptyDef = listOptional ? 1 : 0;
+
+  function alloc(template: any, cap: number, w: number | undefined): any {
+    if (w !== undefined) return new Uint8Array(cap * w);
+    if (template instanceof Int32Array) return new Int32Array(cap);
+    if (template instanceof BigInt64Array) return new BigInt64Array(cap);
+    if (template instanceof Float32Array) return new Float32Array(cap);
+    if (template instanceof Float64Array) return new Float64Array(cap);
+    if (template instanceof Uint8Array) return new Uint8Array(cap);
+    return new Array(cap);
+  }
+  function append(buf: any, src: any, k: number, idx: number, w: number | undefined): void {
+    if (w !== undefined) {
+      (buf as Uint8Array).set((src as Uint8Array).subarray(k * w, (k + 1) * w), idx * w);
+    } else {
+      buf[idx] = src[k];
+    }
+  }
+
+  // Per-field non-null collectors.
+  const fieldBufs: any[] = new Array(elemFields.length).fill(undefined);
+  const fieldCounts: number[] = new Array(elemFields.length).fill(0);
+  let levelIdx = 0;
+
+  for (const spec of specs) {
+    const { offsets, rowValidity, fieldValues, fieldValidity } = spec;
+    const batchRows = offsets.length - 1;
+    for (let fi = 0; fi < elemFields.length; fi++) {
+      if (!fieldBufs[fi]) {
+        fieldBufs[fi] = alloc(fieldValues[fi], totalChild, fieldInfo[fi].typeLength);
+      }
+    }
+    for (let r = 0; r < batchRows; r++) {
+      const start = offsets[r];
+      const end = offsets[r + 1];
+      const rowNull = listOptional && rowValidity && !((rowValidity[r >> 3] >> (r & 7)) & 1);
+      if (rowNull) {
+        repLevels[levelIdx] = 0;
+        for (let fi = 0; fi < elemFields.length; fi++) defLevels[fi][levelIdx] = 0;
+        levelIdx++;
+      } else if (start === end) {
+        repLevels[levelIdx] = 0;
+        for (let fi = 0; fi < elemFields.length; fi++) defLevels[fi][levelIdx] = emptyDef;
+        levelIdx++;
+      } else {
+        for (let k = start; k < end; k++) {
+          repLevels[levelIdx] = k === start ? 0 : 1;
+          for (let fi = 0; fi < elemFields.length; fi++) {
+            const fOpt = fieldInfo[fi].isOptional;
+            const fVld = fieldValidity[fi];
+            const isFieldNull = fOpt && fVld && !((fVld[k >> 3] >> (k & 7)) & 1);
+            defLevels[fi][levelIdx] = isFieldNull ? fieldNullDef[fi] : fieldPresentDef[fi];
+            if (!isFieldNull) {
+              append(fieldBufs[fi], fieldValues[fi], k, fieldCounts[fi], fieldInfo[fi].typeLength);
+              fieldCounts[fi]++;
+            }
+          }
+          levelIdx++;
+        }
+      }
+    }
+  }
+
+  // Trim and finalise per-field.
+  const repBitWidth = bitWidthForMax(1);
+
+  function pageFor(
+    defs: Int32Array,
+    bw: number,
+    vals: any,
+    nn: number,
+    phys: number,
+    tl?: number,
+  ): { compressed: Uint8Array; uncompressedSize: number } {
+    const repBody = encodeLevelsRle(repLevels, levelIdx, repBitWidth);
+    const defBody = encodeLevelsRle(defs, levelIdx, bw);
+    const valuesBody = encodePlainTyped(vals, nn, phys, tl);
+    const w = new ByteWriter();
+    w.writeI32LE(repBody.length);
+    w.writeBytes(repBody);
+    w.writeI32LE(defBody.length);
+    w.writeBytes(defBody);
+    w.writeBytes(valuesBody);
+    const pageBody = w.finish();
+    let compressed: Uint8Array;
+    if (codec === PQ_CODEC_UNCOMPRESSED) compressed = pageBody;
+    else if (codec === PQ_CODEC_SNAPPY) compressed = snappyCompress(pageBody);
+    else if (codec === PQ_CODEC_GZIP) compressed = (Bun as any).gzipSync(pageBody) as Uint8Array;
+    else if (codec === PQ_CODEC_ZSTD) compressed = (Bun as any).zstdCompressSync(pageBody) as Uint8Array;
+    else throw new Error(`parquet: writer codec ${codec} has no compressor wired`);
+    return { compressed, uncompressedSize: pageBody.length };
+  }
+
+  const fieldResults = elemFields.map((_, fi) => {
+    let buf = fieldBufs[fi];
+    const tl = fieldInfo[fi].typeLength;
+    const nn = fieldCounts[fi];
+    if (buf && tl === undefined && buf.length > nn) {
+      buf = Array.isArray(buf) ? buf.slice(0, nn) : (buf as any).slice(0, nn);
+    } else if (buf && tl !== undefined && (buf as Uint8Array).length > nn * tl) {
+      buf = (buf as Uint8Array).slice(0, nn * tl);
+    }
+    if (!buf) buf = tl !== undefined ? new Uint8Array(0) : new Int32Array(0);
+    const bw = bitWidthForMax(fieldPresentDef[fi]);
+    const page = pageFor(defLevels[fi], bw, buf, nn, fieldInfo[fi].physical, tl);
+    return {
+      compressed: page.compressed,
+      uncompressedSize: page.uncompressedSize,
+      numNonNull: nn,
+      physical: fieldInfo[fi].physical,
+      converted: fieldInfo[fi].converted,
+      typeLength: tl,
+      isOptional: fieldInfo[fi].isOptional,
+      name: fieldInfo[fi].name,
+    };
+  });
+
+  return { fieldResults, numLevels: levelIdx };
+}
+
 function encodeListSourceAcrossBatches(
   field: any,
   getCol: (b: number) => any,
@@ -3959,6 +4256,53 @@ export function toParquet(
       };
     }
     if (field.type.kind === "list") {
+      // List<Struct<…>>: emit one chunk per struct field, sharing
+      // the rep+def shape; build a list-struct schema node for the
+      // 5+ nested SchemaElements (LIST + REPEATED + struct group +
+      // N field leaves).
+      if (field.type.child && field.type.child.kind === "struct") {
+        const ls = encodeListOfStructAcrossBatches(field, getCol, batches, numRows, codec);
+        const elemFields: { name: string; plan: ColumnPlan }[] = [];
+        for (const fr of ls.fieldResults) {
+          const pageHeader = writePageHeader(PQ_PAGE_DATA_PAGE, fr.uncompressedSize, fr.compressed.length, {
+            numValues: ls.numLevels,
+          });
+          const pageOffset = BigInt(out.pos);
+          out.writeBytes(pageHeader);
+          out.writeBytes(fr.compressed);
+          const plan: ColumnPlan = {
+            name: fr.name,
+            pathOverride: pathOverride
+              ? [...pathOverride, "list", "element", fr.name]
+              : [field.name, "list", "element", fr.name],
+            physicalType: fr.physical,
+            convertedType: fr.converted,
+            precision: undefined,
+            scale: undefined,
+            typeLength: fr.typeLength,
+            isOptional: fr.isOptional,
+            listOuterOptional: undefined,
+            listElemOptional: undefined,
+            compressedPage: fr.compressed,
+            uncompressedSize: fr.uncompressedSize + pageHeader.length,
+            numValues: ls.numLevels,
+            numNonNull: fr.numNonNull,
+            stats: undefined,
+            bloomFilter: undefined,
+            bloomFilterOffset: undefined,
+          };
+          colPlans.push(plan);
+          dataPageOffsets.push(pageOffset);
+          compressedSizes.push(fr.compressed.length + pageHeader.length);
+          elemFields.push({ name: fr.name, plan });
+        }
+        return {
+          kind: "list-struct",
+          outerName: field.name,
+          isOptional: field.nullable,
+          elemFields,
+        };
+      }
       const result = encodeListSourceAcrossBatches(field, getCol, batches, numRows, codec);
       const compressedSize = result.compressed.length;
       const pageHeader = writePageHeader(PQ_PAGE_DATA_PAGE, result.uncompressedSize, compressedSize, {

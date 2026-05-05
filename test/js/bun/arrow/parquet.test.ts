@@ -1197,6 +1197,154 @@ describe("para:arrow parquet — Map", () => {
   });
 });
 
+describe("para:arrow parquet — nested combinations", () => {
+  test("Struct<Struct<…>> round-trips (nested struct of struct)", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const N = 3;
+    const xs = new Float64Array([1, 2, 3]);
+    const ys = new Float64Array([10, 20, 30]);
+    const xCol = new arrow.Column({ kind: "float64" }, N, xs);
+    const yCol = new arrow.Column({ kind: "float64" }, N, ys);
+    const ptType = {
+      kind: "struct",
+      fields: [
+        { name: "x", type: { kind: "float64" }, nullable: false },
+        { name: "y", type: { kind: "float64" }, nullable: false },
+      ],
+    };
+    const ptCol = new arrow.Column(ptType, N, new Uint8Array(0), undefined, undefined, [xCol, yCol]);
+    const labels = ["a", "b", "c"];
+    const labelCol = new arrow.Column({ kind: "utf8" }, N, labels as any);
+    const wrapType = {
+      kind: "struct",
+      fields: [
+        { name: "label", type: { kind: "utf8" }, nullable: false },
+        { name: "pt", type: ptType, nullable: false },
+      ],
+    };
+    const wrapCol = new arrow.Column(wrapType, N, new Uint8Array(0), undefined, undefined, [labelCol, ptCol]);
+    const batch = new arrow.RecordBatch({ fields: [{ name: "row", type: wrapType, nullable: false }] }, [wrapCol], N);
+    const tbl = new arrow.Table(batch.schema, [batch]);
+    const bytes = arrow.toParquet(tbl, { compression: "uncompressed" });
+    const decoded = arrow.fromParquet(bytes);
+    const dc = decoded.batches[0].columns[0];
+    expect(dc.get(0)).toEqual({ label: "a", pt: { x: 1, y: 10 } });
+    expect(dc.get(2)).toEqual({ label: "c", pt: { x: 3, y: 30 } });
+  });
+
+  test("List<Struct<utf8, int32>> round-trips", async () => {
+    const arrow = (await import("para:arrow")).default;
+    // 3 rows: [{name:"a",x:1},{name:"b",x:2}], [], [{name:"c",x:3}]
+    const N = 3;
+    const offsets = new Int32Array([0, 2, 2, 3]);
+    const totalElems = 3;
+    const names = ["a", "b", "c"];
+    const xs = new Int32Array([1, 2, 3]);
+    const nameCol = new arrow.Column({ kind: "utf8" }, totalElems, names as any);
+    const xCol = new arrow.Column({ kind: "int32" }, totalElems, xs);
+    const structType = {
+      kind: "struct",
+      fields: [
+        { name: "name", type: { kind: "utf8" }, nullable: false },
+        { name: "x", type: { kind: "int32" }, nullable: false },
+      ],
+    };
+    const structCol = new arrow.Column(structType, totalElems, new Uint8Array(0), undefined, undefined, [
+      nameCol,
+      xCol,
+    ]);
+    const listType = { kind: "list", child: structType };
+    const listCol = new arrow.Column(listType, N, offsets, undefined, structCol);
+    const batch = new arrow.RecordBatch({ fields: [{ name: "items", type: listType, nullable: false }] }, [listCol], N);
+    const tbl = new arrow.Table(batch.schema, [batch]);
+    const bytes = arrow.toParquet(tbl, { compression: "snappy" });
+    const decoded = arrow.fromParquet(bytes);
+    expect(decoded.numRows).toBe(N);
+    const dc = decoded.batches[0].columns[0];
+    expect(dc.get(0)).toEqual([
+      { name: "a", x: 1 },
+      { name: "b", x: 2 },
+    ]);
+    expect(dc.get(1)).toEqual([]);
+    expect(dc.get(2)).toEqual([{ name: "c", x: 3 }]);
+  });
+
+  test("List<Struct<utf8, int32>> with OPTIONAL field preserves inner nulls", async () => {
+    const arrow = (await import("para:arrow")).default;
+    // 2 rows: [{name:"x",val:10},{name:"y",val:null}], [{name:"z",val:99}]
+    const N = 2;
+    const offsets = new Int32Array([0, 2, 3]);
+    const totalElems = 3;
+    const names = ["x", "y", "z"];
+    const vals = new Int32Array([10, 0, 99]);
+    const valValidity = new Uint8Array(1);
+    valValidity[0] = 0b00000101; // bits 0, 2 present
+    const nameCol = new arrow.Column({ kind: "utf8" }, totalElems, names as any);
+    const valCol = new arrow.Column({ kind: "int32" }, totalElems, vals, valValidity);
+    const structType = {
+      kind: "struct",
+      fields: [
+        { name: "name", type: { kind: "utf8" }, nullable: false },
+        { name: "val", type: { kind: "int32" }, nullable: true },
+      ],
+    };
+    const structCol = new arrow.Column(structType, totalElems, new Uint8Array(0), undefined, undefined, [
+      nameCol,
+      valCol,
+    ]);
+    const listType = { kind: "list", child: structType };
+    const listCol = new arrow.Column(listType, N, offsets, undefined, structCol);
+    const batch = new arrow.RecordBatch({ fields: [{ name: "items", type: listType, nullable: false }] }, [listCol], N);
+    const tbl = new arrow.Table(batch.schema, [batch]);
+    const bytes = arrow.toParquet(tbl, { compression: "uncompressed" });
+    const decoded = arrow.fromParquet(bytes);
+    const dc = decoded.batches[0].columns[0];
+    expect(dc.get(0)).toEqual([
+      { name: "x", val: 10 },
+      { name: "y", val: null },
+    ]);
+    expect(dc.get(1)).toEqual([{ name: "z", val: 99 }]);
+  });
+
+  test("Struct<int32, List<utf8>> round-trips", async () => {
+    const arrow = (await import("para:arrow")).default;
+    const N = 3;
+    const ids = new Int32Array([1, 2, 3]);
+    // Tags lists per row: ["red","green"], [], ["blue","yellow","cyan"].
+    const tagOffsets = new Int32Array([0, 2, 2, 5]);
+    const tagItems = ["red", "green", "blue", "yellow", "cyan"];
+    const tagItemCol = new arrow.Column({ kind: "utf8" }, 5, tagItems as any);
+    const tagListCol = new arrow.Column(
+      { kind: "list", child: { kind: "utf8" } },
+      N,
+      tagOffsets,
+      undefined,
+      tagItemCol,
+    );
+    const idCol = new arrow.Column({ kind: "int32" }, N, ids);
+    const structType = {
+      kind: "struct",
+      fields: [
+        { name: "id", type: { kind: "int32" }, nullable: false },
+        { name: "tags", type: { kind: "list", child: { kind: "utf8" } }, nullable: false },
+      ],
+    };
+    const structCol = new arrow.Column(structType, N, new Uint8Array(0), undefined, undefined, [idCol, tagListCol]);
+    const batch = new arrow.RecordBatch(
+      { fields: [{ name: "row", type: structType, nullable: false }] },
+      [structCol],
+      N,
+    );
+    const tbl = new arrow.Table(batch.schema, [batch]);
+    const bytes = arrow.toParquet(tbl, { compression: "snappy" });
+    const decoded = arrow.fromParquet(bytes);
+    const dc = decoded.batches[0].columns[0];
+    expect(dc.get(0)).toEqual({ id: 1, tags: ["red", "green"] });
+    expect(dc.get(1)).toEqual({ id: 2, tags: [] });
+    expect(dc.get(2)).toEqual({ id: 3, tags: ["blue", "yellow", "cyan"] });
+  });
+});
+
 describe("para:arrow parquet — predicate pushdown", () => {
   test("filter receives stats + bloom for each row group", async () => {
     const arrow = (await import("para:arrow")).default;
