@@ -824,12 +824,16 @@ async function decode(input: Uint8Array | ArrayBuffer | string, opts?: DecodeOpt
   if (!videoTrak) throw new Error("parabun:video.decode: no video track in MP4");
 
   if (videoCodec !== "mjpeg") {
-    throw new Error(
-      `parabun:video.decode: codec "${videoCodec}" needs the libavcodec native binding (only MJPEG-in-MP4 is unstubbed today)`,
-    );
+    // Non-MJPEG codecs route through the ffmpeg subprocess decoder.
+    // Pure-JS support stops at MJPEG; H.264 / H.265 / VP9 / AV1 all
+    // need a real codec, and shelling out to ffmpeg is dramatically
+    // less brittle than dlopen'ing libavcodec across distros.
+    return ffmpegDecodeFallback(bytes, opts);
   }
   if (!opts?.decodeMjpg) {
-    throw new Error("parabun:video.decode: MJPEG inputs require opts.decodeMjpg — pass `image.decode` from parabun:image");
+    throw new Error(
+      "parabun:video.decode: MJPEG inputs require opts.decodeMjpg — pass `image.decode` from parabun:image",
+    );
   }
   const decodeMjpg = opts.decodeMjpg;
 
@@ -999,7 +1003,9 @@ async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
     throw new Error(`parabun:video.encode: container "${opts.container}" not supported on the MJPEG path (only "mp4")`);
   }
   if (!opts.encodeJpg) {
-    throw new Error("parabun:video.encode: MJPEG outputs require opts.encodeJpg — pass `image.encode` from parabun:image");
+    throw new Error(
+      "parabun:video.encode: MJPEG outputs require opts.encodeJpg — pass `image.encode` from parabun:image",
+    );
   }
   if (!opts.fps || opts.fps <= 0) throw new RangeError("parabun:video.encode: fps must be > 0");
   if (!opts.width || !opts.height) throw new RangeError("parabun:video.encode: width and height required");
@@ -1040,7 +1046,9 @@ async function encode(opts: EncodeOptions): Promise<VideoEncoder> {
           data = frame.data;
           channels = 3;
         } else {
-          throw new Error(`parabun:video.encode: pixelFormat "${frame.pixelFormat}" needs YUV→RGB conversion (pending)`);
+          throw new Error(
+            `parabun:video.encode: pixelFormat "${frame.pixelFormat}" needs YUV→RGB conversion (pending)`,
+          );
         }
       } else if ("format" in frame) {
         // parabun:camera RawFrame — only rgb24 / rgba pass through directly.
@@ -1357,6 +1365,80 @@ function muxMjpegMp4(samples: Uint8Array[], width: number, height: number, fps: 
   })();
 
   return concat([ftyp, realMoov, mdatHeader, ...samples]);
+}
+
+// Lazy require so the ffmpeg probe doesn't fire unless an MJPEG-free
+// codec actually shows up. The submodule itself spawns nothing on
+// import — first decode() call probes ffmpeg.
+const ffmpegMod = require("./video/ffmpeg.ts");
+
+/**
+ * libavcodec-class decode by spawning ffmpeg. Used by `decode()` when
+ * the input is anything other than MJPEG-in-MP4 (the pure-JS path).
+ * Throws "install ffmpeg" when the binary isn't on PATH.
+ */
+async function ffmpegDecodeFallback(bytes: Uint8Array, opts: DecodeOptions | undefined): Promise<VideoDecoder> {
+  const stream = await ffmpegMod.decode(bytes, {
+    startMs: opts?.startMs,
+    endMs: opts?.endMs,
+  });
+  // Map ffmpeg's codec_name to our Codec union; fall back to the raw
+  // string for anything we don't have a tag for (still reaches users
+  // who can compare the exact name).
+  const codecMap: Record<string, Codec> = {
+    h264: "h264",
+    hevc: "h265",
+    h265: "h265",
+    vp8: "vp8",
+    vp9: "vp9",
+    av1: "av1",
+    mjpeg: "mjpeg",
+  };
+  const mappedCodec = (codecMap[stream.codec] ?? stream.codec) as Codec;
+  return {
+    width: stream.width,
+    height: stream.height,
+    codec: mappedCodec,
+    durationMs: stream.durationMs,
+    frames(): AsyncIterableIterator<DecodedFrame> {
+      const inner = stream.frames();
+      const iterator: AsyncIterableIterator<DecodedFrame> = {
+        async next(): Promise<IteratorResult<DecodedFrame>> {
+          const r = await inner.next();
+          if (r.done) return { done: true, value: undefined as any };
+          return {
+            done: false,
+            value: {
+              data: r.value.data,
+              width: stream.width,
+              height: stream.height,
+              pixelFormat: "rgba",
+              ptsMs: r.value.ptsMs,
+              index: r.value.index,
+              // ffmpeg's rawvideo output doesn't expose per-frame
+              // keyframe info; mark only the first frame as keyframe
+              // (it always is) and let the FFI v2 path surface real
+              // I/P/B classification.
+              keyframe: r.value.index === 0,
+            },
+          };
+        },
+        [Symbol.asyncIterator]() {
+          return iterator;
+        },
+      };
+      return iterator;
+    },
+    async seek(_ptsMs: number): Promise<void> {
+      throw new Error("parabun:video.decode: seek() on the ffmpeg path requires re-opening the decoder with startMs");
+    },
+    async close(): Promise<void> {
+      await stream.close();
+    },
+    async [Symbol.asyncDispose](): Promise<void> {
+      await stream.close();
+    },
+  };
 }
 
 /**
