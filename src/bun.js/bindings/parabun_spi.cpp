@@ -187,9 +187,11 @@ JSC_DEFINE_HOST_FUNCTION(functionSpiCloseDevice,
 {
     JSValue v = callFrame->argument(0);
     if (!v.isBigInt()) return JSValue::encode(jsUndefined());
-    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
 #if defined(__linux__)
+    int fd = static_cast<int>(JSBigInt::toBigInt64(dynamicDowncast<JSBigInt>(v.asCell())));
     if (fd >= 0) ::close(fd);
+#else
+    (void)v;
 #endif
     (void)globalObject;
     return JSValue::encode(jsUndefined());
