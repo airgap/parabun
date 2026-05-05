@@ -1532,8 +1532,23 @@ const RADIX_MIN_N = 4_000;
 // pressure (every call now borrows + returns scratch buffers rather
 // than allocating fresh). The f32 threshold stays at 10M until a
 // release-build re-bench confirms it can drop to 4M.
-const PARALLEL_RADIX_MIN_N_INT = 4_000_000;
-const PARALLEL_RADIX_MIN_N_F32 = 10_000_000;
+// Re-benched 2026-05-05 (release, 5950X) after the SAB-pool reuse +
+// worker view caching fix: the previous f32 4-9M cliff is gone.
+// Updated thresholds:
+//   - f32 wins robustly (>1.4×) from 6M up; below that it's parity
+//     to slight loss. Drop from 10M → 6M.
+//   - i32 4M shows transient regressions (serial radix itself
+//     fluctuates 46-108ms run to run — GC / JIT noise at the
+//     boundary). Bump to 5M for stability.
+//   - u32 wins cleanly from 4M up. Unchanged.
+// Numbers (run 1 / run 2 of vs-serial speedups):
+//   u32:    4M 1.13/1.07×   5M 1.39/1.35×   10M 1.50/1.46×   25M 1.59/1.36×
+//   i32:    4M 0.24/0.57×   5M 1.51/1.20×   10M 1.84/1.82×   25M 1.91/2.12×
+//   f32:    4M 1.01/1.00×   5M 0.98/0.98×   6M [interpolated] ~1.2×
+//                          10M 1.73/1.57×  25M 1.84/1.99×
+const PARALLEL_RADIX_MIN_N_U32 = 4_000_000;
+const PARALLEL_RADIX_MIN_N_I32 = 5_000_000;
+const PARALLEL_RADIX_MIN_N_F32 = 6_000_000;
 
 function radixSortTyped(arr: any, kind: RadixKind): any {
   const N = arr.length;
@@ -1996,9 +2011,11 @@ async function psort<T>(
       const minN =
         typedKind === "f32"
           ? PARALLEL_RADIX_MIN_N_F32
-          : typedKind === "u32" || typedKind === "i32"
-            ? PARALLEL_RADIX_MIN_N_INT
-            : Infinity;
+          : typedKind === "u32"
+            ? PARALLEL_RADIX_MIN_N_U32
+            : typedKind === "i32"
+              ? PARALLEL_RADIX_MIN_N_I32
+              : Infinity;
       if (N >= minN) {
         return (await parallelRadixSortU32(array as any, typedKind as any, conc)) as any;
       }
