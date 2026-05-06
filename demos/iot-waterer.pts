@@ -1,19 +1,24 @@
 // Multi-plant auto waterer — moisture signals per plant, threshold-driven
-// pump pulses with a cooldown to prevent drowning. (Para form.)
+// pump pulses with a cooldown to prevent drowning, plus a tank-level
+// sensor that pauses all watering when empty and notifies on the
+// empty/refilled transitions. (Para form.)
 //
-//   bun run build:release demos/iot-waterer.pts [--seconds N] [--simulate] [--i2c BUS]
+//   bun run build:release demos/iot-waterer.pts \
+//     [--seconds N] [--simulate] [--i2c BUS] [--demo-empty]
 //
-// Same demo as iot-waterer.ts, but uses Para syntax in the spots where
-// it shortens the wiring:
+// Same demo as iot-waterer.ts. Para syntax shows up in three places
+// where it's actually shorter:
 //   - `pure function` for the simulator's stateless math
-//   - `signal x = …` for per-plant FSM cells (auto-derived for tags)
-//   - `effect { … }` block for the once-per-tick log line
+//   - `derived` + `when` for the tank-empty alerting (edge-triggered;
+//     the .ts version has to track `wasEmpty` by hand because plain
+//     `effect` re-fires on every change)
+//   - `effect { ... }` block for the once-per-tick log line
 //
 // Hardware (real-mode):
-//   I²C bus 1 (default) → ADS1115 @ 0x48, channels 0..N-1 = moisture sensors
+//   I²C bus 1 (default) → ADS1115 @ 0x48
+//     ch 0..N-1 → moisture sensors
+//     ch 3      → tank level
 //   GPIO chip pinctrl-rp1 → pumpPin per plant drives a relay/MOSFET
-// `--simulate` (default when no /dev/i2c-* present) replaces the I²C
-// reads with a deterministic oscillator so the demo runs anywhere.
 
 import gpio from "parabun:gpio";
 import i2c from "parabun:i2c";
@@ -34,6 +39,10 @@ const PLANTS: Plant[] = [
   { name: "succulent", channel: 2, pumpPin: 22, dryAt: 0.18, pumpMs: 800, cooldownMs: 120_000 },
 ];
 
+const TANK_CHANNEL = 3;
+const TANK_EMPTY_AT = 0.05;
+const TANK_LOW_AT = 0.2;
+
 const args = process.argv.slice(2);
 const num = (k: string, d: number) => {
   const i = args.indexOf(k);
@@ -42,8 +51,9 @@ const num = (k: string, d: number) => {
 const seconds = num("--seconds", -1);
 const i2cBus = num("--i2c", 1);
 const forceSim = args.includes("--simulate");
+const demoEmpty = args.includes("--demo-empty");
 
-// ─── moisture source ────────────────────────────────────────────────
+// ─── moisture + tank source ─────────────────────────────────────────
 
 const ADS1115_ADDR = 0x48;
 
@@ -59,7 +69,17 @@ pure function simStep(t: number, ch: number): number {
 
 function makeSimulator(): (ch: number) => Promise<number> {
   let t = 0;
-  return async (ch: number) => simStep(t++, ch);
+  let tank = 1.0;
+  return async (ch: number) => {
+    if (ch === TANK_CHANNEL) {
+      tank -= demoEmpty ? 0.08 : 0.01;
+      if (tank < -0.05) tank = 1.0; // simulated refill
+      t++;
+      return Math.max(0, Math.min(1, tank));
+    }
+    if (ch === 0) t++;
+    return simStep(t, ch);
+  };
 }
 
 async function makeAds1115(busPath: string) {
@@ -78,27 +98,27 @@ async function makeAds1115(busPath: string) {
   };
 }
 
-let readMoisture: (ch: number) => Promise<number>;
+let readChannel: (ch: number) => Promise<number>;
 let i2cClose: (() => void) | null = null;
 
 if (forceSim) {
   console.log("[mode] --simulate flag set");
-  readMoisture = makeSimulator();
+  readChannel = makeSimulator();
 } else {
   const buses = i2c.buses();
   const path = `/dev/i2c-${i2cBus}`;
   if (!buses.some(b => b.path === path)) {
     console.log(`[mode] ${path} not found → simulator`);
-    readMoisture = makeSimulator();
+    readChannel = makeSimulator();
   } else {
     try {
       const ads = await makeAds1115(path);
-      readMoisture = ads.read;
+      readChannel = ads.read;
       i2cClose = () => ads.bus.close();
       console.log(`[mode] ADS1115 @ 0x48 on ${path}`);
     } catch (e) {
       console.log(`[mode] ADS1115 init failed (${(e as Error).message}) → simulator`);
-      readMoisture = makeSimulator();
+      readChannel = makeSimulator();
     }
   }
 }
@@ -124,6 +144,30 @@ if (chipPath) {
   }
 } else {
   console.log("[gpio] no chip → log-only mode");
+}
+
+function notify(msg: string) {
+  console.error(`[notify] ${msg}`);
+}
+
+// ─── tank level: signal + derived thresholds + edge-triggered notify
+
+const tankRaw = signals.fromInterval(() => readChannel(TANK_CHANNEL), 1000);
+derived tankLevel = tankRaw.signal.get() ?? 1.0;
+derived tankEmpty = tankLevel < TANK_EMPTY_AT;
+derived tankLow = tankLevel < TANK_LOW_AT;
+
+// Edge-triggered alerts. `when EXPR { ... }` fires once per false→true
+// transition of the predicate; `when not EXPR { ... }` fires on the
+// inverse. No manual previous-value tracking needed.
+when tankEmpty {
+  notify("⚠️  tank EMPTY — pausing all watering");
+}
+when not tankEmpty {
+  notify(`✓  tank refilled to ${(tankLevel * 100).toFixed(0)}% — resuming watering`);
+}
+when tankLow {
+  notify(`⚠ tank low — ${(tankLevel * 100).toFixed(0)}% remaining`);
 }
 
 // ─── per-plant FSM ──────────────────────────────────────────────────
@@ -155,17 +199,20 @@ async function runPump(p: Plant) {
 const tick = signals.fromInterval(async () => {
   const now = Date.now();
   const cells: string[] = [];
+  const empty = tankEmpty;
   for (const p of PLANTS) {
-    const m = await readMoisture(p.channel);
+    const m = await readChannel(p.channel);
     const s = state.get(p.name)!;
     s.lastReading = m;
 
     if (s.fsm === "cooldown" && now - s.lastWateredAt >= p.cooldownMs) s.fsm = "ok";
 
     let action = "";
-    if (s.fsm === "ok" && m < p.dryAt) {
+    if (s.fsm === "ok" && m < p.dryAt && !empty) {
       action = " → water";
       runPump(p);
+    } else if (s.fsm === "ok" && m < p.dryAt && empty) {
+      action = " → SKIP (tank empty)";
     }
 
     const tag =
@@ -175,7 +222,8 @@ const tick = signals.fromInterval(async () => {
       : "ok  ";
     cells.push(`${p.name.padEnd(10)} ${(m * 100).toFixed(0).padStart(3)}%  ${tag}${action}`);
   }
-  return cells.join(" │ ");
+  const tankPct = (tankLevel * 100).toFixed(0).padStart(3);
+  return `[tank ${tankPct}%] ${cells.join(" │ ")}`;
 }, 1000);
 
 effect {
@@ -183,7 +231,7 @@ effect {
   if (row !== undefined) console.log(row);
 }
 
-console.log(`watering ${PLANTS.length} plants — Ctrl-C to stop\n`);
+console.log(`watering ${PLANTS.length} plants — tank empty < ${TANK_EMPTY_AT * 100}% pauses pumps — Ctrl-C to stop\n`);
 
 if (seconds > 0) {
   console.log(`(non-interactive: stopping in ${seconds}s)`);
@@ -193,6 +241,7 @@ if (seconds > 0) {
 }
 
 tick.dispose();
+tankRaw.dispose();
 for (const line of pumps.values()) line?.write(0);
 chip?.close();
 i2cClose?.();
