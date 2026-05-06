@@ -363,11 +363,11 @@ describe("parabun:csv", () => {
     expect(exitCode).toBe(7);
   });
 
-  it("LYK-804: para:csv legacy alias still resolves to the same module", async () => {
+  it("LYK-804: @para/csv legacy alias still resolves to the same module", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-csv-legacy-alias",
       `
-        const a = await import("para:csv");
+        const a = await import("@para/csv");
         const b = await import("parabun:csv");
         // Same module under both names — exact identity check.
         console.log("same:", (a.default ?? a) === (b.default ?? b));

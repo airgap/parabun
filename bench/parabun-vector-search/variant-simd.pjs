@@ -1,10 +1,10 @@
-// Variant: single-threaded but uses para:simd.dot for the inner product.
+// Variant: single-threaded but uses @para/simd.dot for the inner product.
 // Same top-K logic as baseline; only the per-pair scoring changes.
 //
-// What this shows: para:simd.dot calls into f32x4 WASM kernels, so each dot
+// What this shows: @para/simd.dot calls into f32x4 WASM kernels, so each dot
 // product runs through SIMD lanes instead of the JS scalar loop.
 
-import { dot as simdDot, topK as simdTopK } from "para:simd";
+import { dot as simdDot, topK as simdTopK } from "@para/simd";
 import { generate, N, D, K } from "./gen.js";
 
 function scoreAll(embeddings, query) {

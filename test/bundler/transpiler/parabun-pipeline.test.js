@@ -13,12 +13,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), exitCode };
 }
 
-describe("para:pipeline", () => {
+describe("@para/pipeline", () => {
   it("map + collect", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-map",
       `
-        import { map, collect } from "para:pipeline";
+        import { map, collect } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         const out = await ([1, 2, 3] |> map(double) |> collect);
         console.log(JSON.stringify(out));
@@ -32,7 +32,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-filter",
       `
-        import { filter, collect } from "para:pipeline";
+        import { filter, collect } from "@para/pipeline";
         pure function even(x) { return x % 2 === 0; }
         const out = await ([1, 2, 3, 4, 5, 6] |> filter(even) |> collect);
         console.log(JSON.stringify(out));
@@ -46,7 +46,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-chain",
       `
-        import { map, filter, take, collect } from "para:pipeline";
+        import { map, filter, take, collect } from "@para/pipeline";
         pure function sq(x) { return x * x; }
         pure function gt10(x) { return x > 10; }
         const out = await ([1,2,3,4,5,6,7,8] |> map(sq) |> filter(gt10) |> take(3) |> collect);
@@ -61,7 +61,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-lazy",
       `
-        import { take, collect } from "para:pipeline";
+        import { take, collect } from "@para/pipeline";
         let pulls = 0;
         function* source() {
           while (true) { pulls++; yield pulls; }
@@ -78,7 +78,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-droptake",
       `
-        import { drop, takeWhile, collect } from "para:pipeline";
+        import { drop, takeWhile, collect } from "@para/pipeline";
         pure function lt6(x) { return x < 6; }
         const out = await ([1,2,3,4,5,6,7] |> drop(2) |> takeWhile(lt6) |> collect);
         console.log(JSON.stringify(out));
@@ -92,7 +92,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-flatmap",
       `
-        import { flatMap, collect } from "para:pipeline";
+        import { flatMap, collect } from "@para/pipeline";
         pure function pair(x) { return [x, x * 10]; }
         const out = await ([1,2,3] |> flatMap(pair) |> collect);
         console.log(JSON.stringify(out));
@@ -106,7 +106,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-chunk",
       `
-        import { chunk, collect } from "para:pipeline";
+        import { chunk, collect } from "@para/pipeline";
         const out = await ([1,2,3,4,5,6,7] |> chunk(3) |> collect);
         console.log(JSON.stringify(out));
       `,
@@ -119,7 +119,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-reduce",
       `
-        import { reduce } from "para:pipeline";
+        import { reduce } from "@para/pipeline";
         pure function add(a, b) { return a + b; }
         const out = await ([1,2,3,4] |> reduce(add, 0));
         console.log(out);
@@ -133,7 +133,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-count",
       `
-        import { filter, count } from "para:pipeline";
+        import { filter, count } from "@para/pipeline";
         pure function odd(x) { return x % 2 === 1; }
         const out = await ([1,2,3,4,5,6,7] |> filter(odd) |> count);
         console.log(out);
@@ -147,7 +147,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-range",
       `
-        import { range, take, collect } from "para:pipeline";
+        import { range, take, collect } from "@para/pipeline";
         const out = await (range(100) |> take(5) |> collect);
         console.log(JSON.stringify(out));
       `,
@@ -160,7 +160,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-async",
       `
-        import { map, collect } from "para:pipeline";
+        import { map, collect } from "@para/pipeline";
         async function* source() { yield 1; yield 2; yield 3; }
         pure function double(x) { return x * 2; }
         const out = await (source() |> map(double) |> collect);
@@ -175,7 +175,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-callform",
       `
-        import { pipe, map, filter, collect } from "para:pipeline";
+        import { pipe, map, filter, collect } from "@para/pipeline";
         pure function inc(x) { return x + 1; }
         pure function pos(x) { return x > 0; }
         const out = await collect(pipe([-2,-1,0,1,2], map(inc), filter(pos)));
@@ -190,7 +190,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-sum",
       `
-        import { map, sum } from "para:pipeline";
+        import { map, sum } from "@para/pipeline";
         pure function k(x) { return x * 3 + 7; }
         const arr = new Float32Array([1, 2, 3, 4, 5]);
         const out = await (arr |> map(k) |> sum);
@@ -206,7 +206,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-compose",
       `
-        import { map, toFloat64Array } from "para:pipeline";
+        import { map, toFloat64Array } from "@para/pipeline";
         pure function f(x) { return x * 2 + 1; }
         pure function g(x) { return x * 10 - 5; }
         const arr = new Float64Array([1, 2, 3]);
@@ -223,7 +223,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-nonaffine",
       `
-        import { map, toFloat64Array } from "para:pipeline";
+        import { map, toFloat64Array } from "@para/pipeline";
         pure function sq(x) { return x * x; }
         const arr = new Float64Array([1, 2, 3, 4]);
         const out = await (arr |> map(sq) |> toFloat64Array);
@@ -238,7 +238,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-filter-fallback",
       `
-        import { map, filter, collect } from "para:pipeline";
+        import { map, filter, collect } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         pure function gt5(x) { return x > 5; }
         const arr = new Float32Array([1, 2, 3, 4, 5]);
@@ -255,7 +255,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-collect-fa",
       `
-        import { map, collect } from "para:pipeline";
+        import { map, collect } from "@para/pipeline";
         pure function inc(x) { return x + 1; }
         const arr = new Float32Array([10, 20, 30]);
         const out = await (arr |> map(inc) |> collect);
@@ -266,7 +266,7 @@ describe("para:pipeline", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("fusion: large f32 affine chain matches para:simd (GPU tier)", async () => {
+  it("fusion: large f32 affine chain matches @para/simd (GPU tier)", async () => {
     // Covers the pipeline → parabun:gpu promotion path. When the fused chain
     // collapses to `x*K + C` over a Float32Array big enough for the GPU
     // to win (>= 1<<18 elems), `realizeChain` dispatches to `gpu.simdMap`
@@ -279,15 +279,15 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-gpu-tier",
       `
-        import { map, toFloat32Array } from "para:pipeline";
-        import simd from "para:simd";
+        import { map, toFloat32Array } from "@para/pipeline";
+        import simd from "@para/simd";
         pure function k1(x) { return x * 3 + 1; }
         pure function k2(x) { return x * 0.5 - 2; }
         const n = 1 << 20;
         const arr = new Float32Array(n);
         for (let i = 0; i < n; i++) arr[i] = i * 0.25;
         const out = await (arr |> map(k1) |> map(k2) |> toFloat32Array);
-        // Reference: same chain through para:simd directly.
+        // Reference: same chain through @para/simd directly.
         const ref = simd.simdMap(x => 0.5 * (x * 3 + 1) - 2, arr);
         let mismatches = 0;
         for (let i = 0; i < n; i++) if (out[i] !== ref[i]) mismatches++;
@@ -306,7 +306,7 @@ describe("para:pipeline", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-pipe-fuse-empty",
       `
-        import { collect, sum } from "para:pipeline";
+        import { collect, sum } from "@para/pipeline";
         const arr = new Float32Array([1.5, 2.5, 3]);
         const s = await sum(arr);
         const c = await collect(arr);

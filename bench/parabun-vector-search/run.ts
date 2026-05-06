@@ -11,8 +11,8 @@ const RUNS = 5;
 
 const variants = [
   { name: "baseline (.js, plain JS)       ", path: `${HERE}baseline.js` },
-  { name: "simd-dot (per-row, para:simd.dot)", path: `${HERE}variant-simd.pjs` },
-  { name: "matvec (para:simd.matVec, bulk) ", path: `${HERE}variant-matvec.pjs` },
+  { name: "simd-dot (per-row, @para/simd.dot)", path: `${HERE}variant-simd.pjs` },
+  { name: "matvec (@para/simd.matVec, bulk) ", path: `${HERE}variant-matvec.pjs` },
   { name: "pmap-cold (fresh pool per call)", path: `${HERE}variant-pmap.pjs` },
   { name: "pmap-warm (persistent pool)    ", path: `${HERE}variant-pmap-warm.pjs` },
   { name: "pmap-shared (SAB embeddings)   ", path: `${HERE}variant-pmap-shared.pjs` },

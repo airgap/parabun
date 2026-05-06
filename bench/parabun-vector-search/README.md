@@ -5,9 +5,9 @@ Seven layered variants of the same cosine-similarity top-K search over a
 final speedup number — it's the diagnostic value of watching each
 primitive fail or succeed in isolation.
 
-This bench is what motivated the `para:simd` reduce-op threshold, the
-`para:simd.matVec` bulk kernel, `para:parallel`'s persistent worker
-pool, `parabun:gpu`'s Tier-4 residency, and the `para:simd.topK` selection
+This bench is what motivated the `@para/simd` reduce-op threshold, the
+`@para/simd.matVec` bulk kernel, `@para/parallel`'s persistent worker
+pool, `parabun:gpu`'s Tier-4 residency, and the `@para/simd.topK` selection
 primitive. Every tier that looked like an obvious win on paper lost
 to something — memory bandwidth, copy-in cost, structured-clone
 overhead, or idiomatic top-K sort — until the last variant lined up
@@ -25,7 +25,7 @@ the bottleneck.
 
 ## Results (best-of-5 median, release build, RTX 4070 Ti + 8-core host)
 
-All rows except `baseline` use `para:simd.topK` for selection; `baseline`
+All rows except `baseline` use `@para/simd.topK` for selection; `baseline`
 keeps the idiomatic `map → sort → slice` to stay honest as a reference.
 The pmap variants do per-chunk fixed-size-heap top-K inside each worker
 (unaffected by the `topK` primitive).
@@ -33,8 +33,8 @@ The pmap variants do per-chunk fixed-size-heap top-K inside each worker
 | variant                                 | score_ms (min/med/max)    | vs baseline |
 |-----------------------------------------|--------------------------:|------------:|
 | baseline (plain JS, scalar loop)        |  38.7 /  42.8 /  44.6     |      1.00×  |
-| simd-dot (per-row `para:simd.dot`)       |  27.8 /  27.9 /  28.8     |      1.53×  |
-| matvec (bulk `para:simd.matVec`)         |  51.8 /  52.5 /  53.3     |      0.82×  |
+| simd-dot (per-row `@para/simd.dot`)       |  27.8 /  27.9 /  28.8     |      1.53×  |
+| matvec (bulk `@para/simd.matVec`)         |  51.8 /  52.5 /  53.3     |      0.82×  |
 | pmap-cold (fresh worker pool)           | 438.3 / 441.7 / 454.1     |      0.10×  |
 | pmap-warm (persistent pool, no SAB)     | 404.6 / 406.8 / 412.1     |      0.11×  |
 | pmap-shared (pool + SAB embeddings)     |  16.8 /  20.2 /  24.5     |      2.12×  |
@@ -87,7 +87,7 @@ first addressing bandwidth just adds overhead.
    topK   per call: 17.89 ms   // idiomatic JS: 100k objects, sort, slice
    ```
 
-   `para:simd.topK(scores, k)` is a scalar fixed-size-sorted-array
+   `@para/simd.topK(scores, k)` is a scalar fixed-size-sorted-array
    insertion — O(N·k) worst-case but with near-perfect branch
    prediction at `k ≪ N`. For k = 10, N = 100 000 it runs in under
    1 ms on a typed-array, beating an object-sort by 20× and a binary
@@ -120,7 +120,7 @@ The harness runs each variant 5 times, prints min/med/max for
 gen/score/total phases, and asserts the top-K set matches across all
 seven variants. Release build is required — debug-build WASM is ~3×
 slower and inverts several of these rankings. The GPU row degrades to
-`para:simd.matVec` behavior if CUDA/Metal isn't available — `parabun:gpu`
+`@para/simd.matVec` behavior if CUDA/Metal isn't available — `parabun:gpu`
 routes through the CPU backend transparently.
 
 ## Files
@@ -128,15 +128,15 @@ routes through the CPU backend transparently.
 - `gen.js` — deterministic normalized embedding + query generator. Optional
   `{ shared: true }` returns SAB-backed views for the last variant.
 - `baseline.js` — idiomatic plain JS, single-threaded scalar loop.
-- `variant-simd.pjs` — per-row `para:simd.dot` (one WASM call per row).
-- `variant-matvec.pjs` — bulk `para:simd.matVec` (one WASM call total).
+- `variant-simd.pjs` — per-row `@para/simd.dot` (one WASM call per row).
+- `variant-matvec.pjs` — bulk `@para/simd.matVec` (one WASM call total).
 - `variant-pmap.pjs` — `pmap × 8` with a fresh worker pool.
 - `variant-pmap-warm.pjs` — `pmap × 8` with the persistent pool pre-warmed.
 - `variant-pmap-shared.pjs` — `pmap × 8` with the persistent pool *and* SAB
   embeddings. First variant to beat baseline.
 - `variant-gpu.pjs` — `parabun:gpu.matVec` with the embedding matrix held on
   device. Score phase runs CUDA PTX when available, falls through to
-  `para:simd.matVec` otherwise.
+  `@para/simd.matVec` otherwise.
 - `run.ts` — best-of-5 harness, top-K cross-check.
 - `batched-baseline.js`, `batched-gpu-loop.pjs`, `batched-gpu-matmul.pjs`,
   `batched-gpu-matmul-ptopk.pjs`, `batched-run.ts` — batched harness for

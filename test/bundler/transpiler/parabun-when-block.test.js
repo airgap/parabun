@@ -4,8 +4,8 @@ import { bunEnv, bunExe, tempDir } from "harness";
 // Parabun `when EXPR { body }` and `when not EXPR { body }` block
 // statements. Slot into the existing `effect { body }` / `arena { body }`
 // keyword-block family. Both desugar to a single helper:
-//   when EXPR { body }     →  require("para:signals").when(() => EXPR, () => { body })
-//   when not EXPR { body } →  require("para:signals").when(() => !(EXPR), () => { body })
+//   when EXPR { body }     →  require("@para/signals").when(() => EXPR, () => { body })
+//   when not EXPR { body } →  require("@para/signals").when(() => !(EXPR), () => { body })
 //
 // Block-form `when` is distinct from the suffix-form `when` clause used
 // by `~>` / `->` — position disambiguates. Suffix is an every-truthy
@@ -73,7 +73,7 @@ describe("Parabun: when block (rising / falling)", () => {
 
     it("`when` followed by `(` parses as plain identifier (call)", () => {
       const out = transform(`const when = (fn) => fn(); when(() => 1);`);
-      // Helper-form would emit `require("para:signals").when(`; user code
+      // Helper-form would emit `require("@para/signals").when(`; user code
       // calling a local `when` function should NOT match that pattern.
       expect(out).not.toContain(`/signals").when(`);
       expect(out).toContain("when(");

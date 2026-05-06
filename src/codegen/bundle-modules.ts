@@ -57,9 +57,9 @@ globalThis.requireTransformer = requireTransformer;
 
 // Parabun-added modules under src/js/bun/ split across two namespaces:
 //
-//   - `para:*`     — cross-runtime Lib modules. Pure JS / Wasm. Also
-//                    distributed as parabun-browser-shims for non-ParaBun
-//                    hosts (Node, Deno, browsers, Workers).
+//   - `@para/*`    — Cross-runtime Lib modules. Pure JS / Wasm.
+//                    Distributed independently on npm; bundled into
+//                    Parabun for builtin-fast resolution.
 //   - `parabun:*`  — Runtime-only modules. Native bindings ($cpp, bun:ffi)
 //                    that can't run outside the ParaBun runtime.
 //
@@ -313,11 +313,11 @@ for (const entrypoint of bundledEntryPoints) {
       (usesDebug
         ? createLogClientJS(
             file_path.replace(".js", ""),
-            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:|^parabun:/, ""),
+            idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^@para\/|^parabun:/, ""),
           )
         : "") +
       (usesAssert
-        ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^para:|^parabun:/, ""))
+        ? createAssertClientJS(idToPublicSpecifierOrEnumName(file_path).replace(/^node:|^bun:|^@para\/|^parabun:/, ""))
         : ""),
   );
   const errors = [...captured.matchAll(/@bundleError\((.*)\)/g)];
@@ -350,7 +350,7 @@ function idToPublicSpecifierOrEnumName(id: string) {
   } else if (id.startsWith("bun/")) {
     const rest = id.slice(4).replaceAll(".", "/");
     const top = rest.split("/")[0];
-    const prefix = PARA_LIB_MODULES.has(top) ? "para:" : PARABUN_RUNTIME_MODULES.has(top) ? "parabun:" : "bun:";
+    const prefix = PARA_LIB_MODULES.has(top) ? "@para/" : PARABUN_RUNTIME_MODULES.has(top) ? "parabun:" : "bun:";
     return prefix + rest;
   } else if (id.startsWith("internal/")) {
     return "internal:" + id.slice(9).replaceAll(".", "/");

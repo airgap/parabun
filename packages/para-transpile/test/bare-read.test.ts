@@ -75,8 +75,8 @@ describe("bare-read inside when predicate and body", () => {
 describe("auto-promotion: signal initializer that reads other signals", () => {
   test("simple binary op promotes to derived", () => {
     const out = transpile(`signal a = 1;\nsignal b = a + 1;`);
-    expect(out).toContain('require("para:signals").derived(() => a.get() + 1)');
-    expect(out).not.toContain('require("para:signals").signal(a + 1)');
+    expect(out).toContain('require("@para/signals").derived(() => a.get() + 1)');
+    expect(out).not.toContain('require("@para/signals").signal(a + 1)');
   });
 
   test("chained derivations", () => {
@@ -87,7 +87,7 @@ describe("auto-promotion: signal initializer that reads other signals", () => {
 
   test("standalone signal (no signal reads) stays signal()", () => {
     const out = transpile(`signal x = 0;`);
-    expect(out).toContain('require("para:signals").signal(0)');
+    expect(out).toContain('require("@para/signals").signal(0)');
     expect(out).not.toContain("derived");
   });
 

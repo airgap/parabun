@@ -1,12 +1,12 @@
 ---
-title: para:pipeline
+title: @para/pipeline
 description: Runtime helpers for the |> pipeline operator. Detects affine chains over typed arrays and collapses them where beneficial.
 ---
 
-The `|>` operator is a [Para language extension](/parabun/language#pipelines) parsed by Parabun's transpiler. At runtime, fused pipelines route through `para:pipeline` which can analyse affine chains and compose them.
+The `|>` operator is a [Para language extension](/parabun/language#pipelines) parsed by Parabun's transpiler. At runtime, fused pipelines route through `@para/pipeline` which can analyse affine chains and compose them.
 
 ```ts
-import simd from "para:simd";
+import simd from "@para/simd";
 
 // Affine chain
 const result = data
@@ -15,12 +15,12 @@ const result = data
   |> simd.sum;
 ```
 
-Each `|>` step is one pass over the typed array. For very long chains where two adjacent affine ops are wasteful, `para:pipeline.compile()` can fuse them.
+Each `|>` step is one pass over the typed array. For very long chains where two adjacent affine ops are wasteful, `@para/pipeline.compile()` can fuse them.
 
 ## API
 
 ```ts
-import pipeline from "para:pipeline";
+import pipeline from "@para/pipeline";
 
 const fused = pipeline.compile([
   ["mulScalar", 2],
@@ -34,5 +34,5 @@ For most workloads you won't need the explicit `compile` — the runtime handles
 ## See also
 
 - [Para language → Pipelines](/parabun/language#pipelines) — operator syntax
-- [`para:simd`](/parabun/lib/simd) — primitives that compose under `|>`
+- [`@para/simd`](/parabun/lib/simd) — primitives that compose under `|>`
 - [Streaming-ETL demo](https://github.com/airgap/parabun/blob/main/demos/streaming-etl.ts) — 5.8× over naive `.map().reduce()`

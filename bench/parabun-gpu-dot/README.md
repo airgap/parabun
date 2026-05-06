@@ -1,10 +1,10 @@
 # parabun-gpu-dot
 
-Microbenchmark: CUDA `dotF32` PTX kernel vs `para:simd.dot`.
+Microbenchmark: CUDA `dotF32` PTX kernel vs `@para/simd.dot`.
 
 `gpu.dot(a, b)` on CUDA dispatches to a warp-reduce PTX kernel — but
 only when the caller held one or both inputs via `gpu.hold`. The cold
-path (plain `Float32Array`) falls through to `para:simd` because, at
+path (plain `Float32Array`) falls through to `@para/simd` because, at
 every size we measured on an RTX 4070 Ti, the per-call HtoD copy
 dominates the kernel no matter how big the vector is. Residency
 (paying HtoD once) is the whole point of GPU dot.

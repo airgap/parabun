@@ -19,7 +19,7 @@ const WORKER_SRC = [
 describe("parallel.pool diagnostic signals (LYK-741/764)", () => {
   test("signals are Signal-shaped + initial state", async () => {
     using dir = tempDir("pool-sig", { "worker.js": WORKER_SRC });
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const p = parallel.pool({ module: join(String(dir), "worker.js"), size: 2 });
     try {
       expect(typeof p.signals.workersCount.get).toBe("function");
@@ -47,7 +47,7 @@ describe("parallel.pool diagnostic signals (LYK-741/764)", () => {
 
   test("inflight tracks concurrent runs; queued tracks overflow", async () => {
     using dir = tempDir("pool-sig-q", { "worker.js": WORKER_SRC });
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const p = parallel.pool({ module: join(String(dir), "worker.js"), size: 2 });
     try {
       // Both workers need to reach initOk=true before we can rely on
@@ -98,7 +98,7 @@ describe("parallel.pool diagnostic signals (LYK-741/764)", () => {
 
   test("dispose() drops all signals to 0", async () => {
     using dir = tempDir("pool-sig-d", { "worker.js": WORKER_SRC });
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const p = parallel.pool({ module: join(String(dir), "worker.js"), size: 2 });
     await p.run("echo", "x");
     expect(p.signals.workersCount.get()).toBeGreaterThan(0);

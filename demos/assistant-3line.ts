@@ -10,7 +10,7 @@
 // behavior.
 
 import assistant from "parabun:assistant";
-import signals from "para:signals";
+import signals from "@para/signals";
 import { existsSync } from "node:fs";
 
 const llm = process.env.ASSISTANT_LLM;

@@ -1,7 +1,7 @@
 # parabun-monte-carlo
 
 Black-Scholes European call option priced by Monte Carlo simulation,
-single-threaded vs `para:parallel.pmap` across 8 workers. No SIMD — this
+single-threaded vs `@para/parallel.pmap` across 8 workers. No SIMD — this
 bench is the pure `pmap` showcase, proving that the worker pool carries
 its weight on CPU-bound work that doesn't map to vector primitives.
 
@@ -32,7 +32,7 @@ only communication is a scalar partial sum at the end, and per-sample
 work is pure CPU math (`Math.log`, `Math.cos`, `Math.exp`). There's no
 shared memory to contend for, no bandwidth pressure.
 
-What makes the `para:parallel` primitive feel light here:
+What makes the `@para/parallel` primitive feel light here:
 
 1. **The pure function contract is enforced at parse time.** `pure
    function mcChunk(chunk)` refuses closures, `this`, and module-level
@@ -56,6 +56,6 @@ bun run build:release bench/parabun-monte-carlo/run.ts
 
 - `baseline.js` — single-threaded MC loop with inline mulberry32.
 - `variant-parabun.pjs` — same math, split across 8 workers via
-  `para:parallel.pmap` with independent PRNG streams.
+  `@para/parallel.pmap` with independent PRNG streams.
 - `run.ts` — best-of-5 harness, parses timing line, reports min/med/max
   and sanity-checks that the price agrees within 2%.

@@ -11,7 +11,7 @@
 // PCIe bandwidth dominates.
 
 import { GpuFloat32Array, matmul } from "parabun:gpu";
-import { topK as simdTopK } from "para:simd";
+import { topK as simdTopK } from "@para/simd";
 import { generate, N, D, K } from "./gen.js";
 
 function mulberry32(seed: number) {

@@ -1,6 +1,6 @@
 # parabun-psort-radix
 
-`para:parallel.psort` typed-array path vs native `TypedArray.sort()`.
+`@para/parallel.psort` typed-array path vs native `TypedArray.sort()`.
 
 ```
 # single-threaded radix vs native (covers all kinds)

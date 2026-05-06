@@ -1,9 +1,9 @@
 // CSV → Arrow analytical pipeline demo.
 //
-// Generates a 100k-row CSV in memory, parses it via para:csv's streaming
+// Generates a 100k-row CSV in memory, parses it via @para/csv's streaming
 // parser, converts to a columnar Arrow RecordBatch via arrow.fromRows,
-// then runs a few filters + aggregations. Demonstrates that para:csv and
-// para:arrow compose at the call site without either module knowing about
+// then runs a few filters + aggregations. Demonstrates that @para/csv and
+// @para/arrow compose at the call site without either module knowing about
 // the other (cross-builtin imports between bun:* aren't supported, so the
 // seam is here).
 //
@@ -14,8 +14,8 @@
 // a pure-perf benchmark — the parse step is mostly synthetic-CSV
 // generation cost on the same thread.
 
-import csv from "para:csv";
-import arrow from "para:arrow";
+import csv from "@para/csv";
+import arrow from "@para/arrow";
 
 const N = 100_000;
 

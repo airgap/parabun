@@ -1,4 +1,4 @@
-// Batch-resize a directory of images via parabun:image + para:parallel.
+// Batch-resize a directory of images via parabun:image + @para/parallel.
 //
 //   bun run build:release demos/image-batch-resize.pts <inDir> <outDir> <maxEdge>
 //
@@ -6,7 +6,7 @@
 // long edge to `maxEdge` (preserving aspect), encodes back as JPEG at
 // quality 85. Runs across N worker threads via `parallel.pmap`.
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 import { Glob } from "bun";
 import { mkdirSync } from "node:fs";
 import { basename, extname, join } from "node:path";

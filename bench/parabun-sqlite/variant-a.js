@@ -53,7 +53,7 @@ for (let sid = 0; sid < N_SENSORS; sid++) {
 const loadMs = (Bun.nanoseconds() - tLoad0) / 1e6;
 
 // Phase 2: analyze — the step we're actually comparing. Variants A/B use
-// plain JS tight loops over `rows[i][0]`; variant C uses para:simd over a
+// plain JS tight loops over `rows[i][0]`; variant C uses @para/simd over a
 // Float64Array.
 const tAnalyze0 = Bun.nanoseconds();
 const results = [];

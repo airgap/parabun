@@ -13,7 +13,7 @@
 //     FakeVectorStore does.
 //
 //   - similaritySearchVectorWithScore() chunks the matrix across a worker
-//     pool via para:parallel. SharedArrayBuffer means each worker reads the
+//     pool via @para/parallel. SharedArrayBuffer means each worker reads the
 //     same physical memory — no ~75 MB structured-clone per call. Workers
 //     return partial top-K (sized by k); main merges, so postMessage
 //     payloads stay small.
@@ -24,7 +24,7 @@
 // un-normalized rows, but the *ordering* — all that similaritySearch cares
 // about — is preserved).
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 import { VectorStore } from "@langchain/core/vectorstores";
 import { Document } from "@langchain/core/documents";
 import { Embeddings } from "@langchain/core/embeddings";

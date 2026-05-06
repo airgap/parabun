@@ -1,7 +1,7 @@
 // Hardcoded module "parabun:llm"
 //
 // Parabun: native LLM inference. v0 targets Llama-3.2 1B Q8_0 GGUF on a CUDA
-// host (falls back to para:simd on CPU). The low-level layers — GGUF file
+// host (falls back to @para/simd on CPU). The low-level layers — GGUF file
 // loader, byte-level BPE tokenizer, and Llama transformer forward pass —
 // are exposed directly so callers can inspect intermediate state; the
 // high-level `LLM` class wraps them into the usual load-then-generate shape.
@@ -27,7 +27,7 @@ const whisperModule = require("./llm/whisper.ts");
 const signals = require("./signals.ts");
 const gpu = require("./gpu.ts");
 
-// Structural Signal types — keep llm.ts agnostic of para:signals's class
+// Structural Signal types — keep llm.ts agnostic of @para/signals's class
 // hierarchy. See `/raid/parabun-site/PLAN-module-signals.md` for the
 // cross-module reactive surface plan.
 type Signal<T> = {

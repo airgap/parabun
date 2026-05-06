@@ -10,7 +10,7 @@
 // BCM 5, 6, 12, 13 → LEDs. Each press lights the matching LED.
 
 import gpio from "parabun:gpio";
-import signals from "para:signals";
+import signals from "@para/signals";
 
 const args = process.argv.slice(2);
 const sIdx = args.indexOf("--seconds");

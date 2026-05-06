@@ -1,4 +1,4 @@
-import { mulScalar, addScalar, add, mul, sum, dot, simdMap, alloc } from "para:simd";
+import { mulScalar, addScalar, add, mul, sum, dot, simdMap, alloc } from "@para/simd";
 
 // Fair-ish microbench:
 //   - warm up each variant (let JSC tier up to FTL)

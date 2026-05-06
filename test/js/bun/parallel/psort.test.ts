@@ -5,9 +5,9 @@ import { describe, expect, test } from "bun:test";
 // concern; tests just confirm the algorithm produces what native sort
 // produces (same elements, same order, including stable tie-break).
 
-describe("para:parallel.psort — correctness", () => {
+describe("@para/parallel.psort — correctness", () => {
   test("empty + single-element arrays return a copy unchanged", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     expect(await parallel.psort([])).toEqual([]);
     expect(await parallel.psort([42])).toEqual([42]);
     // Returns a new array, doesn't mutate input.
@@ -18,7 +18,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("matches native sort on a small object array (forced parallel)", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     // 8 chunks × 8 elements = 64 elements, comfortably exercising the
     // chunked path even past PSORT_SERIAL_THRESHOLD's small-array
     // cutoff.
@@ -31,7 +31,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("matches native sort on a large object array (passes the threshold)", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 8_000;
     const arr = Array.from({ length: N }, (_, i) => ({ id: i, k: (i * 16807) % 65521 }));
     const cmp = (a: any, b: any) => a.k - b.k;
@@ -42,7 +42,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("stable tie-break: ties preserve original input order across chunk boundaries", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     // Lots of ties (key = i % 4) with ids spanning multiple chunks. A
     // stable sort produces ids 0, 4, 8, …, 1, 5, 9, …, etc.
     const N = 6_000;
@@ -66,7 +66,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("default sort (no comparator) falls back to native and works correctly", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     // No comparator → serial fallback (psort can't beat native default
     // sort over postMessage cost). Verify result is still correct.
     const arr = ["banana", "apple", "cherry", "date"];
@@ -77,7 +77,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("preserves all elements (no drops, no duplicates) across chunk boundaries", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 5_000;
     const arr = Array.from({ length: N }, (_, i) => ({ id: i, k: Math.random() }));
     const ps = await parallel.psort(arr, (a, b) => a.k - b.k, { concurrency: 8 });
@@ -88,7 +88,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("sorted output is monotonic under the comparator", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 7_500;
     const arr = Array.from({ length: N }, (_, i) => ({ id: i, k: (i * 9301 + 49297) % 233280 | 0 }));
     const ps = await parallel.psort(arr, (a, b) => a.k - b.k);
@@ -99,7 +99,7 @@ describe("para:parallel.psort — correctness", () => {
   });
 
   test("uneven chunk sizes (concurrency that doesn't divide N evenly)", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     // 5_001 / 7 = 714.43 — last chunk will be short. Verify the merge
     // still produces a correct result.
     const N = 5_001;
@@ -114,9 +114,9 @@ describe("para:parallel.psort — correctness", () => {
   });
 });
 
-describe("para:parallel.psort — sample-sort strategy", () => {
+describe("@para/parallel.psort — sample-sort strategy", () => {
   test("matches native sort across worker count + chunk boundaries", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 6_000;
     const arr = Array.from({ length: N }, (_, i) => ({ id: i, k: (i * 16807) % 65521 }));
     const cmp = (a: any, b: any) => a.k - b.k;
@@ -127,7 +127,7 @@ describe("para:parallel.psort — sample-sort strategy", () => {
   });
 
   test("preserves all elements + monotonic + no duplicates", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 8_000;
     const arr = Array.from({ length: N }, (_, i) => ({ id: i, k: Math.random() * 1000 }));
     const ps = await parallel.psort(arr, (a, b) => a.k - b.k, { strategy: "sample" });
@@ -139,7 +139,7 @@ describe("para:parallel.psort — sample-sort strategy", () => {
   });
 
   test("stable on ties — equal-key elements preserve original order", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 5_000;
     // Lots of ties (key = i % 8) spread across multiple chunks. Stable
     // sort must produce strictly-increasing ids within each tie group.
@@ -160,7 +160,7 @@ describe("para:parallel.psort — sample-sort strategy", () => {
   });
 
   test("handles uneven bucket sizes (skewed key distribution)", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     // 80% of keys cluster low; 20% high. Splitter sampling should
     // handle this by giving the dense range smaller buckets and the
     // sparse range larger ones; the algorithm must still produce a
@@ -177,9 +177,9 @@ describe("para:parallel.psort — sample-sort strategy", () => {
   });
 });
 
-describe("para:parallel.psort — typed-array radix path", () => {
+describe("@para/parallel.psort — typed-array radix path", () => {
   test("Uint8Array sorts correctly", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Uint8Array([5, 1, 255, 0, 200, 17, 17, 99]);
     const native = new Uint8Array(arr).sort();
     const ps = await parallel.psort(arr as any);
@@ -188,7 +188,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Int8Array sorts correctly across the negative→positive boundary", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Int8Array([-128, 127, 0, -1, 1, -64, 63, -127]);
     const native = new Int8Array(arr).sort();
     const ps = await parallel.psort(arr as any);
@@ -197,7 +197,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Uint16Array sorts correctly across the byte boundary", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 4_000;
     const arr = new Uint16Array(N);
     for (let i = 0; i < N; i++) arr[i] = (i * 16807) & 0xffff;
@@ -208,7 +208,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Int16Array sorts correctly across the negative→positive boundary", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Int16Array([-32768, 32767, 0, -1, 1, -16384, 16383, -32767]);
     const native = new Int16Array(arr).sort();
     const ps = await parallel.psort(arr as any);
@@ -217,7 +217,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Uint32Array sorts correctly", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 5_000;
     const arr = new Uint32Array(N);
     for (let i = 0; i < N; i++) arr[i] = ((i * 2654435761) >>> 0) & 0xffffffff;
@@ -228,7 +228,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Int32Array sorts correctly across the negative→positive boundary", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Int32Array([-2147483648, 2147483647, 0, -1, 1, -100, 100, -2147483647]);
     const native = new Int32Array(arr).sort();
     const ps = await parallel.psort(arr as any);
@@ -237,7 +237,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Float32Array sorts correctly across negatives, zero, positives, ±Infinity", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Float32Array([
       -Infinity,
       3.14,
@@ -261,7 +261,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Float32Array large random sorts correctly", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 8_000;
     const arr = new Float32Array(N);
     for (let i = 0; i < N; i++) arr[i] = (Math.random() - 0.5) * 1e9;
@@ -278,7 +278,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   // because debug+ASAN sorts 5-11M elements well past the default
   // 5s budget.
   test("Uint32Array N=5M crosses the parallel-radix threshold and matches native", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 5_000_000;
     const arr = new Uint32Array(N);
     // Reproducible LCG.
@@ -294,7 +294,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   }, 30_000);
 
   test("Int32Array N=5M parallel sort with negatives matches native", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 5_000_000;
     const arr = new Int32Array(N);
     let s = 0xfeedface;
@@ -309,7 +309,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   }, 30_000);
 
   test("Float32Array N=11M parallel sort matches native across negatives + positives + ±Inf", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 11_000_000;
     const arr = new Float32Array(N);
     let s = 0xcafebabe;
@@ -328,7 +328,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   }, 120_000);
 
   test("returns a new array, doesn't mutate input", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Int32Array([3, 1, 2, 5, 4]);
     const before = new Int32Array(arr);
     const ps = await parallel.psort(arr as any);
@@ -338,7 +338,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Float64Array sorts correctly across negatives + ±Infinity + ±0 + subnormals", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Float64Array([
       -Infinity,
       Infinity,
@@ -364,7 +364,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("Float64Array large random matches native", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 8_000;
     const arr = new Float64Array(N);
     let s = 0xdeadbeef;
@@ -379,7 +379,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("BigInt64Array sorts correctly across the negative→positive boundary", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new BigInt64Array([
       -9223372036854775808n,
       9223372036854775807n,
@@ -399,7 +399,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("BigInt64Array large random matches native", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 6_000;
     const arr = new BigInt64Array(N);
     let s = 0xdeadbeef;
@@ -419,7 +419,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("BigUint64Array sorts correctly", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new BigUint64Array([
       0n,
       18446744073709551615n,
@@ -436,7 +436,7 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 
   test("BigUint64Array large random matches native", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 6_000;
     const arr = new BigUint64Array(N);
     let s = 0xdeadbeef;
@@ -454,9 +454,9 @@ describe("para:parallel.psort — typed-array radix path", () => {
   });
 });
 
-describe("para:parallel.psort — fallback decisions", () => {
+describe("@para/parallel.psort — fallback decisions", () => {
   test("serial: true forces native main-thread sort", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const N = 50_000;
     const arr = Array.from({ length: N }, (_, i) => ({ id: i, k: N - i }));
     const ps = await parallel.psort(arr, (a, b) => a.k - b.k, { serial: true });
@@ -467,7 +467,7 @@ describe("para:parallel.psort — fallback decisions", () => {
   });
 
   test("typed-array input + comparator throws (radix path is value-only)", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     const arr = new Float32Array([3, 1, 2]);
     // @ts-expect-error — comparator on typed array isn't supported by the radix path
     await expect(parallel.psort(arr, (a, b) => a - b)).rejects.toThrow(/comparator/);
@@ -475,7 +475,7 @@ describe("para:parallel.psort — fallback decisions", () => {
   });
 
   test("non-array input throws TypeError", async () => {
-    const parallel = (await import("para:parallel")).default;
+    const parallel = (await import("@para/parallel")).default;
     // @ts-expect-error — invalid input on purpose
     await expect(parallel.psort("hello")).rejects.toThrow(TypeError);
     // @ts-expect-error

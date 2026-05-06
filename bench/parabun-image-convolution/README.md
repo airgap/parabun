@@ -4,7 +4,7 @@ Separable 5-tap Gaussian blur on an 8192 × 8192 grayscale image (64 MB
 `Uint8Array`), single-threaded vs tiled across 8 workers with SAB-backed
 intermediate and output buffers.
 
-This proves that Parabun's `para:parallel` + `SharedArrayBuffer` pattern
+This proves that Parabun's `@para/parallel` + `SharedArrayBuffer` pattern
 extends cleanly to `Uint8` pixel data — not just `Float32Array`
 embeddings. Different domain, same primitives.
 

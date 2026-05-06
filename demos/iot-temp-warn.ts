@@ -8,11 +8,11 @@
 //   BCM 27 → red LED    — lit when temp ≥ error (default 75°C)
 //
 // Logs only on threshold transitions so the console isn't a wall of
-// "still hot" lines. Uses para:signals so the LED + log effects fan out
+// "still hot" lines. Uses @para/signals so the LED + log effects fan out
 // from one source signal and stay consistent.
 
 import gpio from "parabun:gpio";
-import signals from "para:signals";
+import signals from "@para/signals";
 import { readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);

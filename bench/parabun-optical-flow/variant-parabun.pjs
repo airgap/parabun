@@ -11,7 +11,7 @@
 // worker has flushed its gradient slab before any window-sum read
 // starts.
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 import { generate, W, H, SIZE, WIN, DET_EPS, SHIFT_X, SHIFT_Y, fnv1a } from "./gen.js";
 
 const { pmap } = parallel;

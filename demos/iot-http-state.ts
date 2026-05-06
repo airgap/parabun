@@ -7,7 +7,7 @@
 // `signals.effect(() => { ... })`. Identical behavior.
 
 import gpio from "parabun:gpio";
-import signals from "para:signals";
+import signals from "@para/signals";
 
 const args = process.argv.slice(2);
 const portIdx = args.indexOf("--port");

@@ -1,10 +1,10 @@
 ---
-title: para:parallel
+title: @para/parallel
 description: Worker-pool primitives — pmap / preduce / psort / pool — plus thread-safe Mutex and Semaphore over SharedArrayBuffer. psort uses radix sort with parallel fan-out above per-kind thresholds.
 ---
 
 ```ts
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 
 // Map a pure function across an array on N workers
 const sums = await parallel.pmap([1, 2, 3, 4, 5], x => x * x);
@@ -91,6 +91,6 @@ Use in tests / scripts to let the event loop exit cleanly. `pool()` instances ne
 
 ## See also
 
-- [`para:simd`](/parabun/lib/simd) — for fused-on-typed-array primitives that often beat parallel for memory-bound work
+- [`@para/simd`](/parabun/lib/simd) — for fused-on-typed-array primitives that often beat parallel for memory-bound work
 - [`parabun:gpu`](/parabun/runtime/gpu) — GPU primitives win when the problem fits a CUDA / Metal kernel
 - [Bench writeup](/parabun/lib/parabun-benches) — when parallel wins vs loses

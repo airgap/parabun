@@ -26,7 +26,7 @@ describe("Parabun arena blocks", () => {
   describe("parse-time desugar", () => {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
 
-    it("desugars `arena { body }` to a para:arena scope call", () => {
+    it("desugars `arena { body }` to a @para/arena scope call", () => {
       const out = transpiler.transformSync(`arena { let x = 1; console.log(x); }`);
       expect(out).toContain("/arena");
       expect(out).toContain(".scope");

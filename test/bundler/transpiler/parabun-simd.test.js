@@ -13,12 +13,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), exitCode };
 }
 
-describe("para:simd", () => {
+describe("@para/simd", () => {
   it("mulScalar — Float32Array scalar multiply", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-mulscalar",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         const out = mulScalar(new Float32Array([1, 2, 3, 4, 5, 6, 7]), 3);
         console.log(Array.from(out).join(","));
       `,
@@ -31,7 +31,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-addscalar",
       `
-        import { addScalar } from "para:simd";
+        import { addScalar } from "@para/simd";
         const out = addScalar(new Float32Array([1, 2, 3, 4, 5]), 10);
         console.log(Array.from(out).join(","));
       `,
@@ -44,7 +44,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-add",
       `
-        import { add } from "para:simd";
+        import { add } from "@para/simd";
         const a = new Float32Array([1, 2, 3, 4, 5, 6]);
         const b = new Float32Array([10, 20, 30, 40, 50, 60]);
         console.log(Array.from(add(a, b)).join(","));
@@ -58,7 +58,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-mul",
       `
-        import { mul } from "para:simd";
+        import { mul } from "@para/simd";
         const a = new Float32Array([1, 2, 3, 4, 5]);
         const b = new Float32Array([2, 3, 4, 5, 6]);
         console.log(Array.from(mul(a, b)).join(","));
@@ -72,7 +72,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-sum",
       `
-        import { sum } from "para:simd";
+        import { sum } from "@para/simd";
         const a = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         console.log(sum(a));
       `,
@@ -85,7 +85,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-dot",
       `
-        import { dot } from "para:simd";
+        import { dot } from "@para/simd";
         const a = new Float32Array([1, 2, 3, 4, 5]);
         const b = new Float32Array([2, 3, 4, 5, 6]);
         console.log(dot(a, b)); // 2 + 6 + 12 + 20 + 30 = 70
@@ -99,7 +99,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-empty",
       `
-        import { mulScalar, sum } from "para:simd";
+        import { mulScalar, sum } from "@para/simd";
         const out = mulScalar(new Float32Array([]), 5);
         console.log(out.length, sum(new Float32Array([])));
       `,
@@ -112,7 +112,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-tail",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         // 9 elements — forces 2 SIMD lanes (8 elems) + 1 scalar tail
         const out = mulScalar(new Float32Array([1,2,3,4,5,6,7,8,9]), 2);
         console.log(Array.from(out).join(","));
@@ -126,7 +126,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-map-mul",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function triple(x) { return x * 3; }
         const out = simdMap(triple, new Float32Array([1, 2, 3, 4, 5]));
         console.log(Array.from(out).join(","));
@@ -140,7 +140,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-map-add",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function plus7(x) { return x + 7; }
         const out = simdMap(plus7, new Float32Array([1, 2, 3, 4]));
         console.log(Array.from(out).join(","));
@@ -154,7 +154,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-map-fallback",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function weird(x) { return Math.sqrt(x) + 1; }
         const out = simdMap(weird, new Float32Array([0, 1, 4, 9, 16]));
         console.log(Array.from(out).join(","));
@@ -168,7 +168,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-typeerr",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         try {
           mulScalar([1, 2, 3], 2);
           console.log("NO_THROW");
@@ -185,7 +185,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-wasm-available",
       `
-        import { isWasmAvailable } from "para:simd";
+        import { isWasmAvailable } from "@para/simd";
         console.log(isWasmAvailable() === true ? "WASM_ON" : "WASM_OFF");
       `,
     );
@@ -201,7 +201,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-wasm-mulscalar",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         const sizes = [3, 4, 5, 17, 127, 1023, 4097];
         for (const n of sizes) {
           const a = new Float32Array(n);
@@ -223,7 +223,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-lenerr",
       `
-        import { add } from "para:simd";
+        import { add } from "@para/simd";
         try {
           add(new Float32Array([1, 2, 3]), new Float32Array([4, 5]));
           console.log("NO_THROW");
@@ -242,7 +242,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-f64-mul",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         const out = mulScalar(new Float64Array([1, 2, 3, 4, 5, 6, 7]), 3);
         console.log(out instanceof Float64Array, Array.from(out).join(","));
       `,
@@ -255,7 +255,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-f64-add-scalar",
       `
-        import { addScalar } from "para:simd";
+        import { addScalar } from "@para/simd";
         const out = addScalar(new Float64Array([1.5, 2.5, 3.5, 4.5, 5.5]), 10);
         console.log(out instanceof Float64Array, Array.from(out).join(","));
       `,
@@ -268,7 +268,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-f64-vec",
       `
-        import { add, mul } from "para:simd";
+        import { add, mul } from "@para/simd";
         const a = new Float64Array([1, 2, 3, 4, 5]);
         const b = new Float64Array([10, 20, 30, 40, 50]);
         console.log(Array.from(add(a, b)).join(","));
@@ -283,7 +283,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-f64-reduce",
       `
-        import { sum, dot } from "para:simd";
+        import { sum, dot } from "@para/simd";
         const a = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         const b = new Float64Array([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         console.log(sum(a), dot(a, b));
@@ -298,7 +298,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-f64-map",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function triple(x) { return x * 3; }
         const out = simdMap(triple, new Float64Array([1.1, 2.2, 3.3, 4.4, 5.5]));
         console.log(out instanceof Float64Array, Array.from(out).map(x => x.toFixed(2)).join(","));
@@ -313,7 +313,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-f64-boundaries",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         const sizes = [1, 2, 3, 9, 65, 513, 2049];
         for (const n of sizes) {
           const a = new Float64Array(n);
@@ -335,7 +335,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-mixed-types",
       `
-        import { add } from "para:simd";
+        import { add } from "@para/simd";
         try {
           add(new Float32Array([1, 2, 3]), new Float64Array([4, 5, 6]));
           console.log("NO_THROW");
@@ -354,7 +354,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-mulscalar-inplace-f32",
       `
-        import { mulScalar } from "para:simd";
+        import { mulScalar } from "@para/simd";
         const a = new Float32Array([1, 2, 3, 4, 5, 6, 7]);
         const out = mulScalar(a, 3, { dstOverwrite: "a" });
         console.log(out === a, Array.from(a).join(","));
@@ -368,7 +368,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-addscalar-inplace-f64",
       `
-        import { addScalar } from "para:simd";
+        import { addScalar } from "@para/simd";
         const a = new Float64Array([1, 2, 3, 4, 5]);
         const out = addScalar(a, 10, { dstOverwrite: "a" });
         console.log(out === a, Array.from(a).join(","));
@@ -382,7 +382,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-add-inplace",
       `
-        import { add } from "para:simd";
+        import { add } from "@para/simd";
         const a1 = new Float32Array([1, 2, 3, 4]);
         const b1 = new Float32Array([10, 20, 30, 40]);
         const r1 = add(a1, b1, { dstOverwrite: "a" });
@@ -402,7 +402,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-mul-inplace-sizes",
       `
-        import { mul } from "para:simd";
+        import { mul } from "@para/simd";
         const sizes = [3, 4, 5, 17, 127, 1023];
         for (const n of sizes) {
           const a = new Float32Array(n);
@@ -423,7 +423,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-empty-inplace",
       `
-        import { mulScalar, add } from "para:simd";
+        import { mulScalar, add } from "@para/simd";
         const a = new Float32Array(0);
         const r1 = mulScalar(a, 3, { dstOverwrite: "a" });
         const b = new Float64Array(0);
@@ -444,7 +444,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-output-threshold",
       `
-        import { mulScalar, addScalar, add, mul } from "para:simd";
+        import { mulScalar, addScalar, add, mul } from "@para/simd";
         function check(label, arr, expected) {
           let ok = arr.length === expected.length;
           for (let i = 0; i < arr.length && ok; i++) {
@@ -498,7 +498,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-dstoverwrite-invalid",
       `
-        import { mulScalar, add } from "para:simd";
+        import { mulScalar, add } from "@para/simd";
         const msgs = [];
         try { mulScalar(new Float32Array([1]), 2, { dstOverwrite: "b" }); msgs.push("NO_THROW"); }
         catch (e) { msgs.push(e instanceof TypeError ? "TYPE_ERROR" : "WRONG:" + e.name); }
@@ -515,7 +515,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-alloc-basic",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const a = simd.alloc(7, "f32");
         const b = simd.alloc(5, "f64");
         const plain = new Float32Array(4);
@@ -551,7 +551,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-alloc-invalid",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const msgs = [];
         try { simd.alloc(-1, "f32"); msgs.push("NO_THROW"); }
         catch (e) { msgs.push(e instanceof RangeError ? "RANGE" : "WRONG:" + e.name); }
@@ -575,7 +575,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-zerocopy-scalar",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const N = 2_000_000;
         const a = simd.alloc(N, "f32");
         for (let i = 0; i < N; i++) a[i] = i & 0xffff;
@@ -594,7 +594,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-zerocopy-binary",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const N = 2_000_000; // above copy-in threshold
         const a = simd.alloc(N, "f32");
         const b = simd.alloc(N, "f32");
@@ -615,7 +615,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-zerocopy-f64",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const a = simd.alloc(1000, "f64");
         const b = simd.alloc(1000, "f64");
         for (let i = 0; i < 1000; i++) { a[i] = i * 0.5; b[i] = i * 0.25; }
@@ -637,7 +637,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-zerocopy-equiv",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const N = 4096; // small — forces the copy-in path on the plain array
         const plain = new Float32Array(N);
         const alloc = simd.alloc(N, "f32");
@@ -679,7 +679,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-zerocopy-coexist",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const held = simd.alloc(1024, "f32");
         for (let i = 0; i < 1024; i++) held[i] = i;
         // Non-alloc ops after commit still work
@@ -707,7 +707,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-f32",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const a = new Float32Array([0.1, 0.9, 0.3, 0.7, 0.5, 0.95, 0.05, 0.8]);
         const idx = topK(a, 3);
         console.log(idx.constructor.name, Array.from(idx).join(","));
@@ -721,7 +721,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-f64",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const a = new Float64Array([3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]);
         const idx = topK(a, 4);
         console.log(Array.from(idx).join(","));
@@ -735,7 +735,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-ties",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const a = new Float32Array([1, 2, 2, 2, 1, 2]);
         const idx = topK(a, 3);
         console.log(Array.from(idx).join(","));
@@ -749,7 +749,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-zero",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const a = new Float32Array([1, 2, 3]);
         const idx = topK(a, 0);
         console.log(idx.constructor.name, idx.length);
@@ -763,7 +763,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-overflow",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const a = new Float32Array([1, 3, 2]);
         const idx = topK(a, 10);
         console.log(idx.length, Array.from(idx).join(","));
@@ -777,7 +777,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-nan",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const a = new Float32Array([1, NaN, 3, NaN, 2]);
         const idx = topK(a, 3);
         console.log(Array.from(idx).join(","));
@@ -791,7 +791,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-topk-invalid",
       `
-        import { topK } from "para:simd";
+        import { topK } from "@para/simd";
         const msgs = [];
         try { topK([1, 2, 3], 2); msgs.push("NO_THROW"); }
         catch (e) { msgs.push(e instanceof TypeError ? "TYPE" : "WRONG:" + e.name); }
@@ -810,7 +810,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-dst-invalid",
       `
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const a = new Float32Array([1, 2, 3]);
         const msgs = [];
         try { simd.mulScalar(a, 2, { dst: new Float64Array(3) }); msgs.push("NO_THROW"); }
@@ -834,7 +834,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-native-f32",
       `
-        import { sum, dot } from "para:simd";
+        import { sum, dot } from "@para/simd";
         const n = 2_000_000;
         const a = new Float32Array(n);
         const b = new Float32Array(n);
@@ -851,7 +851,7 @@ describe("para:simd", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-simd-native-f64",
       `
-        import { sum, dot } from "para:simd";
+        import { sum, dot } from "@para/simd";
         const n = 1_000_000;
         const a = new Float64Array(n);
         const b = new Float64Array(n);
@@ -869,7 +869,7 @@ describe("para:simd", () => {
       `
         // Reach the native kernels directly to exercise the C++ TypeError path
         // (the public API rejects mismatched inputs in JS first).
-        import { sum, dot } from "para:simd";
+        import { sum, dot } from "@para/simd";
         // Mixed types: dot() should throw on shape mismatch in JS-side
         // requireSameTypeAndLen, before reaching native.
         const msgs = [];

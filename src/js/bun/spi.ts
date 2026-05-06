@@ -30,7 +30,7 @@
 const native = $cpp("parabun_spi.cpp", "createParabunSpi");
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of para:signals's
+// Structural Signal types — keep this module agnostic of @para/signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / gpio.ts / i2c.ts.
 type Signal<T> = {
   get(): T;

@@ -12,7 +12,7 @@
 // `parabun:gpio` to drive the value signal at 50 Hz in the background.
 
 import gpio from "parabun:gpio";
-import signals from "para:signals";
+import signals from "@para/signals";
 
 const args = process.argv.slice(2);
 const sIdx = args.indexOf("--seconds");

@@ -1,5 +1,5 @@
 // Allocation-in-a-hot-loop microbench: baseline `new Uint8Array(N)` per
-// iteration vs para:arena Pool reuse. This is the narrowest possible
+// iteration vs @para/arena Pool reuse. This is the narrowest possible
 // scenario where pooling should win — everything else is held constant.
 //
 //   bun run build:release bench/parabun-arena-pool/run.ts
@@ -11,7 +11,7 @@ const RUNS = 5;
 
 const variants = [
   { name: "baseline (new Uint8Array)   ", path: `${HERE}baseline.js` },
-  { name: "parabun (para:arena Pool)    ", path: `${HERE}variant-parabun.js` },
+  { name: "parabun (@para/arena Pool)    ", path: `${HERE}variant-parabun.js` },
 ];
 
 function parseLine(s: string): { ms: number; ns: number } | null {

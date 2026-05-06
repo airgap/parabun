@@ -1,7 +1,7 @@
 // Browser shim for `parabun:gpu`. Two layers:
 //
 //   1. **Sync CPU path** for the upstream signatures (`matVec`,
-//      `matmul`, `dot`, `simdMap`) — scalar loops via para:simd. Keeps
+//      `matmul`, `dot`, `simdMap`) — scalar loops via @para/simd. Keeps
 //      existing .pts code compiling to the browser without an awkward
 //      sync→async migration.
 //

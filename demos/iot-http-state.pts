@@ -15,7 +15,7 @@
 // output is one more line in the effect.
 
 import gpio from "parabun:gpio";
-import signals from "para:signals";
+import signals from "@para/signals";
 
 const args = process.argv.slice(2);
 const portIdx = args.indexOf("--port");

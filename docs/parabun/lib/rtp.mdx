@@ -12,7 +12,7 @@ npm install @para/rtp
 ## Packet pack / parse
 
 ```ts
-import rtp from "para:rtp";
+import rtp from "@para/rtp";
 
 const wire = rtp.pack({
   payloadType: 111,         // Opus default in many SDP configurations
@@ -31,7 +31,7 @@ const { sequence, timestamp, payload, marker, ssrc } = rtp.parse(wire);
 ## JitterBuffer
 
 ```ts
-import rtp from "para:rtp";
+import rtp from "@para/rtp";
 
 const jb = new rtp.JitterBuffer({ depth: 8 });
 jb.push(packet);            // out-of-order is fine

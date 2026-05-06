@@ -15,7 +15,7 @@
 //      inside, so adding another input — `humidity`, a button, a door
 //      switch — is one more line in the body.
 
-import signals from "para:signals";
+import signals from "@para/signals";
 
 // Simulated 0.2 s sensor sweep. In a real deployment this would be
 // e.g. `sensor.smbus.readWord(0xFA)` against a BME280 over i2c.

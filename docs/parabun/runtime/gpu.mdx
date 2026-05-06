@@ -131,4 +131,4 @@ gpu.setBackend("cpu");        // force a backend
 
 - [`parabun:llm`](/parabun/runtime/llm) — heaviest user of `gpu.matVec` + `gpu.matMul`
 - [`parabun:image`](/parabun/runtime/image) — `image.blur({ gpu: true })` routes through `conv2D`
-- [`para:parallel.psort`](/parabun/lib/parallel) — CPU-side parallel radix sort (different from GPU `gpu.sort`)
+- [`@para/parallel.psort`](/parabun/lib/parallel) — CPU-side parallel radix sort (different from GPU `gpu.sort`)

@@ -6,7 +6,7 @@
 // `signals.effect(() => { ... })`. Identical behavior.
 
 import audio from "parabun:audio";
-import signals from "para:signals";
+import signals from "@para/signals";
 
 await using mic = await audio.capture({
   device: "default",

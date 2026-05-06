@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-// Parquet round-trip tests for para:arrow. Covers the codec matrix
+// Parquet round-trip tests for @para/arrow. Covers the codec matrix
 // (UNCOMPRESSED, SNAPPY, GZIP, ZSTD), basic + edge-case schemas, and
 // large-row stress to make sure dictionary + def-level paths hold up.
 //
@@ -11,9 +11,9 @@ import { describe, expect, test } from "bun:test";
 // byte-identically. Cross-validation against pyarrow / arrow-rs is a
 // follow-up benchmark, not a unit test.
 
-describe("para:arrow parquet — codec round-trip", () => {
+describe("@para/arrow parquet — codec round-trip", () => {
   test("uncompressed round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, name: "alice", score: 0.5 },
       { id: 2, name: "bob", score: 0.75 },
@@ -28,7 +28,7 @@ describe("para:arrow parquet — codec round-trip", () => {
   });
 
   test("snappy round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // First-row sentinel `0.5` (not `0`) so type inference picks float64
     // instead of int — `i * 1.5` is fractional from row 1 onward but
     // arrow.fromRows reads the first row to infer the column type.
@@ -40,7 +40,7 @@ describe("para:arrow parquet — codec round-trip", () => {
   });
 
   test("gzip round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // First-row sentinel `0.5` (not `0`) so type inference picks float64
     // instead of int — `i * 1.5` is fractional from row 1 onward but
     // arrow.fromRows reads the first row to infer the column type.
@@ -52,7 +52,7 @@ describe("para:arrow parquet — codec round-trip", () => {
   });
 
   test("zstd round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // First-row sentinel `0.5` (not `0`) so type inference picks float64
     // instead of int — `i * 1.5` is fractional from row 1 onward but
     // arrow.fromRows reads the first row to infer the column type.
@@ -64,7 +64,7 @@ describe("para:arrow parquet — codec round-trip", () => {
   });
 
   test("zstd compresses better than uncompressed on repeating data", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Compressible: long runs of repeating values.
     const rows = Array.from({ length: 1000 }, (_, i) => ({
       bucket: i % 4, // 4 distinct values, 250 each — high redundancy
@@ -79,7 +79,7 @@ describe("para:arrow parquet — codec round-trip", () => {
   });
 
   test("unknown compression option throws RangeError", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const batch = arrow.fromRows([{ x: 1 }]);
     expect(() =>
       // @ts-expect-error — bad codec on purpose
@@ -88,9 +88,9 @@ describe("para:arrow parquet — codec round-trip", () => {
   });
 });
 
-describe("para:arrow parquet — schema coverage", () => {
+describe("@para/arrow parquet — schema coverage", () => {
   test("int32 / float64 / utf8 round-trip", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { i: 1, f: 1.5, s: "alpha" },
       { i: 2, f: 2.5, s: "beta" },
@@ -102,7 +102,7 @@ describe("para:arrow parquet — schema coverage", () => {
   });
 
   test("int64 round-trips through bigint", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Force int64 by passing BigInt values explicitly.
     const rows = [
       { id: 1n << 40n, label: "big-1" },
@@ -116,7 +116,7 @@ describe("para:arrow parquet — schema coverage", () => {
   });
 
   test("boolean round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { name: "a", active: true },
       { name: "b", active: false },
@@ -128,7 +128,7 @@ describe("para:arrow parquet — schema coverage", () => {
   });
 
   test("nullable column round-trips with null preserved at the right rows", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, comment: "first" },
       { id: 2, comment: null },
@@ -141,7 +141,7 @@ describe("para:arrow parquet — schema coverage", () => {
   });
 
   test("PAR1 magic at start AND end", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const batch = arrow.fromRows([{ x: 1 }]);
     const bytes = arrow.toParquet(batch);
     expect(bytes.subarray(0, 4)).toEqual(new Uint8Array([0x50, 0x41, 0x52, 0x31]));
@@ -149,7 +149,7 @@ describe("para:arrow parquet — schema coverage", () => {
   });
 });
 
-describe("para:arrow parquet — column statistics", () => {
+describe("@para/arrow parquet — column statistics", () => {
   // Stats are emitted as field 12 of ColumnMetaData. They aren't
   // surfaced on the JS side of fromParquet (consumers materialize the
   // values directly), so we re-parse the file's footer and pull stats
@@ -372,7 +372,7 @@ describe("para:arrow parquet — column statistics", () => {
   }
 
   test("int32 column stats: correct min, max, null_count=0", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [{ k: 5 }, { k: 1 }, { k: 9 }, { k: 3 }, { k: 7 }];
     const bytes = arrow.toParquet(arrow.fromRows(rows));
     const stats = parseStatsFromFile(bytes);
@@ -380,7 +380,7 @@ describe("para:arrow parquet — column statistics", () => {
   });
 
   test("nullable column stats include null_count and skip nulls in min/max", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [{ v: 10 }, { v: null }, { v: 30 }, { v: null }, { v: 20 }];
     const bytes = arrow.toParquet(arrow.fromRows(rows));
     const stats = parseStatsFromFile(bytes);
@@ -388,7 +388,7 @@ describe("para:arrow parquet — column statistics", () => {
   });
 
   test("string column stats use UTF-8 lex order", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [{ s: "banana" }, { s: "apple" }, { s: "cherry" }];
     const bytes = arrow.toParquet(arrow.fromRows(rows));
     const stats = parseStatsFromFile(bytes);
@@ -396,7 +396,7 @@ describe("para:arrow parquet — column statistics", () => {
   });
 
   test("float64 column stats round-trip through reader for sin-wave data", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 100 }, (_, i) => ({ x: Math.sin((i + 1) * 0.123) * 100 }));
     const bytes = arrow.toParquet(arrow.fromRows(rows));
     const stats = parseStatsFromFile(bytes);
@@ -408,9 +408,9 @@ describe("para:arrow parquet — column statistics", () => {
   });
 });
 
-describe("para:arrow parquet — date32 logical type", () => {
+describe("@para/arrow parquet — date32 logical type", () => {
   test("Date values round-trip as Date objects through parquet", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, day: new Date("2024-01-15T00:00:00Z") },
       { id: 2, day: new Date("2024-06-30T00:00:00Z") },
@@ -427,20 +427,20 @@ describe("para:arrow parquet — date32 logical type", () => {
   });
 
   test("inferred column kind is date32, not int32", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const batch = arrow.fromRows([{ d: new Date("2020-01-01") }]);
     expect(batch.column("d").type.kind).toBe("date32");
   });
 
   test("decoded column kind is date32 (annotation round-trips)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const bytes = arrow.toParquet(arrow.fromRows([{ d: new Date("2020-01-01") }]));
     const decoded = arrow.fromParquet(bytes);
     expect(decoded.batches[0].columns[0].type.kind).toBe("date32");
   });
 
   test("partial-day timestamp floors to UTC day", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Mid-afternoon UTC, mid-evening Pacific — both should land on 2024-01-15.
     const rows = [{ d: new Date("2024-01-15T15:30:45Z") }];
     const bytes = arrow.toParquet(arrow.fromRows(rows));
@@ -449,7 +449,7 @@ describe("para:arrow parquet — date32 logical type", () => {
   });
 
   test("nullable date32 column handles null values", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, deadline: new Date("2024-12-31") },
       { id: 2, deadline: null },
@@ -463,7 +463,7 @@ describe("para:arrow parquet — date32 logical type", () => {
   });
 
   test("Column.get returns Date for date32 columns", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const batch = arrow.fromRows([{ d: new Date("2024-07-04") }, { d: new Date("2024-12-25") }]);
     const col = batch.column("d");
     const v0 = col.get(0);
@@ -475,9 +475,9 @@ describe("para:arrow parquet — date32 logical type", () => {
   });
 });
 
-describe("para:arrow parquet — timestamp logical types", () => {
+describe("@para/arrow parquet — timestamp logical types", () => {
   test("timestamp_millis preserves millisecond precision through parquet", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, ts: new Date("2024-01-15T15:30:45.123Z") },
       { id: 2, ts: new Date("2024-06-30T08:00:00.999Z") },
@@ -496,7 +496,7 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 
   test("timestamp_micros stores at micro resolution; Date-coerced result floors to ms", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Drive raw bigints (in micros) so we exercise sub-ms precision
     // the typed array can hold but JS Date can't expose. Compute the
     // micros from the target Date so the literal can't drift.
@@ -517,7 +517,7 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 
   test("Date input → timestamp_millis preserves the exact ms timestamp", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const d = new Date("2024-12-25T14:00:00.555Z");
     const bytes = arrow.toParquet(arrow.fromRows([{ ts: d }], { schema: { ts: "timestamp_millis" } }));
     const back = arrow.toRows(arrow.fromParquet(bytes));
@@ -525,7 +525,7 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 
   test("Date input → timestamp_micros multiplies ms by 1000", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const d = new Date("2024-12-25T14:00:00.555Z");
     const batch = arrow.fromRows([{ ts: d }], { schema: { ts: "timestamp_micros" } });
     // Underlying typed array should hold getTime() * 1000 in micros.
@@ -536,7 +536,7 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 
   test("nullable timestamp column handles null values", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, ts: new Date("2024-01-01T00:00:00Z") },
       { id: 2, ts: null },
@@ -550,7 +550,7 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 
   test("Column.get returns Date for both timestamp variants", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const d = new Date("2024-07-04T12:34:56.789Z");
     const ms = arrow.fromRows([{ ts: d }], { schema: { ts: "timestamp_millis" } }).column("ts");
     const us = arrow.fromRows([{ ts: d }], { schema: { ts: "timestamp_micros" } }).column("ts");
@@ -561,7 +561,7 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 
   test("date32 and timestamp_millis are distinct kinds for the same input", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const d = new Date("2024-07-04T15:30:00Z");
     // Default Date inference → date32.
     const date = arrow.fromRows([{ x: d }]).column("x");
@@ -575,9 +575,9 @@ describe("para:arrow parquet — timestamp logical types", () => {
   });
 });
 
-describe("para:arrow parquet — decimal128 logical type", () => {
+describe("@para/arrow parquet — decimal128 logical type", () => {
   test("string + number + bigint inputs all round-trip as scaled bigint", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, price: "12.34" }, // string → 123400 (×10^4)
       { id: 2, price: "0.05" }, // string → 500
@@ -601,7 +601,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("negative + edge values handled correctly", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [{ x: "-99.99" }, { x: "0" }, { x: "-0.01" }];
     const batch = arrow.fromRows(rows, {
       schema: { x: { kind: "decimal128", precision: 9, scale: 2 } },
@@ -613,7 +613,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("scale-truncating string drops sub-scale digits (round-toward-zero)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // scale=2 column gets "1.23456" — the .456 is truncated to .45.
     const rows = [{ amt: "1.23456" }];
     const batch = arrow.fromRows(rows, {
@@ -624,7 +624,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("invalid string throws TypeError", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     expect(() =>
       arrow.fromRows([{ x: "not-a-number" }], {
         schema: { x: { kind: "decimal128", precision: 9, scale: 2 } },
@@ -633,7 +633,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("nullable decimal column handles null values", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [{ price: "10.00" }, { price: null }, { price: "20.00" }];
     const batch = arrow.fromRows(rows, {
       schema: { price: { kind: "decimal128", precision: 9, scale: 2 } },
@@ -645,7 +645,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("precision out of range throws RangeError", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     expect(() =>
       arrow.fromRows([{ x: 1n }], {
         schema: { x: { kind: "decimal128", precision: 25, scale: 0 } }, // > 18
@@ -654,7 +654,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("Column.get returns scaled bigint", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const batch = arrow.fromRows([{ x: "42.00" }], {
       schema: { x: { kind: "decimal128", precision: 9, scale: 2 } },
     });
@@ -662,7 +662,7 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 
   test("schema-element precision + scale survive the round trip", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const batch = arrow.fromRows([{ amt: 5n }], {
       schema: { amt: { kind: "decimal128", precision: 7, scale: 3 } },
     });
@@ -673,9 +673,9 @@ describe("para:arrow parquet — decimal128 logical type", () => {
   });
 });
 
-describe("para:arrow parquet — INT96 / timestamp_nanos", () => {
+describe("@para/arrow parquet — INT96 / timestamp_nanos", () => {
   test("nanosecond-precision timestamps round-trip through INT96", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Build a Table directly so we can declare the column kind. The
     // BigInt64Array carries nanoseconds since 1970-01-01 UTC.
     const nanos = new BigInt64Array([
@@ -700,7 +700,7 @@ describe("para:arrow parquet — INT96 / timestamp_nanos", () => {
   });
 
   test("nullable INT96 column preserves null rows", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 5;
     const nanos = new BigInt64Array([1n, 0n, 1_700_000_000_000_000_000n, 0n, -1_000_000_000n]);
     // Validity bitmap: 1=present. Nulls at indices 1 and 3.
@@ -726,9 +726,9 @@ describe("para:arrow parquet — INT96 / timestamp_nanos", () => {
   });
 });
 
-describe("para:arrow parquet — FIXED_LEN_BYTE_ARRAY / fixed_size_binary", () => {
+describe("@para/arrow parquet — FIXED_LEN_BYTE_ARRAY / fixed_size_binary", () => {
   test("16-byte UUID round-trips through FLBA", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const W = 16;
     const N = 4;
     // 4 UUIDs (each 16 bytes). First two are well-known; rest are
@@ -760,7 +760,7 @@ describe("para:arrow parquet — FIXED_LEN_BYTE_ARRAY / fixed_size_binary", () =
   });
 
   test("8-byte FLBA with nulls preserves null rows as zeroed windows", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const W = 8;
     const N = 5;
     const buf = new Uint8Array(N * W);
@@ -786,9 +786,9 @@ describe("para:arrow parquet — FIXED_LEN_BYTE_ARRAY / fixed_size_binary", () =
   });
 });
 
-describe("para:arrow parquet — List<primitive>", () => {
+describe("@para/arrow parquet — List<primitive>", () => {
   test("List<int32> with REQUIRED outer round-trips through parquet", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 3 rows: [10,20,30], [], [40]. Total inner = 4.
     const offsets = new Int32Array([0, 3, 3, 4]);
     const childValues = new Int32Array([10, 20, 30, 40]);
@@ -812,7 +812,7 @@ describe("para:arrow parquet — List<primitive>", () => {
   });
 
   test("List<int32> OPTIONAL list with null + empty + populated rows", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 5 rows: [1,2], null, [], [3], [4,5,6]. Validity bits:
     // 1=present, 0=null. Bit pattern (LSB first): 1,0,1,1,1 → 0b11101.
     const offsets = new Int32Array([0, 2, 2, 2, 3, 6]);
@@ -838,7 +838,7 @@ describe("para:arrow parquet — List<primitive>", () => {
   });
 
   test("List<float64> round-trips with floats including ±0 + Infinity", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const offsets = new Int32Array([0, 4, 4, 7]);
     const childValues = new Float64Array([1.5, -1.5, 0, -0, Infinity, -Infinity, Math.PI]);
     const child = new arrow.Column({ kind: "float64" }, 7, childValues);
@@ -858,7 +858,7 @@ describe("para:arrow parquet — List<primitive>", () => {
   });
 
   test("List<utf8> round-trips with strings including unicode", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const offsets = new Int32Array([0, 2, 5]);
     const childValues = ["alpha", "β", "γαμμα", "δέλτα", "★"];
     const child = new arrow.Column({ kind: "utf8" }, 5, childValues as any);
@@ -877,9 +877,9 @@ describe("para:arrow parquet — List<primitive>", () => {
   });
 });
 
-describe("para:arrow parquet — bloom filters", () => {
+describe("@para/arrow parquet — bloom filters", () => {
   test("readBloomFilters returns empty maps when no bloomFilters option was set", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [
       { id: 1, name: "a" },
       { id: 2, name: "b" },
@@ -891,7 +891,7 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 
   test("int32 column: every inserted value mightContain (no false negatives)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 1_000;
     const rows = Array.from({ length: N }, (_, i) => ({ id: i * 7 + 13, tag: `t${i % 4}` }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), {
@@ -910,7 +910,7 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 
   test("int32 column: false-positive rate is reasonable", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Insert 1000 values, probe 10000 values that aren't in the set.
     // Expect FPR well below 5% — default 32 KB filter has plenty of
     // capacity at 1K NDV (~10⁻⁵ theoretical FPR).
@@ -934,7 +934,7 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 
   test("utf8 column: strings round-trip through the bloom filter", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const tags = ["alpha", "β", "γαμμα", "test", "data", "bloom", "filter", "★"];
     const rows = tags.map((t, i) => ({ id: i, tag: t }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), {
@@ -950,7 +950,7 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 
   test("multiple columns: independent filters per column", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 100 }, (_, i) => ({
       uid: i + 1000,
       sku: `SKU-${i}`,
@@ -971,7 +971,7 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 
   test("the data round-trips correctly when bloom filters are enabled", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 500 }, (_, i) => ({ id: i, label: `item-${i}` }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), {
       compression: "zstd",
@@ -982,7 +982,7 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 
   test("INT96 column rejects bloom-filter request (spec-defined)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 4;
     const nanos = new BigInt64Array([0n, 1_000_000_000n, 2_000_000_000n, 3_000_000_000n]);
     const col = new arrow.Column({ kind: "timestamp_nanos" }, N, nanos);
@@ -998,9 +998,9 @@ describe("para:arrow parquet — bloom filters", () => {
   });
 });
 
-describe("para:arrow parquet — Struct", () => {
+describe("@para/arrow parquet — Struct", () => {
   test("Struct<int32, utf8> round-trips through parquet", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 4;
     const ids = new Int32Array([10, 20, 30, 40]);
     const names = ["alpha", "beta", "gamma", "delta"];
@@ -1032,7 +1032,7 @@ describe("para:arrow parquet — Struct", () => {
   });
 
   test("Struct with nullable inner field preserves nulls", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 4;
     const ids = new Int32Array([1, 2, 3, 4]);
     const tags = ["a", "", "c", ""]; // indices 1 + 3 are null per the bitmap below
@@ -1064,7 +1064,7 @@ describe("para:arrow parquet — Struct", () => {
   });
 
   test("Struct alongside primitive columns in the same row group", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 3;
     const seqs = new Int32Array([100, 200, 300]);
     const xs = new Float64Array([1.5, 2.5, 3.5]);
@@ -1104,7 +1104,7 @@ describe("para:arrow parquet — Struct", () => {
   });
 
   test("OPTIONAL struct throws — only REQUIRED structs supported by writer", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 1;
     const idCol = new arrow.Column({ kind: "int32" }, N, new Int32Array([1]));
     const structType = {
@@ -1122,9 +1122,9 @@ describe("para:arrow parquet — Struct", () => {
   });
 });
 
-describe("para:arrow parquet — Map", () => {
+describe("@para/arrow parquet — Map", () => {
   test("Map<utf8, int32> round-trips through parquet", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 3 rows: {"a": 1, "b": 2}, {}, {"c": 3, "d": 4, "e": 5}.
     const offsets = new Int32Array([0, 2, 2, 5]);
     const keys = ["a", "b", "c", "d", "e"];
@@ -1165,7 +1165,7 @@ describe("para:arrow parquet — Map", () => {
   });
 
   test("Map with OPTIONAL value preserves null values per key", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 2 rows: {"x": 10, "y": null}, {"z": null}.
     const offsets = new Int32Array([0, 2, 3]);
     const keys = ["x", "y", "z"];
@@ -1197,9 +1197,9 @@ describe("para:arrow parquet — Map", () => {
   });
 });
 
-describe("para:arrow parquet — nested combinations", () => {
+describe("@para/arrow parquet — nested combinations", () => {
   test("Struct<Struct<…>> round-trips (nested struct of struct)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 3;
     const xs = new Float64Array([1, 2, 3]);
     const ys = new Float64Array([10, 20, 30]);
@@ -1233,7 +1233,7 @@ describe("para:arrow parquet — nested combinations", () => {
   });
 
   test("List<Struct<utf8, int32>> round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 3 rows: [{name:"a",x:1},{name:"b",x:2}], [], [{name:"c",x:3}]
     const N = 3;
     const offsets = new Int32Array([0, 2, 2, 3]);
@@ -1270,7 +1270,7 @@ describe("para:arrow parquet — nested combinations", () => {
   });
 
   test("List<Struct<utf8, int32>> with OPTIONAL field preserves inner nulls", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 2 rows: [{name:"x",val:10},{name:"y",val:null}], [{name:"z",val:99}]
     const N = 2;
     const offsets = new Int32Array([0, 2, 3]);
@@ -1307,7 +1307,7 @@ describe("para:arrow parquet — nested combinations", () => {
   });
 
   test("Struct<int32, List<utf8>> round-trips", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const N = 3;
     const ids = new Int32Array([1, 2, 3]);
     // Tags lists per row: ["red","green"], [], ["blue","yellow","cyan"].
@@ -1345,9 +1345,9 @@ describe("para:arrow parquet — nested combinations", () => {
   });
 });
 
-describe("para:arrow parquet — multi-row-group", () => {
+describe("@para/arrow parquet — multi-row-group", () => {
   test("multiRowGroup emits one parquet row group per input batch", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // Build a Table with 3 batches of 5 rows each.
     const schema = { fields: [{ name: "id", type: { kind: "int32" }, nullable: false }] };
     const batches = [0, 1, 2].map(g => {
@@ -1372,7 +1372,7 @@ describe("para:arrow parquet — multi-row-group", () => {
   });
 
   test("default (no multiRowGroup option) still merges into a single row group", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const schema = { fields: [{ name: "v", type: { kind: "int32" }, nullable: false }] };
     const batches = [0, 1].map(g => {
       const arr = new Int32Array([g, g + 1, g + 2]);
@@ -1386,7 +1386,7 @@ describe("para:arrow parquet — multi-row-group", () => {
   });
 
   test("multi-row-group filter callback runs per row group + can skip individual ones", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const schema = { fields: [{ name: "id", type: { kind: "int32" }, nullable: false }] };
     const batches = [0, 1, 2].map(g => {
       const ids = new Int32Array([g * 100, g * 100 + 1, g * 100 + 2]);
@@ -1418,9 +1418,9 @@ describe("para:arrow parquet — multi-row-group", () => {
   });
 });
 
-describe("para:arrow parquet — predicate pushdown", () => {
+describe("@para/arrow parquet — predicate pushdown", () => {
   test("filter receives stats + bloom for each row group", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 100 }, (_, i) => ({
       id: i + 1000,
       tag: `t${i % 4}`,
@@ -1453,7 +1453,7 @@ describe("para:arrow parquet — predicate pushdown", () => {
   });
 
   test("returning false skips the row group entirely", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 50 }, (_, i) => ({ id: i, name: `r${i}` }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "snappy" });
     const t = arrow.fromParquet(bytes, { filter: () => false });
@@ -1462,7 +1462,7 @@ describe("para:arrow parquet — predicate pushdown", () => {
   });
 
   test("returning true keeps the row group (default behaviour)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 50 }, (_, i) => ({ id: i, name: `r${i}` }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "snappy" });
     const t = arrow.fromParquet(bytes, { filter: () => true });
@@ -1471,7 +1471,7 @@ describe("para:arrow parquet — predicate pushdown", () => {
   });
 
   test("stats-based pushdown: skip when value is outside [min, max]", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 30 }, (_, i) => ({ score: i * 10 }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "uncompressed" });
     // Looking for score === 999 — definitely not in [0..290].
@@ -1495,7 +1495,7 @@ describe("para:arrow parquet — predicate pushdown", () => {
   });
 
   test("bloom-based pushdown: skip when filter says definitely-not-present", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 50 }, (_, i) => ({ uid: 100 * i, label: `x${i}` }));
     const bytes = arrow.toParquet(arrow.fromRows(rows), {
       compression: "uncompressed",
@@ -1514,7 +1514,7 @@ describe("para:arrow parquet — predicate pushdown", () => {
   });
 
   test("missing stats / missing bloom → keep when caller defaults that way", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = [{ note: "only one row" }];
     const bytes = arrow.toParquet(arrow.fromRows(rows), { compression: "uncompressed" });
     // No bloom filters were requested — get() returns undefined.
@@ -1528,16 +1528,16 @@ describe("para:arrow parquet — predicate pushdown", () => {
   });
 
   test("no filter option = keep all rows (regression)", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     const rows = Array.from({ length: 8 }, (_, i) => ({ k: i }));
     const bytes = arrow.toParquet(arrow.fromRows(rows));
     expect(arrow.fromParquet(bytes).numRows).toBe(8);
   });
 });
 
-describe("para:arrow parquet — scale", () => {
+describe("@para/arrow parquet — scale", () => {
   test("25K-row table round-trips through zstd", async () => {
-    const arrow = (await import("para:arrow")).default;
+    const arrow = (await import("@para/arrow")).default;
     // 25K is plenty to exercise the level-encoding + dictionary
     // pathways at scale without timing out the debug+ASAN build.
     // Production / release builds run this size in tens of ms.

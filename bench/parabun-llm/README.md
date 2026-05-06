@@ -9,8 +9,8 @@ process, with no Python and no `llama.cpp` binary in the loop.
 
 - `parabun:gpu` — every matmul in the forward pass goes through
   `gpu.matVec`, which dispatches a CUDA PTX kernel when a device is
-  present and falls back to `para:simd.matVec` otherwise.
-- `para:simd` — CPU fallback for matVec, plus softmax / activation
+  present and falls back to `@para/simd.matVec` otherwise.
+- `@para/simd` — CPU fallback for matVec, plus softmax / activation
   helpers.
 
 ## Running

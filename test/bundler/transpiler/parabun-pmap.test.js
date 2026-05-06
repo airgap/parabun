@@ -5,7 +5,7 @@ describe("Bun.pmap", () => {
   it("maps a pure function over an array in parallel", async () => {
     using dir = tempDir("parabun-pmap-basic", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function double(x) { return x * 2; }
         const out = await pmap(double, [1, 2, 3, 4, 5, 6, 7, 8]);
         console.log(JSON.stringify(out));
@@ -29,7 +29,7 @@ describe("Bun.pmap", () => {
   it("passes the index as the second argument", async () => {
     using dir = tempDir("parabun-pmap-index", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function withIdx(x, i) { return x + ":" + i; }
         const out = await pmap(withIdx, ["a", "b", "c"]);
         console.log(JSON.stringify(out));
@@ -52,7 +52,7 @@ describe("Bun.pmap", () => {
   it("returns empty array for empty input", async () => {
     using dir = tempDir("parabun-pmap-empty", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function double(x) { return x * 2; }
         const out = await pmap(double, []);
         console.log(JSON.stringify(out));
@@ -74,7 +74,7 @@ describe("Bun.pmap", () => {
   it("respects concurrency option", async () => {
     using dir = tempDir("parabun-pmap-conc", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function square(x) { return x * x; }
         const out = await pmap(square, [1, 2, 3, 4, 5], { concurrency: 2 });
         console.log(JSON.stringify(out));
@@ -96,7 +96,7 @@ describe("Bun.pmap", () => {
   it("propagates errors from the worker", async () => {
     using dir = tempDir("parabun-pmap-err", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function bomb(x) { if (x === 3) throw new Error("boom at " + x); return x; }
         try {
           await pmap(bomb, [1, 2, 3, 4]);
@@ -123,7 +123,7 @@ describe("Bun.pmap", () => {
   it("handles async pure functions", async () => {
     using dir = tempDir("parabun-pmap-async", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure async function asyncDouble(x) { return x * 2; }
         const out = await pmap(asyncDouble, [1, 2, 3]);
         console.log(JSON.stringify(out));
@@ -150,7 +150,7 @@ describe("Bun.pmap", () => {
     // records a per-item cost (i.e. the probe ran).
     using dir = tempDir("parabun-pmap-adaptive-inline", {
       "index.pjs": `
-        import parallel from "para:parallel";
+        import parallel from "@para/parallel";
         pure function double(x) { return x * 2; }
         const out = await parallel.pmap(double, [1, 2, 3, 4]);
         const state = parallel._heuristicState();
@@ -182,7 +182,7 @@ describe("Bun.pmap", () => {
   it("heuristic reuses EMA on subsequent calls with the same fn source", async () => {
     using dir = tempDir("parabun-pmap-adaptive-ema", {
       "index.pjs": `
-        import parallel from "para:parallel";
+        import parallel from "@para/parallel";
         pure function triple(x) { return x * 3; }
         // First call primes the EMA.
         await parallel.pmap(triple, [1, 2, 3, 4, 5, 6, 7, 8]);
@@ -215,7 +215,7 @@ describe("Bun.pmap", () => {
     // Honors caller override even when a parallel-y default would fire.
     using dir = tempDir("parabun-pmap-conc-1", {
       "index.pjs": `
-        import parallel from "para:parallel";
+        import parallel from "@para/parallel";
         pure function plus(x, i) { return x + i; }
         const out = await parallel.pmap(plus, [10, 20, 30, 40, 50], { concurrency: 1 });
         console.log(JSON.stringify(out));
@@ -242,7 +242,7 @@ describe("Bun.pmap", () => {
     // to return results in order and reassemble chunks correctly.
     using dir = tempDir("parabun-pmap-adaptive-heavy", {
       "index.pjs": `
-        import parallel from "para:parallel";
+        import parallel from "@para/parallel";
         pure function heavy(x) {
           let s = 0;
           for (let k = 0; k < 200000; k++) s += Math.sin(k) * x;
@@ -273,7 +273,7 @@ describe("Bun.pmap", () => {
   it("_resetHeuristic clears the EMA", async () => {
     using dir = tempDir("parabun-pmap-reset", {
       "index.pjs": `
-        import parallel from "para:parallel";
+        import parallel from "@para/parallel";
         pure function doubled(x) { return x * 2; }
         await parallel.pmap(doubled, [1, 2, 3, 4]);
         const before = Object.keys(parallel._heuristicState()).length;
@@ -298,7 +298,7 @@ describe("Bun.pmap", () => {
   it("rejects non-function first arg", async () => {
     using dir = tempDir("parabun-pmap-nofn", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         try {
           await pmap(42, [1,2,3]);
           console.log("NO_THROW");

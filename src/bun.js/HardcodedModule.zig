@@ -10,8 +10,8 @@ pub const HardcodedModule = enum {
     @"bun:test",
     @"bun:wrap",
     @"bun:sqlite",
-    @"para:arena",
-    @"para:arrow",
+    @"@para/arena",
+    @"@para/arrow",
     @"parabun:audio",
     @"parabun:camera",
     @"parabun:csv",
@@ -21,12 +21,12 @@ pub const HardcodedModule = enum {
     @"parabun:image",
     @"parabun:assistant",
     @"parabun:llm",
-    @"para:mcp",
-    @"para:parallel",
-    @"para:pipeline",
-    @"para:rtp",
-    @"para:signals",
-    @"para:simd",
+    @"@para/mcp",
+    @"@para/parallel",
+    @"@para/pipeline",
+    @"@para/rtp",
+    @"@para/signals",
+    @"@para/simd",
     @"parabun:speech",
     @"parabun:spi",
     @"parabun:video",
@@ -119,44 +119,45 @@ pub const HardcodedModule = enum {
         .{ "bun:main", .@"bun:main" },
         .{ "bun:test", .@"bun:test" },
         .{ "bun:sqlite", .@"bun:sqlite" },
-        .{ "para:arena", .@"para:arena" },
-        .{ "para:arrow", .@"para:arrow" },
+        // Para libraries — canonical @para/* names. Each registers a
+        // builtin that maps to the bundled JS impl from src/js/bun/<name>.ts.
+        .{ "@para/arena", .@"@para/arena" },
+        .{ "@para/arrow", .@"@para/arrow" },
+        .{ "@para/mcp", .@"@para/mcp" },
+        .{ "@para/parallel", .@"@para/parallel" },
+        .{ "@para/pipeline", .@"@para/pipeline" },
+        .{ "@para/rtp", .@"@para/rtp" },
+        .{ "@para/signals", .@"@para/signals" },
+        .{ "@para/simd", .@"@para/simd" },
+        // LYK-805 deprecation aliases: legacy `para:*` import strings
+        // route to their `@para/*` equivalents for one major release.
+        .{ "para:arena", .@"@para/arena" },
+        .{ "para:arrow", .@"@para/arrow" },
+        .{ "para:mcp", .@"@para/mcp" },
+        .{ "para:parallel", .@"@para/parallel" },
+        .{ "para:pipeline", .@"@para/pipeline" },
+        .{ "para:rtp", .@"@para/rtp" },
+        .{ "para:signals", .@"@para/signals" },
+        .{ "para:simd", .@"@para/simd" },
+        // Parabun runtime modules — native, runtime-only.
+        .{ "parabun:assistant", .@"parabun:assistant" },
         .{ "parabun:audio", .@"parabun:audio" },
         .{ "parabun:camera", .@"parabun:camera" },
         .{ "parabun:csv", .@"parabun:csv" },
-        // LYK-804: para:csv kept as a backward-compat alias for one
-        // major release. New imports should use parabun:csv per the
-        // namespace convention (parabun:* = native, @para/* = lib).
-        .{ "para:csv", .@"parabun:csv" },
-        // LYK-805: @para/* names resolve to the same builtins as
-        // their para:* counterparts. The transpiler now emits
-        // @para/foo for signal/effect/~>/-> lowering; the runtime
-        // honors both forms for one major release.
-        .{ "@para/arena", .@"para:arena" },
-        .{ "@para/arrow", .@"para:arrow" },
-        .{ "@para/csv", .@"parabun:csv" },
-        .{ "@para/mcp", .@"para:mcp" },
-        .{ "@para/parallel", .@"para:parallel" },
-        .{ "@para/pipeline", .@"para:pipeline" },
-        .{ "@para/rtp", .@"para:rtp" },
-        .{ "@para/signals", .@"para:signals" },
-        .{ "@para/simd", .@"para:simd" },
-        .{ "parabun:assistant", .@"parabun:assistant" },
         .{ "parabun:gpio", .@"parabun:gpio" },
         .{ "parabun:gpu", .@"parabun:gpu" },
         .{ "parabun:i2c", .@"parabun:i2c" },
         .{ "parabun:image", .@"parabun:image" },
         .{ "parabun:llm", .@"parabun:llm" },
-        .{ "para:mcp", .@"para:mcp" },
-        .{ "para:parallel", .@"para:parallel" },
-        .{ "para:pipeline", .@"para:pipeline" },
-        .{ "para:rtp", .@"para:rtp" },
-        .{ "para:signals", .@"para:signals" },
-        .{ "para:simd", .@"para:simd" },
         .{ "parabun:speech", .@"parabun:speech" },
         .{ "parabun:spi", .@"parabun:spi" },
         .{ "parabun:video", .@"parabun:video" },
         .{ "parabun:vision", .@"parabun:vision" },
+        // LYK-804: para:csv legacy alias → parabun:csv. parabun:csv is
+        // the runtime-native name; @para/csv is the npm-side name; both
+        // route to the same registered impl.
+        .{ "@para/csv", .@"parabun:csv" },
+        .{ "para:csv", .@"parabun:csv" },
         .{ "bun:wrap", .@"bun:wrap" },
         .{ "bun:internal-for-testing", .@"bun:internal-for-testing" },
         // Node.js
@@ -426,43 +427,45 @@ pub const HardcodedModule = enum {
             .{ "bun:jsc", .{ .path = "bun:jsc" } },
             .{ "bun:main", .{ .path = "bun:main" } },
             .{ "bun:sqlite", .{ .path = "bun:sqlite" } },
-            .{ "para:arena", .{ .path = "para:arena" } },
-            .{ "para:arrow", .{ .path = "para:arrow" } },
+            // Para libraries — canonical @para/* aliases.
+            .{ "@para/arena", .{ .path = "@para/arena" } },
+            .{ "@para/arrow", .{ .path = "@para/arrow" } },
+            .{ "@para/mcp", .{ .path = "@para/mcp" } },
+            .{ "@para/parallel", .{ .path = "@para/parallel" } },
+            .{ "@para/pipeline", .{ .path = "@para/pipeline" } },
+            .{ "@para/rtp", .{ .path = "@para/rtp" } },
+            .{ "@para/signals", .{ .path = "@para/signals" } },
+            .{ "@para/simd", .{ .path = "@para/simd" } },
+            // LYK-805 deprecation aliases — para:* import strings
+            // resolve to the @para/* builtin during the deprecation
+            // window. Drop one major release after consumers migrate.
+            .{ "para:arena", .{ .path = "@para/arena" } },
+            .{ "para:arrow", .{ .path = "@para/arrow" } },
+            .{ "para:mcp", .{ .path = "@para/mcp" } },
+            .{ "para:parallel", .{ .path = "@para/parallel" } },
+            .{ "para:pipeline", .{ .path = "@para/pipeline" } },
+            .{ "para:rtp", .{ .path = "@para/rtp" } },
+            .{ "para:signals", .{ .path = "@para/signals" } },
+            .{ "para:simd", .{ .path = "@para/simd" } },
+            // Parabun runtime modules.
             .{ "parabun:assistant", .{ .path = "parabun:assistant" } },
             .{ "parabun:audio", .{ .path = "parabun:audio" } },
             .{ "parabun:camera", .{ .path = "parabun:camera" } },
             .{ "parabun:csv", .{ .path = "parabun:csv" } },
-            // LYK-804: para:csv aliases to parabun:csv for one major
-            // release. Same module, two import strings during the
-            // deprecation window.
-            .{ "para:csv", .{ .path = "parabun:csv" } },
-            // LYK-805: @para/* aliases to the same builtins. The
-            // transpiler emits @para/foo for keyword lowering; both
-            // forms resolve to the same registered module.
-            .{ "@para/arena", .{ .path = "para:arena" } },
-            .{ "@para/arrow", .{ .path = "para:arrow" } },
-            .{ "@para/csv", .{ .path = "parabun:csv" } },
-            .{ "@para/mcp", .{ .path = "para:mcp" } },
-            .{ "@para/parallel", .{ .path = "para:parallel" } },
-            .{ "@para/pipeline", .{ .path = "para:pipeline" } },
-            .{ "@para/rtp", .{ .path = "para:rtp" } },
-            .{ "@para/signals", .{ .path = "para:signals" } },
-            .{ "@para/simd", .{ .path = "para:simd" } },
             .{ "parabun:gpio", .{ .path = "parabun:gpio" } },
             .{ "parabun:gpu", .{ .path = "parabun:gpu" } },
             .{ "parabun:i2c", .{ .path = "parabun:i2c" } },
             .{ "parabun:image", .{ .path = "parabun:image" } },
             .{ "parabun:llm", .{ .path = "parabun:llm" } },
-            .{ "para:mcp", .{ .path = "para:mcp" } },
-            .{ "para:parallel", .{ .path = "para:parallel" } },
-            .{ "para:pipeline", .{ .path = "para:pipeline" } },
-            .{ "para:rtp", .{ .path = "para:rtp" } },
-            .{ "para:signals", .{ .path = "para:signals" } },
-            .{ "para:simd", .{ .path = "para:simd" } },
             .{ "parabun:speech", .{ .path = "parabun:speech" } },
             .{ "parabun:spi", .{ .path = "parabun:spi" } },
             .{ "parabun:video", .{ .path = "parabun:video" } },
             .{ "parabun:vision", .{ .path = "parabun:vision" } },
+            // LYK-804: csv name aliases — @para/csv (npm-side) and
+            // para:csv (deprecation alias) both route to the runtime
+            // native parabun:csv builtin.
+            .{ "@para/csv", .{ .path = "parabun:csv" } },
+            .{ "para:csv", .{ .path = "parabun:csv" } },
             .{ "bun:wrap", .{ .path = "bun:wrap" } },
             .{ "bun:internal-for-testing", .{ .path = "bun:internal-for-testing" } },
             .{ "ffi", .{ .path = "bun:ffi" } },

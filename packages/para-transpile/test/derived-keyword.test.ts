@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { transpile } from "../src/index";
 
 // `derived NAME = EXPR` desugars to
-//   const NAME = require("para:signals").derived(() => EXPR)
+//   const NAME = require("@para/signals").derived(() => EXPR)
 // with the same bare-read rewrite the auto-promoted signal form already
 // performs (any signal read inside EXPR becomes `.get()`). The new
 // binding itself is also signal-tagged, so reads of NAME elsewhere become
@@ -16,13 +16,13 @@ describe("derived NAME = EXPR — basic desugar", () => {
     // No signal reads — the derived never re-fires, but we don't error.
     // Mirrors how `signal NAME = LITERAL` doesn't error.
     const out = transpile(`derived x = 42;`);
-    expect(out).toContain('require("para:signals").derived(() => 42)');
+    expect(out).toContain('require("@para/signals").derived(() => 42)');
     expect(out).toContain("const x = ");
   });
 
   test("single signal read becomes .get() inside the arrow body", () => {
     const out = transpile(`signal a = 1;\nderived b = a + 1;`);
-    expect(out).toContain('require("para:signals").derived(() => a.get() + 1)');
+    expect(out).toContain('require("@para/signals").derived(() => a.get() + 1)');
   });
 
   test("multi-signal read — each gets .get() inside the arrow body", () => {
@@ -99,11 +99,11 @@ describe("derived NAME = EXPR — TypeScript annotations", () => {
 describe("derived NAME = EXPR — does not interfere with `derived` identifier", () => {
   test("imported `derived` identifier still works as a call expression", () => {
     const out = transpile(
-      `import { signal, derived } from "para:signals";\nconst a = signal(1);\nconst b = derived(() => a.get() * 2);`,
+      `import { signal, derived } from "@para/signals";\nconst a = signal(1);\nconst b = derived(() => a.get() * 2);`,
     );
     // Should remain unchanged — `derived(...)` mid-statement isn't the keyword form.
     expect(out).toContain("derived(() => a.get() * 2)");
-    expect(out).toContain('import { signal, derived } from "para:signals"');
+    expect(out).toContain('import { signal, derived } from "@para/signals"');
   });
 });
 
@@ -115,21 +115,21 @@ describe("derived NAME = EXPR — does not interfere with `derived` identifier",
 describe("arrow / function expression as RHS — parity with the Zig parser", () => {
   test("`signal NAME = () => …` keeps the arrow as the cell value (no extra wrap)", () => {
     const out = transpile(`signal x = () => 5;`);
-    expect(out).toContain(`require("para:signals").signal(`);
+    expect(out).toContain(`require("@para/signals").signal(`);
     // Exactly one arrow lambda — the user's, passed straight to signal().
     expect(out).toMatch(/signal\(\(\)\s*=>\s*5\)/);
   });
 
   test("`derived NAME = () => …` wraps with a synthetic outer thunk (function-as-value)", () => {
     const out = transpile(`derived y = () => 7;`);
-    expect(out).toContain(`require("para:signals").derived(`);
+    expect(out).toContain(`require("@para/signals").derived(`);
     // Two arrows: outer thunk + the user's arrow as its return value.
     expect(out).toMatch(/derived\(\(\)\s*=>\s*\(\)\s*=>\s*7\)/);
   });
 
   test("`signal NAME = function() {…}` (function expression) lowers without crash", () => {
     const out = transpile(`signal x = function () { return 99; };`);
-    expect(out).toContain(`require("para:signals").signal(`);
+    expect(out).toContain(`require("@para/signals").signal(`);
     expect(out).toContain("function");
     expect(out).toContain("return 99");
   });
@@ -143,10 +143,10 @@ describe("arrow / function expression as RHS — parity with the Zig parser", ()
     // multi-decl shape end-to-end. Until the splitter is taught about
     // commas, parity here only holds for one decl per statement.
     const out = transpile(`signal a = () => 1;\nsignal b = () => 2;\nderived c = () => 3;\nderived d = () => 4;`);
-    expect(out).toMatch(/const a = require\("para:signals"\)\.signal\(\(\)\s*=>\s*1\)/);
-    expect(out).toMatch(/const b = require\("para:signals"\)\.signal\(\(\)\s*=>\s*2\)/);
-    expect(out).toMatch(/const c = require\("para:signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*3\)/);
-    expect(out).toMatch(/const d = require\("para:signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*4\)/);
+    expect(out).toMatch(/const a = require\("@para/signals"\)\.signal\(\(\)\s*=>\s*1\)/);
+    expect(out).toMatch(/const b = require\("@para/signals"\)\.signal\(\(\)\s*=>\s*2\)/);
+    expect(out).toMatch(/const c = require\("@para/signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*3\)/);
+    expect(out).toMatch(/const d = require\("@para/signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*4\)/);
   });
 
   test("arrow with parameters as RHS", () => {

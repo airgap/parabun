@@ -203,7 +203,7 @@ class GGUFFile {
           // Read quants as int8 one at a time. A DataView per-byte loop is
           // fine here — this runs once per model load, not on a hot path.
           // If we ever need faster, swap to a typed Int8Array view + scalar
-          // mul, or a para:simd kernel.
+          // mul, or a @para/simd kernel.
           for (let i = 0; i < QK8_0; i++) {
             out[outBase + i] = this.#view.getInt8(qBase + i) * scale;
           }

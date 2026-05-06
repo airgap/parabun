@@ -5,7 +5,7 @@ per-call copy.
 
 Answers one question the main `bench/parabun-gpu-matvec` run could not:
 **once the HtoD cost is amortized across many `matVec` calls, does the
-CUDA kernel beat `para:simd`?** Yes — by a lot, on an RTX 4070 Ti.
+CUDA kernel beat `@para/simd`?** Yes — by a lot, on an RTX 4070 Ti.
 
 The general matVec bench keeps `gpu.matVec(mat, vec, M, K)` as the
 non-resident path, which pays `cuMemAlloc + cuMemcpyHtoD +

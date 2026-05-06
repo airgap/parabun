@@ -1,4 +1,4 @@
-// Hardcoded module "para:parallel"
+// Hardcoded module "@para/parallel"
 //
 // Parabun: parallel map over arrays via a Worker pool. The mapping function
 // must be pure (no closures, no `this`, no impure globals). We ship it to the
@@ -7,7 +7,7 @@
 
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of para:signals's
+// Structural Signal types — keep this module agnostic of @para/signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / vision.ts / rtp.ts.
 type Signal<T> = {
   get(): T;
@@ -939,14 +939,14 @@ interface Pool {
 function pool(opts: { size?: number; module: string }): Pool {
   const moduleArg = opts?.module;
   if (typeof moduleArg !== "string" || moduleArg.length === 0) {
-    throw new TypeError("para:parallel pool: `module` must be an absolute path or file: URL string");
+    throw new TypeError("@para/parallel pool: `module` must be an absolute path or file: URL string");
   }
   // Heuristic: reject obviously-relative paths early so callers don't get a
   // confusing "module not found" from the worker. Bare specifiers (e.g.
   // package names) are allowed; they resolve from the worker context.
   if (moduleArg.startsWith("./") || moduleArg.startsWith("../")) {
     throw new TypeError(
-      "para:parallel pool: `module` must be absolute — relative paths can't resolve in a worker. " +
+      "@para/parallel pool: `module` must be absolute — relative paths can't resolve in a worker. " +
         'Use `import.meta.resolve("./...")` or `path.resolve(...)`.',
     );
   }
@@ -1070,7 +1070,7 @@ function pool(opts: { size?: number; module: string }): Pool {
     if (disposed) return Promise.reject(new Error("@para/parallel pool: disposed"));
     // If every worker failed init, fail fast — queueing forever is worse.
     if (workers.length > 0 && workers.every(e => e.initOk === false)) {
-      return Promise.reject(new Error(initFailureMessage ?? "para:parallel pool: all workers failed to init"));
+      return Promise.reject(new Error(initFailureMessage ?? "@para/parallel pool: all workers failed to init"));
     }
     return new Promise<T>((resolve, reject) => {
       // A worker is dispatchable only when its init has succeeded
@@ -1129,10 +1129,10 @@ function pool(opts: { size?: number; module: string }): Pool {
 
   async function map<T, U>(fnName: string, array: readonly T[], opts?: { chunks?: number }): Promise<U[]> {
     if (typeof fnName !== "string" || fnName.length === 0) {
-      throw new TypeError("para:parallel pool.map: fnName must be a non-empty string");
+      throw new TypeError("@para/parallel pool.map: fnName must be a non-empty string");
     }
     if (!Array.isArray(array)) {
-      throw new TypeError("para:parallel pool.map: array must be a JS array");
+      throw new TypeError("@para/parallel pool.map: array must be a JS array");
     }
     const len = array.length;
     if (len === 0) return [];
@@ -1161,13 +1161,13 @@ function pool(opts: { size?: number; module: string }): Pool {
     opts?: { chunks?: number; init?: A },
   ): Promise<A> {
     if (typeof chunkFn !== "string" || chunkFn.length === 0) {
-      throw new TypeError("para:parallel pool.reduce: chunkFn must be a non-empty string");
+      throw new TypeError("@para/parallel pool.reduce: chunkFn must be a non-empty string");
     }
     if (typeof mergeFn !== "string" || mergeFn.length === 0) {
-      throw new TypeError("para:parallel pool.reduce: mergeFn must be a non-empty string");
+      throw new TypeError("@para/parallel pool.reduce: mergeFn must be a non-empty string");
     }
     if (!Array.isArray(array)) {
-      throw new TypeError("para:parallel pool.reduce: array must be a JS array");
+      throw new TypeError("@para/parallel pool.reduce: array must be a JS array");
     }
     const len = array.length;
     const init = opts?.init;
@@ -1240,7 +1240,7 @@ class Mutex {
    */
   constructor(sab?: SharedArrayBuffer) {
     if (sab !== undefined) {
-      if (sab.byteLength < 4) throw new RangeError("para:parallel: Mutex SAB must be >= 4 bytes");
+      if (sab.byteLength < 4) throw new RangeError("@para/parallel: Mutex SAB must be >= 4 bytes");
       this.sab = sab;
     } else {
       this.sab = new SharedArrayBuffer(4);
@@ -1327,10 +1327,10 @@ class Semaphore {
 
   constructor(initialPermits: number, sab?: SharedArrayBuffer) {
     if (!Number.isInteger(initialPermits) || initialPermits < 0) {
-      throw new RangeError("para:parallel: Semaphore initialPermits must be a non-negative integer");
+      throw new RangeError("@para/parallel: Semaphore initialPermits must be a non-negative integer");
     }
     if (sab !== undefined) {
-      if (sab.byteLength < 4) throw new RangeError("para:parallel: Semaphore SAB must be >= 4 bytes");
+      if (sab.byteLength < 4) throw new RangeError("@para/parallel: Semaphore SAB must be >= 4 bytes");
       this.sab = sab;
     } else {
       this.sab = new SharedArrayBuffer(4);

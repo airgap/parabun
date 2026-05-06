@@ -8,7 +8,7 @@ import { bunExe } from "harness";
 // Two paths covered:
 //   1. Inline `{ name, schema, run }` tools — the dispatch happens in
 //      this process, no subprocess required.
-//   2. MCP connections — para:mcp's stdio-spawned fixture-server.ts is
+//   2. MCP connections — @para/mcp's stdio-spawned fixture-server.ts is
 //      reused; the assistant flattens its tool list and routes calls.
 
 const llmCandidates = [
@@ -83,7 +83,7 @@ describe("parabun:assistant tools (LYK-734)", () => {
 
   test("MCP connection flattens into the assistant's tool list", async () => {
     if (!haveLLM) return;
-    const mcp = (await import("para:mcp")).default;
+    const mcp = (await import("@para/mcp")).default;
     const assistant = (await import("parabun:assistant")).default;
 
     await using conn = await mcp.connect("stdio", bunExe(), { args: [mcpFixture] });

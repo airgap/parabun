@@ -11,7 +11,7 @@
 // Fan-out across 8 workers drops the per-row selection work to ~0.3 ms.
 // With the copy-to-SAB gone, this path should finally pay off.
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 import { GpuFloat32Array, matmul } from "parabun:gpu";
 import { generateBatch, N, D, K } from "./gen.js";
 
@@ -19,7 +19,7 @@ const { pmap } = parallel;
 const CONCURRENCY = 8;
 
 // Fixed-size sorted-array insertion top-K, inlined because pure fns
-// shipped to the worker pool can't require() para:simd.
+// shipped to the worker pool can't require() @para/simd.
 pure function topKChunk(chunk) {
   const scores = chunk.scores;
   const startQ = chunk.startQ;

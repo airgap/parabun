@@ -1,4 +1,4 @@
-// Persistent Worker pool for `para:parallel` — `pmap` / `preduce` /
+// Persistent Worker pool for `@para/parallel` — `pmap` / `preduce` /
 // `run`, with a transparent sequential fallback when Worker + `new
 // Function` aren't available (CSP-restricted contexts, non-browser
 // hosts that lack Worker).
@@ -243,7 +243,7 @@ class Pool {
 
   #dispatch(task) {
     if (this.#closed) {
-      task.reject(new Error("para:parallel: pool is disposed"));
+      task.reject(new Error("@para/parallel: pool is disposed"));
       return;
     }
     if (task.signal && task.signal.aborted) {
@@ -260,7 +260,7 @@ class Pool {
 
   #runOnSlot(slot, task) {
     if (this.#closed) {
-      task.reject(new Error("para:parallel: pool is disposed"));
+      task.reject(new Error("@para/parallel: pool is disposed"));
       return;
     }
     slot.busy = true;
@@ -304,7 +304,7 @@ class Pool {
     const task = slot.currentTask;
     if (task) {
       this.#cleanupTaskHandlers(task);
-      task.reject(err && err.message ? new Error(err.message) : new Error("para:parallel: worker error"));
+      task.reject(err && err.message ? new Error(err.message) : new Error("@para/parallel: worker error"));
     }
     this.#replaceSlot(slot.index);
   }
@@ -355,7 +355,7 @@ class Pool {
   #waitForSlot(signal) {
     return new Promise((resolve, reject) => {
       if (this.#closed) {
-        reject(new Error("para:parallel: pool is disposed"));
+        reject(new Error("@para/parallel: pool is disposed"));
         return;
       }
       if (signal && signal.aborted) {
@@ -407,7 +407,7 @@ class Pool {
 
   #ensureFn(slot, fnSrc, signal) {
     if (slot.fnSrc === fnSrc) return Promise.resolve();
-    if (this.#closed) return Promise.reject(new Error("para:parallel: pool is disposed"));
+    if (this.#closed) return Promise.reject(new Error("@para/parallel: pool is disposed"));
     return new Promise((resolve, reject) => {
       const id = this.#nextRpcId++;
       let abortListener = null;
@@ -630,17 +630,17 @@ class Pool {
     if (this.#closed) return;
     this.#closed = true;
     for (const task of this.#queue) {
-      task.reject(new Error("para:parallel: pool is disposed"));
+      task.reject(new Error("@para/parallel: pool is disposed"));
     }
     this.#queue.length = 0;
     for (const waiter of this.#waiters) {
-      waiter.reject(new Error("para:parallel: pool is disposed"));
+      waiter.reject(new Error("@para/parallel: pool is disposed"));
     }
     this.#waiters.length = 0;
     // Reject any in-flight init operation. The worker about to be
     // terminated would otherwise drop the message-listener silently.
     for (const reject of this.#pendingInits) {
-      reject(new Error("para:parallel: pool is disposed"));
+      reject(new Error("@para/parallel: pool is disposed"));
     }
     this.#pendingInits.clear();
     // Reject any in-flight task BEFORE terminating its worker so
@@ -649,7 +649,7 @@ class Pool {
       if (!slot) continue;
       if (slot.currentTask) {
         this.#cleanupTaskHandlers(slot.currentTask);
-        slot.currentTask.reject(new Error("para:parallel: pool is disposed"));
+        slot.currentTask.reject(new Error("@para/parallel: pool is disposed"));
         slot.currentTask = null;
       }
       try {

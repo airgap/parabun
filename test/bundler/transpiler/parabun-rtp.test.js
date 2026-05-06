@@ -14,12 +14,12 @@ async function runFixture(prefix, source) {
   return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
 }
 
-describe("para:rtp", () => {
+describe("@para/rtp", () => {
   it("packs a minimal packet with the right fixed-header layout", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-pack-minimal",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const packet = rtp.pack({
           payloadType: 111,            // dynamic / Opus
           sequence: 0x1234,
@@ -48,7 +48,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-marker",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const packet = rtp.pack({
           payloadType: 96, sequence: 0, timestamp: 0, ssrc: 0,
           marker: true,
@@ -66,7 +66,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-csrc",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const csrcs = [0x11111111, 0x22222222, 0x33333333];
         const packet = rtp.pack({
           payloadType: 96, sequence: 1, timestamp: 0, ssrc: 0xABCD,
@@ -90,7 +90,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-roundtrip",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const opts = {
           payloadType: 111,
           sequence: 0xBEEF,
@@ -132,7 +132,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-padding",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         // Header: V=2, P=1, X=0, CC=0 → 0xA0
         const packet = new Uint8Array(12 + 4 + 3);
         packet[0] = 0xA0;
@@ -159,7 +159,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-extension",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         // V=2, P=0, X=1, CC=0 → 0x90
         const packet = new Uint8Array(12 + 4 + 2);
         packet[0] = 0x90;
@@ -185,7 +185,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-bad-pt",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         try {
           rtp.pack({ payloadType: 200, sequence: 0, timestamp: 0, ssrc: 0, payload: new Uint8Array(0) });
           console.log("NO_THROW");
@@ -202,7 +202,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-truncated",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         try {
           rtp.parse(new Uint8Array(8));
           console.log("NO_THROW");
@@ -219,7 +219,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-bad-version",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const packet = new Uint8Array(12);
         packet[0] = 0xC0;  // V=3 (top two bits)
         try {
@@ -238,7 +238,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-jb-inorder",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const jb = new rtp.JitterBuffer();
         const mkPkt = (seq) => rtp.parse(rtp.pack({
           payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
@@ -263,7 +263,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-jb-reorder",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const jb = new rtp.JitterBuffer();
         const mkPkt = (seq) => rtp.parse(rtp.pack({
           payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
@@ -290,7 +290,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-jb-loss",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const jb = new rtp.JitterBuffer({ maxLag: 2 });
         const mkPkt = (seq) => rtp.parse(rtp.pack({
           payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
@@ -324,7 +324,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-jb-late",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const jb = new rtp.JitterBuffer();
         const mkPkt = (seq) => rtp.parse(rtp.pack({
           payloadType: 96, sequence: seq, timestamp: seq * 320, ssrc: 1,
@@ -348,7 +348,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-jb-wrap",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         const jb = new rtp.JitterBuffer();
         const mkPkt = (seq) => rtp.parse(rtp.pack({
           payloadType: 96, sequence: seq, timestamp: 0, ssrc: 1,
@@ -375,7 +375,7 @@ describe("para:rtp", () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-jb-bad-maxlag",
       `
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
         try {
           new rtp.JitterBuffer({ maxLag: 0 });
           console.log("NO_THROW");
@@ -389,14 +389,14 @@ describe("para:rtp", () => {
   });
 
   it("voice-pipeline integration: Opus packet → RTP wire → parse → payload matches", async () => {
-    // The use case para:rtp exists for: take an Opus-encoded frame, wrap
+    // The use case @para/rtp exists for: take an Opus-encoded frame, wrap
     // it in RTP for transport, parse on the receiving end, recover the
     // bytes byte-for-byte.
     const { stdout, exitCode } = await runFixture(
       "parabun-rtp-opus-integration",
       `
         import audio from "parabun:audio";
-        import rtp from "para:rtp";
+        import rtp from "@para/rtp";
 
         const enc = new audio.OpusEncoder({ sampleRate: 16000, channels: 1, bitrate: 32000 });
         const samples = new Float32Array(320);

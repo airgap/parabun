@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-// para:signals.resource — explicit-lifecycle reactive primitive.
+// @para/signals.resource — explicit-lifecycle reactive primitive.
 // Setup runs sync, registers cleanups via ctx.onDispose, and exports
 // signals that the handle re-exposes alongside lifecycle members
 // (alive, dispose, [Symbol.dispose], [Symbol.asyncDispose], use).
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-describe("para:signals.resource", () => {
+describe("@para/signals.resource", () => {
   test("setup exports become handle properties; handle adds lifecycle", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const r = sigs.resource(({ signal: sig }) => {
       const a = sig(1);
       const b = sig("x");
@@ -25,7 +25,7 @@ describe("para:signals.resource", () => {
   });
 
   test("dispose runs cleanups in reverse-registration order, flips alive", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const order: string[] = [];
     const r = sigs.resource(({ onDispose }) => {
       onDispose(() => order.push("first-registered"));
@@ -38,7 +38,7 @@ describe("para:signals.resource", () => {
   });
 
   test("dispose is idempotent", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     let calls = 0;
     const r = sigs.resource(({ onDispose }) => {
       onDispose(() => calls++);
@@ -51,7 +51,7 @@ describe("para:signals.resource", () => {
   });
 
   test("[Symbol.dispose] calls dispose()", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     let cleaned = false;
     const r = sigs.resource(({ onDispose }) => {
       onDispose(() => (cleaned = true));
@@ -63,7 +63,7 @@ describe("para:signals.resource", () => {
   });
 
   test("setup throw rolls back partial cleanups", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     let cleaned = false;
     expect(() => {
       sigs.resource(({ onDispose }) => {
@@ -75,7 +75,7 @@ describe("para:signals.resource", () => {
   });
 
   test(".use(fn) effect auto-disposes when resource closes", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const r = sigs.resource(({ signal: sig }) => ({ v: sig(1) }));
     let runs = 0;
     r.use(() => {
@@ -91,7 +91,7 @@ describe("para:signals.resource", () => {
   });
 
   test("alive flips to false on dispose with one final notification", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const r = sigs.resource(({ signal: sig }) => ({ v: sig(0) }));
     const seen: boolean[] = [];
     sigs.effect(() => seen.push(r.alive.get()));
@@ -101,9 +101,9 @@ describe("para:signals.resource", () => {
   });
 });
 
-describe("para:signals.fromAsyncIter", () => {
+describe("@para/signals.fromAsyncIter", () => {
   test("pumps values from an async generator into a resource-shaped signal", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     async function* src() {
       yield 1;
       await sleep(5);
@@ -119,7 +119,7 @@ describe("para:signals.fromAsyncIter", () => {
   });
 
   test("dispose calls iterator.return() to release source state", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     let returnCalled = false;
     const src = {
       [Symbol.asyncIterator]() {
@@ -142,9 +142,9 @@ describe("para:signals.fromAsyncIter", () => {
   });
 });
 
-describe("para:signals.fromStream", () => {
+describe("@para/signals.fromStream", () => {
   test("pumps a ReadableStream into a resource-shaped signal", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const stream = new ReadableStream<string>({
       start(controller) {
         controller.enqueue("a");
@@ -160,9 +160,9 @@ describe("para:signals.fromStream", () => {
   });
 });
 
-describe("para:signals.fromEventTarget", () => {
+describe("@para/signals.fromEventTarget", () => {
   test("listens for events; updates signal; removes listener on dispose", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const target = new EventTarget();
     const r = sigs.fromEventTarget<number>(target, "ping", { initial: 0, map: (e: any) => e.detail });
     target.dispatchEvent(new CustomEvent("ping", { detail: 7 }));
@@ -173,9 +173,9 @@ describe("para:signals.fromEventTarget", () => {
   });
 });
 
-describe("para:signals.throttled / debounced", () => {
+describe("@para/signals.throttled / debounced", () => {
   test("throttled emits leading immediately then trailing after window", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const s = sigs.signal(0);
     const t = sigs.throttled(s, 50);
     const seen: number[] = [];
@@ -191,7 +191,7 @@ describe("para:signals.throttled / debounced", () => {
   });
 
   test("debounced only emits after silence", async () => {
-    const sigs = (await import("para:signals")).default;
+    const sigs = (await import("@para/signals")).default;
     const s = sigs.signal(0);
     const d = sigs.debounced(s, 30);
     const seen: number[] = [];

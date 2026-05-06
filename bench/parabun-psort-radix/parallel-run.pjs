@@ -7,7 +7,7 @@
 // single-threaded — passing `{ serial: true }` here just makes that
 // path explicit so we can compare side-by-side at the same N.
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 
 const SIZES = [4_000_000, 5_000_000, 10_000_000, 25_000_000];
 const KINDS = [

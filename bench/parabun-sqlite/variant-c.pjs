@@ -1,4 +1,4 @@
-// Variant C: parabun-optimized. Uses para:simd primitives and a pure function
+// Variant C: parabun-optimized. Uses @para/simd primitives and a pure function
 // to demonstrate practical speedup on the analytical step once data has
 // been extracted from SQLite.
 //
@@ -14,7 +14,7 @@
 //     SIMD win.
 
 import { Database } from "bun:sqlite";
-import { sum as simdSum, dot as simdDot } from "para:simd";
+import { sum as simdSum, dot as simdDot } from "@para/simd";
 
 const DB_PATH = new URL("./bench.db", import.meta.url).pathname;
 const N_SENSORS = 8;

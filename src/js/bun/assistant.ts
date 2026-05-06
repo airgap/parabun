@@ -61,7 +61,7 @@ const speech = require("./speech.ts");
 const llmMod = require("./llm.ts");
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of para:signals's
+// Structural Signal types — keep this module agnostic of @para/signals's
 // class hierarchy. Same shape as audio.ts / llm.ts / speech.ts.
 type Signal<T> = {
   get(): T;
@@ -120,7 +120,7 @@ type InlineTool = {
 };
 
 /**
- * Anything with `.tools: ToolDescriptor[]` + `.call(name, args)` — `para:mcp`'s
+ * Anything with `.tools: ToolDescriptor[]` + `.call(name, args)` — `@para/mcp`'s
  * `MCPConnection` is the canonical implementation. We deliberately don't
  * `require("./mcp.ts")` for the type so `parabun:assistant` doesn't pull MCP into
  * every assistant binary; the MCP connection is identified structurally.
@@ -227,7 +227,7 @@ type AssistantOptions = {
   memory?: string | { path: string };
   /**
    * Tools the assistant can invoke during a chat turn. Accepts a mix of:
-   *   - `para:mcp` connection objects (every tool the connection exposes
+   *   - `@para/mcp` connection objects (every tool the connection exposes
    *     is flattened into the assistant's tool list).
    *   - Inline `{ name, description?, schema, run }` descriptors.
    *

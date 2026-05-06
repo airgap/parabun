@@ -8,7 +8,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, pipeParallel } from "para:pipeline";
+        import { map, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         const data = Array.from({ length: 500 }, (_, i) => i);
         const out = await pipeParallel(data, map(double));
@@ -32,7 +32,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, pipeParallel } from "para:pipeline";
+        import { map, pipeParallel } from "@para/pipeline";
         pure function addOne(x) { return x + 1; }
         pure function double(x) { return x * 2; }
         pure function square(x) { return x * x; }
@@ -61,7 +61,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, filter, pipeParallel } from "para:pipeline";
+        import { map, filter, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         pure function isEven(x) { return x % 4 === 0; }
         pure function addTen(x) { return x + 10; }
@@ -90,7 +90,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, reduce, pipeParallel } from "para:pipeline";
+        import { map, reduce, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         pure function add(acc, x) { return acc + x; }
         const data = Array.from({ length: 500 }, (_, i) => i + 1);
@@ -115,7 +115,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, collect, pipeParallel } from "para:pipeline";
+        import { map, collect, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         const out = await pipeParallel([1, 2, 3], map(double));
         console.log(JSON.stringify(out));
@@ -137,7 +137,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, pipeParallel } from "para:pipeline";
+        import { map, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         const out = await pipeParallel([], map(double));
         console.log(JSON.stringify(out));
@@ -156,8 +156,8 @@ describe("pipeParallel", () => {
   it("accepts iterable source (generator)", async () => {
     using dir = tempDir("pipe-par-gen", {
       "index.pjs": `
-        import { map, pipeParallel } from "para:pipeline";
-        import { range } from "para:pipeline";
+        import { map, pipeParallel } from "@para/pipeline";
+        import { range } from "@para/pipeline";
         pure function square(x) { return x * x; }
         const out = await pipeParallel(range(300), map(square));
         console.log(JSON.stringify({ len: out.length, first: out[0], last: out[299] }));
@@ -184,7 +184,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { pipeParallel } from "para:pipeline";
+        import { pipeParallel } from "@para/pipeline";
         const out = await pipeParallel([1, 2, 3]);
         console.log(JSON.stringify(out));
         `,
@@ -205,7 +205,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, pipe, collect } from "para:pipeline";
+        import { map, pipe, collect } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         const out = await collect(pipe([1, 2, 3], map(double)));
         console.log(JSON.stringify(out));
@@ -227,7 +227,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, reduce, pipeParallel } from "para:pipeline";
+        import { map, reduce, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         pure function addOne(x) { return x + 1; }
         pure function add(acc, x) { return acc + x; }
@@ -253,7 +253,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, reduce, pipeParallel } from "para:pipeline";
+        import { map, reduce, pipeParallel } from "@para/pipeline";
         pure function square(x) { return x * x; }
         pure function add(acc, x) { return acc + x; }
         const data = Array.from({ length: 500 }, (_, i) => i + 1);
@@ -275,7 +275,7 @@ describe("pipeParallel", () => {
   it("map|>filter|>map|>reduce full pipeline", async () => {
     using dir = tempDir("pipe-par-full", {
       "index.pjs": `
-        import { map, filter, reduce, pipeParallel } from "para:pipeline";
+        import { map, filter, reduce, pipeParallel } from "@para/pipeline";
         pure function triple(x) { return x * 3; }
         pure function isOdd(x) { return x % 2 !== 0; }
         pure function negate(x) { return -x; }
@@ -313,7 +313,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, pipeParallel } from "para:pipeline";
+        import { map, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         pure function addOne(x) { return x + 1; }
         const data = new Float32Array([1, 2, 3, 4, 5]);
@@ -342,7 +342,7 @@ describe("pipeParallel", () => {
         bunExe(),
         "-e",
         `
-        import { map, reduce, pipeParallel } from "para:pipeline";
+        import { map, reduce, pipeParallel } from "@para/pipeline";
         pure function double(x) { return x * 2; }
         pure function add(acc, x) { return acc + x; }
         const data = new Float32Array(Array.from({ length: 500 }, (_, i) => i + 1));

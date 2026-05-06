@@ -4,11 +4,11 @@
 // (matVec + DtoH of scores + top-K), matching pmap-shared's contract which
 // also excludes one-time setup from the timed window.
 //
-// If CUDA isn't available, gpu.matVec falls through to para:simd.matVec
+// If CUDA isn't available, gpu.matVec falls through to @para/simd.matVec
 // and the row degenerates to the same numbers as variant-matvec.
 
 import { GpuFloat32Array, matVec } from "parabun:gpu";
-import { topK as simdTopK } from "para:simd";
+import { topK as simdTopK } from "@para/simd";
 import { generate, N, D, K } from "./gen.js";
 
 const tGen0 = Bun.nanoseconds();

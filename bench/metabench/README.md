@@ -54,6 +54,6 @@ Each manifest entry pins a SHA — cloning on a new host lands the same tree the
 3. Create `targets/<pkg>/`:
    - `gen.*` — deterministic test data
    - `run-upstream.*` — exercise upstream lib, reading it via `process.env.UPSTREAM_DIR`
-   - `run-parabun.pjs` — the rewrite using `para:simd` / `para:parallel` etc.
+   - `run-parabun.pjs` — the rewrite using `@para/simd` / `@para/parallel` etc.
    - `harness.ts` — spawns the 4 runtimes, prints timing table
 4. `bun run run.ts --targets=<pkg>` to verify.

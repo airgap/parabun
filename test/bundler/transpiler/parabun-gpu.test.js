@@ -91,7 +91,7 @@ describe("parabun:gpu scaffold", () => {
 
   it("winsForSize returns false for ops no backend beats simd on yet", async () => {
     // matmul and f64 dot don't have GPU kernels on any backend yet — every
-    // backend says "don't use me", so the caller falls through to para:simd.
+    // backend says "don't use me", so the caller falls through to @para/simd.
     // (simdMap and matVec have size-conditional assertions elsewhere.)
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-wins-false",
@@ -108,10 +108,10 @@ describe("parabun:gpu scaffold", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("matVec f32 over the GPU threshold matches para:simd bit-for-bit", async () => {
+  it("matVec f32 over the GPU threshold matches @para/simd bit-for-bit", async () => {
     // Above the matVec size gate (M*K >= 1<<20 elements), the Metal backend
     // dispatches to an MSL kernel; CUDA PTX currently forwards to simd but
-    // keeps the same interface. Either way, output must match para:simd
+    // keeps the same interface. Either way, output must match @para/simd
     // exactly — fma rounds identically to a tight f32x4 dot product for
     // these operand ranges. We use a deterministic fill so the test is
     // reproducible across hosts.
@@ -119,7 +119,7 @@ describe("parabun:gpu scaffold", () => {
       "parabun-gpu-matvec-large",
       `
         import gpu from "parabun:gpu";
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const M = 1024;
         const K = 1024; // M*K = 1<<20, exactly the threshold
         const mat = new Float32Array(M * K);
@@ -154,24 +154,24 @@ describe("parabun:gpu scaffold", () => {
         );
       `,
     );
-    // Tolerance: per-row FMA on Metal is identical to para:simd's scalar
+    // Tolerance: per-row FMA on Metal is identical to @para/simd's scalar
     // accumulator, but if a backend re-associates the reduction, up to
     // ~1e-3 rounding drift at K=1024 is still acceptable — hence the
     // maxErr<=ok gate rather than mismatches==0. wins= depends on the
     // host: on slower hardware the naive MSL kernel loses to f32x4
-    // para:simd, on faster Metal devices it already wins. This test pins
+    // @para/simd, on faster Metal devices it already wins. This test pins
     // the correctness of the dispatch path; the benchmark is where we
     // watch for the crossover.
     expect(stdout).toMatch(/^wins=(?:true|false) rows=1024 mismatches=\d+ maxErr<=ok$/);
     expect(exitCode).toBe(0);
   });
 
-  it("dot matches para:simd on cpu fallback", async () => {
+  it("dot matches @para/simd on cpu fallback", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-dot-f32",
       `
         import gpu from "parabun:gpu";
-        import simd from "para:simd";
+        import simd from "@para/simd";
         const a = new Float32Array([1, 2, 3, 4, 5]);
         const b = new Float32Array([10, 20, 30, 40, 50]);
         console.log(gpu.dot(a, b), simd.dot(a, b));
@@ -183,12 +183,12 @@ describe("parabun:gpu scaffold", () => {
     expect(exitCode).toBe(0);
   });
 
-  it("matVec matches para:simd on cpu fallback", async () => {
+  it("matVec matches @para/simd on cpu fallback", async () => {
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-matvec-f32",
       `
         import gpu from "parabun:gpu";
-        import simd from "para:simd";
+        import simd from "@para/simd";
         // 3x4 matrix times a 4-vector
         const m = new Float32Array([1,2,3,4, 5,6,7,8, 9,10,11,12]);
         const v = new Float32Array([1, 1, 1, 1]);
@@ -362,7 +362,7 @@ describe("parabun:gpu scaffold", () => {
     // newBufferWithBytes (memcpy). Both kernels run identical MSL, so the
     // outputs must be bit-identical.
     //
-    // On Linux (cpu fallback) both paths collapse to the same para:simd call,
+    // On Linux (cpu fallback) both paths collapse to the same @para/simd call,
     // which also must match bit-for-bit — this pins the contract that the
     // alloc'd array is observably interchangeable with a plain typed array
     // as a matVec input.
@@ -482,7 +482,7 @@ describe("parabun:gpu scaffold", () => {
       firstReleaseOk: true,
       secondReleaseOk: true,
       matVecThrew: true,
-      // Matches the existing "matVec matches para:simd on cpu fallback" test.
+      // Matches the existing "matVec matches @para/simd on cpu fallback" test.
       out: [10, 26, 42],
     });
     expect(exitCode).toBe(0);
@@ -492,7 +492,7 @@ describe("parabun:gpu scaffold", () => {
     // On Metal, the held path reuses one MTLBuffer and the non-held path
     // creates a new one per call (COPY or NOCOPY depending on alignment).
     // Both run the same MSL kernel so outputs must match exactly. On CPU
-    // both paths collapse to the same para:simd call — still must match.
+    // both paths collapse to the same @para/simd call — still must match.
     const { stdout, exitCode } = await runFixture(
       "parabun-gpu-hold-matvec-equiv",
       `
@@ -970,7 +970,7 @@ describe("parabun:gpu pinned host memory (CUDA cuMemAllocHost)", () => {
 });
 
 describe("parabun:gpu per-host calibration (CUDA simdMap crossover)", () => {
-  // `calibrate()` sweeps the real PTX kernel vs para:simd and persists a
+  // `calibrate()` sweeps the real PTX kernel vs @para/simd and persists a
   // crossover under $XDG_CACHE_HOME/parabun/. We point XDG_CACHE_HOME at a
   // tempDir so the test doesn't touch the user's real cache, and the
   // per-test cache files stay isolated.

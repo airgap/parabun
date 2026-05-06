@@ -7,7 +7,7 @@
 // a grid of (array length × per-item work) so we can see the crossover
 // where fanning out to workers actually helps.
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 
 const WARMUP = 3;
 const ITERS = 15;

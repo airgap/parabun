@@ -16,7 +16,7 @@
 //
 // Scope today: simdMap-affine (y = k1*x + k0) on Float32Array — the one
 // kernel proven end-to-end against the MSL compiler + a roundtrip. dot,
-// matVec, matmul fall back to para:simd, matching the CUDA backend's
+// matVec, matmul fall back to @para/simd, matching the CUDA backend's
 // Phase-1 shape.
 //
 // Memory: the MSL source is compiled in probe(). The resulting library,
@@ -102,7 +102,7 @@ kernel void simdMapAffineF32(
 // but effective memory bandwidth doubles-to-triples on M-series.
 //
 // The tree reduction in simd_sum produces a different rounding order
-// from para:simd's left-to-right accumulator, so outputs may differ from
+// from @para/simd's left-to-right accumulator, so outputs may differ from
 // simd.matVec by up to a few ULP — the cross-check tolerates this.
 kernel void matVecF32(
     device const float *mat       [[buffer(0)]],
@@ -2108,7 +2108,7 @@ function newBufferFromF32(arr: Float32Array, byteLen: bigint): bigint {
 // Returns a Float32Array / Float64Array whose backing pointer is a multiple
 // of the system page size (16 KiB on Apple Silicon, 4 KiB on Intel). Memory
 // is owned by posix_memalign and never freed — allocations persist for the
-// backend's lifetime, matching para:simd.alloc's commit-for-lifetime model.
+// backend's lifetime, matching @para/simd.alloc's commit-for-lifetime model.
 // The intent is that callers stage hot inputs through alloc() so matVec can
 // take the NOCOPY path; freeing would require a FinalizationRegistry + care
 // around Metal's aliased MTLBuffer lifetimes, which is out of scope here.
@@ -2149,7 +2149,7 @@ function isAligned(arr: FArray): boolean {
 // RESIDENT row (30-150% faster than NOCOPY) is what this API exposes.
 //
 // Only Float32Array is wired through the MTLBuffer today because matVec on
-// f64 still forwards to para:simd. f64 handles allocate no buffer and just
+// f64 still forwards to @para/simd. f64 handles allocate no buffer and just
 // wrap the view, so `release` is a no-op; matVec sees `view` and falls
 // through to simd.
 //

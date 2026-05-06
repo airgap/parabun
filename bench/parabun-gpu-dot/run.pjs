@@ -1,18 +1,18 @@
-// Microbenchmark: CUDA dotF32 vs para:simd dot.
+// Microbenchmark: CUDA dotF32 vs @para/simd dot.
 //
 //   bun run build:release bench/parabun-gpu-dot/run.pjs
 //
 // gpu.dot(a, b) → scalar. On CUDA with Float32Array inputs, dispatches to
 // a PTX warp-reduce kernel when either (a) the vector is large enough
 // (n ≥ 4M) that the cold round-trip amortizes, or (b) at least one input
-// was held via gpu.hold (Tier 4 residency). Otherwise forwards to para:simd.
+// was held via gpu.hold (Tier 4 residency). Otherwise forwards to @para/simd.
 //
 // Scenarios per size:
-//   simd       : para:simd.dot(a, b) — baseline
+//   simd       : @para/simd.dot(a, b) — baseline
 //   gpu-cold   : gpu.dot(a, b) — alloc × 3 + 2 HtoD + kernel + DtoH + free × 3
 //   gpu-held   : ha=hold(a), hb=hold(b); loop: gpu.dot(ha, hb)
 
-import simd from "para:simd";
+import simd from "@para/simd";
 import gpu from "parabun:gpu";
 
 const desc = gpu.describe();

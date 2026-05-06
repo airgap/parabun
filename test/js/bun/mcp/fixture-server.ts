@@ -1,6 +1,6 @@
-// Minimal MCP server fixture for para:mcp tests.
+// Minimal MCP server fixture for @para/mcp tests.
 //
-// Implements the parts of the protocol para:mcp's v1 client uses:
+// Implements the parts of the protocol @para/mcp's v1 client uses:
 //   - initialize → returns serverInfo + tool capability
 //   - notifications/initialized → ignored
 //   - tools/list → two fake tools

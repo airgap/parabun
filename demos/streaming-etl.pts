@@ -1,5 +1,5 @@
 // Streaming-ETL pipeline showcasing |> operator threading +
-// para:simd primitives. Cross-runtime: native AVX2/NEON in Parabun,
+// @para/simd primitives. Cross-runtime: native AVX2/NEON in Parabun,
 // WebAssembly SIMD in browsers, scalar fallback elsewhere.
 //
 //   bun run build:release demos/streaming-etl.pts
@@ -7,7 +7,7 @@
 // Same demo as streaming-etl.ts; this version uses Para's |>
 // operator for the readable form. Identical runtime behaviour.
 
-import simd from "para:simd";
+import simd from "@para/simd";
 
 const N = 10_000_000;
 

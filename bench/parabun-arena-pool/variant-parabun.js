@@ -1,8 +1,8 @@
-// Pooled variant: single Uint8Array recycled across requests via para:arena.
+// Pooled variant: single Uint8Array recycled across requests via @para/arena.
 // Same BUF_SIZE / ITERS / WORK_BYTES / handler as the baseline so the only
 // variable is whether we allocate fresh or borrow from a pool.
 
-import arena from "para:arena";
+import arena from "@para/arena";
 
 const BUF_SIZE = 65536;
 const ITERS = 200_000;

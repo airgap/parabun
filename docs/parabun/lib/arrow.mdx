@@ -1,10 +1,10 @@
 ---
-title: para:arrow
+title: @para/arrow
 description: In-memory Arrow tables + IPC reader/writer + Parquet read/write. Wire-compatible with apache-arrow + every parquet reader since 1.x. Cross-runtime — works in Node, Deno, and the browser too.
 ---
 
 ```ts
-import arrow from "para:arrow";
+import arrow from "@para/arrow";
 
 // Build a Table from rows
 const table = arrow.fromRows([
@@ -155,5 +155,5 @@ Round-trip suite at [`bench/parabun-arrow-ipc-interop/`](https://github.com/airg
 
 ## See also
 
-- [`para:csv`](/parabun/lib/csv) — RFC 4180 CSV with parallel mode
+- [`@para/csv`](/parabun/lib/csv) — RFC 4180 CSV with parallel mode
 - [`para:decimal`](/parabun/lib/decimal) — backs the `decimal128` arrow kind

@@ -1,14 +1,14 @@
-// Stream a CSV with `para:csv.parseCsv`, summarise with `|>`-threaded pure
+// Stream a CSV with `@para/csv.parseCsv`, summarise with `|>`-threaded pure
 // helpers.
 //
 //   bun run build:release demos/csv-pipeline.pts data.csv
 //
-// `para:csv.parseCsv` is an async generator over rows; the iterator stays
+// `@para/csv.parseCsv` is an async generator over rows; the iterator stays
 // streaming so even huge files don't spike RAM. The pure helpers
 // (`asNumber`, `nonEmpty`) inline at parse time when threaded with `|>`,
 // so the per-row hot path collapses to standard JS — no call overhead.
 
-import csv from "para:csv";
+import csv from "@para/csv";
 import { existsSync } from "node:fs";
 
 const path = process.argv[2];

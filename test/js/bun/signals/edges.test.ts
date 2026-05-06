@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import sigs from "para:signals";
+import sigs from "@para/signals";
 
-// para:signals.when(src, fn) — fires fn once per false→true transition of
+// @para/signals.when(src, fn) — fires fn once per false→true transition of
 // src. Initial state is treated as already-observed. The falling edge is
 // just the rising edge of the negated predicate: when(() => !s.get(), fn).
 
-describe("para:signals.when (rising-edge form)", () => {
+describe("@para/signals.when (rising-edge form)", () => {
   test("fires on false→true transition", async () => {
     const s = sigs.signal(false);
     let n = 0;
@@ -165,7 +165,7 @@ describe("para:signals.when (rising-edge form)", () => {
   });
 });
 
-describe("para:signals.when (falling-edge via negated predicate)", () => {
+describe("@para/signals.when (falling-edge via negated predicate)", () => {
   // The falling edge is just the rising edge of the negated predicate. The
   // block syntax `when not X { … }` does this rewrite at parse time; direct
   // callers spell it `when(() => !s.get(), fn)`.

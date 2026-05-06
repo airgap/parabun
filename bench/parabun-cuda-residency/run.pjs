@@ -3,7 +3,7 @@
 //   bun run build:release bench/parabun-cuda-residency/run.pjs
 //
 // Answers: once the mat's HtoD cost is amortized across many matVec
-// calls, can the CUDA kernel beat para:simd? The general matVec bench
+// calls, can the CUDA kernel beat @para/simd? The general matVec bench
 // (bench/parabun-gpu-matvec) shows that a single per-call dispatch
 // loses to SIMD 3-10× because the cuMemcpyHtoD dominates. Residency
 // removes that copy on every call after the first.
@@ -14,11 +14,11 @@
 //   gpu-held   : h = gpu.hold(mat); loop: gpu.matVec(h, vec, M, K)
 //
 // For each GPU scenario we report the median latency and the
-// speedup vs plain para:simd.matVec. The held scenario's setup cost
+// speedup vs plain @para/simd.matVec. The held scenario's setup cost
 // (hold call) is reported separately so the per-call savings and the
 // amortization break-even are both visible.
 
-import simd from "para:simd";
+import simd from "@para/simd";
 import gpu from "parabun:gpu";
 
 const desc = gpu.describe();

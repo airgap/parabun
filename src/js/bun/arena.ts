@@ -1,4 +1,4 @@
-// Hardcoded module "para:arena"
+// Hardcoded module "@para/arena"
 //
 // Parabun: buffer pool for typed arrays. Avoids the per-call allocation +
 // zero-init + GC-tracking cost of `new Uint8Array(N)` in hot loops by

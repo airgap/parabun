@@ -6,7 +6,7 @@
 //
 //   bun run build:release demos/parquet-etl.ts
 
-import arrow from "para:arrow";
+import arrow from "@para/arrow";
 
 const ROWS_PER_BATCH = 10_000;
 const NUM_BATCHES = 5;

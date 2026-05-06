@@ -1,11 +1,11 @@
-# para:csv — parallel vs serial parse (size sweep)
+# @para/csv — parallel vs serial parse (size sweep)
 
-Times `para:csv` parsing across multiple input sizes in two modes:
+Times `@para/csv` parsing across multiple input sizes in two modes:
 
 - **Serial** — single-threaded state machine, `parseCsv(input)`.
 - **Parallel** — `parseCsv(input, { parallel: true })`. Materializes the
   input, pre-scans for the quote character, splits into N chunks, parses
-  them via `para:parallel.pmap`, concatenates the results.
+  them via `@para/parallel.pmap`, concatenates the results.
 
 ## Run
 

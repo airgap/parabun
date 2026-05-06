@@ -1,10 +1,10 @@
 ---
-title: para:signals
+title: @para/signals
 description: Reactive signals — primitives + derived + effect. Solid-style. Cross-runtime. Self-contained (no npm dep on @preact/signals-core).
 ---
 
 ```ts
-import { signal, derived, effect } from "para:signals";
+import { signal, derived, effect } from "@para/signals";
 
 const count = signal(0);
 const doubled = derived(() => count.value * 2);
@@ -82,5 +82,5 @@ The convention: any module that reports observable state (camera FPS, mic peak, 
 
 ## See also
 
-- [`para:arrow`](/parabun/lib/arrow) — for analytical / batch data (signals are for live state, arrow is for tabular)
+- [`@para/arrow`](/parabun/lib/arrow) — for analytical / batch data (signals are for live state, arrow is for tabular)
 - The signals package on npm is also available as [`@para/signals`](https://www.npmjs.com/package/@para/signals) for use outside Parabun.

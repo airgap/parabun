@@ -1,10 +1,10 @@
 ---
-title: para:csv
+title: @para/csv
 description: RFC 4180 CSV reader / writer with optional parallel decode.
 ---
 
 ```ts
-import csv from "para:csv";
+import csv from "@para/csv";
 
 const rows = csv.parse(text);
 const back = csv.stringify(rows);
@@ -61,4 +61,4 @@ So the option is best framed as "off-the-main-thread", not "faster" — useful w
 
 ## See also
 
-- [`para:arrow`](/parabun/lib/arrow) — for analytical queries on top of CSV-loaded data
+- [`@para/arrow`](/parabun/lib/arrow) — for analytical queries on top of CSV-loaded data

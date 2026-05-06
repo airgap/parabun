@@ -3,13 +3,13 @@
 // The upstream API is cosine(x, y) where x, y are plain Arrays. Here we
 // accept Float32Array directly and compute
 //   dot(x, y) / (sqrt(dot(x, x)) * sqrt(dot(y, y)))
-// via `para:simd.dot` (three SIMD dot products — two for norms, one cross).
+// via `@para/simd.dot` (three SIMD dot products — two for norms, one cross).
 // This is the rewrite path, what a Parabun user would write if they want
 // the fast path.
 //
-// Falls back to the scalar loop if para:simd isn't available for some reason.
+// Falls back to the scalar loop if @para/simd isn't available for some reason.
 
-import { dot } from "para:simd";
+import { dot } from "@para/simd";
 import { generatePair, generateBatch } from "./gen.js";
 
 const WARMUPS = 3;

@@ -1,10 +1,10 @@
 // Streaming-ETL pipeline (TypeScript form). Cross-runtime via the
-// para:simd facade — runs native AVX2/NEON in Parabun, WebAssembly
+// @para/simd facade — runs native AVX2/NEON in Parabun, WebAssembly
 // SIMD in browsers, scalar elsewhere. Same API everywhere.
 //
 //   bun run build:release demos/streaming-etl.ts
 
-import simd from "para:simd";
+import simd from "@para/simd";
 
 const N = 10_000_000;
 

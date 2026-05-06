@@ -1,4 +1,4 @@
-// Parquet reader for para:arrow.
+// Parquet reader for @para/arrow.
 //
 // Supports the column-oriented Apache Parquet format on read. The slice
 // of the spec covered:
@@ -73,7 +73,7 @@ export function setArrowTypes(types: ArrowTypes): void {
 
 function getTypes(): ArrowTypes {
   if (!arrowTypes) {
-    throw new Error("para:arrow parquet: arrow.ts must call setArrowTypes() before fromParquet");
+    throw new Error("@para/arrow parquet: arrow.ts must call setArrowTypes() before fromParquet");
   }
   return arrowTypes;
 }
@@ -3541,7 +3541,7 @@ function encodeMapSourceAcrossBatches(
     // (key is REQUIRED + scalar). This is a permanent constraint,
     // not a v1 limitation.
     throw new Error(
-      `para:arrow.toParquet: Map<${keyType.kind}, …> not supported — parquet requires primitive map keys`,
+      `@para/arrow.toParquet: Map<${keyType.kind}, …> not supported — parquet requires primitive map keys`,
     );
   }
   if (valueType.kind === "list" || valueType.kind === "struct" || valueType.kind === "map") {
@@ -3552,7 +3552,7 @@ function encodeMapSourceAcrossBatches(
     // List<Struct<key, value>> directly which today's writer
     // handles via the list-of-struct path.
     throw new Error(
-      `para:arrow.toParquet: Map<K, ${valueType.kind}> not yet supported by the writer. ` +
+      `@para/arrow.toParquet: Map<K, ${valueType.kind}> not yet supported by the writer. ` +
         `Workaround: convert to List<Struct<key, value>> (today's writer handles that shape directly).`,
     );
   }
@@ -3579,7 +3579,7 @@ function encodeMapSourceAcrossBatches(
     const offsets = c.values as Int32Array;
     const struct = c.child;
     if (!struct || !struct.children || struct.children.length !== 2) {
-      throw new Error(`para:arrow.toParquet: map column "${field.name}" missing struct{key,value} child`);
+      throw new Error(`@para/arrow.toParquet: map column "${field.name}" missing struct{key,value} child`);
     }
     const keyCol = struct.children[0];
     const valCol = struct.children[1];
@@ -3778,13 +3778,13 @@ function encodeListOfStructAcrossBatches(
   const listOptional = field.nullable;
   const innerType = field.type.child;
   if (innerType.kind !== "struct") {
-    throw new Error(`para:arrow.toParquet: encodeListOfStruct called with non-struct inner ${innerType.kind}`);
+    throw new Error(`@para/arrow.toParquet: encodeListOfStruct called with non-struct inner ${innerType.kind}`);
   }
   const elemFields: { name: string; nullable: boolean; type: any }[] = innerType.fields;
   for (const f of elemFields) {
     if (f.type.kind === "list" || f.type.kind === "struct" || f.type.kind === "map") {
       throw new Error(
-        `para:arrow.toParquet: List<Struct<…>> with nested ${f.type.kind} field "${f.name}" not supported`,
+        `@para/arrow.toParquet: List<Struct<…>> with nested ${f.type.kind} field "${f.name}" not supported`,
       );
     }
   }
@@ -3804,7 +3804,7 @@ function encodeListOfStructAcrossBatches(
     const offsets = c.values as Int32Array;
     const struct = c.child;
     if (!struct || !struct.children || struct.children.length !== elemFields.length) {
-      throw new Error(`para:arrow.toParquet: list-of-struct column "${field.name}" missing struct children`);
+      throw new Error(`@para/arrow.toParquet: list-of-struct column "${field.name}" missing struct children`);
     }
     totalChild += offsets[b.numRows];
     specs.push({
@@ -3986,13 +3986,13 @@ function encodeListSourceAcrossBatches(
     // list — the writer handles that today via the
     // list-of-struct path.
     throw new Error(
-      `para:arrow.toParquet: List<List<${innerType.child?.kind ?? "…"}>> not yet supported. ` +
+      `@para/arrow.toParquet: List<List<${innerType.child?.kind ?? "…"}>> not yet supported. ` +
         `Workaround: flatten to List<Struct<inner_index, value>> (writer handles list-of-struct today).`,
     );
   }
   if (innerKind === "map") {
     throw new Error(
-      `para:arrow.toParquet: List<Map<…>> not yet supported. Workaround: flatten to List<Struct<key, value>>.`,
+      `@para/arrow.toParquet: List<Map<…>> not yet supported. Workaround: flatten to List<Struct<key, value>>.`,
     );
   }
   const innerPhysical = parquetPhysicalForKind(innerKind);
@@ -4013,7 +4013,7 @@ function encodeListSourceAcrossBatches(
     const c = getCol(bi) as any;
     const offsets = c.values as Int32Array;
     const child = c.child;
-    if (!child) throw new Error(`para:arrow.toParquet: list column "${field.name}" missing child`);
+    if (!child) throw new Error(`@para/arrow.toParquet: list column "${field.name}" missing child`);
     const lastOffset = offsets[b.numRows];
     totalChild += lastOffset;
     specs.push({
@@ -4177,7 +4177,7 @@ export function toParquet(
   else if (compression === "gzip") codec = PQ_CODEC_GZIP;
   else if (compression === "zstd") codec = PQ_CODEC_ZSTD;
   else if (compression !== "uncompressed") {
-    throw new RangeError(`para:arrow.toParquet: unknown compression "${compression}"`);
+    throw new RangeError(`@para/arrow.toParquet: unknown compression "${compression}"`);
   }
   const bloomCols = new Set<string>(opts?.bloomFilters ?? []);
   const multiRowGroup = opts?.multiRowGroup === true;
@@ -4227,7 +4227,7 @@ export function toParquet(
   ): TopSchemaNode {
     if (field.type.kind === "struct") {
       if (field.nullable) {
-        throw new Error(`para:arrow.toParquet: OPTIONAL struct "${field.name}" not yet supported by writer`);
+        throw new Error(`@para/arrow.toParquet: OPTIONAL struct "${field.name}" not yet supported by writer`);
       }
       const subPath = pathOverride ?? [field.name];
       const children: TopSchemaNode[] = [];
@@ -4557,7 +4557,7 @@ export function toParquet(
     if (bloomCols.has(field.name) && numNonNull > 0) {
       if (physicalType === PQ_TYPE_INT96) {
         throw new Error(
-          `para:arrow.toParquet: bloom filter requested for INT96 column "${field.name}" — not supported by the parquet spec`,
+          `@para/arrow.toParquet: bloom filter requested for INT96 column "${field.name}" — not supported by the parquet spec`,
         );
       }
       bloomBitmap = buildSbbf(nonNullValues, numNonNull, physicalType, flbaWidth);
@@ -4721,7 +4721,7 @@ function parquetPhysicalForKind(kind: string): number {
     case "fixed_size_binary":
       return PQ_TYPE_FIXED_LEN_BYTE_ARRAY;
   }
-  throw new Error(`para:arrow.toParquet: type "${kind}" not supported (list / nested types pending)`);
+  throw new Error(`@para/arrow.toParquet: type "${kind}" not supported (list / nested types pending)`);
 }
 
 // ConvertedType to attach to a column's SchemaElement (field 6) for an

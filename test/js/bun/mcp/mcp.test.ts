@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { bunExe } from "harness";
 
-// para:mcp client coverage (LYK-733).
+// @para/mcp client coverage (LYK-733).
 //
 // Two transports under test:
 //   1. stdio — spawn the bun debug build with fixture-server.ts as argv[0].
@@ -15,10 +15,10 @@ import { bunExe } from "harness";
 
 const fixtureServer = join(import.meta.dir, "fixture-server.ts");
 
-describe("para:mcp", () => {
+describe("@para/mcp", () => {
   describe("stdio transport", () => {
     test("connect, list tools, call, close", async () => {
-      const mcp = (await import("para:mcp")).default;
+      const mcp = (await import("@para/mcp")).default;
       await using conn = await mcp.connect("stdio", bunExe(), { args: [fixtureServer] });
 
       // Initialize populated server info + tool catalog.
@@ -40,7 +40,7 @@ describe("para:mcp", () => {
     }, 30000);
 
     test("call rejects with MCPError when server returns -32601", async () => {
-      const mcp = (await import("para:mcp")).default;
+      const mcp = (await import("@para/mcp")).default;
       await using conn = await mcp.connect("stdio", bunExe(), { args: [fixtureServer] });
       await expect(conn.call("nonexistent")).rejects.toMatchObject({
         name: "MCPError",
@@ -49,7 +49,7 @@ describe("para:mcp", () => {
     }, 30000);
 
     test("close is idempotent and rejects subsequent calls", async () => {
-      const mcp = (await import("para:mcp")).default;
+      const mcp = (await import("@para/mcp")).default;
       const conn = await mcp.connect("stdio", bunExe(), { args: [fixtureServer] });
       await conn.close();
       // Idempotent — second close is a no-op.
@@ -58,7 +58,7 @@ describe("para:mcp", () => {
     }, 30000);
 
     test("refreshTools repopulates from the server", async () => {
-      const mcp = (await import("para:mcp")).default;
+      const mcp = (await import("@para/mcp")).default;
       await using conn = await mcp.connect("stdio", bunExe(), { args: [fixtureServer] });
       const before = conn.tools.length;
       const after = await conn.refreshTools();
@@ -131,7 +131,7 @@ describe("para:mcp", () => {
     });
 
     test("connect over ws, call ping", async () => {
-      const mcp = (await import("para:mcp")).default;
+      const mcp = (await import("@para/mcp")).default;
       await using conn = await mcp.connect("ws", `ws://127.0.0.1:${port}`);
       expect(conn.serverInfo?.name).toBe("ws-fixture");
       expect(conn.tools.map(t => t.name)).toEqual(["ping"]);
@@ -140,14 +140,14 @@ describe("para:mcp", () => {
     }, 30000);
 
     test("connect rejects when ws server is unreachable", async () => {
-      const mcp = (await import("para:mcp")).default;
+      const mcp = (await import("@para/mcp")).default;
       // Reserved test port range; nothing listens here.
-      await expect(mcp.connect("ws", "ws://127.0.0.1:1")).rejects.toThrow(/para:mcp/);
+      await expect(mcp.connect("ws", "ws://127.0.0.1:1")).rejects.toThrow(/@para/mcp/);
     }, 30000);
   });
 
   test("connect rejects unknown transport", async () => {
-    const mcp = (await import("para:mcp")).default;
+    const mcp = (await import("@para/mcp")).default;
     // @ts-expect-error — exercising the runtime guard
     await expect(mcp.connect("http", "http://example.com")).rejects.toThrow(/unknown transport/);
   });

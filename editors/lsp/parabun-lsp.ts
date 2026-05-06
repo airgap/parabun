@@ -167,7 +167,7 @@ function transformParallel(line: string): string {
 // embedded TypeScript checker doesn't choke on the surface syntax. The paired
 // `when not { … }` lands as `else { … }` so it attaches to the preceding
 // transformed `if` — readers still get sensible hover / TS diagnostics. The
-// actual desugar is owned by the parser (→ require("para:signals").when(...)
+// actual desugar is owned by the parser (→ require("@para/signals").when(...)
 // with the predicate negated for the `not` form); this transform is a TS-side
 // shim only.
 function transformWhenBlock(line: string): string {
@@ -1590,7 +1590,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "change, `B` gets re-assigned with `A`'s new value. `B` must be",
       "assignable — an identifier or property access.",
       "",
-      "Desugars to `require('para:signals').effect(() => { B = A; })` —",
+      "Desugars to `require('@para/signals').effect(() => { B = A; })` —",
       "evaluating `A` in a tracked context and returning the disposer, so",
       "you can capture it: `const stop = src ~> dst;`.",
       "",
@@ -1611,7 +1611,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "a callable target — an identifier, property access, or indexed",
       "function.",
       "",
-      "Desugars to `require('para:signals').effect(() => { fn(A); })` — the",
+      "Desugars to `require('@para/signals').effect(() => { fn(A); })` — the",
       "call-sink complement to `~>`. Same precedence, same disposer return,",
       "same optional `when COND` guard.",
       "",
@@ -1651,7 +1651,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "disambiguates. Suffix `when` is an every-truthy guard; the block form",
       "is edge-triggered.",
       "",
-      "Desugars to `require('para:signals').when(() => EXPR, () => { BODY })`",
+      "Desugars to `require('@para/signals').when(() => EXPR, () => { BODY })`",
       "— the `not` form negates the predicate (`() => !(EXPR)`), and the paired",
       "form emits two such calls.",
       "",
@@ -1680,7 +1680,7 @@ function getWordAt(line: string, col: number): string {
 
 // True when the cursor is sitting on the `signal` keyword of a `signal NAME =`
 // declaration (as opposed to a plain identifier named `signal` imported from
-// `para:signals`). Gates the hover so `const x = signal(0)` — which is also
+// `@para/signals`). Gates the hover so `const x = signal(0)` — which is also
 // valid — doesn't trigger the keyword tooltip.
 function isSignalDeclarationAt(line: string, col: number): boolean {
   const word = findWordBounds(line, col);

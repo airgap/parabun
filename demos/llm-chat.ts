@@ -4,7 +4,7 @@
 //     bun run build:release demos/llm-chat.ts "What is the capital of France?"
 //
 // Routes through parabun:gpu when available (CUDA on dev / Jetson, Metal on
-// macOS); falls through to para:simd matVec on CPU-only hosts. Same
+// macOS); falls through to @para/simd matVec on CPU-only hosts. Same
 // source on every target.
 
 import llm from "parabun:llm";

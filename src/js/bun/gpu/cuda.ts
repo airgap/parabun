@@ -26,7 +26,7 @@
 //     at every size we measure on an RTX 4070 Ti (~0.09–0.4× speedup —
 //     see bench/parabun-gpu-matvec). Residency (alloc once + reuse)
 //     is the real unlock here; kernel tuning won't move the needle.
-// dot / matmul still fall back to para:simd.
+// dot / matmul still fall back to @para/simd.
 
 const simd = require("../simd.ts");
 
@@ -2344,7 +2344,7 @@ let MIN_SIMDMAP_ELEMS = DEFAULT_MIN_SIMDMAP_ELEMS;
 //     route the op to parabun:gpu at all.
 //
 // Benchmarked on an RTX 4070 Ti + PCIe 4.0 ×16: the non-resident path
-// loses 3–10× to para:simd at every size we care about because the
+// loses 3–10× to @para/simd at every size we care about because the
 // cuMemcpyHtoD + cuCtxSynchronize per call dominates the actual kernel
 // (see bench/parabun-gpu-matvec). `wins` stays at Infinity until the
 // residency path (alloc once, reuse across calls) lands. When it does,
@@ -2353,14 +2353,14 @@ const MIN_MATVEC_DISPATCH_ELEMS = 1 << 20;
 const MIN_MATVEC_WINS_ELEMS = Number.POSITIVE_INFINITY;
 
 // matmul dispatch threshold: at M*N*K below this, the PTX naive kernel
-// doesn't win against para:simd's tiled JS loop because per-call HtoD+sync
+// doesn't win against @para/simd's tiled JS loop because per-call HtoD+sync
 // dominates. Held inputs bypass this (their HtoD already happened).
 // `wins` stays at Infinity for now — the held path is the winner; cold
 // dispatch is parked. Revisit once we have a 4070 Ti matmul benchmark.
 const MIN_MATMUL_DISPATCH_FLOPS = 1 << 24; // 16M multiply-adds (e.g. 256^3)
 const MIN_MATMUL_WINS_FLOPS = Number.POSITIVE_INFINITY;
 
-// dot: cold GPU loses 9–18× to para:simd at every size we measured on an RTX
+// dot: cold GPU loses 9–18× to @para/simd at every size we measured on an RTX
 // 4070 Ti — the per-call HtoD (pageable memory copy at ~760 MB/s) dominates
 // the warp-reduce kernel no matter how big the vector is. Residency is the
 // only path that wins, so dispatch and wins thresholds are both parked at
@@ -2382,10 +2382,10 @@ function winsForSize(op: string, n: number, elemBytes: number): boolean {
 // ─── Per-host calibration ─────────────────────────────────────────────────
 //
 // `simdMap` is the only op today where the CPU→GPU crossover genuinely
-// varies by hardware; matVec / matmul / dot all lose to para:simd at every
+// varies by hardware; matVec / matmul / dot all lose to @para/simd at every
 // measured size on the non-resident path, so their thresholds are parked
 // at Infinity. `calibrate()` sweeps a handful of sizes with the real PTX
-// kernel vs para:simd, finds the smallest N where GPU wins by ≥10% (margin
+// kernel vs @para/simd, finds the smallest N where GPU wins by ≥10% (margin
 // absorbs host noise), and persists the result to
 // `~/.cache/parabun/gpu-calibrate-<hash>.json`. The hash keys on
 // deviceName + backend + platform + arch so a laptop dock switch (or a
@@ -3579,7 +3579,7 @@ function isAligned(arr: FArray): boolean {
 // Tier 4 residency: hold(arr) on an f32 array does the cuMemAlloc +
 // cuMemcpyHtoD once, so subsequent matVec calls against the handle skip
 // the per-call copy. f64 handles aren't wired to a CUDA kernel yet, so
-// those just wrap the view and matVec falls through to para:simd.
+// those just wrap the view and matVec falls through to @para/simd.
 //
 // Lifetime: caller MUST call release(handle). releaseHandle is
 // idempotent, and after it runs any op that dereferences the handle

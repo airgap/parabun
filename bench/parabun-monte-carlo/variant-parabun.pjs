@@ -1,5 +1,5 @@
 // Parabun: same MC option pricing, chunked across a worker pool via
-// para:parallel. No SIMD — this bench is purely about parallelism. Each
+// @para/parallel. No SIMD — this bench is purely about parallelism. Each
 // worker samples N/CONCURRENCY paths from an independent PRNG stream
 // (seeded from BASE_SEED + c * Weyl constant) and returns a partial sum.
 // Main thread merges.
@@ -9,7 +9,7 @@
 // shipping sound, and it's enforced by the `pure function` keyword at
 // parse time.
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 
 const { pmap } = parallel;
 const CONCURRENCY = 8;

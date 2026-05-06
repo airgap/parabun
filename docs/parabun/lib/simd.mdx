@@ -1,10 +1,10 @@
 ---
-title: para:simd
+title: @para/simd
 description: Cross-runtime SIMD primitives over typed arrays. Native AVX2/NEON via Highway in Parabun, WebAssembly SIMD in browsers, scalar fallback elsewhere.
 ---
 
 ```ts
-import simd from "para:simd";
+import simd from "@para/simd";
 
 const xs = new Float32Array(1_000_000);
 const total = simd.sum(xs);
@@ -55,7 +55,7 @@ simd.isWasmBacked(): boolean;            // true when running on the wasm backen
 simd.wasmWinsForSize(n): boolean;        // heuristic: wasm faster than scalar at this N?
 ```
 
-Useful for adaptive code paths in cross-runtime libraries — see [`para:parallel`](/parabun/lib/parallel) for similar adaptive crossover logic.
+Useful for adaptive code paths in cross-runtime libraries — see [`@para/parallel`](/parabun/lib/parallel) for similar adaptive crossover logic.
 
 ## Backends
 
@@ -84,10 +84,10 @@ const stage1 = simd.mulScalar(readings, 1.8);
 const out = simd.addScalar(stage1, 32);
 ```
 
-For maximum throughput on long chains, use [`para:pipeline`](/parabun/lib/pipeline) — its `compile()` helper detects affine sequences and collapses them into one pass.
+For maximum throughput on long chains, use [`@para/pipeline`](/parabun/lib/pipeline) — its `compile()` helper detects affine sequences and collapses them into one pass.
 
 ## See also
 
-- [`para:parallel`](/parabun/lib/parallel) — for problems too big for one core
+- [`@para/parallel`](/parabun/lib/parallel) — for problems too big for one core
 - [`parabun:gpu`](/parabun/runtime/gpu) — for problems that fit a CUDA / Metal kernel
-- [`para:pipeline`](/parabun/lib/pipeline) — pipeline fusion runtime
+- [`@para/pipeline`](/parabun/lib/pipeline) — pipeline fusion runtime

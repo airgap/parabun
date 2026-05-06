@@ -1,13 +1,13 @@
-// Variant: parallel scoring via para:parallel.pmap. Each worker scores its
+// Variant: parallel scoring via @para/parallel.pmap. Each worker scores its
 // chunk of embeddings against the query using a plain JS dot product (imports
-// at module top aren't visible inside workers, so no para:simd here), then
+// at module top aren't visible inside workers, so no @para/simd here), then
 // returns a partial top-K. Main thread merges.
 //
 // What this shows: pmap over a `pure` function spreads embarrassingly-parallel
 // work across cores. The per-worker kernel is self-contained — the chunk
 // object carries `query`, `dim`, `base`, `k` so no closure is needed.
 
-import { default as parallel } from "para:parallel";
+import { default as parallel } from "@para/parallel";
 import { generate, N, D, K } from "./gen.js";
 
 const { pmap } = parallel;

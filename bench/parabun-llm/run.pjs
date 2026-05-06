@@ -5,7 +5,7 @@
 // Loads a Llama-3.2-1B-Instruct Q8_0 GGUF checkpoint, streams a greedy
 // continuation, and reports tokens-per-second. CUDA (via parabun:gpu) handles
 // every matmul on the forward pass when available; on CPU-only hosts the
-// same code falls through to para:simd.matVec with no source changes.
+// same code falls through to @para/simd.matVec with no source changes.
 //
 // The fixture is a 1.3 GB file that lives outside the repo — set
 // LLM_FIXTURE to override, or put it at the default path below.

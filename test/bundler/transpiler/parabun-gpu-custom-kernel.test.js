@@ -207,7 +207,7 @@ describe("affine detector 4-probe regression", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-relu",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function relu(x) { return x > 0 ? x : 0; }
         const a = new Float32Array([-5, -1, 0, 1, 5]);
         const out = simdMap(relu, a);
@@ -222,7 +222,7 @@ describe("affine detector 4-probe regression", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-abs",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function absX(x) { return Math.abs(x); }
         const a = new Float32Array([-5, -1, 0, 1, 5]);
         const out = simdMap(absX, a);
@@ -237,7 +237,7 @@ describe("affine detector 4-probe regression", () => {
     const { stdout, exitCode } = await runFixture(
       "gpu-affine-true",
       `
-        import { simdMap } from "para:simd";
+        import { simdMap } from "@para/simd";
         pure function linear(x) { return 2 * x + 3; }
         const a = new Float32Array([0, 1, 2, 3, 4]);
         const out = simdMap(linear, a);

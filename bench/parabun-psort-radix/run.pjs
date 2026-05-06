@@ -6,7 +6,7 @@
 // skips the comparator-call cost and runs in O(n·k/B). The question
 // this answers: is that win actual at array sizes anyone uses?
 
-import parallel from "para:parallel";
+import parallel from "@para/parallel";
 
 const SIZES = [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
 const WARMUP = 3;

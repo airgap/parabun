@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
 // Parabun `derived NAME = EXPR` declaration. Mirrors `signal NAME = EXPR`
-// but always lowers to `require("para:signals").derived(() => EXPR)`,
+// but always lowers to `require("@para/signals").derived(() => EXPR)`,
 // regardless of whether EXPR reads other signals and regardless of the
 // `@parabun-strict-signals` file pragma. The declared name is signal-bound
 // so reads of NAME elsewhere desugar to `NAME.get()`.
@@ -64,7 +64,7 @@ describe("Parabun: derived NAME = EXPR — desugar", () => {
 
   it("`derived` as a plain identifier (import / call) is not the keyword form", () => {
     const out = transform(
-      `import { signal, derived } from "para:signals";\nconst a = signal(1);\nconst b = derived(() => a.get() * 2);`,
+      `import { signal, derived } from "@para/signals";\nconst a = signal(1);\nconst b = derived(() => a.get() * 2);`,
     );
     expect(out).toContain(`derived(() => a.get() * 2)`);
     // The const decl should remain a normal call, not be rewritten as a

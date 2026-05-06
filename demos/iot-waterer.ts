@@ -16,7 +16,7 @@
 
 import gpio from "parabun:gpio";
 import i2c from "parabun:i2c";
-import signals from "para:signals";
+import signals from "@para/signals";
 
 interface Plant {
   name: string;

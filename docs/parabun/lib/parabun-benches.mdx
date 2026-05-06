@@ -1,6 +1,6 @@
 ---
 title: Parabun benchmarks
-description: Eight end-to-end benchmarks exercising Parabun's language features (`pure function`, `|>` pipelines) and runtime modules (`para:simd`, `para:parallel`, `para:pipeline`) on real-world shaped workloads. Plus the per-feature micro-benches for sort / parquet / image / video.
+description: Eight end-to-end benchmarks exercising Parabun's language features (`pure function`, `|>` pipelines) and runtime modules (`@para/simd`, `@para/parallel`, `@para/pipeline`) on real-world shaped workloads. Plus the per-feature micro-benches for sort / parquet / image / video.
 ---
 
 All benches live in [`bench/`](https://github.com/airgap/parabun/tree/main/bench), each with its own README covering the workload, results (best-of-N medians), why the Parabun version wins (or loses, in the layered diagnosis), running instructions, and a file list.
@@ -11,8 +11,8 @@ All benches live in [`bench/`](https://github.com/airgap/parabun/tree/main/bench
 |---|---|---:|
 | [vector-search](https://github.com/airgap/parabun/tree/main/bench/parabun-vector-search) | layered diagnosis: SIMD + SAB + pmap | 2.03× |
 | [rag-retrieval](https://github.com/airgap/parabun/tree/main/bench/parabun-rag-retrieval) | drop-in vs real LangChain `VectorStore` | 2.83× |
-| [monte-carlo](https://github.com/airgap/parabun/tree/main/bench/parabun-monte-carlo) | `para:parallel.pmap` alone (no SIMD/SAB) | 5.56× |
-| [streaming-etl](https://github.com/airgap/parabun/tree/main/bench/parabun-streaming-etl) | `para:pipeline` fusion (affine → SIMD) | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
+| [monte-carlo](https://github.com/airgap/parabun/tree/main/bench/parabun-monte-carlo) | `@para/parallel.pmap` alone (no SIMD/SAB) | 5.56× |
+| [streaming-etl](https://github.com/airgap/parabun/tree/main/bench/parabun-streaming-etl) | `@para/pipeline` fusion (affine → SIMD) | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
 | [image-convolution](https://github.com/airgap/parabun/tree/main/bench/parabun-image-convolution) | `pmap + SAB` on `Uint8Array` (light kernel) | 4.75× |
 | [image-sobel](https://github.com/airgap/parabun/tree/main/bench/parabun-image-sobel) | `pmap + SAB` on `Uint8Array` (heavier CV kernel) | 5.94× |
 | [optical-flow](https://github.com/airgap/parabun/tree/main/bench/parabun-optical-flow) | two-frame temporal: both frames in SAB | 2.63× |

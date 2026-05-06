@@ -5,7 +5,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("maps Float32Array inline for small inputs", async () => {
     using dir = tempDir("pmap-sab-f32-small", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function double(x) { return x * 2; }
         const out = await pmap(double, new Float32Array([1, 2, 3, 4]));
         console.log(JSON.stringify({
@@ -33,7 +33,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("maps Float64Array correctly", async () => {
     using dir = tempDir("pmap-sab-f64", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function half(x) { return x / 2; }
         const out = await pmap(half, new Float64Array([10, 20, 30]));
         console.log(JSON.stringify({
@@ -61,7 +61,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("maps Int32Array correctly", async () => {
     using dir = tempDir("pmap-sab-i32", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function square(x) { return x * x; }
         const out = await pmap(square, new Int32Array([2, 3, 4, 5]));
         console.log(JSON.stringify({
@@ -89,7 +89,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("dispatches to workers via SAB for large TypedArrays", async () => {
     using dir = tempDir("pmap-sab-large", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function addOne(x) { return x + 1; }
         const input = new Float32Array(2000);
         for (let i = 0; i < 2000; i++) input[i] = i;
@@ -123,7 +123,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("returns empty TypedArray for empty input", async () => {
     using dir = tempDir("pmap-sab-empty", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function id(x) { return x; }
         const out = await pmap(id, new Float32Array(0));
         console.log(JSON.stringify({
@@ -151,7 +151,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("respects concurrency=1 for TypedArrays", async () => {
     using dir = tempDir("pmap-sab-conc1", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function negate(x) { return -x; }
         const input = new Float32Array([1, 2, 3, 4, 5]);
         const out = await pmap(negate, input, { concurrency: 1 });
@@ -180,7 +180,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("preserves element index in mapping function", async () => {
     using dir = tempDir("pmap-sab-idx", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function addIdx(x, i) { return x + i; }
         const out = await pmap(addIdx, new Int32Array([100, 200, 300]));
         console.log(JSON.stringify(Array.from(out)));
@@ -203,7 +203,7 @@ describe("pmap SAB-backed TypedArray path", () => {
   it("regular arrays still work after TypedArray support", async () => {
     using dir = tempDir("pmap-sab-compat", {
       "index.pjs": `
-        import { pmap } from "para:parallel";
+        import { pmap } from "@para/parallel";
         pure function double(x) { return x * 2; }
         const out = await pmap(double, [1, 2, 3]);
         console.log(JSON.stringify(out));

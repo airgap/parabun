@@ -1,9 +1,9 @@
-// Hardcoded module "para:simd"
+// Hardcoded module "@para/simd"
 //
 // Parabun: vector primitives over typed arrays, designed for use with `pure`
 // functions and the `|>` pipeline operator.
 //
-//   import { mulScalar, add, sum, dot, simdMap } from "para:simd";
+//   import { mulScalar, add, sum, dot, simdMap } from "@para/simd";
 //   const y32 = mulScalar(new Float32Array([1, 2, 3, 4]), 3);  // → [3, 6, 9, 12]
 //   const y64 = mulScalar(new Float64Array([1, 2, 3, 4]), 3);  // same, f64x2 path
 //
@@ -1034,7 +1034,7 @@ function commitAllocPool(): void {
 }
 
 function alloc(length: number, type: "f32" | "f64"): FArray {
-  if (!isWasmAvailable()) throw new Error("para:simd alloc requires the WASM backend");
+  if (!isWasmAvailable()) throw new Error("@para/simd alloc requires the WASM backend");
   if (!Number.isInteger(length) || length < 0) {
     throw new RangeError("length must be a non-negative integer");
   }
@@ -1048,7 +1048,7 @@ function alloc(length: number, type: "f32" | "f64"): FArray {
   const nextTop = base + byteLen;
   if (nextTop > ALLOC_COMMIT_BYTES) {
     throw new RangeError(
-      `para:simd alloc pool exhausted: requested ${byteLen} bytes at offset ${base}, pool ends at ${ALLOC_COMMIT_BYTES}`,
+      `@para/simd alloc pool exhausted: requested ${byteLen} bytes at offset ${base}, pool ends at ${ALLOC_COMMIT_BYTES}`,
     );
   }
   allocTop = nextTop;
@@ -1638,7 +1638,7 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray): FArray {
 
 // --- Auto-accel dispatch (Tier 1) ---
 //
-// Other bun: modules (notably para:pipeline) need to know whether dispatching
+// Other bun: modules (notably @para/pipeline) need to know whether dispatching
 // to our WASM kernels will pay off at a given size. `wasmWinsForSize` is the
 // centralized query; it encapsulates:
 //   - WASM availability (module compiled successfully at boot)

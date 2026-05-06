@@ -1,9 +1,9 @@
 // Hardcoded module "parabun:gpu"
 //
 // Parabun: GPU-accelerated vector primitives over typed arrays. Same public
-// surface as para:simd for `dot`, `matVec`, `simdMap` — plus `matmul`, which
+// surface as @para/simd for `dot`, `matVec`, `simdMap` — plus `matmul`, which
 // is where GPU really earns its keep. Designed to slot in behind
-// `para:pipeline` fusion as a Tier 3 when the buffer crosses a size threshold.
+// `@para/pipeline` fusion as a Tier 3 when the buffer crosses a size threshold.
 //
 //   import gpu from "parabun:gpu";
 //   if (gpu.winsForSize("matVec", nRows, 4)) {
@@ -16,7 +16,7 @@
 //              MTLComputePipelineState. Zero-copy via unified memory.
 //   - "cuda":  NVIDIA GPUs on Linux + Windows. bun:ffi to libcuda.so.1 /
 //              nvcuda.dll via the Driver API. Hand-written PTX kernels.
-//   - "cpu":   Fallback — forwards every op to para:simd. Always available.
+//   - "cpu":   Fallback — forwards every op to @para/simd. Always available.
 //
 // Backend selection is lazy + sticky. On first use we probe in order
 // [metal, cpu] on macOS and [cuda, cpu] elsewhere, and cache the result.
@@ -31,7 +31,7 @@ const cudaBackend = require("./gpu/cuda.ts");
 const metalBackend = require("./gpu/metal.ts");
 const signalsMod = require("./signals.ts");
 
-// Structural Signal types — keep this module agnostic of para:signals's
+// Structural Signal types — keep this module agnostic of @para/signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / vision.ts / rtp.ts.
 type Signal<T> = {
   get(): T;
@@ -234,7 +234,7 @@ function unwrapGpuArg<T extends FArray>(x: T | GpuHandle | GpuFloat32Array): T |
 // ─── Backend protocol ──────────────────────────────────────────────────────
 //
 // Every backend implements this interface. The `cpu` backend is an alias
-// that forwards to para:simd for ops it supports, and a JS fallback for
+// that forwards to @para/simd for ops it supports, and a JS fallback for
 // matmul (simd doesn't have native matmul — we build it on matVec).
 //
 // Backend implementations MUST NOT throw on missing ops; they return
@@ -722,7 +722,7 @@ function cpuConv2D(
   return out;
 }
 
-// ─── CPU backend (always available — forwards to para:simd) ──────────────────
+// ─── CPU backend (always available — forwards to @para/simd) ──────────────────
 
 const cpuBackend: Backend = {
   name: "cpu",
@@ -901,20 +901,20 @@ function setBackend(choice: BackendChoice): BackendName {
 
 // ─── Threshold query ───────────────────────────────────────────────────────
 //
-// Delegates to the active backend. Callers use this to decide between para:simd
+// Delegates to the active backend. Callers use this to decide between @para/simd
 // and parabun:gpu without hard-coding sizes:
 //
 //   if (gpu.winsForSize("matVec", nRows * nCols, 4)) { ... }
 //
 // The `cpu` backend always returns `false` — that's intentional, so
 // consumers can guard with `if (winsForSize(...))` and fall through to
-// para:simd without a second check.
+// @para/simd without a second check.
 
 function winsForSize(op: OpKind, n: number, elemBytes: number): boolean {
   return resolveActive().winsForSize(op, n, elemBytes);
 }
 
-// Per-host calibration — sweeps the real GPU kernel against para:simd at a
+// Per-host calibration — sweeps the real GPU kernel against @para/simd at a
 // small set of sizes, persists the measured CPU→GPU crossover under
 // `~/.cache/parabun/gpu-calibrate-<hash>.json`, and rehydrates it on
 // subsequent process starts. Intended to be called once at app boot; the

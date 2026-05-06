@@ -6,11 +6,11 @@
 // pure JS gets. Honest null on single-pair: we don't beat upstream.
 //
 // The win is on *batched* calls. `closest(query, candidates)` is an
-// embarrassingly parallel loop — perfect for `para:parallel.pmap`, which
+// embarrassingly parallel loop — perfect for `@para/parallel.pmap`, which
 // is a Parabun-specific API. Each worker runs an independent chunk of
 // candidates through the same Myers kernel; master does the argmin.
 
-import { pmap, disposeWorkers } from "para:parallel";
+import { pmap, disposeWorkers } from "@para/parallel";
 import { generate } from "./gen.cjs";
 
 const WARMUPS = 2;

@@ -1,12 +1,12 @@
-// Parabun: same ETL written as a |> chain on para:pipeline. The three
+// Parabun: same ETL written as a |> chain on @para/pipeline. The three
 // affine map fns + `sum` terminal triggers Tier 2 fusion — the chain
 // collapses to K * simd.sum(source) + C * n (K=998, C=2.495) and
-// dispatches to para:simd.sum in one SIMD pass, no intermediate arrays.
+// dispatches to @para/simd.sum in one SIMD pass, no intermediate arrays.
 //
 // If any map were non-affine (e.g. Math.sqrt), fusion would fall back to
 // simdMap with the composed fn — still one pass, still no intermediates.
 
-import { map, sum } from "para:pipeline";
+import { map, sum } from "@para/pipeline";
 import { generate, N } from "./gen.js";
 
 const data = generate();
