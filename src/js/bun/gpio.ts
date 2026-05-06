@@ -563,7 +563,33 @@ function open(path: string): Chip {
   return new ChipImpl(fd, info);
 }
 
+/**
+ * Open the most likely user-facing gpiochip without naming it.
+ *
+ * Resolution order:
+ *   1. process.env.GPIO_CHIP — explicit override
+ *   2. The Pi 5 RP1 chip (label "pinctrl-rp1") — usually /dev/gpiochip4
+ *   3. /dev/gpiochip0 — default on most Linux SBCs (Pi 4, Jetson, etc.)
+ *
+ * Throws if no gpiochip device is present at all (non-Linux, no
+ * /dev/gpiochip*, or the user lacks permission to read /dev/).
+ */
+function openDefaultChip(): Chip {
+  const envOverride = (globalThis as any).process?.env?.GPIO_CHIP;
+  if (typeof envOverride === "string" && envOverride.length > 0) {
+    return open(envOverride);
+  }
+  const all = chips();
+  if (all.length === 0) {
+    throw new Error("parabun:gpio.openDefaultChip: no /dev/gpiochip* found — Linux + GPIO required");
+  }
+  const rp1 = all.find(c => c.label === "pinctrl-rp1");
+  if (rp1) return open(rp1.path);
+  return open(all[0].path);
+}
+
 export default {
   chips,
   open,
+  openDefaultChip,
 };

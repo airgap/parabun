@@ -702,6 +702,57 @@ function debounced<T>(source: ReadableSignal<T>, ms: number): { value: ReadableS
   });
 }
 
+/**
+ * Wrap an async action so concurrent calls AND calls within
+ * `coolingMs` of the previous call's completion are silently dropped.
+ *
+ *   const water = signals.cooldown(runPump, {
+ *     key: p => p.name,                   // partition by plant
+ *     coolingMs: p => p.cooldownMs,       // per-plant cooldown
+ *   });
+ *
+ *   // In a 1Hz tick:
+ *   if (m < p.dryAt) await water(p);
+ *
+ * Returns a Promise<boolean>: true if the action was called, false if
+ * dropped (in-flight or in cooldown). Replaces the manual ok/watering/
+ * cooldown phase + lastWateredAt bookkeeping you'd otherwise write.
+ *
+ * `key` is optional — omit for a single global cooldown across all calls.
+ * `coolingMs` can be a number or a function of the call args.
+ */
+type CooldownOptions<A extends unknown[]> = {
+  key?: (...args: A) => unknown;
+  coolingMs: number | ((...args: A) => number);
+};
+
+function cooldown<A extends unknown[]>(
+  fn: (...args: A) => void | Promise<void>,
+  opts: CooldownOptions<A>,
+): (...args: A) => Promise<boolean> {
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  const lastDoneAt = new Map<unknown, number>(); // key → earliest re-fire timestamp
+  const inFlight = new Set<unknown>();
+  const getKey = opts.key ?? (() => undefined);
+  const getMs = typeof opts.coolingMs === "function" ? opts.coolingMs : () => opts.coolingMs as number;
+  return async (...args: A): Promise<boolean> => {
+    const k = getKey(...args);
+    if (inFlight.has(k)) return false;
+    const readyAt = lastDoneAt.get(k) ?? 0;
+    if (Date.now() < readyAt) return false;
+    inFlight.add(k);
+    try {
+      await fn(...args);
+    } finally {
+      inFlight.delete(k);
+      lastDoneAt.set(k, Date.now() + getMs(...args));
+    }
+    return true;
+  };
+}
+
 export default {
   signal,
   derived,
@@ -718,5 +769,6 @@ export default {
   fromEventTarget,
   throttled,
   debounced,
+  cooldown,
   Signal: ReadableSignal,
 };

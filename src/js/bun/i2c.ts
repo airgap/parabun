@@ -318,7 +318,115 @@ function open(path: string): Bus {
   return new BusImpl(fd, info);
 }
 
+/**
+ * ADS1115 16-bit ADC convenience wrapper.
+ *
+ * The ADS1115 is the most common Pi/Jetson companion ADC. This helper
+ * opens the bus, binds the device address, and exposes one-call reads
+ * that hide the config-register dance (mux + PGA + mode + data-rate +
+ * 8ms wait + sign-extend).
+ *
+ *   await using ads = i2c.ads1115("/dev/i2c-1");
+ *   const raw = await ads.read(0);          // -32768..32767
+ *   const v   = await ads.readVolts(0);     // -4.096..4.096 V (default PGA)
+ *
+ * Single-ended mode only (AINx vs GND, channels 0..3). Default PGA is
+ * ±4.096V, default data rate is 128 SPS. Pass options to override.
+ */
+function ads1115(busPath: string, options: Ads1115Options = {}): Ads1115 {
+  const bus = open(busPath);
+  return ads1115OnBus(bus, options, true);
+}
+
+interface Ads1115Options {
+  /** I²C device address. Default 0x48 (ADDR pin tied to GND). 0x48..0x4B valid. */
+  address?: number;
+  /**
+   * Programmable-gain amplifier setting. Determines the full-scale
+   * input voltage and therefore the volts-per-bit step.
+   * Default `"4.096V"`.
+   */
+  pga?: "6.144V" | "4.096V" | "2.048V" | "1.024V" | "0.512V" | "0.256V";
+}
+
+interface Ads1115 extends AsyncDisposable, Disposable {
+  /** Underlying bus, exposed in case you need scan() or device() for other chips on the same bus. */
+  readonly bus: Bus;
+  /** Single-ended raw read on AINx vs GND. Returns signed 16-bit. */
+  read(channel: 0 | 1 | 2 | 3): Promise<number>;
+  /** Single-ended voltage read on AINx vs GND. */
+  readVolts(channel: 0 | 1 | 2 | 3): Promise<number>;
+  close(): void;
+}
+
+const ADS1115_PGA_BITS: Record<NonNullable<Ads1115Options["pga"]>, number> = {
+  "6.144V": 0b000,
+  "4.096V": 0b001,
+  "2.048V": 0b010,
+  "1.024V": 0b011,
+  "0.512V": 0b100,
+  "0.256V": 0b101,
+};
+const ADS1115_PGA_FS: Record<NonNullable<Ads1115Options["pga"]>, number> = {
+  "6.144V": 6.144,
+  "4.096V": 4.096,
+  "2.048V": 2.048,
+  "1.024V": 1.024,
+  "0.512V": 0.512,
+  "0.256V": 0.256,
+};
+
+// Internal — also used by ads1115OnBus(bus, opts, false) for callers
+// that want to share an existing bus across multiple chips.
+function ads1115OnBus(bus: Bus, opts: Ads1115Options, ownsBus: boolean): Ads1115 {
+  const address = opts.address ?? 0x48;
+  const pga = opts.pga ?? "4.096V";
+  const pgaBits = ADS1115_PGA_BITS[pga];
+  const fullScaleVolts = ADS1115_PGA_FS[pga];
+  const dev = bus.device(address);
+
+  // ADS1115 is big-endian; SMBus word transfers are little-endian on
+  // Linux. Swap bytes both directions.
+  const swap = (v: number) => ((v & 0xff) << 8) | ((v >> 8) & 0xff);
+
+  async function readRaw(channel: number): Promise<number> {
+    const mux = 0b100 | (channel & 0b011);
+    // OS=1 | MUX | PGA | MODE=1 (single-shot) | DR=100 (128 SPS) | COMP_QUE=11 (disable)
+    const cfg = 0x8000 | (mux << 12) | (pgaBits << 9) | (1 << 8) | (4 << 5) | 0x0003;
+    await dev.smbus.writeWord(0x01, swap(cfg));
+    await Bun.sleep(8);
+    const raw = swap(await dev.smbus.readWord(0x00));
+    return (raw << 16) >> 16;
+  }
+
+  let closed = false;
+  return {
+    bus,
+    read(channel) {
+      if (channel < 0 || channel > 3) throw new RangeError("parabun:i2c.ads1115.read: channel must be 0..3");
+      return readRaw(channel);
+    },
+    async readVolts(channel) {
+      const r = await readRaw(channel);
+      return (r / 32768) * fullScaleVolts;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      if (ownsBus) bus.close();
+    },
+    [Symbol.dispose]() {
+      this.close();
+    },
+    [Symbol.asyncDispose]() {
+      this.close();
+      return Promise.resolve();
+    },
+  };
+}
+
 export default {
   buses,
   open,
+  ads1115,
 };
