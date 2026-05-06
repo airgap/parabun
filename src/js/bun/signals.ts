@@ -425,6 +425,28 @@ function when<T>(source: EdgeSource<T>, fn: () => void): () => void {
   });
 }
 
+// `whenever` — same as `when` but ALSO fires once at registration if the
+// predicate is initially truthy. Useful for "the dangerous state is the
+// noteworthy one" alerts where you don't want to silently miss a boot
+// already in the bad state. `when` retains strict-edge semantics for
+// the cases (e.g. button press) where you don't want to fake a press
+// at startup.
+function whenever<T>(source: EdgeSource<T>, fn: () => void): () => void {
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  const { peek, read } = readEdgeSource(source);
+  // Pre-seed the previous value as `false` so the first observation,
+  // if true, counts as a rising edge. The effect body then handles
+  // every subsequent transition.
+  let prev = false;
+  return effect(() => {
+    const now = read();
+    if (now && !prev) fn();
+    prev = now;
+  });
+}
+
 // ─── Resource-tied signals ─────────────────────────────────────────────────
 //
 // `resource(setup)` builds a handle whose lifecycle is explicit. Hardware
@@ -770,5 +792,6 @@ export default {
   throttled,
   debounced,
   cooldown,
+  whenever,
   Signal: ReadableSignal,
 };

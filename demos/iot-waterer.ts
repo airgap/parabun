@@ -115,23 +115,18 @@ const tankLevel = signals.derived(() => tankRaw.signal.get() ?? 1.0);
 const tankEmpty = signals.derived(() => tankLevel.get() < TANK_EMPTY_AT);
 const tankLow = signals.derived(() => tankLevel.get() < TANK_LOW_AT);
 
-let wasEmpty = false;
-signals.effect(() => {
-  const empty = tankEmpty.get();
-  if (empty && !wasEmpty) notify("⚠️  tank EMPTY — pausing all watering");
-  // The transition fires the instant the level crosses TANK_EMPTY_AT
-  // from below, so reading tankLevel here would always show ~6% even
-  // on a tank refilling to 100%. Don't quote a percentage.
-  if (!empty && wasEmpty) notify("✓  tank back above empty — resuming watering");
-  wasEmpty = empty;
-});
-
-let wasLow = false;
-signals.effect(() => {
-  const low = tankLow.get() && !tankEmpty.get();
-  if (low && !wasLow) notify(`⚠ tank low — ${(tankLevel.get() * 100).toFixed(0)}% remaining`);
-  wasLow = low;
-});
+// `whenever` (initial-truthy + edge) for the dangerous-state alerts —
+// catches a boot-already-bad state. `when` (strict edge) for the
+// recovery so we don't fake "back above empty" on a healthy boot.
+signals.whenever(tankEmpty, () => notify("⚠️  tank EMPTY — pausing all watering"));
+signals.when(
+  () => !tankEmpty.get(),
+  () => notify("✓  tank back above empty — resuming watering"),
+);
+signals.whenever(
+  () => tankLow.get() && !tankEmpty.get(),
+  () => notify(`⚠ tank low — ${(tankLevel.get() * 100).toFixed(0)}% remaining`),
+);
 
 // ─── per-plant pump driver, rate-limited by signals.cooldown ────────
 
