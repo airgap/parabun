@@ -65,6 +65,27 @@
       }
     },
     {
+      "comment": "whenever EXPR { ... } / whenever not EXPR { ... } — initial-truthy + edge",
+      "match": "\\b(whenever)\\s+(not)\\b",
+      "captures": {
+        "1": { "name": "keyword.control.whenever.parabun" },
+        "2": { "name": "keyword.control.whenever.not.parabun" }
+      }
+    },
+    {
+      "match": "\\b(whenever)\\b(?=\\s+[!A-Za-z_$])",
+      "captures": {
+        "1": { "name": "keyword.control.whenever.parabun" }
+      }
+    },
+    {
+      "comment": "derived NAME = EXPR — read-only signal",
+      "match": "\\b(derived)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=,;:!])",
+      "captures": {
+        "1": { "name": "storage.type.derived.parabun" }
+      }
+    },
+    {
       "match": "\\b(arena)\\b(?=\\s*\\{)",
       "captures": {
         "1": { "name": "keyword.control.arena.parabun" }
