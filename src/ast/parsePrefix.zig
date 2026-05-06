@@ -924,6 +924,16 @@ pub fn ParsePrefix(
                 .t_super => t_super(p, level),
                 // Parabun extension: throw in expression position
                 .t_throw => t_throw_expr(p),
+                // Parabun extension: bare-dot lambda sugar in any
+                // expression-prefix position. `.name` parses as
+                // `(__pcv) => __pcv.name`. Was previously gated to
+                // direct call-argument position only (see parseCallArgs);
+                // now fires anywhere `.foo` would otherwise be a
+                // SyntaxError — object-literal values, array elements,
+                // assignment RHS, ternary branches, etc. Numeric
+                // literals like `.5` lex as t_numeric_literal so
+                // they're unaffected.
+                .t_dot => p.parseLeadingDotLambda(p.lexer.loc()),
                 else => {
                     @branchHint(.cold);
                     try p.lexer.unexpected();

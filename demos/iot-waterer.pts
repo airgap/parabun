@@ -144,7 +144,7 @@ const water = signals.cooldown(
     pumps.get(p.pumpPin)?.write(0);
     console.log(`✓  ${p.name}: pump OFF — cooldown ${(p.cooldownMs / 1000).toFixed(0)}s`);
   },
-  { key: p => p.name, coolingMs: p => p.cooldownMs },
+  { key: .name, coolingMs: .cooldownMs },
 );
 
 // ─── reactive tick ──────────────────────────────────────────────────
