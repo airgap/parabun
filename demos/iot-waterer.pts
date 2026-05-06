@@ -122,14 +122,14 @@ derived tankEmpty = tankLevel < TANK_EMPTY_AT;
 derived tankLow = tankLevel < TANK_LOW_AT;
 
 // Paired form: `when X start` catches a boot-already-empty tank + each
-// new empty event; bare `when not { }` is the inverse-edge arm,
+// new empty event; bare `when stop { }` is the inverse-edge arm,
 // always strict-edge so a healthy boot doesn't fake a recovery alert.
 // (Reading tankLevel inside the recovery body would always show ~6%
 // since the edge fires the instant level crosses TANK_EMPTY_AT from
 // below — don't quote a percentage.)
 when tankEmpty start { notify("⚠️  tank EMPTY — pausing all watering"); }
-when not             { notify("✓  tank back above empty — resuming watering"); }
-when tankLow start   { notify(`⚠ tank low — ${(tankLevel * 100).toFixed(0)}% remaining`); }
+when stop            { notify("✓  tank back above empty — resuming watering"); }
+when tankLow   start { notify(`⚠ tank low — ${(tankLevel * 100).toFixed(0)}% remaining`); }
 
 // ─── per-plant pump driver, rate-limited by signals.cooldown ────────
 

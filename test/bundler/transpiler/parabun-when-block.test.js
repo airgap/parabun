@@ -203,13 +203,13 @@ describe("Parabun: when block (rising / falling)", () => {
     });
   });
 
-  describe("paired form (when … when not …)", () => {
+  describe("paired form (when … when stop …)", () => {
     describe("desugar", () => {
-      it("`when X { } when not { }` emits two `when` calls — second predicate negated", () => {
+      it("`when X { } when stop { }` emits two `when` calls — second predicate negated", () => {
         const out = transform(`
           signal a = false;
           when a { console.log("rise"); }
-          when not { console.log("fall"); }
+          when stop { console.log("fall"); }
         `);
         // Two helper calls, both on signals.when.
         expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
@@ -218,11 +218,11 @@ describe("Parabun: when block (rising / falling)", () => {
         expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
       });
 
-      it("`when not X { } when not { }` flips the edge — first negated, second bare", () => {
+      it("`when not X { } when stop { }` flips the edge — first negated, second bare", () => {
         const out = transform(`
           signal a = true;
           when not a { console.log("fall"); }
-          when not { console.log("rise"); }
+          when stop  { console.log("rise"); }
         `);
         expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
         // First: `() => !a.get()`. Second arm reuses RAW predicate sans
@@ -241,29 +241,28 @@ describe("Parabun: when block (rising / falling)", () => {
           when not b { console.log("b-fall"); }
         `);
         // Both still emit, but each with its own predicate. The paired-form
-        // lookahead bails out because Y is not bare-{ after `not`.
+        // lookahead requires bare `stop` (no predicate); `not Y` falls
+        // through to the standard predicate-negation form.
         expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
         expect(out).toContain("a.get()");
         expect(out).toContain("b.get()");
       });
 
-      it("intervening statement breaks adjacency — second `when not { }` errors", () => {
-        let threw = false;
-        try {
-          transform(`
-            signal a = false;
-            when a { console.log("rise"); }
-            console.log("between");
-            when not { console.log("fall"); }
-          `);
-        } catch {
-          threw = true;
-        }
-        // The second `when not { }` no longer has a paired predicate to
-        // inherit. Falling through to the normal predicate-required path
-        // produces a parse error (the bare `{` is read as an empty object
-        // literal predicate, then no body brace remains).
-        expect(threw).toBe(true);
+      it("intervening statement breaks adjacency — bare `when stop { }` parses standalone", () => {
+        // After the intervening statement, the second `when stop { }` no
+        // longer has a paired predicate to inherit. It parses as a regular
+        // `when [predicate=stop] { body }` — i.e. fire on rising edge of
+        // the variable named `stop`. Two distinct `when` calls emitted.
+        const out = transform(`
+          signal a = false;
+          signal stop = false;
+          when a { console.log("rise"); }
+          console.log("between");
+          when stop { console.log("stopped"); }
+        `);
+        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect(out).toContain("a.get()");
+        expect(out).toContain("stop.get()");
       });
     });
 
@@ -274,8 +273,8 @@ describe("Parabun: when block (rising / falling)", () => {
           `
             signal a = false;
             const out = [];
-            when a { out.push("rise"); }
-            when not { out.push("fall"); }
+            when a    { out.push("rise"); }
+            when stop { out.push("fall"); }
             a = true;
             await Promise.resolve();
             a = false;
@@ -298,7 +297,7 @@ describe("Parabun: when block (rising / falling)", () => {
             signal a = true;
             const out = [];
             when not a { out.push("fall"); }
-            when not { out.push("rise"); }
+            when stop  { out.push("rise"); }
             a = false;
             await Promise.resolve();
             a = true;
@@ -317,7 +316,7 @@ describe("Parabun: when block (rising / falling)", () => {
             signal x = 0;
             const out = [];
             when x >= 100 { out.push("over"); }
-            when not { out.push("under"); }
+            when stop     { out.push("under"); }
             x = 50;
             await Promise.resolve();
             x = 100;

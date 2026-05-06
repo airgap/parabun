@@ -2202,15 +2202,18 @@ pub fn ParseStmt(
 
             // Parabun: paired-edge form. After `when EXPR { body }` (or `when
             // not EXPR { body }`), if the immediately-following statement is a
-            // bare `when not { body }` — the word `not` followed directly by
-            // `{` with no predicate — pair the two as opposite-edge handlers
-            // sharing this when's predicate. Adjacency is enforced by parsing
-            // both arms in the same call; intervening statements break it.
+            // bare `when stop { body }` — the word `stop` followed directly
+            // by `{` with no predicate — pair the two as opposite-edge
+            // handlers sharing this when's predicate. Adjacency is enforced
+            // by parsing both arms in the same call; intervening statements
+            // break it. `stop` is paired with the `start` modifier on the
+            // first arm — symmetric "fire when X starts" / "fire when X
+            // stops" naming.
             //
-            //   when     X       { a } when not { b }  →  when(X,a)      + when(!X,b)
-            //   when not X       { a } when not { b }  →  when(!X,a)     + when(X,b)
-            //   when     X start { a } when not { b }  →  whenStart(X,a) + when(!X,b)
-            //   when not X start { a } when not { b }  →  whenStart(!X,a) + when(X,b)
+            //   when     X       { a } when stop { b }  →  when(X,a)      + when(!X,b)
+            //   when not X       { a } when stop { b }  →  when(!X,a)     + when(X,b)
+            //   when     X start { a } when stop { b }  →  whenStart(X,a) + when(!X,b)
+            //   when not X start { a } when stop { b }  →  whenStart(!X,a) + when(X,b)
             //
             // The bare-paired arm ALWAYS emits `when` (strict edge) — that's
             // typically what you want when pairing with the `start` form:
@@ -2225,7 +2228,7 @@ pub fn ParseStmt(
                 const saved_after_first = p.lexer;
                 const second_when_loc = p.lexer.loc();
                 try p.lexer.next();
-                const is_paired = p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "not");
+                const is_paired = p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "stop");
                 if (is_paired) {
                     try p.lexer.next();
                     if (p.lexer.token == .t_open_brace) {
