@@ -8,6 +8,7 @@
 
 import gpio from "parabun:gpio";
 import signals from "@para/signals";
+import lifecycle from "@para/lifecycle";
 
 const args = process.argv.slice(2);
 const portIdx = args.indexOf("--port");
@@ -120,9 +121,4 @@ console.log(`  POST /led/auto          → clear override, follow button`);
 console.log("");
 console.log("Ctrl-C to stop.");
 
-const stopped = Promise.withResolvers<void>();
-const stop = () => stopped.resolve();
-process.on("SIGINT", stop);
-process.on("SIGTERM", stop);
-await stopped.promise;
-server.stop();
+await lifecycle.keepAlive({ onShutdown: () => server.stop() });

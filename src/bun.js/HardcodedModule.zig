@@ -12,6 +12,7 @@ pub const HardcodedModule = enum {
     @"bun:sqlite",
     @"@para/arena",
     @"@para/arrow",
+    @"@para/lifecycle",
     @"parabun:audio",
     @"parabun:camera",
     @"parabun:csv",
@@ -123,6 +124,7 @@ pub const HardcodedModule = enum {
         // builtin that maps to the bundled JS impl from src/js/bun/<name>.ts.
         .{ "@para/arena", .@"@para/arena" },
         .{ "@para/arrow", .@"@para/arrow" },
+        .{ "@para/lifecycle", .@"@para/lifecycle" },
         .{ "@para/mcp", .@"@para/mcp" },
         .{ "@para/parallel", .@"@para/parallel" },
         .{ "@para/pipeline", .@"@para/pipeline" },
@@ -133,6 +135,7 @@ pub const HardcodedModule = enum {
         // route to their `@para/*` equivalents for one major release.
         .{ "para:arena", .@"@para/arena" },
         .{ "para:arrow", .@"@para/arrow" },
+        .{ "para:lifecycle", .@"@para/lifecycle" },
         .{ "para:mcp", .@"@para/mcp" },
         .{ "para:parallel", .@"@para/parallel" },
         .{ "para:pipeline", .@"@para/pipeline" },
@@ -430,6 +433,7 @@ pub const HardcodedModule = enum {
             // Para libraries — canonical @para/* aliases.
             .{ "@para/arena", .{ .path = "@para/arena" } },
             .{ "@para/arrow", .{ .path = "@para/arrow" } },
+            .{ "@para/lifecycle", .{ .path = "@para/lifecycle" } },
             .{ "@para/mcp", .{ .path = "@para/mcp" } },
             .{ "@para/parallel", .{ .path = "@para/parallel" } },
             .{ "@para/pipeline", .{ .path = "@para/pipeline" } },
@@ -441,6 +445,7 @@ pub const HardcodedModule = enum {
             // window. Drop one major release after consumers migrate.
             .{ "para:arena", .{ .path = "@para/arena" } },
             .{ "para:arrow", .{ .path = "@para/arrow" } },
+            .{ "para:lifecycle", .{ .path = "@para/lifecycle" } },
             .{ "para:mcp", .{ .path = "@para/mcp" } },
             .{ "para:parallel", .{ .path = "@para/parallel" } },
             .{ "para:pipeline", .{ .path = "@para/pipeline" } },

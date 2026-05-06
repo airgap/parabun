@@ -70,6 +70,7 @@ globalThis.requireTransformer = requireTransformer;
 const PARA_LIB_MODULES: ReadonlySet<string> = new Set([
   "arena",
   "arrow",
+  "lifecycle",
   "mcp",
   "parallel",
   "pipeline",

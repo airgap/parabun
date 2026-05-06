@@ -20,6 +20,7 @@
 import gpio from "parabun:gpio";
 import i2c from "parabun:i2c";
 import signals from "@para/signals";
+import lifecycle from "@para/lifecycle";
 
 interface Plant {
   name: string;
@@ -176,7 +177,7 @@ if (seconds > 0) {
   console.log(`(non-interactive: stopping in ${seconds}s)`);
   await Bun.sleep(seconds * 1000);
 } else {
-  await new Promise(() => {});
+  await lifecycle.keepAlive();
 }
 
 tick.dispose();

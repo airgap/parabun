@@ -16,6 +16,7 @@
 
 import gpio from "parabun:gpio";
 import signals from "@para/signals";
+import lifecycle from "@para/lifecycle";
 
 const args = process.argv.slice(2);
 const portIdx = args.indexOf("--port");
@@ -127,13 +128,6 @@ console.log(`  POST /led/auto          → clear override, follow button`);
 console.log("");
 console.log("Ctrl-C to stop.");
 
-// Keep the script alive so the `await using` resources don't dispose
-// out from under the running server. SIGINT / SIGTERM unblocks via
-// the abort listener, and the dispose chain runs as the function
-// returns.
-const stopped = Promise.withResolvers<void>();
-const stop = () => stopped.resolve();
-process.on("SIGINT", stop);
-process.on("SIGTERM", stop);
-await stopped.promise;
-server.stop();
+// Block until SIGINT / SIGTERM, then stop the server. The
+// `await using` resources further up dispose as the function returns.
+await lifecycle.keepAlive({ onShutdown: () => server.stop() });
