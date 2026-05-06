@@ -1,4 +1,9 @@
-// Hardcoded module "para:csv"
+// Hardcoded module "parabun:csv"
+//
+// LYK-804: renamed from "para:csv". The old name still resolves via the
+// HardcodedModule.zig Aliases table for one major release; new imports
+// should use "parabun:csv" per the namespace convention
+// (parabun:* = native, @para/* = cross-runtime npm).
 //
 // Parabun: streaming CSV parser. RFC 4180-ish (comma delimiter, double-quote
 // quoting, doubled-quote escaping inside fields). Optional header row,

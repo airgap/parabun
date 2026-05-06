@@ -14,7 +14,7 @@ pub const HardcodedModule = enum {
     @"para:arrow",
     @"parabun:audio",
     @"parabun:camera",
-    @"para:csv",
+    @"parabun:csv",
     @"parabun:gpio",
     @"parabun:gpu",
     @"parabun:i2c",
@@ -123,7 +123,11 @@ pub const HardcodedModule = enum {
         .{ "para:arrow", .@"para:arrow" },
         .{ "parabun:audio", .@"parabun:audio" },
         .{ "parabun:camera", .@"parabun:camera" },
-        .{ "para:csv", .@"para:csv" },
+        .{ "parabun:csv", .@"parabun:csv" },
+        // LYK-804: para:csv kept as a backward-compat alias for one
+        // major release. New imports should use parabun:csv per the
+        // namespace convention (parabun:* = native, @para/* = lib).
+        .{ "para:csv", .@"parabun:csv" },
         .{ "parabun:assistant", .@"parabun:assistant" },
         .{ "parabun:gpio", .@"parabun:gpio" },
         .{ "parabun:gpu", .@"parabun:gpu" },
@@ -414,7 +418,11 @@ pub const HardcodedModule = enum {
             .{ "parabun:assistant", .{ .path = "parabun:assistant" } },
             .{ "parabun:audio", .{ .path = "parabun:audio" } },
             .{ "parabun:camera", .{ .path = "parabun:camera" } },
-            .{ "para:csv", .{ .path = "para:csv" } },
+            .{ "parabun:csv", .{ .path = "parabun:csv" } },
+            // LYK-804: para:csv aliases to parabun:csv for one major
+            // release. Same module, two import strings during the
+            // deprecation window.
+            .{ "para:csv", .{ .path = "parabun:csv" } },
             .{ "parabun:gpio", .{ .path = "parabun:gpio" } },
             .{ "parabun:gpu", .{ .path = "parabun:gpu" } },
             .{ "parabun:i2c", .{ .path = "parabun:i2c" } },

@@ -70,7 +70,6 @@ globalThis.requireTransformer = requireTransformer;
 const PARA_LIB_MODULES: ReadonlySet<string> = new Set([
   "arena",
   "arrow",
-  "csv",
   "mcp",
   "parallel",
   "pipeline",
@@ -82,6 +81,7 @@ const PARABUN_RUNTIME_MODULES: ReadonlySet<string> = new Set([
   "assistant",
   "audio",
   "camera",
+  "csv",
   "gpio",
   "gpu",
   "i2c",
