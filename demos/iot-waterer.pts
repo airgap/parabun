@@ -164,7 +164,10 @@ when tankEmpty {
   notify("⚠️  tank EMPTY — pausing all watering");
 }
 when not tankEmpty {
-  notify(`✓  tank refilled to ${(tankLevel * 100).toFixed(0)}% — resuming watering`);
+  // Edge fires the instant tankLevel crosses TANK_EMPTY_AT from below
+  // — reading tankLevel here would always show ~6% even on a tank
+  // refilling to 100%, so we just announce the resume.
+  notify("✓  tank back above empty — resuming watering");
 }
 when tankLow {
   notify(`⚠ tank low — ${(tankLevel * 100).toFixed(0)}% remaining`);

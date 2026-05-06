@@ -168,7 +168,10 @@ let wasEmpty = false;
 signals.effect(() => {
   const empty = tankEmpty.get();
   if (empty && !wasEmpty) notify("⚠️  tank EMPTY — pausing all watering");
-  if (!empty && wasEmpty) notify(`✓  tank refilled to ${(tankLevel.get() * 100).toFixed(0)}% — resuming watering`);
+  // The transition fires the instant the level crosses TANK_EMPTY_AT
+  // from below, so reading tankLevel here would always show ~6% even
+  // on a tank refilling to 100%. Don't quote a percentage.
+  if (!empty && wasEmpty) notify("✓  tank back above empty — resuming watering");
   wasEmpty = empty;
 });
 
