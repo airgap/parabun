@@ -1330,10 +1330,42 @@ function stringifyImpl(rows: Iterable<StringifyRow>, options: StringifyOptions =
   return result;
 }
 
-export default {
+// ─── parabun:csv routing shim ──────────────────────────────────────
+//
+// When running on Parabun and a `parabun:csv` native module is
+// registered, defer to it instead of the bundled JS impl. Same public
+// surface; calls land on the SIMD parser when it's built (LYK-800).
+// Outside Parabun (Node / Deno / browsers) and on Parabun without
+// the native module yet, the require throws synchronously and we
+// keep the JS path. No user-visible API change either way.
+//
+// See: https://para.script.dev/docs/architecture/ — csv row.
+
+type CsvApi = {
+  parseCsv: typeof parseCsvImpl;
+  parseColumns: typeof parseColumnsImpl;
+  parseBatches: typeof parseBatchesImpl;
+  reduceColumns: typeof reduceColumnsImpl;
+  stringify: typeof stringifyImpl;
+};
+
+const jsImpl: CsvApi = {
   parseCsv: parseCsvImpl,
   parseColumns: parseColumnsImpl,
   parseBatches: parseBatchesImpl,
   reduceColumns: reduceColumnsImpl,
   stringify: stringifyImpl,
 };
+
+let nativeCsv: CsvApi | null = null;
+try {
+  // Static-string require so resolvers can decide ahead of time.
+  // Accept either a default-exporting module or a flat namespace.
+  const m = require("parabun:csv");
+  nativeCsv = (m && (m.default ?? m)) as CsvApi;
+} catch {
+  // Module not registered (Node / Deno / browser, or Parabun before
+  // LYK-800 lands). JS impl stands.
+}
+
+export default nativeCsv ?? jsImpl;
