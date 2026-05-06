@@ -6,6 +6,15 @@ ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
 ARG BUN_INSTALL_BIN=/usr/local/bin
 ENV BUN_INSTALL_BIN=${BUN_INSTALL_BIN}
 
+# Runtime deps for parabun's native bindings:
+#   libasound2  — parabun:audio (ALSA capture/playback in parabun_audio_io.cpp)
+# Other native modules (libheif, libjxl, CUDA, piper, whisper) are loaded
+# via dlopen at first use, so they don't need to be in the base image —
+# the user installs them on demand.
+RUN apt-get update -qq \
+    && apt-get install -qq --no-install-recommends libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY docker-entrypoint.sh /usr/local/bin/
 COPY bun /usr/local/bin/bun
 
