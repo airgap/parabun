@@ -1,11 +1,11 @@
 // Block-form Para constructs:
 //
-//   signal NAME = EXPR;             → const NAME = require("para:signals").signal(EXPR);
-//   derived NAME = EXPR;            → const NAME = require("para:signals").derived(() => EXPR);
-//   effect { BODY }                 → require("para:signals").effect(() => { BODY });
-//   arena  { BODY }                 → require("para:arena").scope(() => { BODY });
-//   when EXPR { BODY }              → require("para:signals").when(() => EXPR, () => { BODY });
-//   when not EXPR { BODY }          → require("para:signals").when(() => !(EXPR), () => { BODY });
+//   signal NAME = EXPR;             → const NAME = require("@para/signals").signal(EXPR);
+//   derived NAME = EXPR;            → const NAME = require("@para/signals").derived(() => EXPR);
+//   effect { BODY }                 → require("@para/signals").effect(() => { BODY });
+//   arena  { BODY }                 → require("@para/arena").scope(() => { BODY });
+//   when EXPR { BODY }              → require("@para/signals").when(() => EXPR, () => { BODY });
+//   when not EXPR { BODY }          → require("@para/signals").when(() => !(EXPR), () => { BODY });
 //   when X { A } when not { B }     → two .when() calls, second predicate negated
 //
 // Bare-read sugar (rewriting `count` to `count.get()` inside tracked
@@ -73,7 +73,7 @@ function transformSignalDecls(src: string): string {
     }
     const initializer = src.slice(matchEnd, i).trim();
     out += src.slice(last, matchStart);
-    out += `const ${name} = require("para:signals").signal(${initializer})`;
+    out += `const ${name} = require("@para/signals").signal(${initializer})`;
     last = i; // the trailing `;` / `\n` is appended on the next iter or final tail
     re.lastIndex = i;
   }
@@ -125,7 +125,7 @@ function transformDerivedDecls(src: string): string {
     }
     const initializer = src.slice(matchEnd, i).trim();
     out += src.slice(last, matchStart);
-    out += `const ${name} = require("para:signals").derived(() => ${initializer})`;
+    out += `const ${name} = require("@para/signals").derived(() => ${initializer})`;
     last = i;
     re.lastIndex = i;
   }
@@ -139,11 +139,11 @@ function transformDerivedDecls(src: string): string {
 // ─────────────────────────────────────────────────────────────────────────
 
 function transformEffectBlocks(src: string): string {
-  return rewriteKeywordBlocks(src, "effect", body => `require("para:signals").effect(() => {${body}})`);
+  return rewriteKeywordBlocks(src, "effect", body => `require("@para/signals").effect(() => {${body}})`);
 }
 
 function transformArenaBlocks(src: string): string {
-  return rewriteKeywordBlocks(src, "arena", body => `require("para:arena").scope(() => {${body}})`);
+  return rewriteKeywordBlocks(src, "arena", body => `require("@para/arena").scope(() => {${body}})`);
 }
 
 function rewriteKeywordBlocks(src: string, keyword: string, wrap: (body: string) => string): string {
@@ -323,5 +323,5 @@ function peekPairedWhenNot(src: string, from: number): { body: string; end: numb
 
 function emitWhenCall(rawPredicate: string, body: string, negate: boolean): string {
   const predicate = negate ? `!(${rawPredicate})` : rawPredicate;
-  return `require("para:signals").when(() => ${predicate}, () => {${body}})`;
+  return `require("@para/signals").when(() => ${predicate}, () => {${body}})`;
 }

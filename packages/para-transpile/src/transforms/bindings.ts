@@ -1,7 +1,7 @@
 // Reactive binding operators:
 //
-//   A ~> B    →  require("para:signals").effect(() => { B = A; })
-//   A -> fn   →  require("para:signals").effect(() => { fn(A); })
+//   A ~> B    →  require("@para/signals").effect(() => { B = A; })
+//   A -> fn   →  require("@para/signals").effect(() => { fn(A); })
 //
 // `~>` is an assignment binding — B is the sink, A is the source. Both
 // can be arbitrary expressions. The desugar wraps the assignment in an
@@ -29,8 +29,8 @@ export function transformBindings(src: string): string {
   // operator matches inside strings/comments and (b) skip non-code
   // regions during scanning without counting their interior braces.
   let out = src;
-  out = transformOp(out, "~>", (lhs, rhs) => `require("para:signals").effect(() => { ${rhs} = ${lhs}; })`);
-  out = transformOp(out, "->", (lhs, rhs) => `require("para:signals").effect(() => { ${rhs}(${lhs}); })`);
+  out = transformOp(out, "~>", (lhs, rhs) => `require("@para/signals").effect(() => { ${rhs} = ${lhs}; })`);
+  out = transformOp(out, "->", (lhs, rhs) => `require("@para/signals").effect(() => { ${rhs}(${lhs}); })`);
   return out;
 }
 

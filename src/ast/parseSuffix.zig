@@ -1065,7 +1065,7 @@ pub fn ParseSuffix(
         }
 
         // Parabun: `A ~> B` reactive binding — desugars to
-        //   require("para:signals").effect(() => { B = A; })
+        //   require("@para/signals").effect(() => { B = A; })
         //
         // The body is an arrow that evaluates A (tracking any signal reads) and
         // assigns to B. If B is a signal, the existing assignment-sugar pass
@@ -1080,7 +1080,7 @@ pub fn ParseSuffix(
         // `(a |> f) ~> sink`.
         //
         // Conditional bind (LYK-767): `A ~> B when C` adds a guard. The desugar
-        // becomes `require("para:signals").effect(() => { if (C) B = A; })`.
+        // becomes `require("@para/signals").effect(() => { if (C) B = A; })`.
         // C is read inside the effect so signal reads in the predicate are
         // tracked too — flipping C re-fires the effect, the body re-evaluates
         // the guard, and only assigns when the guard passes.
@@ -1157,7 +1157,7 @@ pub fn ParseSuffix(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, op_loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, op_loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, op_loc),
                 .args = ExprNodeList.fromOwnedSlice(require_args),
@@ -1178,7 +1178,7 @@ pub fn ParseSuffix(
         }
 
         // Parabun: `A -> fn` reactive function-call binding — desugars to
-        //   require("para:signals").effect(() => { fn(A); })
+        //   require("@para/signals").effect(() => { fn(A); })
         //
         // Complement to `~>`: where `~>` writes `A.get()` into an assignable
         // sink, `->` calls a function/method with `A.get()`. Reads naturally:
@@ -1260,7 +1260,7 @@ pub fn ParseSuffix(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, op_loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, op_loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, op_loc),
                 .args = ExprNodeList.fromOwnedSlice(require_args),

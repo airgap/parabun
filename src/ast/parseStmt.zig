@@ -1447,7 +1447,7 @@ pub fn ParseStmt(
 
         // Parabun: parse an `arena { ...body... }` block statement. Desugars to
         //   __parabunArena(() => { ...body... });
-        // which delegates to para:arena's `scope` — running the body with JSC
+        // which delegates to @para/arena's `scope` — running the body with JSC
         // GC deferred, then requesting an Eden collection on scope exit.
         // Latency-smoothing, not a bump allocator.
         //
@@ -1493,7 +1493,7 @@ pub fn ParseStmt(
                 .is_async = false,
             }, arrow_loc);
 
-            // Build `require("para:arena").scope(arrow)` via the user-typed
+            // Build `require("@para/arena").scope(arrow)` via the user-typed
             // require identifier shape. During the visit pass the parser's
             // transposeRequire path rewrites the literal require call into
             // an E.RequireString with correct part-level import-record
@@ -1505,7 +1505,7 @@ pub fn ParseStmt(
             // resolves via findSymbol to whatever `require` is bound to.
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "para:arena" }, arena_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@para/arena" }, arena_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, arena_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -1528,9 +1528,9 @@ pub fn ParseStmt(
         // Parabun: parse a `signal NAME = RHS` declaration. `signal` implies
         // `const` — there's no `signal let`/`const`/`var` form. Each RHS is
         // wrapped in
-        //   require("para:signals").signal(RHS)
+        //   require("@para/signals").signal(RHS)
         // by default, or
-        //   require("para:signals").derived(() => RHS)
+        //   require("@para/signals").derived(() => RHS)
         // when the RHS references another in-scope signal name (auto-derive).
         // The file-level pragma `// @parabun-strict-signals` disables
         // auto-derive, making every decl a plain `signal(RHS)`.
@@ -1643,7 +1643,7 @@ pub fn ParseStmt(
 
                             const require_ref = p.storeNameInRef("require") catch unreachable;
                             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, signal_range.loc);
+                            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, signal_range.loc);
                             const require_call = p.newExpr(E.Call{
                                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, signal_range.loc),
                                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -2003,7 +2003,7 @@ pub fn ParseStmt(
         }
 
         // Parabun: parse an `effect { ...body... }` block statement. Desugars to
-        //   require("para:signals").effect(() => { ...body... });
+        //   require("@para/signals").effect(() => { ...body... });
         // The runtime wraps the arrow in an EffectImpl which runs once eagerly,
         // tracks any signal `.get()` reads as deps, and re-runs on invalidation.
         // Return a function from the body for cleanup (React-style); it fires
@@ -2046,7 +2046,7 @@ pub fn ParseStmt(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, effect_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, effect_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -2068,8 +2068,8 @@ pub fn ParseStmt(
 
         // Parabun: parse `when EXPR { body }` or `when not EXPR { body }`
         // statement. Both forms desugar to a single helper:
-        //   when EXPR { body }     → require("para:signals").when(() => EXPR, () => { body });
-        //   when not EXPR { body } → require("para:signals").when(() => !(EXPR), () => { body });
+        //   when EXPR { body }     → require("@para/signals").when(() => EXPR, () => { body });
+        //   when not EXPR { body } → require("@para/signals").when(() => !(EXPR), () => { body });
         //
         // Edge-triggered handler — fires the body once on each rising
         // (false→true) transition of the predicate. The `not` form is the
@@ -2154,10 +2154,10 @@ pub fn ParseStmt(
                 .is_async = false,
             }, body_arrow_loc);
 
-            // require("para:signals").<helper_name>(pred_arrow, body_arrow)
+            // require("@para/signals").<helper_name>(pred_arrow, body_arrow)
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, when_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, when_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, when_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -2257,7 +2257,7 @@ pub fn ParseStmt(
 
                         const second_require_ref = p.storeNameInRef("require") catch unreachable;
                         const second_require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                        second_require_args[0] = p.newExpr(E.String{ .data = "para:signals" }, second_when_loc);
+                        second_require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, second_when_loc);
                         const second_require_call = p.newExpr(E.Call{
                             .target = p.newExpr(E.Identifier{ .ref = second_require_ref }, second_when_loc),
                             .args = js_ast.ExprNodeList.fromOwnedSlice(second_require_args),
@@ -2444,7 +2444,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "signal NAME = RHS" declaration — each RHS is wrapped
-            // in `require("para:signals").signal(RHS)` and the declared ref is
+            // in `require("@para/signals").signal(RHS)` and the declared ref is
             // marked as signal-bound so the visit pass rewrites reads/assigns
             // accordingly. `signal` implies `const` — there's no `signal let`
             // or `signal var`.
@@ -2460,20 +2460,20 @@ pub fn ParseStmt(
                     return try parseSignalStmt(p, signal_range, opts, false);
                 }
                 // Not a signal declaration — rewind so `signal` works as a
-                // plain identifier (`import { signal } from "para:signals"; signal(0);`).
+                // plain identifier (`import { signal } from "@para/signals"; signal(0);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "derived NAME = RHS" declaration — the explicit form
             // of what `signal NAME = EXPR` does automatically when EXPR reads
             // other signals. The RHS is ALWAYS wrapped as
-            //   require("para:signals").derived(() => RHS)
+            //   require("@para/signals").derived(() => RHS)
             // ignoring the @parabun-strict-signals pragma. The declared ref
             // is signal-bound so reads of NAME elsewhere lower to NAME.get().
             //
             // Only triggers when `derived` is immediately followed (no
             // newline) by an identifier. Any other continuation leaves
             // `derived` as a plain identifier (`import { derived } from
-            // "para:signals"; derived(() => …);`).
+            // "@para/signals"; derived(() => …);`).
             if (is_identifier and strings.eqlComptime(p.lexer.raw(), "derived")) {
                 const derived_range = p.lexer.range();
                 const saved = p.lexer;
@@ -2484,7 +2484,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising
-            // and falling edge handlers. Both desugar to require("para:signals")
+            // and falling edge handlers. Both desugar to require("@para/signals")
             // .when(() => EXPR, () => { body }); the `not` form negates the
             // predicate inside the arrow.
             //
@@ -2514,7 +2514,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "effect { ...body... }" block statement — desugars to
-            //   require("para:signals").effect(() => { ...body... });
+            //   require("@para/signals").effect(() => { ...body... });
             // Only triggers when `effect` is immediately followed (no newline)
             // by `{`. Any other token means `effect` is a plain identifier
             // (including `effect(fn)` — that's a regular call expression).
@@ -2526,7 +2526,7 @@ pub fn ParseStmt(
                     return try parseEffectStmt(p, effect_range);
                 }
                 // Not an effect block — rewind so `effect` works as a plain
-                // identifier (`import { effect } from "para:signals"; effect(fn);`).
+                // identifier (`import { effect } from "@para/signals"; effect(fn);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "pure function" or "pure async function" statements

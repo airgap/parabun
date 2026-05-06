@@ -128,6 +128,19 @@ pub const HardcodedModule = enum {
         // major release. New imports should use parabun:csv per the
         // namespace convention (parabun:* = native, @para/* = lib).
         .{ "para:csv", .@"parabun:csv" },
+        // LYK-805: @para/* names resolve to the same builtins as
+        // their para:* counterparts. The transpiler now emits
+        // @para/foo for signal/effect/~>/-> lowering; the runtime
+        // honors both forms for one major release.
+        .{ "@para/arena", .@"para:arena" },
+        .{ "@para/arrow", .@"para:arrow" },
+        .{ "@para/csv", .@"parabun:csv" },
+        .{ "@para/mcp", .@"para:mcp" },
+        .{ "@para/parallel", .@"para:parallel" },
+        .{ "@para/pipeline", .@"para:pipeline" },
+        .{ "@para/rtp", .@"para:rtp" },
+        .{ "@para/signals", .@"para:signals" },
+        .{ "@para/simd", .@"para:simd" },
         .{ "parabun:assistant", .@"parabun:assistant" },
         .{ "parabun:gpio", .@"parabun:gpio" },
         .{ "parabun:gpu", .@"parabun:gpu" },
@@ -423,6 +436,18 @@ pub const HardcodedModule = enum {
             // release. Same module, two import strings during the
             // deprecation window.
             .{ "para:csv", .{ .path = "parabun:csv" } },
+            // LYK-805: @para/* aliases to the same builtins. The
+            // transpiler emits @para/foo for keyword lowering; both
+            // forms resolve to the same registered module.
+            .{ "@para/arena", .{ .path = "para:arena" } },
+            .{ "@para/arrow", .{ .path = "para:arrow" } },
+            .{ "@para/csv", .{ .path = "parabun:csv" } },
+            .{ "@para/mcp", .{ .path = "para:mcp" } },
+            .{ "@para/parallel", .{ .path = "para:parallel" } },
+            .{ "@para/pipeline", .{ .path = "para:pipeline" } },
+            .{ "@para/rtp", .{ .path = "para:rtp" } },
+            .{ "@para/signals", .{ .path = "para:signals" } },
+            .{ "@para/simd", .{ .path = "para:simd" } },
             .{ "parabun:gpio", .{ .path = "parabun:gpio" } },
             .{ "parabun:gpu", .{ .path = "parabun:gpu" } },
             .{ "parabun:i2c", .{ .path = "parabun:i2c" } },

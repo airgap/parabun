@@ -152,7 +152,7 @@ describe("para:parallel — pool", () => {
         console.log(await racer);
       `,
     });
-    expect(stdout).toBe("REJECTED:para:parallel pool: disposed");
+    expect(stdout).toBe("REJECTED:@para/parallel pool: disposed");
     expect(exitCode).toBe(0);
   });
 

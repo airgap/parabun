@@ -1067,7 +1067,7 @@ function pool(opts: { size?: number; module: string }): Pool {
   }
 
   function run<T>(fnName: string, ...args: unknown[]): Promise<T> {
-    if (disposed) return Promise.reject(new Error("para:parallel pool: disposed"));
+    if (disposed) return Promise.reject(new Error("@para/parallel pool: disposed"));
     // If every worker failed init, fail fast — queueing forever is worse.
     if (workers.length > 0 && workers.every(e => e.initOk === false)) {
       return Promise.reject(new Error(initFailureMessage ?? "para:parallel pool: all workers failed to init"));
@@ -1099,10 +1099,10 @@ function pool(opts: { size?: number; module: string }): Pool {
     // Reject pending RUN calls (init pending entries don't live in
     // `pending` anymore — their promises are tied to the worker entry
     // and just become unobservable after terminate()).
-    for (const [, p] of pending) p.reject(new Error("para:parallel pool: disposed"));
+    for (const [, p] of pending) p.reject(new Error("@para/parallel pool: disposed"));
     pending.clear();
     // Reject queued run calls so the user's awaiting promises terminate.
-    for (const c of queue) c.reject(new Error("para:parallel pool: disposed"));
+    for (const c of queue) c.reject(new Error("@para/parallel pool: disposed"));
     queue.length = 0;
     URL.revokeObjectURL(blobUrl);
     syncPoolSignals();

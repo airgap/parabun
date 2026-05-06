@@ -13,11 +13,13 @@ signal temperature = 22;     // °C
 signal humidity = 45;         // %
 signal door = "closed";       // "closed" | "open"
 
-// Derived state — anything whose RHS reads a signal becomes read-only
-// `derived()` automatically.
-signal isHot = temperature > 30;
-signal isHumid = humidity > 80;
-signal alarm = isHot || isHumid || door === "open";
+// Derived state — `derived NAME = …` is read-only and recomputes when
+// any signal it reads changes. (`signal NAME = …` with a signal-reading
+// RHS auto-promotes to the same shape, but writing `derived` makes
+// the intent explicit at the declaration site.)
+derived isHot = temperature > 30;
+derived isHumid = humidity > 80;
+derived alarm = isHot || isHumid || door === "open";
 
 // Pretend display panel — a sink the dashboard writes into.
 const display = { line: "" };

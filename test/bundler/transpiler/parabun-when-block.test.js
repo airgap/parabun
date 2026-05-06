@@ -32,7 +32,7 @@ describe("Parabun: when block (rising / falling)", () => {
   describe("desugar", () => {
     it("`when EXPR { body }` calls signals.when with predicate + body arrows", () => {
       const out = transform(`signal a = false; when a { console.log("hi"); }`);
-      expect(out).toContain(`require("para:signals").when(`);
+      expect(out).toContain(`/signals").when(`);
       expect(out).toContain("a.get()");
       expect(out).toContain('console.log("hi")');
       // No standalone negation in the predicate for the positive form.
@@ -41,7 +41,7 @@ describe("Parabun: when block (rising / falling)", () => {
 
     it("`when not EXPR { body }` negates the predicate inside the same `when` helper", () => {
       const out = transform(`signal a = true; when not a { console.log("bye"); }`);
-      expect(out).toContain(`require("para:signals").when(`);
+      expect(out).toContain(`/signals").when(`);
       // Predicate is negated: `() => !a.get()` (or with surrounding parens).
       expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
     });
@@ -52,7 +52,7 @@ describe("Parabun: when block (rising / falling)", () => {
         signal b = "x";
         when a && b === "y" { console.log("match"); }
       `);
-      expect(out).toContain(`require("para:signals").when(`);
+      expect(out).toContain(`/signals").when(`);
       expect(out).toContain("a.get()");
       expect(out).toContain("b.get()");
     });
@@ -66,7 +66,7 @@ describe("Parabun: when block (rising / falling)", () => {
           console.log(n);
         }
       `);
-      expect(out).toContain(`require("para:signals").when(`);
+      expect(out).toContain(`/signals").when(`);
       expect(out).toContain("n++");
       expect(out).toContain("console.log(n)");
     });
@@ -75,25 +75,25 @@ describe("Parabun: when block (rising / falling)", () => {
       const out = transform(`const when = (fn) => fn(); when(() => 1);`);
       // Helper-form would emit `require("para:signals").when(`; user code
       // calling a local `when` function should NOT match that pattern.
-      expect(out).not.toContain(`require("para:signals").when(`);
+      expect(out).not.toContain(`/signals").when(`);
       expect(out).toContain("when(");
     });
 
     it("`when` followed by `;` parses as plain identifier", () => {
       const out = transform(`const when = 42; export { when };`);
-      expect(out).not.toContain(`require("para:signals").when(`);
+      expect(out).not.toContain(`/signals").when(`);
       expect(out).toContain("when");
     });
 
     it("`when` followed by `=` parses as plain identifier", () => {
       const out = transform(`let when; when = 5; console.log(when);`);
-      expect(out).not.toContain(`require("para:signals").when(`);
+      expect(out).not.toContain(`/signals").when(`);
     });
 
     it("plain `effect { body }` still works alongside `when`", () => {
       const out = transform(`signal a = 0; effect { console.log(a); }`);
-      expect(out).toContain(`require("para:signals").effect(`);
-      expect(out).not.toContain(`require("para:signals").when(`);
+      expect(out).toContain(`/signals").effect(`);
+      expect(out).not.toContain(`/signals").when(`);
     });
   });
 
@@ -212,7 +212,7 @@ describe("Parabun: when block (rising / falling)", () => {
           when not { console.log("fall"); }
         `);
         // Two helper calls, both on signals.when.
-        expect((out.match(/require\("para:signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
         // First arm: `() => a.get()`. Second arm: `() => !a.get()`.
         expect(out).toMatch(/\(\)\s*=>\s*a\.get\(\)/);
         expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
@@ -224,7 +224,7 @@ describe("Parabun: when block (rising / falling)", () => {
           when not a { console.log("fall"); }
           when not { console.log("rise"); }
         `);
-        expect((out.match(/require\("para:signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
         // First: `() => !a.get()`. Second arm reuses RAW predicate sans
         // negation (avoids double-negation): `() => a.get()`.
         expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
@@ -242,7 +242,7 @@ describe("Parabun: when block (rising / falling)", () => {
         `);
         // Both still emit, but each with its own predicate. The paired-form
         // lookahead bails out because Y is not bare-{ after `not`.
-        expect((out.match(/require\("para:signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
         expect(out).toContain("a.get()");
         expect(out).toContain("b.get()");
       });

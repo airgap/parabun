@@ -27,20 +27,20 @@ async function runFixture(prefix, source) {
 describe("Parabun: derived NAME = EXPR — desugar", () => {
   it("plain literal RHS still desugars to derived(() => …)", () => {
     const out = transform(`derived x = 42;`);
-    expect(out).toContain(`require("para:signals").derived(`);
+    expect(out).toContain(`/signals").derived(`);
     expect(out).toMatch(/derived\(\(\)\s*=>\s*42\)/);
   });
 
   it("single signal read becomes .get() inside the arrow body", () => {
     const out = transform(`signal a = 1;\nderived b = a + 1;`);
-    expect(out).toContain(`require("para:signals").derived(`);
+    expect(out).toContain(`/signals").derived(`);
     expect(out).toContain("a.get()");
     expect(out).toMatch(/derived\(\(\)\s*=>\s*a\.get\(\)\s*\+\s*1\)/);
   });
 
   it("multi-signal read — each gets .get() inside the arrow body", () => {
     const out = transform(`signal a = 1;\nsignal b = 2;\nderived c = a + b;`);
-    expect(out).toContain(`require("para:signals").derived(`);
+    expect(out).toContain(`/signals").derived(`);
     expect(out).toContain("a.get()");
     expect(out).toContain("b.get()");
   });
@@ -58,7 +58,7 @@ describe("Parabun: derived NAME = EXPR — desugar", () => {
 
   it("TypeScript annotation is stripped from the desugared output", () => {
     const out = transform(`signal a = 1;\nderived b: number = a + 1;`);
-    expect(out).toContain(`require("para:signals").derived(`);
+    expect(out).toContain(`/signals").derived(`);
     expect(out).not.toContain(": number");
   });
 
