@@ -2201,18 +2201,21 @@ pub fn ParseStmt(
             // sharing this when's predicate. Adjacency is enforced by parsing
             // both arms in the same call; intervening statements break it.
             //
-            //   when X { a } when not { b }   →  when(X,a) + when(!X,b)
-            //   when not X { a } when not { b } →  when(!X,a) + when(X,b)
+            //   when     X { a } when not { b }  →  when(X,a)     + when(!X,b)
+            //   when not X { a } when not { b }  →  when(!X,a)    + when(X,b)
+            //   whenever X { a } when not { b }  →  whenever(X,a) + when(!X,b)
+            //   whenever not X { a } when not { b } → whenever(!X,a) + when(X,b)
             //
-            // Only `when` (not `whenever`) supports the paired form — the
-            // shapes of "fire on observed-true if rare event" and "always-
-            // fire-paired-edge" don't compose meaningfully. If users want
-            // both edges with whenever semantics, they write two explicit
-            // blocks.
+            // The bare-paired arm ALWAYS emits `when` (strict edge) — that's
+            // typically what you want when pairing with `whenever`: the
+            // dangerous-state arm catches a boot-already-bad state via
+            // `whenever`, the recovery arm stays strict-edge so a healthy
+            // boot doesn't fake a recovery alert. Users who want symmetric
+            // boot-truthy behavior on both arms write two explicit blocks.
             //
             // The shared predicate is deep-cloned so the visit pass walks two
             // independent identifier trees instead of double-walking one.
-            if (helper_kind == .when and p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "when")) {
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "when")) {
                 const saved_after_first = p.lexer;
                 const second_when_loc = p.lexer.loc();
                 try p.lexer.next();
