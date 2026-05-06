@@ -33,11 +33,34 @@ await using bot = await assistant.create({
   stt: stt!,
   tts: tts!,
   system: "You are a concise voice assistant. Answer in one or two sentences.",
-  tools: {
-    setLight: ({ room, on, brightness }) =>
-      console.log(`\n[tool] light ${room} ${on ? "on" : "off"} @ ${brightness ?? 100}`),
-    playMusic: ({ track }) => console.log(`\n[tool] play ${track}`),
-  },
+  tools: [
+    {
+      name: "setLight",
+      description: "Turn a room's light on or off.",
+      schema: {
+        type: "object",
+        properties: {
+          room: { type: "string" },
+          on: { type: "boolean" },
+          brightness: { type: "number", minimum: 0, maximum: 100 },
+        },
+        required: ["room", "on"],
+      },
+      run: ({ room, on, brightness }) => {
+        console.log(`\n[tool] light ${room} ${on ? "on" : "off"} @ ${brightness ?? 100}`);
+        return `light ${room} ${on ? "on" : "off"}`;
+      },
+    },
+    {
+      name: "playMusic",
+      description: "Play a music track.",
+      schema: { type: "object", properties: { track: { type: "string" } }, required: ["track"] },
+      run: ({ track }) => {
+        console.log(`\n[tool] play ${track}`);
+        return `playing ${track}`;
+      },
+    },
+  ],
 });
 
 signals.effect(() => process.stdout.write(`\r[${bot.state.get().padEnd(10)}]`));
