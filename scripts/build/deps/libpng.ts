@@ -4,9 +4,11 @@
  * libpng comes after zlib).
  */
 
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Dependency } from "../source.ts";
 import { depBuildDir } from "../source.ts";
+import { writeIfChanged } from "../fs.ts";
 
 const LIBPNG_COMMIT = "fdc7185dfedbddce8c2487bc171f66af4fca24ab"; // v1.6.58
 
@@ -33,10 +35,26 @@ export const libpng: Dependency = {
     // restricts the lookup to the cross sysroot, where there's no zlib
     // unless we install zlib1g-dev:arm64 (Ubuntu archive doesn't even
     // serve that without ports.ubuntu.com gymnastics). Explicit paths
-    // are simpler: the build sequencer guarantees zlib's libz.a + headers
-    // exist by the time libpng configures (fetchDeps: ["zlib"]).
+    // are simpler: the build sequencer guarantees zlib's headers exist
+    // by the time libpng configures (fetchDeps: ["zlib"]).
     const zlibBuild = depBuildDir(cfg, "zlib");
     const zlibLib = join(zlibBuild, `${cfg.libPrefix}z${cfg.libSuffix}`);
+
+    // zlib is a `direct` build — its .o files go straight into bun's main
+    // link, no `lib*.a` archive is produced. cmake's FindZLIB does
+    // `find_library(ZLIB_LIBRARY NAMES z ...)` with the cache hint, then
+    // validates by file existence; if our hinted path doesn't exist it
+    // re-searches and silently falls back to system zlib. On macOS the
+    // SDK ships zlib 1.2.12 (VERNUM 0x12c0) while we vendor zlib-ng 2.3.3
+    // (1.3.1, VERNUM 0x1310) — pnglibconf.h gets baked with the SDK's
+    // VERNUM at libpng configure, but compile-time `-isystem` points at
+    // our zlib's header → pngpriv.h:1027 (`PNG_ZLIB_VERNUM != ZLIB_VERNUM`)
+    // trips. Emit an 8-byte empty ar archive at the hinted path so
+    // FindZLIB's existence check passes; cmake never reads the bytes
+    // because png_static is `ar`-archived (no consuming link step).
+    mkdirSync(zlibBuild, { recursive: true });
+    writeIfChanged(zlibLib, "!<arch>\n");
+
     return {
       kind: "nested-cmake",
       targets: ["png_static"],
