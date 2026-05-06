@@ -95,17 +95,11 @@ const server = Bun.serve({
       });
     }
 
-    if (url.pathname === "/led/0" && req.method === "POST") {
-      ledOverride.set(0);
-      return Response.json({ override: 0 });
-    }
-    if (url.pathname === "/led/1" && req.method === "POST") {
-      ledOverride.set(1);
-      return Response.json({ override: 1 });
-    }
-    if (url.pathname === "/led/auto" && req.method === "POST") {
-      ledOverride.set(null);
-      return Response.json({ override: null });
+    const ledRoutes: Record<string, 0 | 1 | null> = { "/led/0": 0, "/led/1": 1, "/led/auto": null };
+    if (req.method === "POST" && url.pathname in ledRoutes) {
+      const override = ledRoutes[url.pathname];
+      ledOverride.set(override);
+      return Response.json({ override });
     }
 
     return new Response("not found", { status: 404 });
