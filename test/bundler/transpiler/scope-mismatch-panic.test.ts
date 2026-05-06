@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
+import path from "node:path";
+
+// JSX in the fixture below resolves react/jsx-dev-runtime; the
+// tempDir doesn't have node_modules so module resolution would fail
+// before reaching the parser. Point NODE_PATH at the test root's
+// node_modules so the spawned bun finds react.
+const envWithReact = {
+  ...bunEnv,
+  NODE_PATH: path.join(import.meta.dirname, "..", "..", "node_modules"),
+};
 
 describe("scope mismatch panic regression test", () => {
   test("should not panic with scope mismatch when arrow function is followed by array literal", async () => {
@@ -28,7 +38,7 @@ const Layout = () => {
     // With the fix, it should fail with a normal ReferenceError for 'app'
     await using proc = Bun.spawn({
       cmd: [bunExe(), "index.tsx"],
-      env: bunEnv,
+      env: envWithReact,
       cwd: String(dir),
       stderr: "pipe",
       stdout: "pipe",
@@ -57,7 +67,7 @@ const fn = () => {
 
     await using proc = Bun.spawn({
       cmd: [bunExe(), "test.js"],
-      env: bunEnv,
+      env: envWithReact,
       cwd: String(dir),
       stderr: "pipe",
       stdout: "pipe",
@@ -81,7 +91,7 @@ const fn = () => {
 
     await using proc = Bun.spawn({
       cmd: [bunExe(), "test.js"],
-      env: bunEnv,
+      env: envWithReact,
       cwd: String(dir),
       stderr: "pipe",
       stdout: "pipe",

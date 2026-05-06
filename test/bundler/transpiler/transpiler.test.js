@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { bunEnv, bunExe, hideFromStackTrace } from "harness";
+import { bunEnv, bunExe, hideFromStackTrace, stripASANWarning } from "harness";
 import { join } from "path";
 
 describe("Bun.Transpiler", () => {
@@ -1321,7 +1321,7 @@ export default <>hi</>
       stderr: "pipe",
     });
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-    expect(stderr).toBe("");
+    expect(stripASANWarning(stderr)).toBe("");
     expect(stdout.trim()).toBe('console.log("bar");');
     expect(exitCode).toBe(0);
   });
@@ -3629,7 +3629,7 @@ it("does not crash with --minify-syntax and revisiting dot expressions", () => {
     env: bunEnv,
   });
 
-  expect(stderr.toString()).toBe("");
+  expect(stripASANWarning(stderr.toString())).toBe("");
   expect(stdout.toString()).toBe("undefined\n");
   expect(exitCode).toBe(0);
 });

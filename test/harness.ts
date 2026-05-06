@@ -47,6 +47,23 @@ export const isFlaky = isCI;
 export const isBroken = isCI;
 export const isASAN = basename(process.execPath).includes("bun-asan");
 
+/**
+ * Strip the JSC sanitizer-init warning from stderr so tests that
+ * assert empty/no-error stderr aren't tripped by it.
+ *
+ *   "WARNING: ASAN interferes with JSC signal handlers; useWasmFastMemory
+ *    and useWasmFaultSignalHandler will be disabled."
+ *
+ * Emitted unconditionally by ASAN-instrumented builds (debug builds
+ * compiled with -fsanitize-address — that includes our local debug
+ * builds despite isASAN being false because the binary is still named
+ * bun-debug). Not a real error; the warning never indicates a test
+ * failure.
+ */
+export function stripASANWarning(stderr: string): string {
+  return stderr.replace(/WARNING: ASAN interferes with JSC signal handlers;[^\n]*\n?/g, "");
+}
+
 export const bunEnv: NodeJS.Dict<string> = {
   ...process.env,
   // Strip ad-hoc JSC debug options that may be set on CI agents — they leak
