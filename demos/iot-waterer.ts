@@ -115,15 +115,16 @@ const tankLevel = signals.derived(() => tankRaw.signal.get() ?? 1.0);
 const tankEmpty = signals.derived(() => tankLevel.get() < TANK_EMPTY_AT);
 const tankLow = signals.derived(() => tankLevel.get() < TANK_LOW_AT);
 
-// `whenever` (initial-truthy + edge) for the dangerous-state alerts —
+// `whenStart` (initial-truthy + edge) for the dangerous-state alerts —
 // catches a boot-already-bad state. `when` (strict edge) for the
 // recovery so we don't fake "back above empty" on a healthy boot.
-signals.whenever(tankEmpty, () => notify("⚠️  tank EMPTY — pausing all watering"));
+// (.pts users get a `when X start` keyword form for the same semantic.)
+signals.whenStart(tankEmpty, () => notify("⚠️  tank EMPTY — pausing all watering"));
 signals.when(
   () => !tankEmpty.get(),
   () => notify("✓  tank back above empty — resuming watering"),
 );
-signals.whenever(
+signals.whenStart(
   () => tankLow.get() && !tankEmpty.get(),
   () => notify(`⚠ tank low — ${(tankLevel.get() * 100).toFixed(0)}% remaining`),
 );

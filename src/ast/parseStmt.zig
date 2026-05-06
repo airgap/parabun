@@ -10,10 +10,6 @@ pub fn ParseStmt(
         const is_typescript_enabled = P.is_typescript_enabled;
         const track_symbol_usage_during_parse_pass = P.track_symbol_usage_during_parse_pass;
 
-        // Discriminator for parseWhenBlockStmt — switches between the two
-        // helper names (signals.when vs signals.whenever) at comptime.
-        const WhenHelperKind = enum { when, whenever };
-
         fn t_semicolon(p: *P) anyerror!Stmt {
             try p.lexer.next();
             return Stmt.empty();
@@ -2071,19 +2067,19 @@ pub fn ParseStmt(
         }
 
         // Parabun: parse `when EXPR { body }` / `when not EXPR { body }` /
-        // `whenever EXPR { body }` / `whenever not EXPR { body }` statements.
-        // All four lower to the same shape — `when` vs `whenever` controls
-        // the helper name on the runtime call:
-        //   when     EXPR { body } → require("@para/signals").when(() => EXPR, () => { body });
-        //   when not EXPR { body } → require("@para/signals").when(() => !(EXPR), () => { body });
-        //   whenever EXPR { body } → require("@para/signals").whenever(() => EXPR, () => { body });
-        //   whenever not EXPR { body } → require("@para/signals").whenever(() => !(EXPR), () => { body });
+        // `when EXPR start { body }` / `when not EXPR start { body }`
+        // statements. All four lower to the same shape — the trailing
+        // `start` modifier controls the helper name on the runtime call:
+        //   when     EXPR       { body } → require("@para/signals").when(() => EXPR, () => { body });
+        //   when not EXPR       { body } → require("@para/signals").when(() => !(EXPR), () => { body });
+        //   when     EXPR start { body } → require("@para/signals").whenStart(() => EXPR, () => { body });
+        //   when not EXPR start { body } → require("@para/signals").whenStart(() => !(EXPR), () => { body });
         //
         // Both helpers fire the body on each rising (false→true) transition
-        // of the predicate. `whenever` ALSO fires once on registration if
-        // the predicate is initially truthy — for "the dangerous state is
-        // the noteworthy one" alerts where you don't want to silently miss
-        // a boot already in the bad state.
+        // of the predicate. The `start` modifier ALSO fires once on
+        // registration if the predicate is initially truthy — for "the
+        // dangerous state is the noteworthy one" alerts where you don't
+        // want to silently miss a boot already in the bad state.
         //
         // The `not` form is the rising edge of the negated predicate, which
         // is the falling edge of EXPR; the negation is pushed into the
@@ -2091,7 +2087,7 @@ pub fn ParseStmt(
         //
         // At entry: the keyword has already been consumed; p.lexer is on
         // the first token of the predicate (which may be `not`).
-        fn parseWhenBlockStmt(p: *P, when_range: logger.Range, comptime helper_kind: WhenHelperKind) anyerror!Stmt {
+        fn parseWhenBlockStmt(p: *P, when_range: logger.Range) anyerror!Stmt {
             // Optional `not` for the falling form.
             var negate = false;
             if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
@@ -2100,17 +2096,6 @@ pub fn ParseStmt(
                 try p.lexer.next();
                 negate = true;
             }
-
-            // Single helper per kind: `signals.when` / `signals.whenever`.
-            // Both fire once per false→true transition. `whenever` ALSO
-            // fires once at registration if the predicate is initially
-            // truthy. The `not` form is just the rising edge of the
-            // negated predicate, so we push the negation into the arrow
-            // body instead of dispatching to a different helper.
-            const helper_name: []const u8 = comptime switch (helper_kind) {
-                .when => "when",
-                .whenever => "whenever",
-            };
 
             // Parse the predicate at the outer scope. The expression-form
             // arrow built around it later registers its scopes empty, the
@@ -2121,6 +2106,27 @@ pub fn ParseStmt(
                 p.newExpr(E.Unary{ .op = .un_not, .value = raw_predicate }, pred_loc)
             else
                 raw_predicate;
+
+            // Trailing `start` modifier: only valid when followed by `{`,
+            // so it never collides with `start` as an identifier inside the
+            // predicate (those are consumed by parseExpr). Presence flips
+            // the runtime helper from strict-edge `when` to initial-truthy
+            // `whenever` — ALSO fires once on registration if the predicate
+            // is truthy. Use for "dangerous state observed" alerts where a
+            // boot already in the bad state must not be silently missed.
+            var initial_truthy = false;
+            if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
+                strings.eqlComptime(p.lexer.raw(), "start"))
+            {
+                const before_start = p.lexer;
+                try p.lexer.next();
+                if (p.lexer.token == .t_open_brace) {
+                    initial_truthy = true;
+                } else {
+                    p.lexer.restore(&before_start);
+                }
+            }
+            const helper_name: []const u8 = if (initial_truthy) "whenStart" else "when";
 
             // Synthesize distinct locs for the predicate arrow's two scopes
             // — same loc-bumping trick `parseDeferStmt` uses (line 1388) so
@@ -2201,16 +2207,16 @@ pub fn ParseStmt(
             // sharing this when's predicate. Adjacency is enforced by parsing
             // both arms in the same call; intervening statements break it.
             //
-            //   when     X { a } when not { b }  →  when(X,a)     + when(!X,b)
-            //   when not X { a } when not { b }  →  when(!X,a)    + when(X,b)
-            //   whenever X { a } when not { b }  →  whenever(X,a) + when(!X,b)
-            //   whenever not X { a } when not { b } → whenever(!X,a) + when(X,b)
+            //   when     X       { a } when not { b }  →  when(X,a)      + when(!X,b)
+            //   when not X       { a } when not { b }  →  when(!X,a)     + when(X,b)
+            //   when     X start { a } when not { b }  →  whenStart(X,a) + when(!X,b)
+            //   when not X start { a } when not { b }  →  whenStart(!X,a) + when(X,b)
             //
             // The bare-paired arm ALWAYS emits `when` (strict edge) — that's
-            // typically what you want when pairing with `whenever`: the
-            // dangerous-state arm catches a boot-already-bad state via
-            // `whenever`, the recovery arm stays strict-edge so a healthy
-            // boot doesn't fake a recovery alert. Users who want symmetric
+            // typically what you want when pairing with the `start` form:
+            // the dangerous-state arm catches a boot-already-bad state via
+            // `start`, the recovery arm stays strict-edge so a healthy boot
+            // doesn't fake a recovery alert. Users who want symmetric
             // boot-truthy behavior on both arms write two explicit blocks.
             //
             // The shared predicate is deep-cloned so the visit pass walks two
@@ -2535,25 +2541,7 @@ pub fn ParseStmt(
                     else => true,
                 };
                 if (is_block_form) {
-                    return try parseWhenBlockStmt(p, when_range, .when);
-                }
-                p.lexer.restore(&saved);
-            }
-            // Parabun: `whenever` block — same shape as `when` but the runtime
-            // helper also fires once on registration if the predicate is
-            // initially truthy. Same identifier-vs-block-form disambiguation
-            // as `when` (parens, dot, equals, etc. fall through to identifier
-            // reading).
-            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "whenever")) {
-                const whenever_range = p.lexer.range();
-                const saved = p.lexer;
-                try p.lexer.next();
-                const is_block_form = !p.lexer.has_newline_before and switch (p.lexer.token) {
-                    .t_open_paren, .t_dot, .t_question_dot, .t_equals, .t_semicolon, .t_comma, .t_close_paren, .t_close_brace, .t_close_bracket, .t_end_of_file => false,
-                    else => true,
-                };
-                if (is_block_form) {
-                    return try parseWhenBlockStmt(p, whenever_range, .whenever);
+                    return try parseWhenBlockStmt(p, when_range);
                 }
                 p.lexer.restore(&saved);
             }

@@ -425,13 +425,15 @@ function when<T>(source: EdgeSource<T>, fn: () => void): () => void {
   });
 }
 
-// `whenever` — same as `when` but ALSO fires once at registration if the
-// predicate is initially truthy. Useful for "the dangerous state is the
-// noteworthy one" alerts where you don't want to silently miss a boot
-// already in the bad state. `when` retains strict-edge semantics for
-// the cases (e.g. button press) where you don't want to fake a press
-// at startup.
-function whenever<T>(source: EdgeSource<T>, fn: () => void): () => void {
+// `whenStart` — same as `when` but ALSO fires once at registration if
+// the predicate is initially truthy. Useful for "the dangerous state
+// is the noteworthy one" alerts where you don't want to silently miss
+// a boot already in the bad state. `when` retains strict-edge
+// semantics for the cases (e.g. button press) where you don't want to
+// fake a press at startup. The `.pts` keyword form is `when X start`
+// (trailing modifier on a `when` block); `signals.whenStart(...)` is
+// the direct call form for `.ts` users.
+function whenStart<T>(source: EdgeSource<T>, fn: () => void): () => void {
   if (!$isCallable(fn)) {
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
@@ -792,6 +794,6 @@ export default {
   throttled,
   debounced,
   cooldown,
-  whenever,
+  whenStart,
   Signal: ReadableSignal,
 };
