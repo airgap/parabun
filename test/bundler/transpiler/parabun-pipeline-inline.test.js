@@ -287,18 +287,43 @@ describe("pipeline inline fusion", () => {
       expect(out).toContain(".reduce(");
     });
 
-    test("inline arrow combinator-arg stops fusion at that step", () => {
+    test("inline arrow map fuses (scope-tree surgery)", () => {
+      const out = ts(`
+        const r = nums |> map(x => x * 2) |> sum
+      `);
+      // Synth-body and the inline arrow's args/body all coexist. The
+      // surgery re-parents the inline arrow's scopes under the synth body
+      // and reorders scopes_in_order so visit walks them in AST order.
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("((x) => x * 2)(");
+    });
+
+    test("two inline arrow combinator args fuse together", () => {
+      const out = ts(`
+        const r = nums |> map(x => x * 2) |> filter(x => x > 0) |> sum
+      `);
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("((x) => x * 2)(");
+      expect(out).toContain("((x) => x > 0)(");
+    });
+
+    test("mixed inline arrow + named fn fuses", () => {
       const out = ts(`
         function pos(x: number) { return x > 0 }
         const r = nums |> map(x => x * 2) |> filter(pos) |> sum
       `);
-      // map(x => x*2) has an inline arrow, so chain extraction stops
-      // at that step. Source becomes `map(...)(nums)` — a call expr —
-      // which is also excluded from fusion (call sources may yield
-      // async iterables like @para/pipeline ones), so the entire chain
-      // falls back to the existing nested-call desugar.
-      expect(out).toContain("sum(");
-      expect(out).not.toContain(".reduce(");
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("((x) => x * 2)(");
+      expect(out).toContain("if (!pos(");
+    });
+
+    test("pure inline arrow combinator fuses", () => {
+      const out = ts(`
+        const r = nums |> map(pure (x) => x * 2) |> sum
+      `);
+      // The pure annotation is dropped at print but the arrow remains.
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("((x) => x * 2)(");
     });
 
     test("call-expression source stays unfused (async-iter safe)", () => {

@@ -1500,17 +1500,6 @@ pub fn ParseSuffix(
             if (cb_args.len != 1) return null;
             if (cb_call.target.data != .e_identifier) return null;
             const name = p.loadNameFromRef(cb_call.target.data.e_identifier.ref);
-            // Limit fusion to combinator args that don't introduce their
-            // own scopes (no inline arrows, no inline function expressions).
-            // Embedding e.g. `map(x => x*2)`'s arrow inside a synth arrow's
-            // body breaks the parser's parse-order==visit-order invariant on
-            // scopes_in_order — supporting it cleanly needs scope-tree
-            // surgery we're punting on. Identifiers (named fns), member
-            // access, and calls are fine.
-            switch (cb_args[0].data) {
-                .e_arrow, .e_function => return null,
-                else => {},
-            }
             if (bun.strings.eqlComptime(name, "map")) {
                 return .{
                     .step = .{ .kind = .map, .fn_or_pred = cb_args[0] },
@@ -1586,11 +1575,21 @@ pub fn ParseSuffix(
         // for value flow + statement-level steps (so each map fn runs
         // exactly once even when filter follows).
         fn buildFusedReduce(p: *P, left: *Expr, source: Expr, steps: []const StreamStep, terminal: StreamTerminal) bool {
-            // Combinator args were filtered to non-arrow / non-function in
-            // recognizeStreamStep, so the chain hasn't pushed any scopes —
-            // synth-arrow scopes can use a loc derived from the chain's
-            // start without violating pushScopeForParsePass's monotonic-
-            // increase check.
+            // Snapshot scopes_in_order length + the original chain-start loc
+            // before we touch anything — we'll use both to do scope-tree
+            // surgery once the synth scopes are pushed and *left is rewritten.
+            const scope_order_len_before = p.scopes_in_order.items.len;
+            const chain_start = left.loc.start;
+            // The scope our synth arrow will be a child of — same as whatever
+            // the chain's inline-arrow scopes were parented to (current_scope
+            // hasn't moved during chain parse since |> doesn't open a scope).
+            const outer_scope = p.current_scope;
+
+            // pushScopeForParsePass enforces strictly-increasing locs across
+            // every scope in the file, so synth-arrow locs must be later than
+            // any scope already pushed during this parse — including any
+            // inline-arrow scopes the chain just registered. Use the lexer's
+            // current loc (just past the terminal token) for args, +1 for body.
             const args_loc = p.lexer.loc();
             const body_loc = logger.Loc{ .start = args_loc.start + 1 };
 
@@ -1605,6 +1604,7 @@ pub fn ParseSuffix(
             const elem_ref = p.declareSymbol(.hoisted, args_loc, elem_name) catch return false;
 
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch return false;
+            const synth_body_scope = p.current_scope;
             const val_ref = p.declareSymbol(.other, body_loc, val_name) catch return false;
 
             var stmts = ListManaged(Stmt).initCapacity(p.allocator, steps.len + 3) catch return false;
@@ -1757,6 +1757,64 @@ pub fn ParseSuffix(
             }, args_loc);
 
             left.* = reduce_call;
+
+            // ─── Scope-tree surgery ────────────────────────────────────
+            // After fusion, the AST has my synth arrow OUTSIDE the chain's
+            // inline arrows (which moved into the synth body). But Bun's
+            // visit pass walks `scopes_in_order` sequentially expecting
+            // depth-first AST order, and uses `scope.parent` to pop back
+            // up. Both invariants need re-establishing:
+            //
+            //   1. scopes_in_order: my synth pair was pushed last (latest
+            //      locs), but visit will reach the synth arrow first. Move
+            //      the pair to just before the chain's earliest scope.
+            //
+            //   2. scope.parent: the chain's outermost arrow scopes were
+            //      parented to outer_scope at parse time (siblings of my
+            //      synth_args). Re-parent each one whose .parent is
+            //      outer_scope to synth_body_scope so visit's pop sequence
+            //      lands back inside the synth body, not above it. Inner
+            //      arrow-body scopes (parent == arrow_args) stay untouched.
+            {
+                const scopes = &p.scopes_in_order;
+                const len = scopes.items.len;
+                if (len < scope_order_len_before + 2) return true;
+                const synth_args_entry = scopes.items[len - 2];
+                const synth_body_entry = scopes.items[len - 1];
+
+                // First chain-pushed scope = first prior entry whose loc
+                // is at-or-after chain_start. Re-parent every entry from
+                // there onward (still within the pre-synth slice) whose
+                // parent is outer_scope, so they nest under synth_body.
+                var insert_at: usize = scope_order_len_before;
+                var i: usize = 0;
+                while (i < scope_order_len_before) : (i += 1) {
+                    const entry = scopes.items[i] orelse continue;
+                    if (entry.loc.start >= chain_start) {
+                        insert_at = i;
+                        break;
+                    }
+                }
+
+                if (insert_at < scope_order_len_before) {
+                    // Re-parent the chain scopes that were siblings of synth.
+                    var k: usize = insert_at;
+                    while (k < scope_order_len_before) : (k += 1) {
+                        const entry = scopes.items[k] orelse continue;
+                        if (entry.scope.parent == outer_scope) {
+                            entry.scope.parent = synth_body_scope;
+                        }
+                    }
+                    // Move my synth pair from end → insert_at position.
+                    var j: usize = len;
+                    while (j > insert_at + 2) : (j -= 1) {
+                        scopes.items[j - 1] = scopes.items[j - 3];
+                    }
+                    scopes.items[insert_at] = synth_args_entry;
+                    scopes.items[insert_at + 1] = synth_body_entry;
+                }
+            }
+
             return true;
         }
 
