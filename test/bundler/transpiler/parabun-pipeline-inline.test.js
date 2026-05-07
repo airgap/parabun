@@ -364,6 +364,102 @@ describe("pipeline inline fusion", () => {
       expect(out).toContain("})(nums)");
     });
 
+    // Early-exit batch: take / find / findIndex / some / every / min / max.
+    test("take(n) emits a counter + break", () => {
+      const out = ts(`
+        const r = nums |> take(3) |> sum
+      `);
+      expect(out).toContain("for (");
+      expect(out).toContain(">= 3)");
+      expect(out).toContain("break");
+    });
+
+    test("filter + take counts only filter-passing elements", () => {
+      const out = ts(`
+        function pos(x: number) { return x > 0 }
+        const r = nums |> filter(pos) |> take(5) |> sum
+      `);
+      expect(out).toContain("if (!pos(");
+      expect(out).toContain("continue");
+      expect(out).toContain(">= 5)");
+      expect(out).toContain("break");
+    });
+
+    test("find(pred) — early-exit terminal, init undefined", () => {
+      const out = ts(`
+        const r = nums |> find(x => x > 100)
+      `);
+      expect(out).toContain("for (");
+      expect(out).toContain("undefined");
+      expect(out).toContain("break");
+      // Predicate inlined: `__pvN > 100`.
+      expect(out).toMatch(/__pv[\w$]+ > 100/);
+    });
+
+    test("findIndex(pred) — early-exit, init -1, returns index", () => {
+      const out = ts(`
+        const r = nums |> findIndex(x => x === 42)
+      `);
+      expect(out).toContain("for (");
+      expect(out).toContain("-1");
+      expect(out).toContain("break");
+      // The accumulator gets the index (__pi), not the value.
+      expect(out).toMatch(/__pa[\w$]+ = __pi[\w$]+/);
+    });
+
+    test("some(pred) — true on first match", () => {
+      const out = ts(`
+        const r = nums |> some(x => x < 0)
+      `);
+      expect(out).toContain("for (");
+      expect(out).toContain("= false");
+      expect(out).toContain("= true");
+      expect(out).toContain("break");
+    });
+
+    test("every(pred) — false on first non-match", () => {
+      const out = ts(`
+        const r = nums |> every(x => x >= 0)
+      `);
+      expect(out).toContain("for (");
+      expect(out).toContain("= true");
+      expect(out).toContain("= false");
+      expect(out).toContain("break");
+      // Predicate negated.
+      expect(out).toMatch(/!\(__pv[\w$]+ >= 0\)/);
+    });
+
+    test("min — init Infinity, tracks smallest", () => {
+      const out = ts(`
+        const r = nums |> min
+      `);
+      expect(out).toContain("for (");
+      // Init prints as `1 / 0` (Infinity) without symbol-renamer.
+      expect(out).toMatch(/= 1 \/ 0/);
+      expect(out).toMatch(/__pv[\w$]+ < __pa[\w$]+/);
+    });
+
+    test("max — init -Infinity, tracks largest", () => {
+      const out = ts(`
+        const r = nums |> max
+      `);
+      expect(out).toContain("for (");
+      expect(out).toMatch(/= -1 \/ 0/);
+      expect(out).toMatch(/__pv[\w$]+ > __pa[\w$]+/);
+    });
+
+    test("multiple fused chains in one file don't crash visit pass", () => {
+      const out = ts(`
+        const a = nums |> filter(x => x > 0) |> sum
+        const b = nums |> find(x => x > 10)
+        const c = nums |> map(x => x * 2) |> max
+      `);
+      // Three independent chains, each with inline arrows that get
+      // their bodies substituted away — orphan scopes need to be
+      // nulled correctly to avoid scope-mismatch on later chains.
+      expect(out.match(/for \(/g)?.length ?? 0).toBe(3);
+    });
+
     test("call-expression source stays unfused (async-iter safe)", () => {
       const out = ts(`
         function double(x: number) { return x * 2 }

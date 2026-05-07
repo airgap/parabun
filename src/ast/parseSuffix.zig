@@ -1448,12 +1448,23 @@ pub fn ParseSuffix(
         const StreamTerminal = union(enum) {
             sum,
             count,
+            min,
+            max,
             reduce_call: struct { init: Expr, fold: Expr },
             for_each: Expr, // forEach(fn) — fn is the callback
             collect, // collect / toArray — accumulate into array
+            // Early-exit terminals — set the accumulator and `break;` out
+            // of the for loop on first match.
+            find: Expr, // find(pred) — first matching value (init undefined)
+            find_index: Expr, // findIndex(pred) — first matching index (init -1)
+            some: Expr, // some(pred) — bool (init false)
+            every: Expr, // every(pred) — bool (init true)
         };
 
-        const StreamStepKind = enum { map, filter };
+        const StreamStepKind = enum { map, filter, take };
+        // For map/filter, `fn_or_pred` is the function/predicate. For take,
+        // `fn_or_pred` is the count expression — emitter checks the kind
+        // before reading.
         const StreamStep = struct { kind: StreamStepKind, fn_or_pred: Expr };
 
         // Recognize a `|>` rhs as a stream-pipeline terminal. Returns the
@@ -1464,6 +1475,8 @@ pub fn ParseSuffix(
                     const name = p.loadNameFromRef(id.ref);
                     if (bun.strings.eqlComptime(name, "sum")) return .sum;
                     if (bun.strings.eqlComptime(name, "count")) return .count;
+                    if (bun.strings.eqlComptime(name, "min")) return .min;
+                    if (bun.strings.eqlComptime(name, "max")) return .max;
                     if (bun.strings.eqlComptime(name, "collect")) return .collect;
                     if (bun.strings.eqlComptime(name, "toArray")) return .collect;
                     return null;
@@ -1477,6 +1490,18 @@ pub fn ParseSuffix(
                     }
                     if (bun.strings.eqlComptime(name, "reduce") and args.len == 2) {
                         return StreamTerminal{ .reduce_call = .{ .init = args[0], .fold = args[1] } };
+                    }
+                    if (bun.strings.eqlComptime(name, "find") and args.len == 1) {
+                        return StreamTerminal{ .find = args[0] };
+                    }
+                    if (bun.strings.eqlComptime(name, "findIndex") and args.len == 1) {
+                        return StreamTerminal{ .find_index = args[0] };
+                    }
+                    if (bun.strings.eqlComptime(name, "some") and args.len == 1) {
+                        return StreamTerminal{ .some = args[0] };
+                    }
+                    if (bun.strings.eqlComptime(name, "every") and args.len == 1) {
+                        return StreamTerminal{ .every = args[0] };
                     }
                     return null;
                 },
@@ -1512,6 +1537,12 @@ pub fn ParseSuffix(
                     .source = outer_args[0],
                 };
             }
+            if (bun.strings.eqlComptime(name, "take")) {
+                return .{
+                    .step = .{ .kind = .take, .fn_or_pred = cb_args[0] },
+                    .source = outer_args[0],
+                };
+            }
             return null;
         }
 
@@ -1543,11 +1574,19 @@ pub fn ParseSuffix(
                 current = found.source;
             }
 
-            // No intermediate transforms means there's nothing to fuse —
-            // the existing call-wrapping desugar already handles that case.
-            if (steps_len == 0) return false;
             // Bail on chains longer than the static buffer.
             if (steps_len == steps_buf.len) return false;
+            // Zero-step fusion: only worthwhile for terminals that themselves
+            // do real iteration / early-exit work (find/findIndex/some/every/
+            // min/max/forEach). For sum/count/collect/reduce-call with no
+            // intermediates, the existing call-wrapping desugar produces
+            // equivalent code, so don't bother.
+            if (steps_len == 0) {
+                switch (terminal) {
+                    .find, .find_index, .some, .every, .min, .max, .for_each => {},
+                    else => return false,
+                }
+            }
 
             // Source-shape filter. The fused output emits `source.reduce(...)`,
             // which assumes `source` is array-like. Conservative: only fuse
@@ -1580,6 +1619,13 @@ pub fn ParseSuffix(
         // Eliminates the per-element call frame that
         //   __pv = ((x) => x * x)(__pv);
         // would otherwise produce — collapses to `__pv = __pv * __pv;`.
+        //
+        // On success for an inline arrow / function expr, the substituted
+        // function is no longer reachable from the AST. Its scope-tree
+        // entries (function_args + function_body) are orphans — they'd
+        // sit in scopes_in_order at the wrong position, and a subsequent
+        // chain's visit walk would mismatch on them. nullArrowScopes
+        // walks scopes_in_order at the arrow's own locs and clears them.
         fn tryInlineFnCall(p: *P, fn_expr: Expr, arg_expr: Expr) ?Expr {
             switch (fn_expr.data) {
                 .e_arrow => |arrow| {
@@ -1590,7 +1636,9 @@ pub fn ParseSuffix(
                     if (arrow.body.stmts[0].data != .s_return) return null;
                     const body = arrow.body.stmts[0].data.s_return.value orelse return null;
                     const param_name = p.loadNameFromRef(arrow.args[0].binding.data.b_identifier.ref);
-                    return substituteByName(p, body, param_name, arg_expr);
+                    const out = substituteByName(p, body, param_name, arg_expr) orelse return null;
+                    nullArrowScopes(p, fn_expr.loc, arrow.body.loc);
+                    return out;
                 },
                 .e_function => |fexpr| {
                     if (fexpr.func.args.len != 1) return null;
@@ -1600,7 +1648,9 @@ pub fn ParseSuffix(
                     if (fexpr.func.body.stmts[0].data != .s_return) return null;
                     const body = fexpr.func.body.stmts[0].data.s_return.value orelse return null;
                     const param_name = p.loadNameFromRef(fexpr.func.args[0].binding.data.b_identifier.ref);
-                    return substituteByName(p, body, param_name, arg_expr);
+                    const out = substituteByName(p, body, param_name, arg_expr) orelse return null;
+                    nullArrowScopes(p, fn_expr.loc, fexpr.func.body.loc);
+                    return out;
                 },
                 .e_identifier => |id| {
                     const name = p.loadNameFromRef(id.ref);
@@ -1615,6 +1665,38 @@ pub fn ParseSuffix(
                 },
                 else => return null,
             }
+        }
+
+        // Helper: null out scopes_in_order entries at the given locs.
+        // Used after tryInlineFnCall substitutes an inline arrow / fn
+        // expression — the arrow's args + body scopes are no longer
+        // anchored to any AST node, and visit's sequential walk would
+        // mismatch on them. prepareForVisitPass filters nulls out.
+        fn nullArrowScopes(p: *P, args_loc: logger.Loc, body_loc: logger.Loc) void {
+            const scopes = p.scopes_in_order.items;
+            var i: usize = 0;
+            while (i < scopes.len) : (i += 1) {
+                const entry = scopes[i] orelse continue;
+                if (entry.loc.start == args_loc.start or entry.loc.start == body_loc.start) {
+                    p.scopes_in_order.items[i] = null;
+                }
+            }
+        }
+
+        // Helper: build `fn(__pv)` either inlined (when fn body is a single
+        // return) or as a regular call. Used by the early-exit terminals
+        // (find/findIndex/some/every) which need the predicate's truth
+        // value without the IIFE call frame the inline form would otherwise
+        // have left behind.
+        fn inlinedOrCall(p: *P, fn_expr: Expr, val_ref: js_ast.Ref, loc: logger.Loc) !Expr {
+            const arg_expr = p.newExpr(E.Identifier{ .ref = val_ref }, loc);
+            if (tryInlineFnCall(p, fn_expr, arg_expr)) |inlined| return inlined;
+            const args = try p.allocator.alloc(Expr, 1);
+            args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, loc);
+            return p.newExpr(E.Call{
+                .target = fn_expr,
+                .args = ExprNodeList.fromOwnedSlice(args),
+            }, loc);
         }
 
         // Helper: build a single-decl `let NAME = VALUE;` statement.
@@ -1682,6 +1764,14 @@ pub fn ParseSuffix(
             const i_name = std.fmt.allocPrint(p.allocator, "__pi_{x}$", .{counter}) catch return false;
             const val_name = std.fmt.allocPrint(p.allocator, "__pv_{x}$", .{counter}) catch return false;
 
+            // Track which steps use take so we can declare a count symbol
+            // only when needed. Each take step gets its own counter — chains
+            // with `|> take(3) |> filter |> take(2)` need independent counts.
+            var take_count: u32 = 0;
+            for (steps) |step| {
+                if (step.kind == .take) take_count += 1;
+            }
+
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc) catch return false;
             const src_ref = p.declareSymbol(.hoisted, args_loc, src_name) catch return false;
 
@@ -1690,6 +1780,19 @@ pub fn ParseSuffix(
             const acc_ref = p.declareSymbol(.other, body_loc, acc_name) catch return false;
             const i_ref = p.declareSymbol(.other, body_loc, i_name) catch return false;
             const val_ref = p.declareSymbol(.other, body_loc, val_name) catch return false;
+
+            // Per-take counter refs (one per take step in chain order).
+            const take_refs: []js_ast.Ref = if (take_count > 0)
+                p.allocator.alloc(js_ast.Ref, take_count) catch return false
+            else
+                &[_]js_ast.Ref{};
+            {
+                var k: u32 = 0;
+                while (k < take_count) : (k += 1) {
+                    const tname = std.fmt.allocPrint(p.allocator, "__pc{d}_{x}$", .{ k, counter }) catch return false;
+                    take_refs[k] = p.declareSymbol(.other, body_loc, tname) catch return false;
+                }
+            }
 
             // S.For's visit pushes a `.block` for its own scope at S.For.loc;
             // the inner S.Block (body) pushes another `.block` at its own loc.
@@ -1700,8 +1803,8 @@ pub fn ParseSuffix(
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.block, for_body_loc) catch return false;
             const for_body_scope = p.current_scope;
 
-            // Top-level body stmts: let __acc, let __i, let __pv, for(...), return.
-            var body_stmts = ListManaged(Stmt).initCapacity(p.allocator, 5) catch return false;
+            // Top-level body stmts: let __acc, let __i, [let __pcN]*, let __pv, for(...), return.
+            var body_stmts = ListManaged(Stmt).initCapacity(p.allocator, 5 + take_count) catch return false;
 
             // Init value per terminal — the starting __acc value.
             const acc_init: Expr = switch (terminal) {
@@ -1712,12 +1815,22 @@ pub fn ParseSuffix(
                     .items = ExprNodeList{},
                     .is_single_line = true,
                 }, body_loc),
+                .find => p.newExpr(E.Undefined{}, body_loc),
+                .find_index => p.newExpr(E.Number{ .value = -1.0 }, body_loc),
+                .some => p.newExpr(E.Boolean{ .value = false }, body_loc),
+                .every => p.newExpr(E.Boolean{ .value = true }, body_loc),
+                .min => p.newExpr(E.Number{ .value = std.math.inf(f64) }, body_loc),
+                .max => p.newExpr(E.Number{ .value = -std.math.inf(f64) }, body_loc),
             };
 
             // let __acc = INIT;
             body_stmts.appendAssumeCapacity(buildLet(p, acc_ref, acc_init, body_loc) catch return false);
             // let __i = 0;
             body_stmts.appendAssumeCapacity(buildLet(p, i_ref, p.newExpr(E.Number{ .value = 0.0 }, body_loc), body_loc) catch return false);
+            // let __pcN = 0; for each take step.
+            for (take_refs) |take_ref| {
+                body_stmts.appendAssumeCapacity(buildLet(p, take_ref, p.newExpr(E.Number{ .value = 0.0 }, body_loc), body_loc) catch return false);
+            }
             // let __pv; (no initializer)
             {
                 const decls = p.allocator.alloc(G.Decl, 1) catch return false;
@@ -1732,7 +1845,11 @@ pub fn ParseSuffix(
             }
 
             // for (; __i < __src.length; __i++) { ... loop body ... }
-            var loop_stmts = ListManaged(Stmt).initCapacity(p.allocator, steps.len + 2) catch return false;
+            // Capacity: initial `__pv = __src[__i];` (1) + up to 2 stmts per
+            // step (take emits `if (...) break;` plus `__pcN++;`) + up to
+            // 2 stmts for the terminal (find/findIndex/some/every emit two
+            // if-statements).
+            var loop_stmts = ListManaged(Stmt).initCapacity(p.allocator, 3 + steps.len * 2) catch return false;
 
             // __pv = __src[__i];
             {
@@ -1754,18 +1871,19 @@ pub fn ParseSuffix(
             // named functions both qualify. Falls back to a regular call
             // when the function can't be inlined (multi-param, multi-stmt
             // body, etc.).
+            var take_idx: u32 = 0;
             for (steps) |step| {
-                const arg_expr = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                const call_or_inline: Expr = if (tryInlineFnCall(p, step.fn_or_pred, arg_expr)) |inlined| inlined else blk: {
-                    const call_args = p.allocator.alloc(Expr, 1) catch return false;
-                    call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                    break :blk p.newExpr(E.Call{
-                        .target = step.fn_or_pred,
-                        .args = ExprNodeList.fromOwnedSlice(call_args),
-                    }, body_loc);
-                };
                 switch (step.kind) {
                     .map => {
+                        const arg_expr = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        const call_or_inline: Expr = if (tryInlineFnCall(p, step.fn_or_pred, arg_expr)) |inlined| inlined else blk: {
+                            const call_args = p.allocator.alloc(Expr, 1) catch return false;
+                            call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                            break :blk p.newExpr(E.Call{
+                                .target = step.fn_or_pred,
+                                .args = ExprNodeList.fromOwnedSlice(call_args),
+                            }, body_loc);
+                        };
                         // __pv = call_or_inline;
                         const assign = p.newExpr(E.Binary{
                             .op = .bin_assign,
@@ -1775,6 +1893,15 @@ pub fn ParseSuffix(
                         loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
                     },
                     .filter => {
+                        const arg_expr = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        const call_or_inline: Expr = if (tryInlineFnCall(p, step.fn_or_pred, arg_expr)) |inlined| inlined else blk: {
+                            const call_args = p.allocator.alloc(Expr, 1) catch return false;
+                            call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                            break :blk p.newExpr(E.Call{
+                                .target = step.fn_or_pred,
+                                .args = ExprNodeList.fromOwnedSlice(call_args),
+                            }, body_loc);
+                        };
                         // if (!call_or_inline) continue;
                         const not_expr = p.newExpr(E.Unary{
                             .op = .un_not,
@@ -1786,6 +1913,33 @@ pub fn ParseSuffix(
                             .yes = yes_stmt,
                             .no = null,
                         }, body_loc));
+                    },
+                    .take => {
+                        // take(n): elements that *reach* this step are counted.
+                        // Once n have passed through, break out of the loop —
+                        // subsequent steps and the terminal don't see further
+                        // elements.
+                        //
+                        //   if (__pcK >= n) break;
+                        //   __pcK++;
+                        const take_ref = take_refs[take_idx];
+                        take_idx += 1;
+                        const test_expr = p.newExpr(E.Binary{
+                            .op = .bin_ge,
+                            .left = p.newExpr(E.Identifier{ .ref = take_ref }, body_loc),
+                            .right = step.fn_or_pred,
+                        }, body_loc);
+                        const break_stmt = p.s(S.Break{ .label = null }, body_loc);
+                        loop_stmts.appendAssumeCapacity(p.s(S.If{
+                            .test_ = test_expr,
+                            .yes = break_stmt,
+                            .no = null,
+                        }, body_loc));
+                        const inc_expr = p.newExpr(E.Unary{
+                            .op = .un_post_inc,
+                            .value = p.newExpr(E.Identifier{ .ref = take_ref }, body_loc),
+                        }, body_loc);
+                        loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = inc_expr }, body_loc));
                     },
                 }
             }
@@ -1859,6 +2013,126 @@ pub fn ParseSuffix(
                         .args = ExprNodeList.fromOwnedSlice(push_args),
                     }, body_loc);
                     loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = push_call }, body_loc));
+                },
+                .find => |pred| {
+                    // Two stmts (no Block to avoid an extra scope push):
+                    //   if (pred(__pv)) __acc = __pv;
+                    //   if (pred(__pv)) break;
+                    // Predicate is evaluated twice; for inlined arrows /
+                    // pure-fns this is free, and the contract for these
+                    // combinators presumes pure predicates anyway.
+                    const t1 = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const t2 = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t1,
+                        .yes = p.s(S.SExpr{ .value = assign }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t2,
+                        .yes = p.s(S.Break{ .label = null }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                },
+                .find_index => |pred| {
+                    const t1 = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const t2 = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t1,
+                        .yes = p.s(S.SExpr{ .value = assign }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t2,
+                        .yes = p.s(S.Break{ .label = null }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                },
+                .some => |pred| {
+                    const t1 = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const t2 = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Boolean{ .value = true }, body_loc),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t1,
+                        .yes = p.s(S.SExpr{ .value = assign }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t2,
+                        .yes = p.s(S.Break{ .label = null }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                },
+                .every => |pred| {
+                    const t1_inner = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const t1 = p.newExpr(E.Unary{ .op = .un_not, .value = t1_inner }, body_loc);
+                    const t2_inner = inlinedOrCall(p, pred, val_ref, body_loc) catch return false;
+                    const t2 = p.newExpr(E.Unary{ .op = .un_not, .value = t2_inner }, body_loc);
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Boolean{ .value = false }, body_loc),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t1,
+                        .yes = p.s(S.SExpr{ .value = assign }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = t2,
+                        .yes = p.s(S.Break{ .label = null }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                },
+                .min => {
+                    // if (__pv < __acc) __acc = __pv;
+                    const cmp = p.newExpr(E.Binary{
+                        .op = .bin_lt,
+                        .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                    }, body_loc);
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = cmp,
+                        .yes = p.s(S.SExpr{ .value = assign }, body_loc),
+                        .no = null,
+                    }, body_loc));
+                },
+                .max => {
+                    // if (__pv > __acc) __acc = __pv;
+                    const cmp = p.newExpr(E.Binary{
+                        .op = .bin_gt,
+                        .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                    }, body_loc);
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.If{
+                        .test_ = cmp,
+                        .yes = p.s(S.SExpr{ .value = assign }, body_loc),
+                        .no = null,
+                    }, body_loc));
                 },
             }
 
