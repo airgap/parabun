@@ -178,6 +178,169 @@ describe("pipeline inline fusion", () => {
     });
   });
 
+  // Stream fusion: chain of |> map/filter combinators ending in a known
+  // terminal (sum, count, reduce, forEach, collect/toArray) collapses to
+  // a single .reduce() pass so the intermediate per-step arrays / call
+  // frames disappear. Combinator args that introduce their own scopes
+  // (inline arrows, inline function exprs) bail to the existing |>
+  // desugar — supporting those needs scope-tree surgery we're punting on.
+  describe("stream fusion", () => {
+    test("map + sum collapses to .reduce", () => {
+      const out = ts(`
+        function square(x: number) { return x * x }
+        const r = nums |> map(square) |> sum
+      `);
+      expect(out).toContain(".reduce(");
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("square(");
+      expect(out).not.toContain("sum(");
+    });
+
+    test("map + filter + sum collapses to single reduce", () => {
+      const out = ts(`
+        function square(x: number) { return x * x }
+        function positive(x: number) { return x > 0 }
+        const r = nums |> map(square) |> filter(positive) |> sum
+      `);
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("square(");
+      expect(out).toContain("if (!positive(");
+      expect(out).not.toContain("filter(");
+      expect(out).not.toContain("sum(");
+    });
+
+    test("filter only + sum", () => {
+      const out = ts(`
+        function pos(x: number) { return x > 0 }
+        const r = nums |> filter(pos) |> sum
+      `);
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("if (!pos(");
+    });
+
+    test("count terminal", () => {
+      const out = ts(`
+        function active(x: any) { return x.active }
+        const r = items |> filter(active) |> count
+      `);
+      expect(out).toContain("items.reduce");
+      expect(out).toContain("+ 1");
+    });
+
+    test("reduce(init, fold) terminal", () => {
+      const out = ts(`
+        function double(x: number) { return x * 2 }
+        function add(a: number, b: number) { return a + b }
+        const r = nums |> map(double) |> reduce(0, add)
+      `);
+      expect(out).toContain("nums.reduce");
+      expect(out).toContain("double(");
+      expect(out).toContain("add(");
+    });
+
+    test("forEach terminal calls per element, returns acc", () => {
+      const out = ts(`
+        function prep(x: any) { return x }
+        function emit(x: any) { console.log(x) }
+        items |> map(prep) |> forEach(emit)
+      `);
+      expect(out).toContain("items.reduce");
+      expect(out).toContain("emit(");
+      expect(out).toContain("undefined");
+    });
+
+    test("collect terminal pushes into array", () => {
+      const out = ts(`
+        function valid(x: any) { return x.ok }
+        const out2 = items |> filter(valid) |> collect
+      `);
+      expect(out).toContain("items.reduce");
+      expect(out).toContain(".push(");
+      expect(out).toContain("[]");
+    });
+
+    test("toArray is an alias for collect", () => {
+      const out = ts(`
+        function valid(x: any) { return x.ok }
+        const out2 = items |> filter(valid) |> toArray
+      `);
+      expect(out).toContain("items.reduce");
+      expect(out).toContain(".push(");
+    });
+
+    test("complex source — method-chain expression — works", () => {
+      const out = ts(`
+        function double(x: number) { return x * 2 }
+        const r = data.points |> map(double) |> sum
+      `);
+      expect(out).toContain("data.points.reduce");
+    });
+
+    test("chain continues after fusion — fused result feeds next |>", () => {
+      const out = ts(`
+        function double(x: number) { return x * 2 }
+        function log(v: number) { return v }
+        const r = nums |> map(double) |> sum |> log
+      `);
+      // sum fuses; the |> log wraps the fused .reduce in log(...).
+      expect(out).toContain("log(");
+      expect(out).toContain(".reduce(");
+    });
+
+    test("inline arrow combinator-arg stops fusion at that step", () => {
+      const out = ts(`
+        function pos(x: number) { return x > 0 }
+        const r = nums |> map(x => x * 2) |> filter(pos) |> sum
+      `);
+      // map(x => x*2) has an inline arrow, so chain extraction stops
+      // at that step. Source becomes `map(...)(nums)` — a call expr —
+      // which is also excluded from fusion (call sources may yield
+      // async iterables like @para/pipeline ones), so the entire chain
+      // falls back to the existing nested-call desugar.
+      expect(out).toContain("sum(");
+      expect(out).not.toContain(".reduce(");
+    });
+
+    test("call-expression source stays unfused (async-iter safe)", () => {
+      const out = ts(`
+        function double(x: number) { return x * 2 }
+        const r = source() |> map(double) |> sum
+      `);
+      // source() may return an async iterable that needs runtime semantics
+      // (e.g. from @para/pipeline). Don't fuse calls.
+      expect(out).toContain("sum(");
+      expect(out).not.toContain(".reduce(");
+    });
+
+    test("zero intermediate steps leaves chain unfused", () => {
+      const out = ts(`
+        const r = nums |> sum
+      `);
+      // No map / filter — nothing to fuse over. Falls back to sum(nums).
+      expect(out).toContain("sum(");
+      expect(out).not.toContain(".reduce(");
+    });
+
+    test("unrecognized terminal bails", () => {
+      const out = ts(`
+        function double(x: number) { return x * 2 }
+        const r = items |> map(double) |> custom
+      `);
+      // `custom` isn't a recognized terminal — chain stays as nested calls.
+      expect(out).toContain("custom(");
+      expect(out).not.toContain(".reduce(");
+    });
+
+    test("unrecognized intermediate bails", () => {
+      const out = ts(`
+        const r = items |> custom(x) |> sum
+      `);
+      // `custom` isn't a known intermediate — no steps to fuse.
+      expect(out).toContain("sum(");
+      expect(out).not.toContain(".reduce(");
+    });
+  });
+
   test("multi-param pure function is NOT inlined", () => {
     const out = ts(`
       pure function add(a: number, b: number) { return a + b }

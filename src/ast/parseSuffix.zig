@@ -1054,6 +1054,13 @@ pub fn ParseSuffix(
                 return .next;
             }
 
+            // Parabun: stream fusion — collapse `src |> map(f) |> filter(g) |> sum`
+            // (and friends) into a single `src.reduce((__pa, __px) => { ... }, init)`
+            // pass so the intermediate arrays / call frames vanish.
+            if (tryFuseStreamPipeline(p, left, rhs)) {
+                return .next;
+            }
+
             // Build: rhs(left)
             const args = try ExprNodeList.initOne(p.allocator, left.*);
             left.* = p.newExpr(E.Call{
@@ -1436,6 +1443,323 @@ pub fn ParseSuffix(
                 else => null,
             };
         }
+
+        // Parabun: stream-fusion shapes recognized by tryFuseStreamPipeline.
+        const StreamTerminal = union(enum) {
+            sum,
+            count,
+            reduce_call: struct { init: Expr, fold: Expr },
+            for_each: Expr, // forEach(fn) — fn is the callback
+            collect, // collect / toArray — accumulate into array
+        };
+
+        const StreamStepKind = enum { map, filter };
+        const StreamStep = struct { kind: StreamStepKind, fn_or_pred: Expr };
+
+        // Recognize a `|>` rhs as a stream-pipeline terminal. Returns the
+        // terminal kind on success; null if rhs is not a known terminal.
+        fn recognizeStreamTerminal(p: *P, rhs: Expr) ?StreamTerminal {
+            switch (rhs.data) {
+                .e_identifier => |id| {
+                    const name = p.loadNameFromRef(id.ref);
+                    if (bun.strings.eqlComptime(name, "sum")) return .sum;
+                    if (bun.strings.eqlComptime(name, "count")) return .count;
+                    if (bun.strings.eqlComptime(name, "collect")) return .collect;
+                    if (bun.strings.eqlComptime(name, "toArray")) return .collect;
+                    return null;
+                },
+                .e_call => |call| {
+                    if (call.target.data != .e_identifier) return null;
+                    const name = p.loadNameFromRef(call.target.data.e_identifier.ref);
+                    const args = call.args.slice();
+                    if (bun.strings.eqlComptime(name, "forEach") and args.len == 1) {
+                        return StreamTerminal{ .for_each = args[0] };
+                    }
+                    if (bun.strings.eqlComptime(name, "reduce") and args.len == 2) {
+                        return StreamTerminal{ .reduce_call = .{ .init = args[0], .fold = args[1] } };
+                    }
+                    return null;
+                },
+                else => return null,
+            }
+        }
+
+        // Try to extract a single intermediate step from the outermost shape
+        // of `expr`. The expected shape after the existing |> desugar is
+        // `combinator(arg)(prevChain)` — an outer call whose target is
+        // itself a call to a known combinator name. On a match, returns the
+        // step plus the source (prevChain).
+        fn recognizeStreamStep(p: *P, expr: Expr) ?struct { step: StreamStep, source: Expr } {
+            if (expr.data != .e_call) return null;
+            const outer = expr.data.e_call;
+            const outer_args = outer.args.slice();
+            if (outer_args.len != 1) return null;
+            if (outer.target.data != .e_call) return null;
+            const cb_call = outer.target.data.e_call;
+            const cb_args = cb_call.args.slice();
+            if (cb_args.len != 1) return null;
+            if (cb_call.target.data != .e_identifier) return null;
+            const name = p.loadNameFromRef(cb_call.target.data.e_identifier.ref);
+            // Limit fusion to combinator args that don't introduce their
+            // own scopes (no inline arrows, no inline function expressions).
+            // Embedding e.g. `map(x => x*2)`'s arrow inside a synth arrow's
+            // body breaks the parser's parse-order==visit-order invariant on
+            // scopes_in_order — supporting it cleanly needs scope-tree
+            // surgery we're punting on. Identifiers (named fns), member
+            // access, and calls are fine.
+            switch (cb_args[0].data) {
+                .e_arrow, .e_function => return null,
+                else => {},
+            }
+            if (bun.strings.eqlComptime(name, "map")) {
+                return .{
+                    .step = .{ .kind = .map, .fn_or_pred = cb_args[0] },
+                    .source = outer_args[0],
+                };
+            }
+            if (bun.strings.eqlComptime(name, "filter")) {
+                return .{
+                    .step = .{ .kind = .filter, .fn_or_pred = cb_args[0] },
+                    .source = outer_args[0],
+                };
+            }
+            return null;
+        }
+
+        // Parabun: stream-pipeline fusion. `src |> map(f) |> filter(g) |> sum`
+        // (and the other terminals supported by recognizeStreamTerminal)
+        // collapses into `src.reduce((__pa, __px) => { ... }, init)` so the
+        // intermediate per-step arrays / call frames disappear into a single
+        // pass over the source.
+        //
+        // Recognition is conservative: only a fixed set of combinator NAMES
+        // (map, filter; sum, count, collect, toArray, forEach, reduce). If
+        // any step is unrecognized — or if the chain has no intermediate
+        // steps — we fall through to the regular |> desugaring.
+        //
+        // The synthesized arrow uses `let __pv = __px;` + per-step mutation /
+        // early-return so each map fn evaluates exactly once even when a
+        // filter follows. acc, elem, val symbols are uniquely numbered via
+        // p.temp_ref_count to avoid collision with user names.
+        fn tryFuseStreamPipeline(p: *P, left: *Expr, rhs: Expr) bool {
+            const terminal = recognizeStreamTerminal(p, rhs) orelse return false;
+
+            var steps_buf: [16]StreamStep = undefined;
+            var steps_len: u32 = 0;
+            var current = left.*;
+            while (steps_len < steps_buf.len) {
+                const found = recognizeStreamStep(p, current) orelse break;
+                steps_buf[steps_len] = found.step;
+                steps_len += 1;
+                current = found.source;
+            }
+
+            // No intermediate transforms means there's nothing to fuse —
+            // the existing call-wrapping desugar already handles that case.
+            if (steps_len == 0) return false;
+            // Bail on chains longer than the static buffer.
+            if (steps_len == steps_buf.len) return false;
+
+            // Source-shape filter. The fused output emits `source.reduce(...)`,
+            // which assumes `source` is array-like. Conservative: only fuse
+            // when the source is provably-arrayish syntax. This excludes call
+            // expressions like `source()` (which may return an async iterable
+            // — the @para/pipeline library handles those at runtime via its
+            // own combinators), `await x`, and other indeterminate shapes.
+            switch (current.data) {
+                .e_identifier,
+                .e_dot,
+                .e_index,
+                .e_array,
+                => {},
+                else => return false,
+            }
+
+            // We walked outer→source; the application order is the reverse.
+            std.mem.reverse(StreamStep, steps_buf[0..steps_len]);
+
+            return buildFusedReduce(p, left, current, steps_buf[0..steps_len], terminal);
+        }
+
+        // Construct `source.reduce((__pa_N, __px_N) => { ... }, init)` and
+        // overwrite `*left` with it. The body is built using `let __pv_N`
+        // for value flow + statement-level steps (so each map fn runs
+        // exactly once even when filter follows).
+        fn buildFusedReduce(p: *P, left: *Expr, source: Expr, steps: []const StreamStep, terminal: StreamTerminal) bool {
+            // Combinator args were filtered to non-arrow / non-function in
+            // recognizeStreamStep, so the chain hasn't pushed any scopes —
+            // synth-arrow scopes can use a loc derived from the chain's
+            // start without violating pushScopeForParsePass's monotonic-
+            // increase check.
+            const args_loc = p.lexer.loc();
+            const body_loc = logger.Loc{ .start = args_loc.start + 1 };
+
+            p.temp_ref_count += 1;
+            const counter = p.temp_ref_count;
+            const acc_name = std.fmt.allocPrint(p.allocator, "__pa_{x}$", .{counter}) catch return false;
+            const elem_name = std.fmt.allocPrint(p.allocator, "__px_{x}$", .{counter}) catch return false;
+            const val_name = std.fmt.allocPrint(p.allocator, "__pv_{x}$", .{counter}) catch return false;
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc) catch return false;
+            const acc_ref = p.declareSymbol(.hoisted, args_loc, acc_name) catch return false;
+            const elem_ref = p.declareSymbol(.hoisted, args_loc, elem_name) catch return false;
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch return false;
+            const val_ref = p.declareSymbol(.other, body_loc, val_name) catch return false;
+
+            var stmts = ListManaged(Stmt).initCapacity(p.allocator, steps.len + 3) catch return false;
+
+            // let __pv = __px;
+            {
+                const decls = p.allocator.alloc(G.Decl, 1) catch return false;
+                decls[0] = .{
+                    .binding = p.b(B.Identifier{ .ref = val_ref }, body_loc),
+                    .value = p.newExpr(E.Identifier{ .ref = elem_ref }, body_loc),
+                };
+                stmts.appendAssumeCapacity(p.s(S.Local{
+                    .kind = .k_let,
+                    .decls = G.Decl.List.fromOwnedSlice(decls),
+                }, body_loc));
+            }
+
+            // Per-step lowering:
+            //   map(f):    __pv = f(__pv);
+            //   filter(g): if (!g(__pv)) return __pa;
+            for (steps) |step| {
+                switch (step.kind) {
+                    .map => {
+                        const call_args = p.allocator.alloc(Expr, 1) catch return false;
+                        call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        const call_expr = p.newExpr(E.Call{
+                            .target = step.fn_or_pred,
+                            .args = ExprNodeList.fromOwnedSlice(call_args),
+                        }, body_loc);
+                        const assign = p.newExpr(E.Binary{
+                            .op = .bin_assign,
+                            .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                            .right = call_expr,
+                        }, body_loc);
+                        stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
+                    },
+                    .filter => {
+                        const call_args = p.allocator.alloc(Expr, 1) catch return false;
+                        call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        const call_expr = p.newExpr(E.Call{
+                            .target = step.fn_or_pred,
+                            .args = ExprNodeList.fromOwnedSlice(call_args),
+                        }, body_loc);
+                        const not_expr = p.newExpr(E.Unary{
+                            .op = .un_not,
+                            .value = call_expr,
+                        }, body_loc);
+                        const yes_stmt = p.s(S.Return{
+                            .value = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        }, body_loc);
+                        stmts.appendAssumeCapacity(p.s(S.If{
+                            .test_ = not_expr,
+                            .yes = yes_stmt,
+                            .no = null,
+                        }, body_loc));
+                    },
+                }
+            }
+
+            // Terminal: build the final `return ...;` (and any preceding
+            // side-effect stmt for forEach / collect).
+            const terminal_value: Expr = blk: {
+                switch (terminal) {
+                    .sum => break :blk p.newExpr(E.Binary{
+                        .op = .bin_add,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                    }, body_loc),
+                    .count => break :blk p.newExpr(E.Binary{
+                        .op = .bin_add,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = p.newExpr(E.Number{ .value = 1.0 }, body_loc),
+                    }, body_loc),
+                    .reduce_call => |r| {
+                        const fold_args = p.allocator.alloc(Expr, 2) catch return false;
+                        fold_args[0] = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
+                        fold_args[1] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        break :blk p.newExpr(E.Call{
+                            .target = r.fold,
+                            .args = ExprNodeList.fromOwnedSlice(fold_args),
+                        }, body_loc);
+                    },
+                    .for_each => |fn_expr| {
+                        // fn_expr(__pv); return __pa;
+                        const fe_args = p.allocator.alloc(Expr, 1) catch return false;
+                        fe_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        const fe_call = p.newExpr(E.Call{
+                            .target = fn_expr,
+                            .args = ExprNodeList.fromOwnedSlice(fe_args),
+                        }, body_loc);
+                        stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = fe_call }, body_loc));
+                        break :blk p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
+                    },
+                    .collect => {
+                        // __pa.push(__pv); return __pa;
+                        const push_args = p.allocator.alloc(Expr, 1) catch return false;
+                        push_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                        const push_call = p.newExpr(E.Call{
+                            .target = p.newExpr(E.Dot{
+                                .target = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                                .name = "push",
+                                .name_loc = body_loc,
+                            }, body_loc),
+                            .args = ExprNodeList.fromOwnedSlice(push_args),
+                        }, body_loc);
+                        stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = push_call }, body_loc));
+                        break :blk p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
+                    },
+                }
+            };
+            stmts.appendAssumeCapacity(p.s(S.Return{ .value = terminal_value }, body_loc));
+
+            p.popScope();
+            p.popScope();
+
+            // Arrow params and the arrow itself.
+            const arrow_args = p.allocator.alloc(G.Arg, 2) catch return false;
+            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = acc_ref }, args_loc) };
+            arrow_args[1] = .{ .binding = p.b(B.Identifier{ .ref = elem_ref }, args_loc) };
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = arrow_args,
+                .body = .{ .loc = body_loc, .stmts = stmts.toOwnedSlice() catch return false },
+                .prefer_expr = false,
+                .is_async = false,
+            }, args_loc);
+
+            // Init value per terminal.
+            const init_value: Expr = switch (terminal) {
+                .sum, .count => p.newExpr(E.Number{ .value = 0.0 }, args_loc),
+                .reduce_call => |r| r.init,
+                .for_each => p.newExpr(E.Undefined{}, args_loc),
+                .collect => p.newExpr(E.Array{
+                    .items = ExprNodeList{},
+                    .is_single_line = true,
+                }, args_loc),
+            };
+
+            // Build `source.reduce(arrow, init)`.
+            const reduce_args = p.allocator.alloc(Expr, 2) catch return false;
+            reduce_args[0] = arrow;
+            reduce_args[1] = init_value;
+            const reduce_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Dot{
+                    .target = source,
+                    .name = "reduce",
+                    .name_loc = args_loc,
+                }, args_loc),
+                .args = ExprNodeList.fromOwnedSlice(reduce_args),
+            }, args_loc);
+
+            left.* = reduce_call;
+            return true;
+        }
+
         fn t_in(p: *P, level: Level, left: *Expr) anyerror!Continuation {
             if (level.gte(.compare) or !p.allow_in) {
                 return .done;
@@ -1620,6 +1944,8 @@ pub fn ParseSuffix(
 const Continuation = enum { next, done };
 const string = []const u8;
 
+const std = @import("std");
+const ListManaged = std.array_list.Managed;
 const bun = @import("bun");
 
 const logger = bun.logger;
