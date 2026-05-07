@@ -1467,6 +1467,42 @@ pub fn ParseSuffix(
         // before reading.
         const StreamStep = struct { kind: StreamStepKind, fn_or_pred: Expr };
 
+        // Range sources: `0..n |> ...` and `0..=n |> ...` desugar to runtime
+        // calls (`__parabunRange(a, b)` / `__parabunRangeInclusive(a, b)`)
+        // before reaching the fusion site. Recognizing that shape lets the
+        // emitter skip the `__src.length` / `__src[__i]` boilerplate and
+        // run the loop counter directly between the two bounds — no
+        // intermediate range object materializes.
+        const StreamSource = union(enum) {
+            array: Expr, // ordinary array-like; uses src.length and src[i]
+            range_excl: struct { lo: Expr, hi: Expr }, // 0..n  (i < hi)
+            range_incl: struct { lo: Expr, hi: Expr }, // 0..=n (i <= hi)
+        };
+
+        fn classifyStreamSource(p: *P, source: Expr) StreamSource {
+            // `a..b` and `a..=b` produce e_call where target is an
+            // ImportIdentifier referencing the runtime helper. In non-bundle
+            // builds the runtime symbol's `original_name` is hashed
+            // (`__parabunRange_HASH`), so match by prefix. The inclusive
+            // helper is checked first since its name extends the exclusive
+            // one's prefix.
+            if (source.data == .e_call) {
+                const call = source.data.e_call;
+                if (call.target.data == .e_import_identifier and call.args.len == 2) {
+                    const ref = call.target.data.e_import_identifier.ref;
+                    const name = p.symbols.items[ref.innerIndex()].original_name;
+                    const args = call.args.slice();
+                    if (bun.strings.hasPrefixComptime(name, "__parabunRangeInclusive")) {
+                        return StreamSource{ .range_incl = .{ .lo = args[0], .hi = args[1] } };
+                    }
+                    if (bun.strings.hasPrefixComptime(name, "__parabunRange")) {
+                        return StreamSource{ .range_excl = .{ .lo = args[0], .hi = args[1] } };
+                    }
+                }
+            }
+            return StreamSource{ .array = source };
+        }
+
         // Recognize a `|>` rhs as a stream-pipeline terminal. Returns the
         // terminal kind on success; null if rhs is not a known terminal.
         fn recognizeStreamTerminal(p: *P, rhs: Expr) ?StreamTerminal {
@@ -1588,25 +1624,31 @@ pub fn ParseSuffix(
                 }
             }
 
-            // Source-shape filter. The fused output emits `source.reduce(...)`,
-            // which assumes `source` is array-like. Conservative: only fuse
-            // when the source is provably-arrayish syntax. This excludes call
-            // expressions like `source()` (which may return an async iterable
-            // — the @para/pipeline library handles those at runtime via its
-            // own combinators), `await x`, and other indeterminate shapes.
-            switch (current.data) {
-                .e_identifier,
-                .e_dot,
-                .e_index,
-                .e_array,
-                => {},
-                else => return false,
+            // Source classification + shape filter. Range calls
+            // (`__parabunRange(a, b)` / inclusive variant) are accepted
+            // even though they're calls — the classifier extracts the
+            // bounds and the emitter runs the for-loop directly between
+            // them, no intermediate range object materializes.
+            const source = classifyStreamSource(p, current);
+            switch (source) {
+                .range_excl, .range_incl => {},
+                .array => switch (current.data) {
+                    .e_identifier,
+                    .e_dot,
+                    .e_index,
+                    .e_array,
+                    => {},
+                    // Call sources (other than range helpers) may yield
+                    // async iterables — `@para/pipeline` handles those at
+                    // runtime via its own combinators, so leave them alone.
+                    else => return false,
+                },
             }
 
             // We walked outer→source; the application order is the reverse.
             std.mem.reverse(StreamStep, steps_buf[0..steps_len]);
 
-            return buildFusedReduce(p, left, current, steps_buf[0..steps_len], terminal);
+            return buildFusedReduce(p, left, source, steps_buf[0..steps_len], terminal);
         }
 
         // Helper: try to inline `fn_expr(arg_expr)` by substituting the
@@ -1734,7 +1776,7 @@ pub fn ParseSuffix(
         // reliably fast across V8/JSC. The IIFE wrapper costs one call
         // frame per chain (vs N) — net win, and lets the result sit in
         // expression position without a stmt-level rewrite.
-        fn buildFusedReduce(p: *P, left: *Expr, source: Expr, steps: []const StreamStep, terminal: StreamTerminal) bool {
+        fn buildFusedReduce(p: *P, left: *Expr, source: StreamSource, steps: []const StreamStep, terminal: StreamTerminal) bool {
             // Snapshot scopes_in_order length + the original chain-start loc
             // before we touch anything — we'll use both to do scope-tree
             // surgery once the synth scopes are pushed and *left is rewritten.
@@ -1759,10 +1801,14 @@ pub fn ParseSuffix(
 
             p.temp_ref_count += 1;
             const counter = p.temp_ref_count;
-            const src_name = std.fmt.allocPrint(p.allocator, "__ps_{x}$", .{counter}) catch return false;
             const acc_name = std.fmt.allocPrint(p.allocator, "__pa_{x}$", .{counter}) catch return false;
             const i_name = std.fmt.allocPrint(p.allocator, "__pi_{x}$", .{counter}) catch return false;
             const val_name = std.fmt.allocPrint(p.allocator, "__pv_{x}$", .{counter}) catch return false;
+
+            const is_range = switch (source) {
+                .array => false,
+                .range_excl, .range_incl => true,
+            };
 
             // Track which steps use take so we can declare a count symbol
             // only when needed. Each take step gets its own counter — chains
@@ -1773,7 +1819,21 @@ pub fn ParseSuffix(
             }
 
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc) catch return false;
-            const src_ref = p.declareSymbol(.hoisted, args_loc, src_name) catch return false;
+            // IIFE arg refs vary by source kind:
+            //   array: 1 param `__src` — accessed via `__src.length` / `__src[__i]`
+            //   range: 2 params `__plo, __phi` — used as the loop bounds.
+            const src_ref: js_ast.Ref = if (!is_range) blk: {
+                const src_name = std.fmt.allocPrint(p.allocator, "__ps_{x}$", .{counter}) catch return false;
+                break :blk p.declareSymbol(.hoisted, args_loc, src_name) catch return false;
+            } else js_ast.Ref.None;
+            const lo_ref: js_ast.Ref = if (is_range) blk: {
+                const lo_name = std.fmt.allocPrint(p.allocator, "__plo_{x}$", .{counter}) catch return false;
+                break :blk p.declareSymbol(.hoisted, args_loc, lo_name) catch return false;
+            } else js_ast.Ref.None;
+            const hi_ref: js_ast.Ref = if (is_range) blk: {
+                const hi_name = std.fmt.allocPrint(p.allocator, "__phi_{x}$", .{counter}) catch return false;
+                break :blk p.declareSymbol(.hoisted, args_loc, hi_name) catch return false;
+            } else js_ast.Ref.None;
 
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch return false;
             const synth_body_scope = p.current_scope;
@@ -1825,8 +1885,13 @@ pub fn ParseSuffix(
 
             // let __acc = INIT;
             body_stmts.appendAssumeCapacity(buildLet(p, acc_ref, acc_init, body_loc) catch return false);
-            // let __i = 0;
-            body_stmts.appendAssumeCapacity(buildLet(p, i_ref, p.newExpr(E.Number{ .value = 0.0 }, body_loc), body_loc) catch return false);
+            // let __i = 0;        (array source — index from 0)
+            // let __i = __plo;    (range source — counter starts at lo)
+            const i_init_expr: Expr = if (is_range)
+                p.newExpr(E.Identifier{ .ref = lo_ref }, body_loc)
+            else
+                p.newExpr(E.Number{ .value = 0.0 }, body_loc);
+            body_stmts.appendAssumeCapacity(buildLet(p, i_ref, i_init_expr, body_loc) catch return false);
             // let __pcN = 0; for each take step.
             for (take_refs) |take_ref| {
                 body_stmts.appendAssumeCapacity(buildLet(p, take_ref, p.newExpr(E.Number{ .value = 0.0 }, body_loc), body_loc) catch return false);
@@ -1851,16 +1916,20 @@ pub fn ParseSuffix(
             // if-statements).
             var loop_stmts = ListManaged(Stmt).initCapacity(p.allocator, 3 + steps.len * 2) catch return false;
 
-            // __pv = __src[__i];
+            // __pv = __src[__i];   (array source)
+            // __pv = __i;          (range source — value IS the counter)
             {
-                const index_expr = p.newExpr(E.Index{
-                    .target = p.newExpr(E.Identifier{ .ref = src_ref }, body_loc),
-                    .index = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
-                }, body_loc);
+                const rhs_expr: Expr = if (is_range)
+                    p.newExpr(E.Identifier{ .ref = i_ref }, body_loc)
+                else
+                    p.newExpr(E.Index{
+                        .target = p.newExpr(E.Identifier{ .ref = src_ref }, body_loc),
+                        .index = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
+                    }, body_loc);
                 const assign = p.newExpr(E.Binary{
                     .op = .bin_assign,
                     .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
-                    .right = index_expr,
+                    .right = rhs_expr,
                 }, body_loc);
                 loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
             }
@@ -2137,15 +2206,33 @@ pub fn ParseSuffix(
             }
 
             // Assemble for-loop and append to body.
-            const for_test = p.newExpr(E.Binary{
-                .op = .bin_lt,
-                .left = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
-                .right = p.newExpr(E.Dot{
-                    .target = p.newExpr(E.Identifier{ .ref = src_ref }, body_loc),
-                    .name = "length",
-                    .name_loc = body_loc,
-                }, body_loc),
-            }, body_loc);
+            // array source:    __i < __src.length
+            // range_excl:      __i < __phi
+            // range_incl:      __i <= __phi
+            const for_test = blk: {
+                const left_expr = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc);
+                switch (source) {
+                    .array => break :blk p.newExpr(E.Binary{
+                        .op = .bin_lt,
+                        .left = left_expr,
+                        .right = p.newExpr(E.Dot{
+                            .target = p.newExpr(E.Identifier{ .ref = src_ref }, body_loc),
+                            .name = "length",
+                            .name_loc = body_loc,
+                        }, body_loc),
+                    }, body_loc),
+                    .range_excl => break :blk p.newExpr(E.Binary{
+                        .op = .bin_lt,
+                        .left = left_expr,
+                        .right = p.newExpr(E.Identifier{ .ref = hi_ref }, body_loc),
+                    }, body_loc),
+                    .range_incl => break :blk p.newExpr(E.Binary{
+                        .op = .bin_le,
+                        .left = left_expr,
+                        .right = p.newExpr(E.Identifier{ .ref = hi_ref }, body_loc),
+                    }, body_loc),
+                }
+            };
             const for_update = p.newExpr(E.Unary{
                 .op = .un_post_inc,
                 .value = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
@@ -2170,9 +2257,30 @@ pub fn ParseSuffix(
             p.popScope(); // synth_body
             p.popScope(); // synth_args
 
-            // Arrow takes one param `__src`, body is the for-loop block.
-            const arrow_args = p.allocator.alloc(G.Arg, 1) catch return false;
-            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = src_ref }, args_loc) };
+            // Arrow + IIFE shape varies by source:
+            //   array:        ((__src) => { ... })(srcExpr)
+            //   range_*:      ((__plo, __phi) => { ... })(loExpr, hiExpr)
+            const arg_count: usize = if (is_range) 2 else 1;
+            const arrow_args = p.allocator.alloc(G.Arg, arg_count) catch return false;
+            const call_args = p.allocator.alloc(Expr, arg_count) catch return false;
+            switch (source) {
+                .array => |src_expr| {
+                    arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = src_ref }, args_loc) };
+                    call_args[0] = src_expr;
+                },
+                .range_excl => |r| {
+                    arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = lo_ref }, args_loc) };
+                    arrow_args[1] = .{ .binding = p.b(B.Identifier{ .ref = hi_ref }, args_loc) };
+                    call_args[0] = r.lo;
+                    call_args[1] = r.hi;
+                },
+                .range_incl => |r| {
+                    arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = lo_ref }, args_loc) };
+                    arrow_args[1] = .{ .binding = p.b(B.Identifier{ .ref = hi_ref }, args_loc) };
+                    call_args[0] = r.lo;
+                    call_args[1] = r.hi;
+                },
+            }
 
             const arrow = p.newExpr(E.Arrow{
                 .args = arrow_args,
@@ -2182,9 +2290,6 @@ pub fn ParseSuffix(
                 .is_para_fusion_iife = true,
             }, args_loc);
 
-            // IIFE: `(arrow)(srcExpr)`.
-            const call_args = p.allocator.alloc(Expr, 1) catch return false;
-            call_args[0] = source;
             const iife_call = p.newExpr(E.Call{
                 .target = arrow,
                 .args = ExprNodeList.fromOwnedSlice(call_args),

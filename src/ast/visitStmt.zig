@@ -841,37 +841,49 @@ pub fn VisitStmt(
                     if (call.target.data == .e_arrow) {
                         const arrow = call.target.data.e_arrow;
                         const call_args = call.args.slice();
-                        if (arrow.is_para_fusion_iife and call_args.len == 1 and
-                            arrow.args.len == 1 and
-                            arrow.args[0].binding.data == .b_identifier)
+                        if (arrow.is_para_fusion_iife and
+                            call_args.len == arrow.args.len and
+                            (call_args.len == 1 or call_args.len == 2))
                         {
-                            const src_ref = arrow.args[0].binding.data.b_identifier.ref;
-                            const src_loc = arrow.body.loc;
-
-                            // let __src = srcExpr;
-                            const decls = p.allocator.alloc(G.Decl, 1) catch unreachable;
-                            decls[0] = .{
-                                .binding = p.b(B.Identifier{ .ref = src_ref }, src_loc),
-                                .value = call_args[0],
-                            };
-                            stmts.append(p.s(S.Local{
-                                .kind = .k_let,
-                                .decls = G.Decl.List.fromOwnedSlice(decls),
-                            }, src_loc)) catch unreachable;
-
-                            // Splice the arrow body's stmts (visit already
-                            // ran on them via visitExpr above). Drop the
-                            // trailing `return __acc;` — its value isn't
-                            // observed in stmt-level position.
-                            const body_stmts = arrow.body.stmts;
-                            const upper = if (body_stmts.len > 0 and body_stmts[body_stmts.len - 1].data == .s_return)
-                                body_stmts.len - 1
-                            else
-                                body_stmts.len;
-                            for (body_stmts[0..upper]) |inner_stmt| {
-                                stmts.append(inner_stmt) catch unreachable;
+                            // Validate every param is a plain b_identifier.
+                            var ok = true;
+                            for (arrow.args) |arg| {
+                                if (arg.binding.data != .b_identifier) {
+                                    ok = false;
+                                    break;
+                                }
                             }
-                            return;
+                            if (ok) {
+                                const src_loc = arrow.body.loc;
+                                // Materialize each `let __param = call_arg;`
+                                // pair (1 for array source, 2 for range).
+                                for (arrow.args, 0..) |arg, i| {
+                                    const ref = arg.binding.data.b_identifier.ref;
+                                    const decls = p.allocator.alloc(G.Decl, 1) catch unreachable;
+                                    decls[0] = .{
+                                        .binding = p.b(B.Identifier{ .ref = ref }, src_loc),
+                                        .value = call_args[i],
+                                    };
+                                    stmts.append(p.s(S.Local{
+                                        .kind = .k_let,
+                                        .decls = G.Decl.List.fromOwnedSlice(decls),
+                                    }, src_loc)) catch unreachable;
+                                }
+
+                                // Splice the arrow body's stmts (visit already
+                                // ran on them via visitExpr above). Drop the
+                                // trailing `return __acc;` — its value isn't
+                                // observed in stmt-level position.
+                                const body_stmts = arrow.body.stmts;
+                                const upper = if (body_stmts.len > 0 and body_stmts[body_stmts.len - 1].data == .s_return)
+                                    body_stmts.len - 1
+                                else
+                                    body_stmts.len;
+                                for (body_stmts[0..upper]) |inner_stmt| {
+                                    stmts.append(inner_stmt) catch unreachable;
+                                }
+                                return;
+                            }
                         }
                     }
                 }

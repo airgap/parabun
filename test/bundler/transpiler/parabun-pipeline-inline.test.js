@@ -448,6 +448,41 @@ describe("pipeline inline fusion", () => {
       expect(out).toMatch(/__pv[\w$]+ > __pa[\w$]+/);
     });
 
+    test("range source — exclusive `0..n |> map |> sum`", () => {
+      const out = ts(`
+        const r = 0..100 |> map(x => x * x) |> sum
+      `);
+      // 2-arg IIFE: ((__plo, __phi) => { ... })(0, 100)
+      expect(out).toContain("(0, 100)");
+      expect(out).toContain("for (");
+      // Exclusive: i < phi (uppercase loop test).
+      expect(out).toMatch(/__pi[\w$]+ < __phi/);
+      // Bounds are extracted into the IIFE args directly — the for-loop
+      // body uses `__phi` (the param), not a range-helper call.
+      expect(out).not.toMatch(/__parabunRange[\w$]*\(0,\s*100\)/);
+      // Element fetch is `__pv = __i;` (no `__src[__i]`).
+      expect(out).toMatch(/__pv[\w$]+ = __pi[\w$]+/);
+    });
+
+    test("range source — inclusive `0..=n` uses `<=` in the test", () => {
+      const out = ts(`
+        const r = 0..=10 |> filter(x => x > 0) |> sum
+      `);
+      expect(out).toContain("(0, 10)");
+      expect(out).toMatch(/__pi[\w$]+ <= __phi/);
+    });
+
+    test("range source with take + collect", () => {
+      const out = ts(`
+        const r = 0..1000 |> map(x => x * 2) |> filter(x => x > 100) |> take(5) |> collect
+      `);
+      expect(out).toContain("(0, 1000)");
+      expect(out).toContain("for (");
+      expect(out).toContain(">= 5)");
+      expect(out).toContain("break");
+      expect(out).toContain(".push(");
+    });
+
     test("multiple fused chains in one file don't crash visit pass", () => {
       const out = ts(`
         const a = nums |> filter(x => x > 0) |> sum
