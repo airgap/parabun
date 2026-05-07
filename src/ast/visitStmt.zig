@@ -830,6 +830,52 @@ pub fn VisitStmt(
 
                 data.value = p.visitExpr(data.value);
 
+                // Parabun: stmt-level stream-fusion unwrap. When the
+                // visited value is `(synth_iife_arrow)(srcExpr)` and we're
+                // sitting in expression-statement position, splice the
+                // arrow body's stmts directly into the parent stmt list
+                // — for-loop sits where the IIFE call would, no wrapper
+                // call frame, no anonymous stack frame in tracebacks.
+                if (data.value.data == .e_call) {
+                    const call = data.value.data.e_call;
+                    if (call.target.data == .e_arrow) {
+                        const arrow = call.target.data.e_arrow;
+                        const call_args = call.args.slice();
+                        if (arrow.is_para_fusion_iife and call_args.len == 1 and
+                            arrow.args.len == 1 and
+                            arrow.args[0].binding.data == .b_identifier)
+                        {
+                            const src_ref = arrow.args[0].binding.data.b_identifier.ref;
+                            const src_loc = arrow.body.loc;
+
+                            // let __src = srcExpr;
+                            const decls = p.allocator.alloc(G.Decl, 1) catch unreachable;
+                            decls[0] = .{
+                                .binding = p.b(B.Identifier{ .ref = src_ref }, src_loc),
+                                .value = call_args[0],
+                            };
+                            stmts.append(p.s(S.Local{
+                                .kind = .k_let,
+                                .decls = G.Decl.List.fromOwnedSlice(decls),
+                            }, src_loc)) catch unreachable;
+
+                            // Splice the arrow body's stmts (visit already
+                            // ran on them via visitExpr above). Drop the
+                            // trailing `return __acc;` — its value isn't
+                            // observed in stmt-level position.
+                            const body_stmts = arrow.body.stmts;
+                            const upper = if (body_stmts.len > 0 and body_stmts[body_stmts.len - 1].data == .s_return)
+                                body_stmts.len - 1
+                            else
+                                body_stmts.len;
+                            for (body_stmts[0..upper]) |inner_stmt| {
+                                stmts.append(inner_stmt) catch unreachable;
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 if (should_trim_primitive and data.value.isPrimitiveLiteral()) {
                     return;
                 }

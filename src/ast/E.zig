@@ -269,6 +269,11 @@ pub const Arrow = struct {
     is_pure: bool = false, // Parabun: pure arrow annotation
     has_rest_arg: bool = false,
     prefer_expr: bool = false, // Use shorthand if true and "Body" is a single return statement
+    // Parabun: marks this arrow as a stream-fusion synth IIFE so visit's
+    // s_expr handler can unwrap `(arrow)(src);` at stmt-level into the
+    // arrow body's stmts directly (eliminating the wrapper call frame
+    // when fusion sits in expression-statement position).
+    is_para_fusion_iife: bool = false,
 
     pub const noop_return_undefined: Arrow = .{
         .args = &.{},

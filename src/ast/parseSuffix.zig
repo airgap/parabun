@@ -1905,6 +1905,7 @@ pub fn ParseSuffix(
                 .body = .{ .loc = body_loc, .stmts = body_stmts.toOwnedSlice() catch return false },
                 .prefer_expr = false,
                 .is_async = false,
+                .is_para_fusion_iife = true,
             }, args_loc);
 
             // IIFE: `(arrow)(srcExpr)`.

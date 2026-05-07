@@ -340,6 +340,30 @@ describe("pipeline inline fusion", () => {
       expect(out).not.toMatch(/double\(__pv/);
     });
 
+    test("stmt-level chain unwraps the IIFE wrapper", () => {
+      const out = ts(`
+        function emit(x: any) { console.log(x) }
+        items |> map(x => x * 2) |> forEach(emit)
+      `);
+      // Chain at stmt-level: visit's s_expr handler splices the synth
+      // arrow's body stmts directly into the parent stmt list. No IIFE
+      // wrapper survives — just the for-loop.
+      expect(out).toContain("for (");
+      expect(out).toContain("emit(");
+      // No `((src) => {...})(items)` wrapper.
+      expect(out).not.toMatch(/\(\(.*\)\s*=>\s*\{[\s\S]*\}\)\(items\)/);
+    });
+
+    test("const-decl chain keeps the IIFE (expression position)", () => {
+      const out = ts(`
+        const total = nums |> map(x => x * 2) |> sum
+      `);
+      // RHS of const needs an expression — the IIFE wraps the for-loop
+      // so it sits in expression position.
+      expect(out).toContain("for (");
+      expect(out).toContain("})(nums)");
+    });
+
     test("call-expression source stays unfused (async-iter safe)", () => {
       const out = ts(`
         function double(x: number) { return x * 2 }
