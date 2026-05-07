@@ -1545,6 +1545,30 @@ pub fn ParseSuffix(
             }
         }
 
+        // Recognize a "bare" step expression — `map(f)` / `filter(g)` /
+        // `take(n)` as the |> rhs BEFORE it's applied to anything. Used by
+        // the default-collect path: when a chain ends with one of these
+        // and no more |> follows, treat as if the user had written
+        // `... |> step |> collect`.
+        fn recognizeBareStep(p: *P, rhs: Expr) ?StreamStep {
+            if (rhs.data != .e_call) return null;
+            const call = rhs.data.e_call;
+            if (call.target.data != .e_identifier) return null;
+            const args = call.args.slice();
+            if (args.len != 1) return null;
+            const name = p.loadNameFromRef(call.target.data.e_identifier.ref);
+            if (bun.strings.eqlComptime(name, "map")) {
+                return .{ .kind = .map, .fn_or_pred = args[0] };
+            }
+            if (bun.strings.eqlComptime(name, "filter")) {
+                return .{ .kind = .filter, .fn_or_pred = args[0] };
+            }
+            if (bun.strings.eqlComptime(name, "take")) {
+                return .{ .kind = .take, .fn_or_pred = args[0] };
+            }
+            return null;
+        }
+
         // Try to extract a single intermediate step from the outermost shape
         // of `expr`. The expected shape after the existing |> desugar is
         // `combinator(arg)(prevChain)` — an outer call whose target is
@@ -1988,10 +2012,33 @@ pub fn ParseSuffix(
         // filter follows. acc, elem, val symbols are uniquely numbered via
         // p.temp_ref_count to avoid collision with user names.
         fn tryFuseStreamPipeline(p: *P, left: *Expr, rhs: Expr) bool {
-            const terminal = recognizeStreamTerminal(p, rhs) orelse return false;
+            // Recognize an explicit terminal (`sum`, `find(pred)`, etc.) OR
+            // fall to the default-collect path: rhs is a step combinator
+            // (`map(f)` / `filter(g)` / `take(n)`) AND no more |> follows
+            // — treat the chain as if the user had written `… |> collect`.
+            // The trailing step from rhs becomes the outermost (last-applied)
+            // step in the chain.
+            var trailing_step: ?StreamStep = null;
+            const terminal: StreamTerminal = blk: {
+                if (recognizeStreamTerminal(p, rhs)) |t| break :blk t;
+                if (p.lexer.token != .t_bar_greater_than) {
+                    if (recognizeBareStep(p, rhs)) |step| {
+                        trailing_step = step;
+                        break :blk .collect;
+                    }
+                }
+                return false;
+            };
 
             var steps_buf: [16]StreamStep = undefined;
             var steps_len: u32 = 0;
+            // Trailing step (from default-collect path) is the outermost
+            // step semantically — prepended in walk order so the post-
+            // reverse application order ends with it.
+            if (trailing_step) |ts| {
+                steps_buf[0] = ts;
+                steps_len = 1;
+            }
             var current = left.*;
             while (steps_len < steps_buf.len) {
                 const found = recognizeStreamStep(p, current) orelse break;

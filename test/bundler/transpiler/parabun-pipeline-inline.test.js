@@ -556,6 +556,53 @@ describe("pipeline inline fusion", () => {
       });
     });
 
+    // Default-collect — when a chain ends with map / filter / take and
+    // no explicit terminal follows, treat as if `|> collect` was written.
+    describe("default collect", () => {
+      test("chain ending in map collects to array", () => {
+        const out = ts(`const r = arr |> map(x => x * x)`);
+        // No `for (` if folded; otherwise IIFE with .push.
+        expect(out).toMatch(/\.push\(|const r = \[/);
+      });
+
+      test("chain ending in filter collects to array", () => {
+        const out = ts(`const r = arr |> filter(x => x > 0)`);
+        expect(out).toMatch(/\.push\(|const r = \[/);
+      });
+
+      test("chain ending in take collects to array", () => {
+        const out = ts(`const r = arr |> take(5)`);
+        expect(out).toMatch(/\.push\(|const r = \[/);
+      });
+
+      test("multi-step chain ending in map collects after all steps", () => {
+        const out = ts(`
+          const r = nums |> filter(x => x > 0) |> map(x => x * 2)
+        `);
+        expect(out).toContain(".push(");
+        expect(out).toContain("for (");
+        // map applied AFTER filter (filter runs first, continues, then map).
+        expect(out).toContain("if (!(");
+        expect(out).toContain("continue");
+      });
+
+      test("explicit terminal still fires when present", () => {
+        const out = ts(`
+          const r = nums |> map(x => x * 2) |> sum
+        `);
+        // Sum terminal, not collect.
+        expect(out).not.toContain(".push(");
+        expect(out).toMatch(/__pa[\w$]+ \+ __pv[\w$]+|__pa[\w$]+ \+ /);
+      });
+
+      test("single |> with no step is unchanged (pipe-as-call)", () => {
+        const out = ts(`const r = arr |> log`);
+        // No fusion; falls through to call form.
+        expect(out).toContain("log(arr)");
+        expect(out).not.toContain("for (");
+      });
+    });
+
     test("multiple fused chains in one file don't crash visit pass", () => {
       const out = ts(`
         const a = nums |> filter(x => x > 0) |> sum
