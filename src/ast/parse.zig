@@ -1796,6 +1796,371 @@ pub fn Parse(
                 .args = js_ast.ExprNodeList.fromOwnedSlice(then_args),
             }, parallel_range.loc);
         }
+
+        // Parabun: parse a `match SUBJECT { pat => result, ... }` expression
+        // and lower it to an IIFE wrapping a ternary chain:
+        //
+        //   match status {
+        //     200 => "ok",
+        //     400 | 404 => "client error",
+        //     500 => "server error",
+        //     _ => "unknown"
+        //   }
+        //
+        // becomes
+        //
+        //   ((__pmN$) =>
+        //     __pmN$ === 200 ? "ok"
+        //     : (__pmN$ === 400 || __pmN$ === 404) ? "client error"
+        //     : __pmN$ === 500 ? "server error"
+        //     : "unknown"
+        //   )(status)
+        //
+        // Patterns supported in this MVP:
+        //   - Literal:           42, "ok", true, null, -3
+        //   - Wildcard:          _   (always matches; must come last)
+        //   - OR:                lit1 | lit2 | lit3
+        //   - Identifier-bind:   n   (matches anything, binds to `n`)
+        //
+        // Each arm's result expression is parsed at .comma so a trailing
+        // comma terminates the arm cleanly. The fallback when no arms match
+        // (no wildcard / identifier-bind reached) is `undefined`.
+        pub fn parseMatchExpr(p: *P, match_range: logger.Range) anyerror!Expr {
+            // Parse the subject expression. parseExpr at .lowest stops at
+            // `{` (which isn't an expression continuation) — we land
+            // exactly at the open-brace of the arms block.
+            const subject = try p.parseExpr(.lowest);
+
+            try p.lexer.expect(.t_open_brace);
+
+            // Synthesize an IIFE arrow whose param is the matched value.
+            // Use a unique name via temp_ref_count.
+            p.temp_ref_count += 1;
+            const counter = p.temp_ref_count;
+            const m_name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__pm_{x}$", .{counter}));
+
+            // Push the arrow's scopes at fresh locs (lexer.loc is just past
+            // `{` — strictly later than any scope pushed during subject
+            // parsing, satisfying pushScopeForParsePass's monotonic check).
+            const args_loc = match_range.loc;
+            const body_loc = logger.Loc{ .start = args_loc.start + 1 };
+
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc);
+            const m_ref = try p.declareSymbol(.hoisted, args_loc, m_name);
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc);
+
+            // Collect arms: each is { test_expr | null = wildcard, result }.
+            // The test for an OR / literal pattern is `__pm === lit` (chained
+            // with || for OR). The wildcard / identifier-bind arms have no
+            // test (they always match).
+            const Arm = struct { test_expr: ?Expr, result: Expr };
+            var arms = ListManaged(Arm).init(p.allocator);
+
+            while (p.lexer.token != .t_close_brace) {
+                // Parse a single pattern (with optional OR alternatives).
+                var test_expr: ?Expr = null;
+                var bind_name: ?[]const u8 = null;
+
+                // What kind of identifier should be substituted in the
+                // arm result post-parse, and to what value:
+                //   ident-bind:  bind_name → __pm
+                //   Ok(x)/Some(x): bind_name → __pm.value
+                //   Err(e):       bind_name → __pm.error
+                //   None / _ / lit: no substitution
+                const SubKind = enum { none, plain, dot_value, dot_error };
+                var sub_kind: SubKind = .none;
+
+                // Wildcard `_`.
+                if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "_")) {
+                    try p.lexer.next();
+                }
+                // Result / Option constructor patterns.
+                else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "Ok")) {
+                    try p.lexer.next();
+                    test_expr = buildTagTestExpr(p, m_ref, args_loc, "Ok");
+                    if (try parseCtorArgIdent(p)) |bn| {
+                        bind_name = bn;
+                        sub_kind = .dot_value;
+                    }
+                } else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "Some")) {
+                    try p.lexer.next();
+                    test_expr = buildTagTestExpr(p, m_ref, args_loc, "Some");
+                    if (try parseCtorArgIdent(p)) |bn| {
+                        bind_name = bn;
+                        sub_kind = .dot_value;
+                    }
+                } else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "Err")) {
+                    try p.lexer.next();
+                    test_expr = buildTagTestExpr(p, m_ref, args_loc, "Err");
+                    if (try parseCtorArgIdent(p)) |bn| {
+                        bind_name = bn;
+                        sub_kind = .dot_error;
+                    }
+                } else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "None")) {
+                    try p.lexer.next();
+                    test_expr = buildTagTestExpr(p, m_ref, args_loc, "None");
+                } else if (p.lexer.token == .t_identifier) {
+                    // Identifier-bind: `n => n + 1`.
+                    bind_name = p.lexer.identifier;
+                    sub_kind = .plain;
+                    try p.lexer.next();
+                } else {
+                    // Literal pattern (with possible OR chain).
+                    test_expr = try buildArmTestForLiteral(p, m_ref, args_loc);
+                }
+
+                try p.lexer.expect(.t_equals_greater_than);
+
+                var result_expr = try p.parseExpr(.comma);
+
+                // Apply substitution for binding patterns.
+                if (bind_name) |bname| {
+                    const replacement: Expr = switch (sub_kind) {
+                        .plain => p.newExpr(E.Identifier{ .ref = m_ref }, args_loc),
+                        .dot_value => p.newExpr(E.Dot{
+                            .target = p.newExpr(E.Identifier{ .ref = m_ref }, args_loc),
+                            .name = "value",
+                            .name_loc = args_loc,
+                        }, args_loc),
+                        .dot_error => p.newExpr(E.Dot{
+                            .target = p.newExpr(E.Identifier{ .ref = m_ref }, args_loc),
+                            .name = "error",
+                            .name_loc = args_loc,
+                        }, args_loc),
+                        .none => p.newExpr(E.Undefined{}, args_loc),
+                    };
+                    if (substituteIdentifierByName(p, result_expr, bname, replacement)) |substituted| {
+                        result_expr = substituted;
+                    }
+                }
+
+                bun.handleOom(arms.append(.{
+                    .test_expr = test_expr,
+                    .result = result_expr,
+                }));
+
+                if (p.lexer.token == .t_comma) {
+                    try p.lexer.next();
+                } else {
+                    break;
+                }
+            }
+
+            try p.lexer.expect(.t_close_brace);
+
+            p.popScope();
+            p.popScope();
+
+            // Build the ternary chain right-to-left. Fallback is the last
+            // catch-all arm's result, or `undefined` if no catch-all exists.
+            var fallback: Expr = p.newExpr(E.Undefined{}, args_loc);
+            var first_test_idx: usize = arms.items.len;
+            // Find the first catch-all arm (test_expr == null). Everything
+            // after it is unreachable; ignore for the chain. Its result is
+            // the fallback.
+            for (arms.items, 0..) |arm, i| {
+                if (arm.test_expr == null) {
+                    fallback = arm.result;
+                    first_test_idx = i;
+                    break;
+                }
+            }
+            // Build right-to-left across arms BEFORE the catch-all.
+            var chain: Expr = fallback;
+            var i = first_test_idx;
+            while (i > 0) {
+                i -= 1;
+                const arm = arms.items[i];
+                chain = p.newExpr(E.If{
+                    .test_ = arm.test_expr.?,
+                    .yes = arm.result,
+                    .no = chain,
+                }, args_loc);
+            }
+            // Wrap in ((__pm) => chain)(subject).
+            const arrow_args = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = m_ref }, args_loc) };
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            body_stmts[0] = p.s(S.Return{ .value = chain }, body_loc);
+            const arrow = p.newExpr(E.Arrow{
+                .args = arrow_args,
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, args_loc);
+            const call_args2 = bun.handleOom(p.allocator.alloc(Expr, 1));
+            call_args2[0] = subject;
+            return p.newExpr(E.Call{
+                .target = arrow,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(call_args2),
+            }, args_loc);
+        }
+
+        // Parabun: build a Result / Option constructor object literal.
+        // Called for `Ok(x)` / `Err(e)` / `Some(x)`. Caller has already
+        // consumed the constructor name; lexer is at `(`.
+        pub fn parseResultCtor(p: *P, comptime tag_name: string, comptime value_key: string, loc: logger.Loc) anyerror!Expr {
+            try p.lexer.expect(.t_open_paren);
+            const value = try p.parseExpr(.comma);
+            try p.lexer.expect(.t_close_paren);
+
+            const properties = bun.handleOom(p.allocator.alloc(G.Property, 2));
+            properties[0] = .{
+                .key = p.newExpr(E.String{ .data = "tag" }, loc),
+                .value = p.newExpr(E.String{ .data = tag_name }, loc),
+            };
+            properties[1] = .{
+                .key = p.newExpr(E.String{ .data = value_key }, loc),
+                .value = value,
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(properties),
+            }, loc);
+        }
+
+        // Parabun: build the None literal object — `{ tag: "None" }`.
+        pub fn parseNoneLiteral(p: *P, loc: logger.Loc) anyerror!Expr {
+            const properties = bun.handleOom(p.allocator.alloc(G.Property, 1));
+            properties[0] = .{
+                .key = p.newExpr(E.String{ .data = "tag" }, loc),
+                .value = p.newExpr(E.String{ .data = "None" }, loc),
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(properties),
+            }, loc);
+        }
+
+        // Helper: substitute every occurrence of identifier `name` in
+        // `expr` with `replacement` (typically the match subject ref).
+        // Handles the common shapes that show up in match-arm result
+        // expressions; bails (returns null) on anything unsupported, which
+        // leaves the original `name` reference in place — visit will then
+        // fail to resolve it, surfacing a clean compile error.
+        fn substituteIdentifierByName(p: *P, expr: Expr, name: []const u8, replacement: Expr) ?Expr {
+            return switch (expr.data) {
+                .e_identifier => |id| if (bun.strings.eql(p.loadNameFromRef(id.ref), name)) replacement else expr,
+                .e_number, .e_string, .e_null, .e_undefined, .e_missing, .e_boolean => expr,
+                .e_binary => |bin| blk: {
+                    const new_left = substituteIdentifierByName(p, bin.left, name, replacement) orelse break :blk null;
+                    const new_right = substituteIdentifierByName(p, bin.right, name, replacement) orelse break :blk null;
+                    break :blk Expr.init(E.Binary, .{
+                        .op = bin.op,
+                        .left = new_left,
+                        .right = new_right,
+                    }, expr.loc);
+                },
+                .e_unary => |un| blk: {
+                    const new_val = substituteIdentifierByName(p, un.value, name, replacement) orelse break :blk null;
+                    break :blk Expr.init(E.Unary, .{
+                        .op = un.op,
+                        .value = new_val,
+                    }, expr.loc);
+                },
+                .e_dot => |dot| blk: {
+                    const new_target = substituteIdentifierByName(p, dot.target, name, replacement) orelse break :blk null;
+                    break :blk Expr.init(E.Dot, .{
+                        .target = new_target,
+                        .name = dot.name,
+                        .name_loc = dot.name_loc,
+                    }, expr.loc);
+                },
+                .e_index => |idx| blk: {
+                    const new_target = substituteIdentifierByName(p, idx.target, name, replacement) orelse break :blk null;
+                    const new_index = substituteIdentifierByName(p, idx.index, name, replacement) orelse break :blk null;
+                    break :blk Expr.init(E.Index, .{
+                        .target = new_target,
+                        .index = new_index,
+                    }, expr.loc);
+                },
+                .e_call => |call| blk: {
+                    const new_target = substituteIdentifierByName(p, call.target, name, replacement) orelse break :blk null;
+                    const new_args = p.allocator.alloc(Expr, call.args.len) catch break :blk null;
+                    for (call.args.slice(), 0..) |arg, i| {
+                        new_args[i] = substituteIdentifierByName(p, arg, name, replacement) orelse break :blk null;
+                    }
+                    break :blk Expr.init(E.Call, .{
+                        .target = new_target,
+                        .args = js_ast.ExprNodeList.fromOwnedSlice(new_args),
+                        .close_paren_loc = call.close_paren_loc,
+                    }, expr.loc);
+                },
+                .e_if => |cond| blk: {
+                    const new_test = substituteIdentifierByName(p, cond.test_, name, replacement) orelse break :blk null;
+                    const new_yes = substituteIdentifierByName(p, cond.yes, name, replacement) orelse break :blk null;
+                    const new_no = substituteIdentifierByName(p, cond.no, name, replacement) orelse break :blk null;
+                    break :blk Expr.init(E.If, .{
+                        .test_ = new_test,
+                        .yes = new_yes,
+                        .no = new_no,
+                    }, expr.loc);
+                },
+                else => null,
+            };
+        }
+
+        // Build `__pm.tag === "<tag>"` for a Result / Option pattern.
+        fn buildTagTestExpr(p: *P, m_ref: js_ast.Ref, m_loc: logger.Loc, comptime tag_name: string) Expr {
+            const tag_access = p.newExpr(E.Dot{
+                .target = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),
+                .name = "tag",
+                .name_loc = m_loc,
+            }, m_loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_strict_eq,
+                .left = tag_access,
+                .right = p.newExpr(E.String{ .data = tag_name }, m_loc),
+            }, m_loc);
+        }
+
+        // Parse the argument of a constructor pattern: `Ok(name)` /
+        // `Ok(_)` / `Ok` (no parens — match-tag-only). Returns the bound
+        // name on identifier; null on `_` or no-parens.
+        fn parseCtorArgIdent(p: *P) anyerror!?[]const u8 {
+            if (p.lexer.token != .t_open_paren) return null;
+            try p.lexer.next();
+            var name: ?[]const u8 = null;
+            if (p.lexer.token == .t_identifier) {
+                if (!bun.strings.eqlComptime(p.lexer.raw(), "_")) {
+                    name = p.lexer.identifier;
+                }
+                try p.lexer.next();
+            }
+            try p.lexer.expect(.t_close_paren);
+            return name;
+        }
+
+        // Parse a literal pattern (with optional OR chain) and return the
+        // test expression `__pm === lit (|| __pm === lit2)*`.
+        fn buildArmTestForLiteral(p: *P, m_ref: js_ast.Ref, m_loc: logger.Loc) anyerror!Expr {
+            // Parse the first literal — accepts numbers, strings, booleans,
+            // null, and unary-prefixed numbers (-3). Use parseExpr at .pipe
+            // so the OR `|` doesn't get consumed as bitwise OR.
+            const first = try p.parseExpr(.bitwise_or);
+            var test_expr = p.newExpr(E.Binary{
+                .op = .bin_strict_eq,
+                .left = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),
+                .right = first,
+            }, m_loc);
+
+            // OR alternatives: `| pat | pat ...`. The lexer token for `|`
+            // at this level is t_bar. We chain with `||`.
+            while (p.lexer.token == .t_bar) {
+                try p.lexer.next();
+                const next_pat = try p.parseExpr(.bitwise_or);
+                const next_test = p.newExpr(E.Binary{
+                    .op = .bin_strict_eq,
+                    .left = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),
+                    .right = next_pat,
+                }, m_loc);
+                test_expr = p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = test_expr,
+                    .right = next_test,
+                }, m_loc);
+            }
+
+            return test_expr;
+        }
     };
 }
 

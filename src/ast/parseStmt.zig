@@ -2038,6 +2038,268 @@ pub fn ParseStmt(
         // synchronous (the flush loop assumes so).
         //
         // At entry: `effect` has already been consumed; p.lexer is on the `{`.
+        // Parabun: `model NAME { field: type, ... }` declaration. Produces
+        // a const binding `NAME = { parse: (v) => Result<NAME, str> }` —
+        // a pure data shape with a runtime validator, no methods. Field
+        // types: int / str / bool / float / num. Optional via `T?` suffix.
+        // Arrays and nested-model refs are deferred (not in this MVP).
+        fn parseModelStmt(p: *P, model_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
+            const name = p.lexer.identifier;
+            const name_loc = p.lexer.loc();
+            const name_ref = try p.declareSymbol(.constant, name_loc, name);
+            try p.lexer.next();
+
+            try p.lexer.expect(.t_open_brace);
+
+            const Field = struct {
+                name: []const u8,
+                type_name: []const u8,
+                optional: bool,
+                loc: logger.Loc,
+            };
+            var fields = ListManaged(Field).init(p.allocator);
+            while (p.lexer.token != .t_close_brace) {
+                if (p.lexer.token != .t_identifier) break;
+                const field_name = p.lexer.identifier;
+                const field_loc = p.lexer.loc();
+                try p.lexer.next();
+                try p.lexer.expect(.t_colon);
+                if (p.lexer.token != .t_identifier) break;
+                const type_name = p.lexer.identifier;
+                try p.lexer.next();
+                const optional = p.lexer.token == .t_question;
+                if (optional) try p.lexer.next();
+                bun.handleOom(fields.append(.{
+                    .name = field_name,
+                    .type_name = type_name,
+                    .optional = optional,
+                    .loc = field_loc,
+                }));
+                if (p.lexer.token == .t_comma or p.lexer.token == .t_semicolon) {
+                    try p.lexer.next();
+                } else break;
+            }
+            try p.lexer.expect(.t_close_brace);
+
+            // Synth arrow scopes for the parse fn — locs at lexer.loc so
+            // they're strictly later than anything the field parses pushed.
+            const args_loc = p.lexer.loc();
+            const body_loc = logger.Loc{ .start = args_loc.start + 1 };
+
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc);
+            const v_ref = try p.declareSymbol(.hoisted, args_loc, "v");
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc);
+
+            var stmts = ListManaged(Stmt).init(p.allocator);
+
+            // Outer object check: typeof v !== "object" || v === null.
+            {
+                const typeof_v = p.newExpr(E.Unary{
+                    .op = .un_typeof,
+                    .value = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
+                }, body_loc);
+                const not_object = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_v,
+                    .right = p.newExpr(E.String{ .data = "object" }, body_loc),
+                }, body_loc);
+                const v_null = p.newExpr(E.Binary{
+                    .op = .bin_strict_eq,
+                    .left = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
+                    .right = p.newExpr(E.Null{}, body_loc),
+                }, body_loc);
+                const test_expr = p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = not_object,
+                    .right = v_null,
+                }, body_loc);
+                const err_obj = buildResultErrLiteral(p, "expected object", body_loc);
+                const ret_stmt = p.s(S.Return{ .value = err_obj }, body_loc);
+                bun.handleOom(stmts.append(p.s(S.If{
+                    .test_ = test_expr,
+                    .yes = ret_stmt,
+                    .no = null,
+                }, body_loc)));
+            }
+
+            // Per-field type check.
+            for (fields.items) |field| {
+                const field_access = p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
+                    .name = field.name,
+                    .name_loc = field.loc,
+                }, field.loc);
+                const test_expr_opt = buildTypeMismatchTest(p, field_access, field.type_name, field.optional, field.loc);
+                if (test_expr_opt) |test_expr| {
+                    const err_msg = bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected {s}", .{ field.name, field.type_name }));
+                    const err_obj = buildResultErrLiteral(p, err_msg, field.loc);
+                    const ret_stmt = p.s(S.Return{ .value = err_obj }, field.loc);
+                    bun.handleOom(stmts.append(p.s(S.If{
+                        .test_ = test_expr,
+                        .yes = ret_stmt,
+                        .no = null,
+                    }, field.loc)));
+                }
+            }
+
+            // Final: return Ok(v).
+            {
+                const ok_obj = buildResultOkLiteral(p, p.newExpr(E.Identifier{ .ref = v_ref }, body_loc), body_loc);
+                bun.handleOom(stmts.append(p.s(S.Return{ .value = ok_obj }, body_loc)));
+            }
+
+            p.popScope();
+            p.popScope();
+
+            // Arrow `(v) => { ... }`.
+            const arrow_args = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = v_ref }, args_loc) };
+            const arrow = p.newExpr(E.Arrow{
+                .args = arrow_args,
+                .body = .{ .loc = body_loc, .stmts = bun.handleOom(stmts.toOwnedSlice()) },
+                .prefer_expr = false,
+                .is_async = false,
+            }, args_loc);
+
+            // Model object: { parse: arrow }.
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 1));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "parse" }, body_loc),
+                .value = arrow,
+            };
+            const model_obj = p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, model_range.loc);
+
+            // const NAME = { parse: ... }
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc),
+                .value = model_obj,
+            };
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = opts.is_export,
+            }, model_range.loc);
+        }
+
+        // For a given field expression and type name, returns a test
+        // expression that's TRUE when the value is INVALID (used as the
+        // if-cond that triggers the early Err return). Returns null for
+        // unknown type names — caller skips the check (permissive default).
+        fn buildTypeMismatchTest(p: *P, field_access: Expr, type_name: []const u8, optional: bool, loc: logger.Loc) ?Expr {
+            const typeof_field = p.newExpr(E.Unary{
+                .op = .un_typeof,
+                .value = field_access,
+            }, loc);
+            const inner_check: Expr = if (strings.eqlComptime(type_name, "int")) blk: {
+                // typeof !== "number" || !Number.isInteger(field)
+                const not_num = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "number" }, loc),
+                }, loc);
+                const number_id = p.newExpr(E.Identifier{ .ref = p.storeNameInRef("Number") catch return null }, loc);
+                const is_int_dot = p.newExpr(E.Dot{
+                    .target = number_id,
+                    .name = "isInteger",
+                    .name_loc = loc,
+                }, loc);
+                const is_int_args = p.allocator.alloc(Expr, 1) catch return null;
+                is_int_args[0] = field_access;
+                const is_int_call = p.newExpr(E.Call{
+                    .target = is_int_dot,
+                    .args = js_ast.ExprNodeList.fromOwnedSlice(is_int_args),
+                }, loc);
+                const not_int = p.newExpr(E.Unary{
+                    .op = .un_not,
+                    .value = is_int_call,
+                }, loc);
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = not_num,
+                    .right = not_int,
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "str") or strings.eqlComptime(type_name, "string")) blk: {
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "string" }, loc),
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "bool") or strings.eqlComptime(type_name, "boolean")) blk: {
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "boolean" }, loc),
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "float") or strings.eqlComptime(type_name, "num") or strings.eqlComptime(type_name, "number")) blk: {
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "number" }, loc),
+                }, loc);
+            } else {
+                // Unknown type — skip the check.
+                return null;
+            };
+
+            if (!optional) return inner_check;
+
+            // Optional: only check if field is not null/undefined.
+            //   (field !== undefined && field !== null) && inner_check
+            const not_undef = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Undefined{}, loc),
+            }, loc);
+            const not_null2 = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Null{}, loc),
+            }, loc);
+            const present = p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = not_undef,
+                .right = not_null2,
+            }, loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = present,
+                .right = inner_check,
+            }, loc);
+        }
+
+        fn buildResultOkLiteral(p: *P, value: Expr, loc: logger.Loc) Expr {
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 2));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "tag" }, loc),
+                .value = p.newExpr(E.String{ .data = "Ok" }, loc),
+            };
+            props[1] = .{
+                .key = p.newExpr(E.String{ .data = "value" }, loc),
+                .value = value,
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, loc);
+        }
+
+        fn buildResultErrLiteral(p: *P, msg: []const u8, loc: logger.Loc) Expr {
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 2));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "tag" }, loc),
+                .value = p.newExpr(E.String{ .data = "Err" }, loc),
+            };
+            props[1] = .{
+                .key = p.newExpr(E.String{ .data = "error" }, loc),
+                .value = p.newExpr(E.String{ .data = msg }, loc),
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, loc);
+        }
+
         fn parseEffectStmt(p: *P, effect_range: logger.Range) anyerror!Stmt {
             const arrow_loc = effect_range.loc;
             const body_loc = p.lexer.loc();
@@ -2569,6 +2831,20 @@ pub fn ParseStmt(
                 };
                 if (is_block_form) {
                     return try parseWhenBlockStmt(p, when_range);
+                }
+                p.lexer.restore(&saved);
+            }
+            // Parabun: `model NAME { field: type, ... }` declaration —
+            // a pure data shape with a runtime validator, no methods.
+            // Desugars to a const binding holding `{ __schema, parse, is }`.
+            // Parse-time checks the field types are recognized; runtime
+            // parse() returns a Result<T, str>.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "model")) {
+                const model_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseModelStmt(p, model_range, opts);
                 }
                 p.lexer.restore(&saved);
             }

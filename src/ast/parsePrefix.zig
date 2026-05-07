@@ -130,6 +130,67 @@ pub fn ParsePrefix(
                 return try p.parseMemoPrefixExpr(name_range, level);
             }
 
+            // Parabun: Result / Option constructor desugaring.
+            //   Ok(x)   → { tag: "Ok",   value: x }
+            //   Err(e)  → { tag: "Err",  error: e }
+            //   Some(x) → { tag: "Some", value: x }
+            //   None    → { tag: "None" }
+            //
+            // Triggers when the constructor name is at expression position.
+            // For Ok / Err / Some, the next token must be `(` (otherwise
+            // the name remains a plain identifier — `import { Ok } from
+            // "..."` style still works). None is a bare expression with no
+            // parens; it's recognized when the next token is anything
+            // that wouldn't make `None` a function call or member access.
+            if (strings.eqlComptime(name, "Ok") and (raw.ptr == name.ptr and raw.len == name.len) and p.lexer.token == .t_open_paren) {
+                return try p.parseResultCtor("Ok", "value", name_range.loc);
+            }
+            if (strings.eqlComptime(name, "Err") and (raw.ptr == name.ptr and raw.len == name.len) and p.lexer.token == .t_open_paren) {
+                return try p.parseResultCtor("Err", "error", name_range.loc);
+            }
+            if (strings.eqlComptime(name, "Some") and (raw.ptr == name.ptr and raw.len == name.len) and p.lexer.token == .t_open_paren) {
+                return try p.parseResultCtor("Some", "value", name_range.loc);
+            }
+            if (strings.eqlComptime(name, "None") and (raw.ptr == name.ptr and raw.len == name.len)) {
+                // Bare `None` — only desugar if it's not followed by a
+                // continuation that would treat it as an identifier
+                // (`.foo` / `[idx]` / `(args)` / `=` etc.). Anything
+                // unambiguous becomes the None object literal.
+                switch (p.lexer.token) {
+                    .t_open_paren, .t_dot, .t_open_bracket, .t_equals => {},
+                    else => return try p.parseNoneLiteral(name_range.loc),
+                }
+            }
+
+            // Parabun: `match SUBJECT { pat => result, ... }` expression.
+            // Subject expression followed by an open-brace block of pattern
+            // arms; the whole thing desugars to an IIFE-wrapped ternary
+            // chain. Triggers when `match` is immediately followed (no
+            // newline) by an expression-starting token. Other continuations
+            // (`match.foo`, `match()`, `match;`) leave `match` as a plain
+            // identifier — no syntactic conflict because `match expr` would
+            // be a parse error in standard JS.
+            if (strings.eqlComptime(name, "match") and (raw.ptr == name.ptr and raw.len == name.len)) {
+                if (!p.lexer.has_newline_before) {
+                    switch (p.lexer.token) {
+                        .t_identifier,
+                        .t_numeric_literal,
+                        .t_string_literal,
+                        .t_true,
+                        .t_false,
+                        .t_null,
+                        .t_open_paren,
+                        .t_open_bracket,
+                        .t_minus,
+                        .t_plus,
+                        .t_exclamation,
+                        .t_tilde,
+                        => return try p.parseMatchExpr(name_range),
+                        else => {},
+                    }
+                }
+            }
+
             // Parabun: Handle "parallel { … }" expression form — fan-out
             // promise composition that preserves keys. Lowers to
             // `Promise.all([v0, v1]).then(([__pb0, __pb1]) => ({ k0: __pb0, k1: __pb1 }))`.
