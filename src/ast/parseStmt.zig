@@ -559,6 +559,30 @@ pub fn ParseStmt(
                 try p.requireInitializers(.k_const, decls.items);
             }
 
+            // Parabun: register `const NAME = pure (x) => expr` arrows as
+            // pipeline-fusable, mirroring the `pure function NAME(x) { return expr }`
+            // path in parseFn.zig. let/var are excluded — the inlining is only
+            // sound when the binding can't be reassigned.
+            for (decls.items) |decl| {
+                if (decl.binding.data != .b_identifier) continue;
+                const value = decl.value orelse continue;
+                if (value.data != .e_arrow) continue;
+                const arrow = value.data.e_arrow;
+                if (!arrow.is_pure) continue;
+                if (arrow.args.len != 1) continue;
+                if (arrow.args[0].default != null) continue;
+                if (arrow.args[0].binding.data != .b_identifier) continue;
+                if (arrow.body.stmts.len != 1) continue;
+                if (arrow.body.stmts[0].data != .s_return) continue;
+                const body_expr = arrow.body.stmts[0].data.s_return.value orelse continue;
+
+                p.pure_inline_fns.append(p.allocator, .{
+                    .fn_name = p.loadNameFromRef(decl.binding.data.b_identifier.ref),
+                    .param_name = p.loadNameFromRef(arrow.args[0].binding.data.b_identifier.ref),
+                    .body_expr = body_expr,
+                }) catch {};
+            }
+
             return p.s(S.Local{
                 .kind = .k_const,
                 .decls = Decl.List.moveFromList(&decls),
