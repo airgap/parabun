@@ -180,33 +180,34 @@ describe("pipeline inline fusion", () => {
 
   // Stream fusion: chain of |> map/filter combinators ending in a known
   // terminal (sum, count, reduce, forEach, collect/toArray) collapses to
-  // a single .reduce() pass so the intermediate per-step arrays / call
-  // frames disappear. Combinator args that introduce their own scopes
-  // (inline arrows, inline function exprs) bail to the existing |>
-  // desugar — supporting those needs scope-tree surgery we're punting on.
+  // an IIFE-wrapped for-loop over the source so the intermediate per-step
+  // arrays / call frames disappear into a single pass. Inline arrow
+  // combinator args fuse too — scope-tree surgery in buildFusedReduce
+  // re-threads scopes_in_order and parent links so the visit pass sees
+  // depth-first AST order.
   describe("stream fusion", () => {
-    test("map + sum collapses to .reduce", () => {
+    test("map + sum collapses to a for-loop IIFE", () => {
       const out = ts(`
         function square(x: number) { return x * x }
         const r = nums |> map(square) |> sum
       `);
-      expect(out).toContain(".reduce(");
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
+      expect(out).toContain("})(nums)");
       expect(out).toContain("square(");
       expect(out).not.toContain("sum(");
     });
 
-    test("map + filter + sum collapses to single reduce", () => {
+    test("map + filter + sum collapses with continue", () => {
       const out = ts(`
         function square(x: number) { return x * x }
         function positive(x: number) { return x > 0 }
         const r = nums |> map(square) |> filter(positive) |> sum
       `);
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
+      expect(out).toContain("})(nums)");
       expect(out).toContain("square(");
       expect(out).toContain("if (!positive(");
-      expect(out).not.toContain("filter(");
-      expect(out).not.toContain("sum(");
+      expect(out).toContain("continue");
     });
 
     test("filter only + sum", () => {
@@ -214,37 +215,38 @@ describe("pipeline inline fusion", () => {
         function pos(x: number) { return x > 0 }
         const r = nums |> filter(pos) |> sum
       `);
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("if (!pos(");
+      expect(out).toContain("continue");
     });
 
-    test("count terminal", () => {
+    test("count terminal increments by 1", () => {
       const out = ts(`
         function active(x: any) { return x.active }
         const r = items |> filter(active) |> count
       `);
-      expect(out).toContain("items.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("+ 1");
     });
 
-    test("reduce(init, fold) terminal", () => {
+    test("reduce(init, fold) calls fold per element", () => {
       const out = ts(`
         function double(x: number) { return x * 2 }
         function add(a: number, b: number) { return a + b }
         const r = nums |> map(double) |> reduce(0, add)
       `);
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("double(");
       expect(out).toContain("add(");
     });
 
-    test("forEach terminal calls per element, returns acc", () => {
+    test("forEach terminal — side effect per element, returns acc", () => {
       const out = ts(`
         function prep(x: any) { return x }
         function emit(x: any) { console.log(x) }
         items |> map(prep) |> forEach(emit)
       `);
-      expect(out).toContain("items.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("emit(");
       expect(out).toContain("undefined");
     });
@@ -254,7 +256,7 @@ describe("pipeline inline fusion", () => {
         function valid(x: any) { return x.ok }
         const out2 = items |> filter(valid) |> collect
       `);
-      expect(out).toContain("items.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain(".push(");
       expect(out).toContain("[]");
     });
@@ -264,7 +266,7 @@ describe("pipeline inline fusion", () => {
         function valid(x: any) { return x.ok }
         const out2 = items |> filter(valid) |> toArray
       `);
-      expect(out).toContain("items.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain(".push(");
     });
 
@@ -273,7 +275,8 @@ describe("pipeline inline fusion", () => {
         function double(x: number) { return x * 2 }
         const r = data.points |> map(double) |> sum
       `);
-      expect(out).toContain("data.points.reduce");
+      expect(out).toContain("for (");
+      expect(out).toContain("})(data.points)");
     });
 
     test("chain continues after fusion — fused result feeds next |>", () => {
@@ -282,19 +285,15 @@ describe("pipeline inline fusion", () => {
         function log(v: number) { return v }
         const r = nums |> map(double) |> sum |> log
       `);
-      // sum fuses; the |> log wraps the fused .reduce in log(...).
       expect(out).toContain("log(");
-      expect(out).toContain(".reduce(");
+      expect(out).toContain("for (");
     });
 
     test("inline arrow map fuses (scope-tree surgery)", () => {
       const out = ts(`
         const r = nums |> map(x => x * 2) |> sum
       `);
-      // Synth-body and the inline arrow's args/body all coexist. The
-      // surgery re-parents the inline arrow's scopes under the synth body
-      // and reorders scopes_in_order so visit walks them in AST order.
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("((x) => x * 2)(");
     });
 
@@ -302,7 +301,7 @@ describe("pipeline inline fusion", () => {
       const out = ts(`
         const r = nums |> map(x => x * 2) |> filter(x => x > 0) |> sum
       `);
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("((x) => x * 2)(");
       expect(out).toContain("((x) => x > 0)(");
     });
@@ -312,7 +311,7 @@ describe("pipeline inline fusion", () => {
         function pos(x: number) { return x > 0 }
         const r = nums |> map(x => x * 2) |> filter(pos) |> sum
       `);
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("((x) => x * 2)(");
       expect(out).toContain("if (!pos(");
     });
@@ -321,8 +320,7 @@ describe("pipeline inline fusion", () => {
       const out = ts(`
         const r = nums |> map(pure (x) => x * 2) |> sum
       `);
-      // The pure annotation is dropped at print but the arrow remains.
-      expect(out).toContain("nums.reduce");
+      expect(out).toContain("for (");
       expect(out).toContain("((x) => x * 2)(");
     });
 
@@ -334,7 +332,7 @@ describe("pipeline inline fusion", () => {
       // source() may return an async iterable that needs runtime semantics
       // (e.g. from @para/pipeline). Don't fuse calls.
       expect(out).toContain("sum(");
-      expect(out).not.toContain(".reduce(");
+      expect(out).not.toContain("for (");
     });
 
     test("zero intermediate steps leaves chain unfused", () => {
@@ -343,7 +341,7 @@ describe("pipeline inline fusion", () => {
       `);
       // No map / filter — nothing to fuse over. Falls back to sum(nums).
       expect(out).toContain("sum(");
-      expect(out).not.toContain(".reduce(");
+      expect(out).not.toContain("for (");
     });
 
     test("unrecognized terminal bails", () => {
@@ -351,18 +349,16 @@ describe("pipeline inline fusion", () => {
         function double(x: number) { return x * 2 }
         const r = items |> map(double) |> custom
       `);
-      // `custom` isn't a recognized terminal — chain stays as nested calls.
       expect(out).toContain("custom(");
-      expect(out).not.toContain(".reduce(");
+      expect(out).not.toContain("for (");
     });
 
     test("unrecognized intermediate bails", () => {
       const out = ts(`
         const r = items |> custom(x) |> sum
       `);
-      // `custom` isn't a known intermediate — no steps to fuse.
       expect(out).toContain("sum(");
-      expect(out).not.toContain(".reduce(");
+      expect(out).not.toContain("for (");
     });
   });
 

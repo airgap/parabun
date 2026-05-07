@@ -1570,10 +1570,41 @@ pub fn ParseSuffix(
             return buildFusedReduce(p, left, current, steps_buf[0..steps_len], terminal);
         }
 
-        // Construct `source.reduce((__pa_N, __px_N) => { ... }, init)` and
-        // overwrite `*left` with it. The body is built using `let __pv_N`
-        // for value flow + statement-level steps (so each map fn runs
-        // exactly once even when filter follows).
+        // Helper: build a single-decl `let NAME = VALUE;` statement.
+        fn buildLet(p: *P, ref: js_ast.Ref, value: Expr, loc: logger.Loc) !Stmt {
+            const decls = try p.allocator.alloc(G.Decl, 1);
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = ref }, loc),
+                .value = value,
+            };
+            return p.s(S.Local{
+                .kind = .k_let,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+            }, loc);
+        }
+
+        // Construct an IIFE-wrapped `for` loop and overwrite `*left` with
+        // it. Shape:
+        //
+        //   ((__src) => {
+        //     let __acc = INIT;
+        //     let __i = 0;
+        //     let __pv;
+        //     for (; __i < __src.length; __i++) {
+        //       __pv = __src[__i];
+        //       __pv = f(__pv);              // map step
+        //       if (!g(__pv)) continue;      // filter step
+        //       __acc = __acc + __pv;        // terminal (per-element)
+        //     }
+        //     return __acc;
+        //   })(srcExpr)
+        //
+        // Why a for loop instead of `.reduce`: cold call sites and
+        // megamorphic chains don't get the reducer callback inlined, so
+        // each element pays a real call frame. A direct for-loop is
+        // reliably fast across V8/JSC. The IIFE wrapper costs one call
+        // frame per chain (vs N) — net win, and lets the result sit in
+        // expression position without a stmt-level rewrite.
         fn buildFusedReduce(p: *P, left: *Expr, source: Expr, steps: []const StreamStep, terminal: StreamTerminal) bool {
             // Snapshot scopes_in_order length + the original chain-start loc
             // before we touch anything — we'll use both to do scope-tree
@@ -1586,45 +1617,93 @@ pub fn ParseSuffix(
             const outer_scope = p.current_scope;
 
             // pushScopeForParsePass enforces strictly-increasing locs across
-            // every scope in the file, so synth-arrow locs must be later than
-            // any scope already pushed during this parse — including any
-            // inline-arrow scopes the chain just registered. Use the lexer's
-            // current loc (just past the terminal token) for args, +1 for body.
+            // every scope in the file, so synth scope locs must be later
+            // than any scope already pushed during this parse — including
+            // any inline-arrow scopes the chain registered. Use the lexer's
+            // current loc (just past the terminal token) for args; offsets
+            // +1/+2/+3 for the body, the for's own `.block` (every S.For
+            // visit pushes one at S.For.loc), and the for-body S.Block.
             const args_loc = p.lexer.loc();
             const body_loc = logger.Loc{ .start = args_loc.start + 1 };
+            const for_outer_loc = logger.Loc{ .start = args_loc.start + 2 };
+            const for_body_loc = logger.Loc{ .start = args_loc.start + 3 };
 
             p.temp_ref_count += 1;
             const counter = p.temp_ref_count;
+            const src_name = std.fmt.allocPrint(p.allocator, "__ps_{x}$", .{counter}) catch return false;
             const acc_name = std.fmt.allocPrint(p.allocator, "__pa_{x}$", .{counter}) catch return false;
-            const elem_name = std.fmt.allocPrint(p.allocator, "__px_{x}$", .{counter}) catch return false;
+            const i_name = std.fmt.allocPrint(p.allocator, "__pi_{x}$", .{counter}) catch return false;
             const val_name = std.fmt.allocPrint(p.allocator, "__pv_{x}$", .{counter}) catch return false;
 
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc) catch return false;
-            const acc_ref = p.declareSymbol(.hoisted, args_loc, acc_name) catch return false;
-            const elem_ref = p.declareSymbol(.hoisted, args_loc, elem_name) catch return false;
+            const src_ref = p.declareSymbol(.hoisted, args_loc, src_name) catch return false;
 
             _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch return false;
             const synth_body_scope = p.current_scope;
+            const acc_ref = p.declareSymbol(.other, body_loc, acc_name) catch return false;
+            const i_ref = p.declareSymbol(.other, body_loc, i_name) catch return false;
             const val_ref = p.declareSymbol(.other, body_loc, val_name) catch return false;
 
-            var stmts = ListManaged(Stmt).initCapacity(p.allocator, steps.len + 3) catch return false;
+            // S.For's visit pushes a `.block` for its own scope at S.For.loc;
+            // the inner S.Block (body) pushes another `.block` at its own loc.
+            // Pre-declare both at parse time so visit iteration matches.
+            // No declarations needed in either — references to __pv / __acc /
+            // __i climb to synth_body via the parent chain.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.block, for_outer_loc) catch return false;
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.block, for_body_loc) catch return false;
+            const for_body_scope = p.current_scope;
 
-            // let __pv = __px;
+            // Top-level body stmts: let __acc, let __i, let __pv, for(...), return.
+            var body_stmts = ListManaged(Stmt).initCapacity(p.allocator, 5) catch return false;
+
+            // Init value per terminal — the starting __acc value.
+            const acc_init: Expr = switch (terminal) {
+                .sum, .count => p.newExpr(E.Number{ .value = 0.0 }, body_loc),
+                .reduce_call => |r| r.init,
+                .for_each => p.newExpr(E.Undefined{}, body_loc),
+                .collect => p.newExpr(E.Array{
+                    .items = ExprNodeList{},
+                    .is_single_line = true,
+                }, body_loc),
+            };
+
+            // let __acc = INIT;
+            body_stmts.appendAssumeCapacity(buildLet(p, acc_ref, acc_init, body_loc) catch return false);
+            // let __i = 0;
+            body_stmts.appendAssumeCapacity(buildLet(p, i_ref, p.newExpr(E.Number{ .value = 0.0 }, body_loc), body_loc) catch return false);
+            // let __pv; (no initializer)
             {
                 const decls = p.allocator.alloc(G.Decl, 1) catch return false;
                 decls[0] = .{
                     .binding = p.b(B.Identifier{ .ref = val_ref }, body_loc),
-                    .value = p.newExpr(E.Identifier{ .ref = elem_ref }, body_loc),
+                    .value = null,
                 };
-                stmts.appendAssumeCapacity(p.s(S.Local{
+                body_stmts.appendAssumeCapacity(p.s(S.Local{
                     .kind = .k_let,
                     .decls = G.Decl.List.fromOwnedSlice(decls),
                 }, body_loc));
             }
 
+            // for (; __i < __src.length; __i++) { ... loop body ... }
+            var loop_stmts = ListManaged(Stmt).initCapacity(p.allocator, steps.len + 2) catch return false;
+
+            // __pv = __src[__i];
+            {
+                const index_expr = p.newExpr(E.Index{
+                    .target = p.newExpr(E.Identifier{ .ref = src_ref }, body_loc),
+                    .index = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
+                }, body_loc);
+                const assign = p.newExpr(E.Binary{
+                    .op = .bin_assign,
+                    .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
+                    .right = index_expr,
+                }, body_loc);
+                loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
+            }
+
             // Per-step lowering:
             //   map(f):    __pv = f(__pv);
-            //   filter(g): if (!g(__pv)) return __pa;
+            //   filter(g): if (!g(__pv)) continue;
             for (steps) |step| {
                 switch (step.kind) {
                     .map => {
@@ -1639,7 +1718,7 @@ pub fn ParseSuffix(
                             .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
                             .right = call_expr,
                         }, body_loc);
-                        stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
+                        loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
                     },
                     .filter => {
                         const call_args = p.allocator.alloc(Expr, 1) catch return false;
@@ -1652,10 +1731,8 @@ pub fn ParseSuffix(
                             .op = .un_not,
                             .value = call_expr,
                         }, body_loc);
-                        const yes_stmt = p.s(S.Return{
-                            .value = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
-                        }, body_loc);
-                        stmts.appendAssumeCapacity(p.s(S.If{
+                        const yes_stmt = p.s(S.Continue{ .label = null }, body_loc);
+                        loop_stmts.appendAssumeCapacity(p.s(S.If{
                             .test_ = not_expr,
                             .yes = yes_stmt,
                             .no = null,
@@ -1664,128 +1741,158 @@ pub fn ParseSuffix(
                 }
             }
 
-            // Terminal: build the final `return ...;` (and any preceding
-            // side-effect stmt for forEach / collect).
-            const terminal_value: Expr = blk: {
-                switch (terminal) {
-                    .sum => break :blk p.newExpr(E.Binary{
+            // Terminal step (per-element accumulator update).
+            switch (terminal) {
+                .sum => {
+                    // __acc = __acc + __pv;
+                    const add = p.newExpr(E.Binary{
                         .op = .bin_add,
                         .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
                         .right = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
-                    }, body_loc),
-                    .count => break :blk p.newExpr(E.Binary{
+                    }, body_loc);
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = add,
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
+                },
+                .count => {
+                    // __acc = __acc + 1;
+                    const add = p.newExpr(E.Binary{
                         .op = .bin_add,
                         .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
                         .right = p.newExpr(E.Number{ .value = 1.0 }, body_loc),
-                    }, body_loc),
-                    .reduce_call => |r| {
-                        const fold_args = p.allocator.alloc(Expr, 2) catch return false;
-                        fold_args[0] = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
-                        fold_args[1] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                        break :blk p.newExpr(E.Call{
-                            .target = r.fold,
-                            .args = ExprNodeList.fromOwnedSlice(fold_args),
-                        }, body_loc);
-                    },
-                    .for_each => |fn_expr| {
-                        // fn_expr(__pv); return __pa;
-                        const fe_args = p.allocator.alloc(Expr, 1) catch return false;
-                        fe_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                        const fe_call = p.newExpr(E.Call{
-                            .target = fn_expr,
-                            .args = ExprNodeList.fromOwnedSlice(fe_args),
-                        }, body_loc);
-                        stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = fe_call }, body_loc));
-                        break :blk p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
-                    },
-                    .collect => {
-                        // __pa.push(__pv); return __pa;
-                        const push_args = p.allocator.alloc(Expr, 1) catch return false;
-                        push_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                        const push_call = p.newExpr(E.Call{
-                            .target = p.newExpr(E.Dot{
-                                .target = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
-                                .name = "push",
-                                .name_loc = body_loc,
-                            }, body_loc),
-                            .args = ExprNodeList.fromOwnedSlice(push_args),
-                        }, body_loc);
-                        stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = push_call }, body_loc));
-                        break :blk p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
-                    },
-                }
-            };
-            stmts.appendAssumeCapacity(p.s(S.Return{ .value = terminal_value }, body_loc));
+                    }, body_loc);
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = add,
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
+                },
+                .reduce_call => |r| {
+                    // __acc = fold(__acc, __pv);
+                    const fold_args = p.allocator.alloc(Expr, 2) catch return false;
+                    fold_args[0] = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc);
+                    fold_args[1] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                    const fold_call = p.newExpr(E.Call{
+                        .target = r.fold,
+                        .args = ExprNodeList.fromOwnedSlice(fold_args),
+                    }, body_loc);
+                    const assign = p.newExpr(E.Binary{
+                        .op = .bin_assign,
+                        .left = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                        .right = fold_call,
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
+                },
+                .for_each => |fn_expr| {
+                    // fn_expr(__pv);
+                    const fe_args = p.allocator.alloc(Expr, 1) catch return false;
+                    fe_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                    const fe_call = p.newExpr(E.Call{
+                        .target = fn_expr,
+                        .args = ExprNodeList.fromOwnedSlice(fe_args),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = fe_call }, body_loc));
+                },
+                .collect => {
+                    // __acc.push(__pv);
+                    const push_args = p.allocator.alloc(Expr, 1) catch return false;
+                    push_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                    const push_call = p.newExpr(E.Call{
+                        .target = p.newExpr(E.Dot{
+                            .target = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+                            .name = "push",
+                            .name_loc = body_loc,
+                        }, body_loc),
+                        .args = ExprNodeList.fromOwnedSlice(push_args),
+                    }, body_loc);
+                    loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = push_call }, body_loc));
+                },
+            }
 
-            p.popScope();
-            p.popScope();
+            // Assemble for-loop and append to body.
+            const for_test = p.newExpr(E.Binary{
+                .op = .bin_lt,
+                .left = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
+                .right = p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = src_ref }, body_loc),
+                    .name = "length",
+                    .name_loc = body_loc,
+                }, body_loc),
+            }, body_loc);
+            const for_update = p.newExpr(E.Unary{
+                .op = .un_post_inc,
+                .value = p.newExpr(E.Identifier{ .ref = i_ref }, body_loc),
+            }, body_loc);
+            const for_body = p.s(S.Block{
+                .stmts = loop_stmts.toOwnedSlice() catch return false,
+            }, for_body_loc);
+            body_stmts.appendAssumeCapacity(p.s(S.For{
+                .init = null,
+                .test_ = for_test,
+                .update = for_update,
+                .body = for_body,
+            }, for_outer_loc));
 
-            // Arrow params and the arrow itself.
-            const arrow_args = p.allocator.alloc(G.Arg, 2) catch return false;
-            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = acc_ref }, args_loc) };
-            arrow_args[1] = .{ .binding = p.b(B.Identifier{ .ref = elem_ref }, args_loc) };
+            // return __acc;
+            body_stmts.appendAssumeCapacity(p.s(S.Return{
+                .value = p.newExpr(E.Identifier{ .ref = acc_ref }, body_loc),
+            }, body_loc));
+
+            p.popScope(); // for_body block
+            p.popScope(); // for_outer block
+            p.popScope(); // synth_body
+            p.popScope(); // synth_args
+
+            // Arrow takes one param `__src`, body is the for-loop block.
+            const arrow_args = p.allocator.alloc(G.Arg, 1) catch return false;
+            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = src_ref }, args_loc) };
 
             const arrow = p.newExpr(E.Arrow{
                 .args = arrow_args,
-                .body = .{ .loc = body_loc, .stmts = stmts.toOwnedSlice() catch return false },
+                .body = .{ .loc = body_loc, .stmts = body_stmts.toOwnedSlice() catch return false },
                 .prefer_expr = false,
                 .is_async = false,
             }, args_loc);
 
-            // Init value per terminal.
-            const init_value: Expr = switch (terminal) {
-                .sum, .count => p.newExpr(E.Number{ .value = 0.0 }, args_loc),
-                .reduce_call => |r| r.init,
-                .for_each => p.newExpr(E.Undefined{}, args_loc),
-                .collect => p.newExpr(E.Array{
-                    .items = ExprNodeList{},
-                    .is_single_line = true,
-                }, args_loc),
-            };
-
-            // Build `source.reduce(arrow, init)`.
-            const reduce_args = p.allocator.alloc(Expr, 2) catch return false;
-            reduce_args[0] = arrow;
-            reduce_args[1] = init_value;
-            const reduce_call = p.newExpr(E.Call{
-                .target = p.newExpr(E.Dot{
-                    .target = source,
-                    .name = "reduce",
-                    .name_loc = args_loc,
-                }, args_loc),
-                .args = ExprNodeList.fromOwnedSlice(reduce_args),
+            // IIFE: `(arrow)(srcExpr)`.
+            const call_args = p.allocator.alloc(Expr, 1) catch return false;
+            call_args[0] = source;
+            const iife_call = p.newExpr(E.Call{
+                .target = arrow,
+                .args = ExprNodeList.fromOwnedSlice(call_args),
             }, args_loc);
 
-            left.* = reduce_call;
+            left.* = iife_call;
 
             // ─── Scope-tree surgery ────────────────────────────────────
-            // After fusion, the AST has my synth arrow OUTSIDE the chain's
-            // inline arrows (which moved into the synth body). But Bun's
-            // visit pass walks `scopes_in_order` sequentially expecting
-            // depth-first AST order, and uses `scope.parent` to pop back
-            // up. Both invariants need re-establishing:
+            // Four synth scopes (args / body / for-outer-block / for-body-block)
+            // were pushed at the *end* of scopes_in_order with late locs,
+            // but AST traversal will reach them BEFORE the chain's inline-
+            // arrow scopes (which we parsed earlier and which now sit inside
+            // the for-body block). Re-thread two invariants:
             //
-            //   1. scopes_in_order: my synth pair was pushed last (latest
-            //      locs), but visit will reach the synth arrow first. Move
-            //      the pair to just before the chain's earliest scope.
+            //   1. scopes_in_order order: move the synth quad to just before
+            //      the chain's earliest scope so visit's sequential walk
+            //      matches AST order.
             //
-            //   2. scope.parent: the chain's outermost arrow scopes were
-            //      parented to outer_scope at parse time (siblings of my
-            //      synth_args). Re-parent each one whose .parent is
-            //      outer_scope to synth_body_scope so visit's pop sequence
-            //      lands back inside the synth body, not above it. Inner
-            //      arrow-body scopes (parent == arrow_args) stay untouched.
+            //   2. scope.parent links: chain's outermost arrow scopes were
+            //      parented to outer_scope at parse time (siblings of
+            //      synth_args). Re-parent each such scope to for_body_scope —
+            //      the actual lexical parent in the post-fusion AST.
+            const synth_scope_count: usize = 4;
             {
                 const scopes = &p.scopes_in_order;
                 const len = scopes.items.len;
-                if (len < scope_order_len_before + 2) return true;
-                const synth_args_entry = scopes.items[len - 2];
-                const synth_body_entry = scopes.items[len - 1];
+                if (len < scope_order_len_before + synth_scope_count) return true;
+                const synth_args_entry = scopes.items[len - 4];
+                const synth_body_entry = scopes.items[len - 3];
+                const for_outer_entry = scopes.items[len - 2];
+                const for_body_entry = scopes.items[len - 1];
 
-                // First chain-pushed scope = first prior entry whose loc
-                // is at-or-after chain_start. Re-parent every entry from
-                // there onward (still within the pre-synth slice) whose
-                // parent is outer_scope, so they nest under synth_body.
                 var insert_at: usize = scope_order_len_before;
                 var i: usize = 0;
                 while (i < scope_order_len_before) : (i += 1) {
@@ -1797,23 +1904,28 @@ pub fn ParseSuffix(
                 }
 
                 if (insert_at < scope_order_len_before) {
-                    // Re-parent the chain scopes that were siblings of synth.
+                    // Re-parent chain scopes whose .parent == outer_scope to
+                    // for_body_scope (the immediate enclosing scope after
+                    // fusion).
                     var k: usize = insert_at;
                     while (k < scope_order_len_before) : (k += 1) {
                         const entry = scopes.items[k] orelse continue;
                         if (entry.scope.parent == outer_scope) {
-                            entry.scope.parent = synth_body_scope;
+                            entry.scope.parent = for_body_scope;
                         }
                     }
-                    // Move my synth pair from end → insert_at position.
+                    // Move synth quad from end → insert_at position.
                     var j: usize = len;
-                    while (j > insert_at + 2) : (j -= 1) {
-                        scopes.items[j - 1] = scopes.items[j - 3];
+                    while (j > insert_at + synth_scope_count) : (j -= 1) {
+                        scopes.items[j - 1] = scopes.items[j - 1 - synth_scope_count];
                     }
                     scopes.items[insert_at] = synth_args_entry;
                     scopes.items[insert_at + 1] = synth_body_entry;
+                    scopes.items[insert_at + 2] = for_outer_entry;
+                    scopes.items[insert_at + 3] = for_body_entry;
                 }
             }
+            _ = synth_body_scope;
 
             return true;
         }
