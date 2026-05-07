@@ -1570,6 +1570,53 @@ pub fn ParseSuffix(
             return buildFusedReduce(p, left, current, steps_buf[0..steps_len], terminal);
         }
 
+        // Helper: try to inline `fn_expr(arg_expr)` by substituting the
+        // body of fn_expr inline. Works for inline arrows / function exprs
+        // with a single binding-identifier parameter and a single-return
+        // body. Also handles named identifiers registered in
+        // pure_inline_fns. Returns null when the call can't be inlined
+        // (caller falls back to emitting a regular function call).
+        //
+        // Eliminates the per-element call frame that
+        //   __pv = ((x) => x * x)(__pv);
+        // would otherwise produce — collapses to `__pv = __pv * __pv;`.
+        fn tryInlineFnCall(p: *P, fn_expr: Expr, arg_expr: Expr) ?Expr {
+            switch (fn_expr.data) {
+                .e_arrow => |arrow| {
+                    if (arrow.args.len != 1) return null;
+                    if (arrow.args[0].default != null) return null;
+                    if (arrow.args[0].binding.data != .b_identifier) return null;
+                    if (arrow.body.stmts.len != 1) return null;
+                    if (arrow.body.stmts[0].data != .s_return) return null;
+                    const body = arrow.body.stmts[0].data.s_return.value orelse return null;
+                    const param_name = p.loadNameFromRef(arrow.args[0].binding.data.b_identifier.ref);
+                    return substituteByName(p, body, param_name, arg_expr);
+                },
+                .e_function => |fexpr| {
+                    if (fexpr.func.args.len != 1) return null;
+                    if (fexpr.func.args[0].default != null) return null;
+                    if (fexpr.func.args[0].binding.data != .b_identifier) return null;
+                    if (fexpr.func.body.stmts.len != 1) return null;
+                    if (fexpr.func.body.stmts[0].data != .s_return) return null;
+                    const body = fexpr.func.body.stmts[0].data.s_return.value orelse return null;
+                    const param_name = p.loadNameFromRef(fexpr.func.args[0].binding.data.b_identifier.ref);
+                    return substituteByName(p, body, param_name, arg_expr);
+                },
+                .e_identifier => |id| {
+                    const name = p.loadNameFromRef(id.ref);
+                    for (p.pure_inline_fns.items) |info| {
+                        if (bun.strings.eql(info.fn_name, name)) {
+                            const inlined = substituteByName(p, info.body_expr, info.param_name, arg_expr) orelse return null;
+                            p.pure_fusion_consumed_names.put(p.allocator, info.fn_name, {}) catch {};
+                            return inlined;
+                        }
+                    }
+                    return null;
+                },
+                else => return null,
+            }
+        }
+
         // Helper: build a single-decl `let NAME = VALUE;` statement.
         fn buildLet(p: *P, ref: js_ast.Ref, value: Expr, loc: logger.Loc) !Stmt {
             const decls = try p.allocator.alloc(G.Decl, 1);
@@ -1701,35 +1748,37 @@ pub fn ParseSuffix(
                 loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
             }
 
-            // Per-step lowering:
-            //   map(f):    __pv = f(__pv);
-            //   filter(g): if (!g(__pv)) continue;
+            // Per-step lowering. For each step, we first try to inline the
+            // combinator function's body directly (substituting __pv for the
+            // param in a single-return body). Inline arrows and pure-inline
+            // named functions both qualify. Falls back to a regular call
+            // when the function can't be inlined (multi-param, multi-stmt
+            // body, etc.).
             for (steps) |step| {
+                const arg_expr = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                const call_or_inline: Expr = if (tryInlineFnCall(p, step.fn_or_pred, arg_expr)) |inlined| inlined else blk: {
+                    const call_args = p.allocator.alloc(Expr, 1) catch return false;
+                    call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
+                    break :blk p.newExpr(E.Call{
+                        .target = step.fn_or_pred,
+                        .args = ExprNodeList.fromOwnedSlice(call_args),
+                    }, body_loc);
+                };
                 switch (step.kind) {
                     .map => {
-                        const call_args = p.allocator.alloc(Expr, 1) catch return false;
-                        call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                        const call_expr = p.newExpr(E.Call{
-                            .target = step.fn_or_pred,
-                            .args = ExprNodeList.fromOwnedSlice(call_args),
-                        }, body_loc);
+                        // __pv = call_or_inline;
                         const assign = p.newExpr(E.Binary{
                             .op = .bin_assign,
                             .left = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc),
-                            .right = call_expr,
+                            .right = call_or_inline,
                         }, body_loc);
                         loop_stmts.appendAssumeCapacity(p.s(S.SExpr{ .value = assign }, body_loc));
                     },
                     .filter => {
-                        const call_args = p.allocator.alloc(Expr, 1) catch return false;
-                        call_args[0] = p.newExpr(E.Identifier{ .ref = val_ref }, body_loc);
-                        const call_expr = p.newExpr(E.Call{
-                            .target = step.fn_or_pred,
-                            .args = ExprNodeList.fromOwnedSlice(call_args),
-                        }, body_loc);
+                        // if (!call_or_inline) continue;
                         const not_expr = p.newExpr(E.Unary{
                             .op = .un_not,
-                            .value = call_expr,
+                            .value = call_or_inline,
                         }, body_loc);
                         const yes_stmt = p.s(S.Continue{ .label = null }, body_loc);
                         loop_stmts.appendAssumeCapacity(p.s(S.If{

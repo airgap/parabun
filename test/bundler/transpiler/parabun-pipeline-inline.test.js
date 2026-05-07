@@ -289,39 +289,55 @@ describe("pipeline inline fusion", () => {
       expect(out).toContain("for (");
     });
 
-    test("inline arrow map fuses (scope-tree surgery)", () => {
+    test("inline arrow map body inlines (no IIFE call frame)", () => {
       const out = ts(`
         const r = nums |> map(x => x * 2) |> sum
       `);
+      // The arrow body substitutes inline — no call wrapper survives.
       expect(out).toContain("for (");
-      expect(out).toContain("((x) => x * 2)(");
+      expect(out).not.toContain("(x) => x * 2");
     });
 
-    test("two inline arrow combinator args fuse together", () => {
+    test("two inline arrow combinator args inline together", () => {
       const out = ts(`
         const r = nums |> map(x => x * 2) |> filter(x => x > 0) |> sum
       `);
       expect(out).toContain("for (");
-      expect(out).toContain("((x) => x * 2)(");
-      expect(out).toContain("((x) => x > 0)(");
+      expect(out).not.toContain("(x) => x * 2");
+      expect(out).not.toContain("(x) => x > 0");
     });
 
-    test("mixed inline arrow + named fn fuses", () => {
+    test("mixed inline arrow + named fn — arrow inlines, named fn calls", () => {
       const out = ts(`
         function pos(x: number) { return x > 0 }
         const r = nums |> map(x => x * 2) |> filter(pos) |> sum
       `);
       expect(out).toContain("for (");
-      expect(out).toContain("((x) => x * 2)(");
+      expect(out).not.toContain("(x) => x * 2");
+      // Non-pure named fn: still a call.
       expect(out).toContain("if (!pos(");
     });
 
-    test("pure inline arrow combinator fuses", () => {
+    test("pure inline arrow combinator inlines", () => {
       const out = ts(`
         const r = nums |> map(pure (x) => x * 2) |> sum
       `);
       expect(out).toContain("for (");
-      expect(out).toContain("((x) => x * 2)(");
+      expect(out).not.toContain("(x) => x * 2");
+    });
+
+    test("pure named function inlines into the loop body", () => {
+      const out = ts(`
+        pure function double(x: number) { return x * 2 }
+        const r = nums |> map(double) |> sum
+      `);
+      // double's body is registered in pure_inline_fns and substitutes
+      // into the synth body — no per-element call to double().
+      expect(out).toContain("for (");
+      // Body of `function double(x)` declaration is `x * 2`; the inlined
+      // form is `__pvN$ * 2`. Neither path calls `double(...)` at runtime.
+      expect(out).toContain("* 2");
+      expect(out).not.toMatch(/double\(__pv/);
     });
 
     test("call-expression source stays unfused (async-iter safe)", () => {
