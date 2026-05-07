@@ -448,39 +448,112 @@ describe("pipeline inline fusion", () => {
       expect(out).toMatch(/__pv[\w$]+ > __pa[\w$]+/);
     });
 
-    test("range source — exclusive `0..n |> map |> sum`", () => {
+    test("range source — exclusive `lo..hi |> map |> sum`", () => {
+      // Bounds as variables so the const-fold pass doesn't pre-evaluate
+      // the chain at parse time.
       const out = ts(`
-        const r = 0..100 |> map(x => x * x) |> sum
+        const r = lo..hi |> map(x => x * x) |> sum
       `);
-      // 2-arg IIFE: ((__plo, __phi) => { ... })(0, 100)
-      expect(out).toContain("(0, 100)");
+      // 2-arg IIFE: ((__plo, __phi) => { ... })(lo, hi)
+      expect(out).toContain("(lo, hi)");
       expect(out).toContain("for (");
-      // Exclusive: i < phi (uppercase loop test).
       expect(out).toMatch(/__pi[\w$]+ < __phi/);
-      // Bounds are extracted into the IIFE args directly — the for-loop
-      // body uses `__phi` (the param), not a range-helper call.
-      expect(out).not.toMatch(/__parabunRange[\w$]*\(0,\s*100\)/);
-      // Element fetch is `__pv = __i;` (no `__src[__i]`).
       expect(out).toMatch(/__pv[\w$]+ = __pi[\w$]+/);
     });
 
-    test("range source — inclusive `0..=n` uses `<=` in the test", () => {
+    test("range source — inclusive `lo..=hi` uses `<=` in the test", () => {
       const out = ts(`
-        const r = 0..=10 |> filter(x => x > 0) |> sum
+        const r = lo..=hi |> filter(x => x > 0) |> sum
       `);
-      expect(out).toContain("(0, 10)");
+      expect(out).toContain("(lo, hi)");
       expect(out).toMatch(/__pi[\w$]+ <= __phi/);
     });
 
     test("range source with take + collect", () => {
       const out = ts(`
-        const r = 0..1000 |> map(x => x * 2) |> filter(x => x > 100) |> take(5) |> collect
+        const r = lo..hi |> map(x => x * 2) |> filter(x => x > 100) |> take(5) |> collect
       `);
-      expect(out).toContain("(0, 1000)");
+      expect(out).toContain("(lo, hi)");
       expect(out).toContain("for (");
       expect(out).toContain(">= 5)");
       expect(out).toContain("break");
       expect(out).toContain(".push(");
+    });
+
+    // Compile-time pipeline evaluation — when the source is a literal AND
+    // every step body + terminal evaluates at parse time, the chain
+    // collapses to a literal. No for-loop, no IIFE.
+    describe("compile-time fold", () => {
+      test("array literal + map + sum folds to a number", () => {
+        const out = ts(`const r = [1, 2, 3, 4, 5] |> map(x => x * x) |> sum`);
+        expect(out).toContain("const r = 55");
+        expect(out).not.toContain("for (");
+      });
+
+      test("array + filter + count folds", () => {
+        const out = ts(`const r = [1, 2, 3, 4, 5] |> filter(x => x > 2) |> count`);
+        expect(out).toContain("const r = 3");
+        expect(out).not.toContain("for (");
+      });
+
+      test("min / max fold", () => {
+        const out = ts(`
+          const lo = [3, 1, 4, 1, 5, 9, 2, 6] |> min
+          const hi = [3, 1, 4, 1, 5, 9, 2, 6] |> max
+        `);
+        expect(out).toContain("const lo = 1");
+        expect(out).toContain("const hi = 9");
+      });
+
+      test("find / findIndex / some / every fold", () => {
+        const out = ts(`
+          const a = [10, 20, 30, 40] |> find(x => x > 25)
+          const b = [10, 20, 30, 40] |> findIndex(x => x === 30)
+          const c = [1, 2, -3, 4] |> some(x => x < 0)
+          const d = [1, 2, 3, 4] |> every(x => x > 0)
+        `);
+        expect(out).toContain("const a = 30");
+        expect(out).toContain("const b = 2");
+        expect(out).toContain("const c = true");
+        expect(out).toContain("const d = true");
+      });
+
+      test("collect produces an array literal", () => {
+        const out = ts(`const r = [10, 20, 30] |> map(x => x * 0.85) |> collect`);
+        // Output may be single-line `[8.5, 17, 25.5]` or wrapped.
+        expect(out).toMatch(/8\.5/);
+        expect(out).toMatch(/17/);
+        expect(out).toMatch(/25\.5/);
+        expect(out).not.toContain("for (");
+      });
+
+      test("range literal `1..=5` folds with map + collect", () => {
+        const out = ts(`const r = 1..=5 |> map(x => x * x) |> collect`);
+        expect(out).toMatch(/\b1\b/);
+        expect(out).toMatch(/\b4\b/);
+        expect(out).toMatch(/\b9\b/);
+        expect(out).toMatch(/\b16\b/);
+        expect(out).toMatch(/\b25\b/);
+        expect(out).not.toContain("for (");
+      });
+
+      test("non-literal element falls through to runtime fusion", () => {
+        const out = ts(`const r = [1, 2, x, 4] |> map(n => n * 2) |> sum`);
+        // `x` isn't a literal — fold bails, fusion takes over.
+        expect(out).toContain("for (");
+      });
+
+      test("non-evaluable body falls through to runtime fusion", () => {
+        const out = ts(`const r = [1, 2, 3] |> map(n => Math.sqrt(n)) |> sum`);
+        // Math.sqrt is a member access — not in our const evaluator's set.
+        expect(out).toContain("for (");
+      });
+
+      test("oversize ranges don't fold (parse-time bloat guard)", () => {
+        const out = ts(`const r = 0..10000 |> map(x => x * 2) |> sum`);
+        // 10k elements > fold_limit; falls through to runtime loop.
+        expect(out).toContain("for (");
+      });
     });
 
     test("multiple fused chains in one file don't crash visit pass", () => {

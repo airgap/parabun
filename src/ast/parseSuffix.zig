@@ -1582,6 +1582,396 @@ pub fn ParseSuffix(
             return null;
         }
 
+        // ─── Compile-time pipeline evaluation ───────────────────────────────
+        // When the source is a literal (array of literals, or a fully-numeric
+        // range) AND every step body + terminal evaluates at parse time,
+        // replace the entire chain with the computed result. No for-loop is
+        // emitted; the chain becomes a single literal. Bails on anything
+        // non-evaluable.
+        const ConstValue = union(enum) {
+            number: f64,
+            boolean: bool,
+            string: []const u8,
+            undef,
+            nul,
+        };
+
+        fn boolOf(v: ConstValue) bool {
+            return switch (v) {
+                .number => |n| n != 0 and !std.math.isNan(n),
+                .boolean => |b| b,
+                .string => |s| s.len != 0,
+                .undef, .nul => false,
+            };
+        }
+
+        fn evalToExpr(p: *P, v: ConstValue, loc: logger.Loc) Expr {
+            return switch (v) {
+                .number => |n| p.newExpr(E.Number{ .value = n }, loc),
+                .boolean => |b| p.newExpr(E.Boolean{ .value = b }, loc),
+                .string => |s| p.newExpr(E.String{ .data = s }, loc),
+                .undef => p.newExpr(E.Undefined{}, loc),
+                .nul => p.newExpr(E.Null{}, loc),
+            };
+        }
+
+        fn evalLiteralExpr(expr: Expr) ?ConstValue {
+            return switch (expr.data) {
+                .e_number => |n| ConstValue{ .number = n.value },
+                .e_boolean => |b| ConstValue{ .boolean = b.value },
+                .e_string => |s| if (s.next == null) ConstValue{ .string = s.data } else null,
+                .e_undefined => .undef,
+                .e_null => .nul,
+                // `-3` parses as e_unary(neg, e_number(3)) — recognize it as
+                // the literal -3 so array sources like `[1, -3, 5]` fold.
+                .e_unary => |un| switch (un.op) {
+                    .un_neg => switch (un.value.data) {
+                        .e_number => |n| ConstValue{ .number = -n.value },
+                        else => null,
+                    },
+                    .un_pos => switch (un.value.data) {
+                        .e_number => |n| ConstValue{ .number = n.value },
+                        else => null,
+                    },
+                    else => null,
+                },
+                else => null,
+            };
+        }
+
+        // Recursively evaluate `expr` with `param_name` bound to `param_val`.
+        // Returns null if any sub-expression isn't constant-evaluable.
+        fn evalConst(p: *P, expr: Expr, param_name: []const u8, param_val: ConstValue) ?ConstValue {
+            switch (expr.data) {
+                .e_number => |n| return ConstValue{ .number = n.value },
+                .e_boolean => |b| return ConstValue{ .boolean = b.value },
+                .e_string => |s| return if (s.next == null) ConstValue{ .string = s.data } else null,
+                .e_undefined => return .undef,
+                .e_null => return .nul,
+                .e_identifier => |id| {
+                    const name = p.loadNameFromRef(id.ref);
+                    if (bun.strings.eql(name, param_name)) return param_val;
+                    return null;
+                },
+                .e_unary => |un| {
+                    const v = evalConst(p, un.value, param_name, param_val) orelse return null;
+                    return switch (un.op) {
+                        .un_neg => switch (v) {
+                            .number => |n| ConstValue{ .number = -n },
+                            else => null,
+                        },
+                        .un_pos => switch (v) {
+                            .number => v,
+                            else => null,
+                        },
+                        .un_not => ConstValue{ .boolean = !boolOf(v) },
+                        else => null,
+                    };
+                },
+                .e_binary => |bin| {
+                    // Short-circuit && / || before evaluating the right side.
+                    if (bin.op == .bin_logical_and) {
+                        const l = evalConst(p, bin.left, param_name, param_val) orelse return null;
+                        if (!boolOf(l)) return l;
+                        return evalConst(p, bin.right, param_name, param_val);
+                    }
+                    if (bin.op == .bin_logical_or) {
+                        const l = evalConst(p, bin.left, param_name, param_val) orelse return null;
+                        if (boolOf(l)) return l;
+                        return evalConst(p, bin.right, param_name, param_val);
+                    }
+                    if (bin.op == .bin_nullish_coalescing) {
+                        const l = evalConst(p, bin.left, param_name, param_val) orelse return null;
+                        return switch (l) {
+                            .undef, .nul => evalConst(p, bin.right, param_name, param_val),
+                            else => l,
+                        };
+                    }
+                    const l = evalConst(p, bin.left, param_name, param_val) orelse return null;
+                    const r = evalConst(p, bin.right, param_name, param_val) orelse return null;
+                    // Numeric ops on numbers.
+                    if (l == .number and r == .number) {
+                        const lv = l.number;
+                        const rv = r.number;
+                        return switch (bin.op) {
+                            .bin_add => ConstValue{ .number = lv + rv },
+                            .bin_sub => ConstValue{ .number = lv - rv },
+                            .bin_mul => ConstValue{ .number = lv * rv },
+                            .bin_div => ConstValue{ .number = lv / rv },
+                            .bin_rem => ConstValue{ .number = @rem(lv, rv) },
+                            .bin_pow => ConstValue{ .number = std.math.pow(f64, lv, rv) },
+                            .bin_lt => ConstValue{ .boolean = lv < rv },
+                            .bin_le => ConstValue{ .boolean = lv <= rv },
+                            .bin_gt => ConstValue{ .boolean = lv > rv },
+                            .bin_ge => ConstValue{ .boolean = lv >= rv },
+                            .bin_loose_eq, .bin_strict_eq => ConstValue{ .boolean = lv == rv },
+                            .bin_loose_ne, .bin_strict_ne => ConstValue{ .boolean = lv != rv },
+                            .bin_bitwise_and => ConstValue{ .number = @floatFromInt(@as(i32, @intFromFloat(lv)) & @as(i32, @intFromFloat(rv))) },
+                            .bin_bitwise_or => ConstValue{ .number = @floatFromInt(@as(i32, @intFromFloat(lv)) | @as(i32, @intFromFloat(rv))) },
+                            .bin_bitwise_xor => ConstValue{ .number = @floatFromInt(@as(i32, @intFromFloat(lv)) ^ @as(i32, @intFromFloat(rv))) },
+                            else => null,
+                        };
+                    }
+                    // String concat / equality.
+                    if (l == .string and r == .string) {
+                        return switch (bin.op) {
+                            .bin_loose_eq, .bin_strict_eq => ConstValue{ .boolean = bun.strings.eql(l.string, r.string) },
+                            .bin_loose_ne, .bin_strict_ne => ConstValue{ .boolean = !bun.strings.eql(l.string, r.string) },
+                            .bin_add => blk: {
+                                const buf = p.allocator.alloc(u8, l.string.len + r.string.len) catch return null;
+                                @memcpy(buf[0..l.string.len], l.string);
+                                @memcpy(buf[l.string.len..], r.string);
+                                break :blk ConstValue{ .string = buf };
+                            },
+                            else => null,
+                        };
+                    }
+                    return null;
+                },
+                .e_if => |cond| {
+                    const t = evalConst(p, cond.test_, param_name, param_val) orelse return null;
+                    return if (boolOf(t))
+                        evalConst(p, cond.yes, param_name, param_val)
+                    else
+                        evalConst(p, cond.no, param_name, param_val);
+                },
+                else => return null,
+            }
+        }
+
+        // Extract the (single param-name, body Expr) pair from a step's
+        // function arg if it qualifies for inline-style evaluation.
+        // Pure functions registered in `pure_inline_fns` qualify too.
+        fn extractEvalable(p: *P, fn_expr: Expr) ?struct { name: []const u8, body: Expr } {
+            switch (fn_expr.data) {
+                .e_arrow => |arrow| {
+                    if (arrow.args.len != 1) return null;
+                    if (arrow.args[0].default != null) return null;
+                    if (arrow.args[0].binding.data != .b_identifier) return null;
+                    if (arrow.body.stmts.len != 1) return null;
+                    if (arrow.body.stmts[0].data != .s_return) return null;
+                    const body = arrow.body.stmts[0].data.s_return.value orelse return null;
+                    return .{
+                        .name = p.loadNameFromRef(arrow.args[0].binding.data.b_identifier.ref),
+                        .body = body,
+                    };
+                },
+                .e_identifier => |id| {
+                    const name = p.loadNameFromRef(id.ref);
+                    for (p.pure_inline_fns.items) |info| {
+                        if (bun.strings.eql(info.fn_name, name)) {
+                            return .{ .name = info.param_name, .body = info.body_expr };
+                        }
+                    }
+                    return null;
+                },
+                else => return null,
+            }
+        }
+
+        // Pre-pass before buildFusedReduce. Returns a literal Expr if the
+        // entire chain folds at parse time; null otherwise (caller falls
+        // through to the runtime for-loop emit).
+        fn tryConstantFoldPipeline(
+            p: *P,
+            source: StreamSource,
+            steps: []const StreamStep,
+            terminal: StreamTerminal,
+            loc: logger.Loc,
+        ) ?Expr {
+            // Materialize the source as a slice of ConstValues. Cap the
+            // expansion so a `0..1_000_000` chain doesn't fold at parse time
+            // and bloat the output.
+            const fold_limit: usize = 1024;
+            var elems_buf: [fold_limit]ConstValue = undefined;
+            var elem_count: usize = 0;
+
+            switch (source) {
+                .array => |arr_expr| {
+                    if (arr_expr.data != .e_array) return null;
+                    const items = arr_expr.data.e_array.items.slice();
+                    if (items.len > fold_limit) return null;
+                    for (items) |item| {
+                        const v = evalLiteralExpr(item) orelse return null;
+                        elems_buf[elem_count] = v;
+                        elem_count += 1;
+                    }
+                },
+                .range_excl => |r| {
+                    if (r.lo.data != .e_number or r.hi.data != .e_number) return null;
+                    const lo = r.lo.data.e_number.value;
+                    const hi = r.hi.data.e_number.value;
+                    if (lo != @floor(lo) or hi != @floor(hi)) return null;
+                    const start: i64 = @intFromFloat(lo);
+                    const end: i64 = @intFromFloat(hi);
+                    if (end < start) return null;
+                    const span: usize = @intCast(end - start);
+                    if (span > fold_limit) return null;
+                    var ii: i64 = start;
+                    while (ii < end) : (ii += 1) {
+                        elems_buf[elem_count] = ConstValue{ .number = @floatFromInt(ii) };
+                        elem_count += 1;
+                    }
+                },
+                .range_incl => |r| {
+                    if (r.lo.data != .e_number or r.hi.data != .e_number) return null;
+                    const lo = r.lo.data.e_number.value;
+                    const hi = r.hi.data.e_number.value;
+                    if (lo != @floor(lo) or hi != @floor(hi)) return null;
+                    const start: i64 = @intFromFloat(lo);
+                    const end: i64 = @as(i64, @intFromFloat(hi)) + 1;
+                    if (end < start) return null;
+                    const span: usize = @intCast(end - start);
+                    if (span > fold_limit) return null;
+                    var ii: i64 = start;
+                    while (ii < end) : (ii += 1) {
+                        elems_buf[elem_count] = ConstValue{ .number = @floatFromInt(ii) };
+                        elem_count += 1;
+                    }
+                },
+            }
+
+            const elems = elems_buf[0..elem_count];
+
+            // Pre-extract step (param_name, body) — bail if any step has a
+            // non-evaluable shape (multi-stmt body, multi-param, named
+            // non-pure fn, etc.).
+            var step_bodies_buf: [16]struct {
+                kind: StreamStepKind,
+                fn_or_pred: Expr, // for .take, this is the count expr
+                name: []const u8 = "",
+                body: Expr = undefined,
+                has_body: bool = false,
+            } = undefined;
+            for (steps, 0..) |step, idx| {
+                step_bodies_buf[idx] = .{ .kind = step.kind, .fn_or_pred = step.fn_or_pred };
+                if (step.kind == .take) continue;
+                const ev = extractEvalable(p, step.fn_or_pred) orelse return null;
+                step_bodies_buf[idx].name = ev.name;
+                step_bodies_buf[idx].body = ev.body;
+                step_bodies_buf[idx].has_body = true;
+            }
+            // Walk each source element through the steps, applying the
+            // terminal's accumulator at the end.
+            var acc: ConstValue = switch (terminal) {
+                .sum, .count => ConstValue{ .number = 0 },
+                .min => ConstValue{ .number = std.math.inf(f64) },
+                .max => ConstValue{ .number = -std.math.inf(f64) },
+                .find, .for_each => .undef,
+                .find_index => ConstValue{ .number = -1 },
+                .some => ConstValue{ .boolean = false },
+                .every => ConstValue{ .boolean = true },
+                .collect => ConstValue{ .number = 0 }, // sentinel; collect uses a separate items buffer
+                .reduce_call => return null, // skip — fold body may not be evaluable
+            };
+
+            // For collect: accumulate ConstValue items, then materialize
+            // an array literal at the end.
+            var collect_buf: [fold_limit]ConstValue = undefined;
+            var collect_len: usize = 0;
+
+            // Per-take counters.
+            var take_counts: [16]i64 = .{0} ** 16;
+
+            var i: usize = 0;
+            element_loop: while (i < elems.len) : (i += 1) {
+                var v: ConstValue = elems[i];
+                var step_take_idx: usize = 0;
+                for (step_bodies_buf[0..steps.len]) |step_info| {
+                    switch (step_info.kind) {
+                        .map => {
+                            const new_v = evalConst(p, step_info.body, step_info.name, v) orelse return null;
+                            v = new_v;
+                        },
+                        .filter => {
+                            const test_v = evalConst(p, step_info.body, step_info.name, v) orelse return null;
+                            if (!boolOf(test_v)) continue :element_loop;
+                        },
+                        .take => {
+                            const n_expr = step_info.fn_or_pred;
+                            if (n_expr.data != .e_number) return null;
+                            const n_f = n_expr.data.e_number.value;
+                            if (n_f != @floor(n_f) or n_f < 0) return null;
+                            const n: i64 = @intFromFloat(n_f);
+                            if (take_counts[step_take_idx] >= n) break :element_loop;
+                            take_counts[step_take_idx] += 1;
+                            step_take_idx += 1;
+                        },
+                    }
+                }
+
+                // Per-element terminal update.
+                switch (terminal) {
+                    .sum => {
+                        if (v != .number or acc != .number) return null;
+                        acc = ConstValue{ .number = acc.number + v.number };
+                    },
+                    .count => {
+                        acc = ConstValue{ .number = acc.number + 1 };
+                    },
+                    .min => {
+                        if (v != .number or acc != .number) return null;
+                        if (v.number < acc.number) acc = v;
+                    },
+                    .max => {
+                        if (v != .number or acc != .number) return null;
+                        if (v.number > acc.number) acc = v;
+                    },
+                    .find => |pred_expr| {
+                        const ev = extractEvalable(p, pred_expr) orelse return null;
+                        const t = evalConst(p, ev.body, ev.name, v) orelse return null;
+                        if (boolOf(t)) {
+                            acc = v;
+                            break :element_loop;
+                        }
+                    },
+                    .find_index => |pred_expr| {
+                        const ev = extractEvalable(p, pred_expr) orelse return null;
+                        const t = evalConst(p, ev.body, ev.name, v) orelse return null;
+                        if (boolOf(t)) {
+                            acc = ConstValue{ .number = @floatFromInt(i) };
+                            break :element_loop;
+                        }
+                    },
+                    .some => |pred_expr| {
+                        const ev = extractEvalable(p, pred_expr) orelse return null;
+                        const t = evalConst(p, ev.body, ev.name, v) orelse return null;
+                        if (boolOf(t)) {
+                            acc = ConstValue{ .boolean = true };
+                            break :element_loop;
+                        }
+                    },
+                    .every => |pred_expr| {
+                        const ev = extractEvalable(p, pred_expr) orelse return null;
+                        const t = evalConst(p, ev.body, ev.name, v) orelse return null;
+                        if (!boolOf(t)) {
+                            acc = ConstValue{ .boolean = false };
+                            break :element_loop;
+                        }
+                    },
+                    .collect => {
+                        if (collect_len >= fold_limit) return null;
+                        collect_buf[collect_len] = v;
+                        collect_len += 1;
+                    },
+                    .for_each, .reduce_call => return null,
+                }
+            }
+
+            // Materialize the result as a literal Expr.
+            if (terminal == .collect) {
+                const arr_items = p.allocator.alloc(Expr, collect_len) catch return null;
+                for (collect_buf[0..collect_len], 0..) |item, j| {
+                    arr_items[j] = evalToExpr(p, item, loc);
+                }
+                return p.newExpr(E.Array{
+                    .items = ExprNodeList.fromOwnedSlice(arr_items),
+                    .is_single_line = collect_len <= 4,
+                }, loc);
+            }
+            return evalToExpr(p, acc, loc);
+        }
+
         // Parabun: stream-pipeline fusion. `src |> map(f) |> filter(g) |> sum`
         // (and the other terminals supported by recognizeStreamTerminal)
         // collapses into `src.reduce((__pa, __px) => { ... }, init)` so the
@@ -1647,6 +2037,27 @@ pub fn ParseSuffix(
 
             // We walked outer→source; the application order is the reverse.
             std.mem.reverse(StreamStep, steps_buf[0..steps_len]);
+
+            // Compile-time fold first. If the source is a literal array /
+            // numeric range AND every step body + terminal evaluates at parse
+            // time, the chain becomes a single literal — no for-loop emit.
+            if (tryConstantFoldPipeline(p, source, steps_buf[0..steps_len], terminal, left.loc)) |folded| {
+                // Inline arrows in the chain (in any step's fn_or_pred or
+                // the terminal's pred call) are orphaned — their scopes
+                // were pushed during chain parse and would mismatch on
+                // visit. Null any scope whose loc falls inside the
+                // chain's source range.
+                const chain_lo = left.loc.start;
+                const chain_hi = p.lexer.loc().start;
+                for (p.scopes_in_order.items, 0..) |entry_opt, idx| {
+                    const entry = entry_opt orelse continue;
+                    if (entry.loc.start >= chain_lo and entry.loc.start < chain_hi) {
+                        p.scopes_in_order.items[idx] = null;
+                    }
+                }
+                left.* = folded;
+                return true;
+            }
 
             return buildFusedReduce(p, left, source, steps_buf[0..steps_len], terminal);
         }
