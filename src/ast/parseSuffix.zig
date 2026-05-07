@@ -1360,6 +1360,10 @@ pub fn ParseSuffix(
                     if (bun.strings.eql(info.fn_name, fn_name)) {
                         if (substituteByName(p, info.body_expr, info.param_name, left.*)) |result| {
                             left.* = result;
+                            // Track that this binding was consumed by fusion
+                            // so ImportScanner can DCE the decl if no other
+                            // (non-fused) reference to it exists.
+                            p.pure_fusion_consumed_names.put(p.allocator, info.fn_name, {}) catch {};
                             return true;
                         }
                         break;

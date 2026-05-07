@@ -107,6 +107,77 @@ describe("pipeline inline fusion", () => {
     expect(out).toContain("double(21)");
   });
 
+  // Pure-fusion DCE: const-bound pure arrows whose only references were
+  // absorbed by |> fusion (so use_count_estimate == 0 after visit) drop
+  // out of the output entirely. Exports and non-fused references keep
+  // the declaration alive.
+  describe("pure-fusion DCE", () => {
+    test("fully-fused const pure arrow is DCE'd", () => {
+      const out = ts(`
+        const norm = pure (x: number) => x / 100
+        const cap  = pure (x: number) => Math.min(x, 1)
+        console.log(raw |> norm |> cap)
+      `);
+      expect(out).not.toContain("const norm");
+      expect(out).not.toContain("const cap");
+      expect(out).toContain("Math.min(raw / 100, 1)");
+    });
+
+    test("partially-fused pure arrow is kept", () => {
+      // `b` is referenced both as a value (b(5)) and via fusion.
+      // The fusion still happens; the binding stays alive for the
+      // direct call.
+      const out = ts(`
+        const b = pure (x: number) => x * 2
+        console.log(b(5))
+        console.log(10 |> b)
+      `);
+      expect(out).toContain("const b");
+      expect(out).toContain("b(5)");
+      expect(out).toContain("10 * 2");
+    });
+
+    test("exported pure arrow is kept", () => {
+      const out = ts(`
+        export const c = pure (x: number) => x + 3
+        console.log(10 |> c)
+      `);
+      expect(out).toContain("export const c");
+      expect(out).toContain("10 + 3");
+    });
+
+    test("late-exported pure arrow is kept", () => {
+      const out = ts(`
+        const d = pure (x: number) => x + 4
+        console.log(10 |> d)
+        export { d }
+      `);
+      expect(out).toContain("const d");
+      expect(out).toContain("export { d }");
+      expect(out).toContain("10 + 4");
+    });
+
+    test("let-bound pure arrow is kept (no fusion, no DCE)", () => {
+      const out = ts(`
+        let l = pure (x: number) => x + 5
+        console.log(10 |> l)
+      `);
+      expect(out).toContain("let l");
+      expect(out).toContain("l(10)");
+    });
+
+    test("non-pure arrow with no refs is kept (DCE only targets pure)", () => {
+      // A regular const arrow is NOT a pure-fusion candidate, so even if
+      // never referenced, the DCE pass leaves it alone — matches Bun's
+      // baseline transpile behavior.
+      const out = ts(`
+        const unused = (x: number) => x + 9
+        export const used = 1
+      `);
+      expect(out).toContain("const unused");
+    });
+  });
+
   test("multi-param pure function is NOT inlined", () => {
     const out = ts(`
       pure function add(a: number, b: number) { return a + b }

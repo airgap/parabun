@@ -34,6 +34,17 @@ pub const AstBuilder = struct {
             return null;
         }
     } = .{},
+    // Parabun: stub so ImportScanner's pure-fusion DCE check compiles for
+    // server-component AstBuilder. This builder doesn't run the |> fusion
+    // path, so pretend nothing was ever consumed.
+    comptime pure_fusion_consumed_names: struct {
+        pub fn count(_: @This()) u32 {
+            return 0;
+        }
+        pub fn contains(_: @This(), _: []const u8) bool {
+            return false;
+        }
+    } = .{},
     pub const parser_features = struct {
         pub const typescript = false;
     };

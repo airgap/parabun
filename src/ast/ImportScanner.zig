@@ -384,6 +384,53 @@ pub fn scan(
                     }
                 }
 
+                // Parabun: drop `const NAME = pure (x) => expr` decls whose
+                // only uses were absorbed by `|>` pipeline fusion. The fusion
+                // substitutes the body inline at parse time before any visit
+                // runs, so a fully-inlined identifier never increments
+                // use_count_estimate. ImportScanner runs after the whole file
+                // has been visited (per the comment at P.zig:6459), so the
+                // count here is final.
+                //
+                // Eligibility: const + non-exported + pure-arrow shape + zero
+                // remaining refs + the binding was consumed by fusion at least
+                // once (`pure_fusion_consumed_refs`). The fusion-consumed
+                // requirement keeps this from acting as a generic
+                // unused-pure-arrow DCE — without it, `const f = pure x => x`
+                // with no callers would also drop, which changes Bun's
+                // baseline transpile behavior beyond what the fusion path
+                // demands. let/var are excluded because the binding can be
+                // rebound; exports are excluded because the binding is
+                // module-visible.
+                if (st.kind == .k_const and !st.is_export and st.decls.len > 0 and p.pure_fusion_consumed_names.count() > 0) {
+                    var write: u32 = 0;
+                    const decls = st.decls.slice();
+                    for (decls) |decl| {
+                        const dropped = blk: {
+                            if (decl.binding.data != .b_identifier) break :blk false;
+                            const ref = decl.binding.data.b_identifier.ref;
+                            const name = p.symbols.items[ref.innerIndex()].original_name;
+                            if (!p.pure_fusion_consumed_names.contains(name)) break :blk false;
+                            if (p.symbols.items[ref.innerIndex()].use_count_estimate != 0) break :blk false;
+                            const value = decl.value orelse break :blk false;
+                            if (value.data != .e_arrow) break :blk false;
+                            const arrow = value.data.e_arrow;
+                            if (!arrow.is_pure) break :blk false;
+                            if (arrow.args.len != 1) break :blk false;
+                            if (arrow.args[0].default != null) break :blk false;
+                            if (arrow.args[0].binding.data != .b_identifier) break :blk false;
+                            if (arrow.body.stmts.len != 1) break :blk false;
+                            if (arrow.body.stmts[0].data != .s_return) break :blk false;
+                            break :blk true;
+                        };
+                        if (dropped) continue;
+                        decls[write] = decl;
+                        write += 1;
+                    }
+                    st.decls.len = write;
+                    if (write == 0) continue;
+                }
+
                 // Remove unused import-equals statements, since those likely
                 // correspond to types instead of values
                 if (st.was_ts_import_equals and !st.is_export and st.decls.len > 0) {

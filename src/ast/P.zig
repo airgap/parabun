@@ -503,6 +503,18 @@ pub fn NewParser_(
         /// `.set(...)` calls. Populated during parse, consumed during visit.
         signal_bound_refs: std.AutoHashMapUnmanaged(Ref, void) = .{},
 
+        /// Parabun: names of pure inline functions that were substituted at
+        /// a `|>` site by `tryInlinePipeline`. Keyed by name (string) rather
+        /// than ref because at parse time, e_identifier refs are
+        /// `.source_contents_slice` form and don't match the post-visit
+        /// `.symbol` refs that ImportScanner sees on declaration bindings.
+        /// Used by ImportScanner to tell "fully-fused, no other uses ⇒ DCE
+        /// the const decl" apart from "no uses at all and never participated
+        /// in fusion ⇒ leave the decl, match Bun baseline." Populated during
+        /// parse, consumed in ImportScanner after the visit pass finalizes
+        /// use_count_estimate.
+        pure_fusion_consumed_names: bun.StringHashMapUnmanaged(void) = .{},
+
         /// Parabun: names of in-scope signal-bound bindings — keyed by name
         /// (not ref) because at parse time, identifiers in the RHS of a
         /// `signal` decl are still name-refs pending visit-pass resolution.
