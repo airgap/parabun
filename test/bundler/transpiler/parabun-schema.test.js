@@ -7,9 +7,12 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-const RUNTIME_PATH = "/raid/parabun/src/runtime.bun.js";
+// Resolve the runtime path relative to this test file so the suite works
+// in any workspace layout (Linux x64 lives at /raid/parabun, macOS CI
+// lives under /Users/<user>/jenkins/workspace, etc.).
+const RUNTIME_PATH = resolve(import.meta.dir, "../../../src/runtime.bun.js");
 
 function transpileAndImport(code) {
   const out = new Bun.Transpiler({ loader: "tsx" })
