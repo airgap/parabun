@@ -1,14 +1,14 @@
-# Parabun + ParaScript — LLM Context
+# Parabun + Para — LLM Context
 
-**Parabun** is a fork of [Bun](https://bun.com) (the JavaScript/TypeScript runtime) that ships native modules for parallel compute, GPU, SIMD, and direct hardware I/O. **ParaScript** is the optional TypeScript dialect Parabun ships alongside it — purity, error chaining, pipelines, ranges, reactivity, and edge-triggered handlers, written in `.pts` files. All ParaScript extensions desugar to standard JavaScript at parse time in the Zig-based parser; no runtime changes. The same extensions also work over plain JavaScript in `.pjs` files (un-branded — `.pts` is the canonical surface). The runtime and the language are independent: you can use Parabun without ParaScript, and (once the standalone transpiler ships) ParaScript without Parabun.
+**Parabun** is a fork of [Bun](https://bun.com) (the JavaScript/TypeScript runtime) that ships native modules for parallel compute, GPU, SIMD, and direct hardware I/O. **Para** is the optional TypeScript dialect Parabun ships alongside it — purity, error chaining, pipelines, ranges, reactivity, edge-triggered handlers, JSON Schema data shapes, pattern matching — written in `.pts` files. All Para extensions desugar to standard JavaScript at parse time in the Zig-based parser; no runtime changes. The same extensions also work over plain JavaScript in `.pjs` files (un-branded — `.pts` is the canonical surface). The runtime and the language are independent: you can use Parabun without Para, and (once the standalone transpiler ships) Para without Parabun.
 
 ## File Extensions
 
-- `.pts` — **ParaScript** (superset of `.ts`). The canonical surface — what the docs and editor tooling lead with.
+- `.pts` — **Para** (superset of `.ts`). The canonical surface — what the docs and editor tooling lead with.
 - `.pjs` — same extensions over plain JavaScript (superset of `.js`). Supported, un-branded; the marketing focuses on `.pts`.
 - Standard `.ts`/`.js` files are unaffected.
 
-## ParaScript Language Extensions
+## Para Language Extensions
 
 ### `pure` keyword
 
@@ -419,6 +419,95 @@ const fail = x => throw new Error(x);
 ```
 
 Regular `throw E;` statements are unaffected. ASI still applies: a newline between `throw` and its operand is a syntax error.
+
+### `schema` keyword
+
+Declares a JSON Schema 2020-12 binding with a runtime validator and field-navigation accessors. Three statement forms plus an expression literal:
+
+```
+schema NAME = <expr>            // ingest JSON Schema literal / value
+schema NAME from <expr>         // alias for the `=` form (lockstep parity)
+schema NAME { id: int, name: str(1..=50) }   // refinement-typed DSL
+schema { ... }                  // inline expression literal at value position
+```
+
+All forms desugar to a `__paraFromSchema(() => <body>)` runtime helper call. The `=` / `from` forms emit `const NAME = __paraFromSchema(() => <expr>);`; the DSL emits the equivalent JSON Schema body inline; the expression form emits the call directly at the call site.
+
+The runtime helper returns the JSON Schema body decorated with:
+
+- `parse(v) → Result<T, string>` — validates `v` against the schema, returns `{ tag: "Ok", value: v }` or `{ tag: "Err", error: msg }`.
+- `is(v) → boolean` — true when `parse(v).tag === "Ok"`. Used by the `is` type-guard operator.
+- `schema` — the literal back-reference (the JSON Schema object itself).
+- Field-navigation accessors — for an object-shape schema, each property is exposed as a non-enumerable getter that walks into the sub-schema. Lets consumers read `User.profile.bio.maxLength` without spelling out `User.schema.properties.profile.properties.bio.maxLength`.
+- For arrays: `.element` returns the wrapped item schema (so `Tags.element.type === "string"`).
+
+The thunk-wrap (`() => <body>`) lets self- and mutual-recursion through declared bindings work: the body isn't evaluated until the surrounding scope's bindings exist.
+
+```
+schema User = {
+  type: "object",
+  properties: {
+    id:   { type: "bigint" },
+    name: { type: "string", minLength: 1, maxLength: 50 },
+  },
+  required: ["id", "name"],
+};
+
+User.parse({ id: 1n, name: "Alice" }).tag;   // "Ok"
+User.parse({ id: 1n }).tag;                   // "Err"
+User.id.type;                                  // "bigint"
+User.name.maxLength;                           // 50
+
+// Inline at value position — same shape, no name binding.
+const ep = {
+  request:  schema { type: "bigint" },
+  response: User,
+  authenticated: true,
+} satisfies TsonHandlerModel;
+ep.request.parse(123n).tag;                    // "Ok"
+```
+
+Para extends the JSON Schema `type` field with `bigint`, `varchar`, `text`, `char`, `timestamptz`, `snowflake`, `numeric`, `jsonb`, `enum` (the lockstep DDL types). Para extension keys recognized at the schema level: `length`, `unique`, `primaryKey`, `indexed`, `references`, `foreignKey`, `autoIncrement`, `generated`, `collation`, `nullable` (column-shape models from pg-models).
+
+Endpoint records (`{ request, response, throws, ... }`) are plain JS objects whose schema slots hold either an imported `schema X = …` binding or an inline `schema { ... }` literal — Para does not have a separate `endpoint` / `api` keyword. Lockstep (or any consumer) provides per-slot helpers like `parseRequest`/`parseResponse`. The `schema` keyword is the single shape primitive.
+
+LSP validates the body of every `schema X = body` block against the JSON Schema vocabulary; unknown top-level keys flag with a "did you mean…" hint. Lockstep records (top-level `properties` without `type`) are tolerated unchanged.
+
+The TS-type generator (`@para/schema`, Phase 1 design in `PROPOSALS.md`) ships dual-variant types: extended (constraint brands `StringOf<{minLength: 3}>`, `NumberOf<{minimum: 0}>`, etc.) for `.pts` consumers via the `parabun` package-export condition; standard (every brand collapses to its base primitive) for vanilla TS consumers — no condition required.
+
+### `match` keyword
+
+Pattern matching expression:
+
+```
+match SUBJECT {
+  pat1 => result1,
+  pat2 | pat3 => result2,
+  _ => fallback,
+}
+```
+
+Patterns: literal numbers / strings / booleans, `Ok(x)` / `Err(e)` / `Some(x)` / `None` Result/Option ctors, identifier-bind (any identifier matches everything and binds the subject as that name), `_` wildcard, OR-alternation (`a | b | c`).
+
+Lowering depends on the arm shape:
+
+- All-literal arms over a primitive subject → `switch` on `__pm`.
+- All-Result/Option-ctor arms → `switch` on `__pm.tag`.
+- Mixed / has-bind arms → IIFE wrapping a ternary chain.
+
+The subject is evaluated once and stored in a hoisted `__pmN` temp.
+
+### `Result` / `Option` constructors
+
+`Ok(x)`, `Err(e)`, `Some(x)`, `None` desugar to literal-typed objects: `{ tag: "Ok", value: x }`, `{ tag: "Err", error: e }`, `{ tag: "Some", value: x }`, `{ tag: "None" }`. Triggers when the constructor is at expression position — `import { Ok } from "..."` style is unaffected. Designed to discriminate cleanly under `match` (the `__pm.tag` switch path).
+
+### `is` runtime type-guard
+
+`expr is Type` lowers to `__paraIs_Type(expr)` — a typed predicate `(v: any): v is Type => Type.parse(v).tag === "Ok"`. The `__paraIs_<T>` helpers are auto-injected at the top of the source by the LSP / ts-plugin transform, so TS narrows `expr` inside `if (...)` bodies. `expr is not Type` is the negated form.
+
+### `::` validation marker
+
+`function f(req:: Type) { ... }` injects a parse-and-throw at function entry: `Type.parse(req); if (...tag === "Err") throw new Error(...)`. Position-preserving (the second `:` becomes a space). Skips JS builtins (`String`/`Number`/`Boolean`/etc.) and lowercase types — runs on user-declared schemas only.
 
 ### Chaining
 

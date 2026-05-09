@@ -68,7 +68,7 @@ await using bot = await assistant.create({
 await bot.run();
 ```
 
-Parabun is a drop-in replacement for Bun — your existing `.ts` / `.js` files run unchanged. The runtime modules above are the headline. Parabun also ships **ParaScript**, an optional TypeScript dialect (`pure`, `..!`, `..&`, `..=`, `|>`, range literals, `signal`/`effect { }`/`when { }` blocks) that lives in `.pts` files and desugars to standard JS at parse time; use it or ignore it, the modules don't depend on it.
+Parabun is a drop-in replacement for Bun — your existing `.ts` / `.js` files run unchanged. The runtime modules above are the headline. Parabun also ships **Para**, an optional TypeScript dialect (`pure`, `..!`, `..&`, `..=`, `|>`, range literals, `signal`/`effect { }`/`when { }` blocks, `schema { … }` data shapes, `match`) that lives in `.pts` files and desugars to standard JS at parse time; use it or ignore it, the modules don't depend on it.
 
 > **What this isn't:** a numerical-Python replacement. NumPy, JAX, PyTorch, and CuPy are deeply ahead in scientific computing and ML training, and Parabun won't catch them. The pitch is *for the developer who'd otherwise leave TypeScript* — to spawn a Python sidecar, to write an N-API module, or to put a perf-critical service in Rust. Parabun keeps that developer in TypeScript.
 
@@ -710,6 +710,38 @@ count = 10;                     // count=10 x2=20
 - **`signal` / `effect` as plain identifiers are unaffected** — the keyword path only triggers when `signal` is immediately followed by an identifier, or `effect` by `{`.
 - **`A ~> B` reactive binding** — desugars to `effect(() => { B = A; })` so `B` stays in step with `A` and any signals `A` reads from. RHS must be assignable (identifier, dot, index). Captures the disposer if you want it: `const stop = src ~> dst;`.
 - **`A ~> B when C` conditional bind** — adds a guard. Desugars to `effect(() => { if (C) B = A; })`. `C` is read inside the effect so signal reads in the predicate are tracked too — flipping a signal-typed `C` re-fires the effect, the body re-evaluates the guard, and only assigns when the guard passes. `when` is contextual; bare uses elsewhere stay normal identifiers.
+
+### Data Shapes (`schema`)
+
+`schema NAME = body` declares a JSON Schema 2020-12 binding with a runtime validator and field-navigation accessors. Same keyword works as an inline expression literal — `schema { ... }` mints a decorated value at any value position:
+
+```pts
+schema User = {
+  type: 'object',
+  properties: {
+    id:   { type: 'bigint' },
+    name: { type: 'string', minLength: 1, maxLength: 50 },
+  },
+  required: ['id', 'name'],
+};
+
+User.parse({ id: 1n, name: 'Alice' });   // { tag: 'Ok', value: ... }
+User.parse({ id: 1n });                   // { tag: 'Err', error: '...' }
+User.name.maxLength;                      // 50  — schema fields navigable
+User.id.type;                             // 'bigint'
+
+// Inline literal at value position — same decorated shape, no name binding.
+const ep = {
+  request:  schema { type: 'bigint' },
+  response: User,
+  authenticated: true,
+};
+ep.request.parse(123n);                   // works
+```
+
+Both forms desugar to `__paraFromSchema(...)` and produce the same surface: `parse(v) → Result<T, string>`, `is(v) → boolean`, `schema` (the literal back-reference), and per-field accessors. Composes naturally inside lockstep `satisfies TsonHandlerModel` blocks — endpoint records that hold `schema { … }` slots type-check against the JSON Schema vocabulary while gaining runtime validators for free. Para extends the JSON Schema `type` field with `bigint`, `varchar`, `text`, `char`, `timestamptz`, `snowflake`, `numeric`, `jsonb`, `enum`.
+
+Alt forms: `schema X from <expr>` ingests an existing JSON Schema (file import, lockstep pg-models output) without declaring the body inline; `schema X { id: int, name: str(1..=50) }` is the refinement-typed DSL that keeps types short for the lockstep-record case.
 
 ### Throw Expressions
 
