@@ -197,3 +197,20 @@ scripts/lldb-inline
 
 test/integration/bun-types/fixture/bun.lock
 .claude/scheduled_tasks.lock
+
+# Local SEA / build-from-source artifacts at the repo root. Produced
+# by `bun build --compile` and friends when run from this dir; keep
+# the names anchored with `/` so a real `app/` source dir wouldn't be
+# accidentally ignored.
+/app
+/app-with-resources
+/entry
+/nosourcemap_entry
+/events.parquet
+
+# vsce package output (the VSIX-build stage drops parabun.vsix here).
+/artifacts/
+
+# Bun bytecode cache emitted under any test directory when fixtures
+# are run through the transpiler.
+**/@bc@/
