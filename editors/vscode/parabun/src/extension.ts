@@ -358,9 +358,7 @@ function isParabunEditor(editor: vscode.TextEditor): boolean {
 }
 
 function updatePureDecorations(editor: vscode.TextEditor) {
-  log.appendLine(`updatePureDecorations called for ${editor.document.uri.fsPath} (lang=${editor.document.languageId})`);
   if (!isParabunEditor(editor)) {
-    log.appendLine(`  skipped — not a parabun file`);
     editor.setDecorations(pureDecoration, []);
     return;
   }

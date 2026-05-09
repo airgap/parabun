@@ -495,3 +495,131 @@ const label = (() => {
 **LLMs.md:** must be updated with every new feature — it's the spec reference for AI tooling and new contributors.
 
 **README.md:** only the highest-visibility features land in the README (the language-extensions section is already the "optional footnote" per project positioning). Don't bloat it with every operator — defer everything not in the top 5 to `LLMs.md`.
+
+---
+
+## Proposal: TS-type generator for `schema` declarations
+
+**Status:** design draft, no implementation yet.
+
+### Problem
+
+`schema X = body` and `schema { body }` emit a runtime `{ parse, schema, …field accessors }` value, but the *type* surfaced to TypeScript is currently `as const satisfies TsonSchema` — TS sees the literal object shape, not the data shape that `parse()` returns. This means:
+
+- `parse(v)` returns `Result<unknown, string>` instead of `Result<X, string>`.
+- A field marked `minLength: 3, maxLength: 50` is just `string` to TS — calling `.slice(100)` is silently allowed.
+- A field marked `format: "email"` is just `string` — no boundary type at function entry.
+- An `enum: ["draft", "published"]` field is `string` instead of the literal union `"draft" | "published"`.
+
+We want types stricter than what plain TS can derive, expressed natively in TS (no compiler patch), generated from the schema itself.
+
+### Approaches surveyed
+
+**A. Branded types.** Encode constraints as phantom intersections:
+
+```ts
+type Brand<B> = string & { readonly __brand: B };
+type SchemaString<C extends Constraints> = string & { readonly __schema: C };
+type Email = SchemaString<{ format: "email" }>;
+type Username = SchemaString<{ minLength: 3; maxLength: 32; pattern: "^[A-Za-z0-9_]+$" }>;
+```
+
+- ✅ Native TS, zero compiler magic.
+- ✅ Functions can declare `(name: Username) => …` and tsc enforces "you can't pass a raw string."
+- ❌ Brand is opaque to tsc — the *constraints* aren't checked at the call site, only the brand identity. (`"a"` and `"thisIsLongEnough"` are equally invalid as `Username`; you must go through `parse` to mint one.)
+- ❌ No literal-level narrowing (TS won't tell you `"x"` is too short at compile time).
+
+**B. Template-literal type computation.** Push constraints into the type itself where TS can evaluate:
+
+```ts
+type StringOfLength<N extends number, S extends string = ""> =
+  S["length"] extends N ? S : StringOfLength<N, `${S}${string}`>;
+type FixedLen36 = StringOfLength<36>;     // approximate; TS recursion limit is 100
+```
+
+- ✅ Some literal-level checking (TS narrows known string literals against the type).
+- ❌ Recursion depth + complexity blow up fast; only works for tiny ranges.
+- ❌ Only meaningful for length / fixed-shape constraints — `minimum`/`format`/`pattern` reduce to brands.
+
+**C. Custom external checker.** Run a Para-specific tsc-aware checker that consumes JSON Schema directly and emits errors orthogonal to tsc.
+
+- ✅ Full constraint expressivity.
+- ❌ Requires a parallel type system, separate IDE integration, separate diagnostic stream. Multi-month build.
+
+### Recommendation
+
+**Dual-output strategy.** A single emitted `.d.ts` is consumed by two
+audiences with different appetites for strictness, so `@para/schema`
+ships two type-resolution variants under the same export names:
+
+| Audience                     | Resolves to             | What you get                                                |
+| ---------------------------- | ----------------------- | ----------------------------------------------------------- |
+| `.pts` / Para projects       | `index.ts`              | Full constraint brands (`StringOf<{ minLength: 3 }>` etc.)  |
+| Vanilla TS / Node consumers  | `index.standard.ts`     | Same names, all collapse to base primitives                 |
+
+Selected via the `parabun` package-export condition on
+`@para/schema`'s `package.json` `exports` map (TS 5.0+ `customConditions`).
+Para-aware `tsconfig.json` sets `"customConditions": ["parabun"]` and
+gets the brands; everything else gets the standard variant. The emitted
+`.d.ts` from `gen-dts-rewrite` references brand types by name only, so
+the same file works in both audiences without recompilation.
+
+**Phase 1 emit table** — codegen walks each schema body and emits these brand types:
+
+| Schema fragment | Emitted TS (Para variant) | Emitted TS (standard variant) |
+| --- | --- | --- |
+| `{ type: "string" }` | `StringOf<{}>` | `string` |
+| `{ type: "string", minLength, maxLength }` | `StringOf<{ minLength: 3; maxLength: 50 }>` | `string` |
+| `{ type: "string", format: "email" }` | `StringOf<{ format: "email" }>` | `string` |
+| `{ type: "integer" }` | `NumberOf<{ integer: true }>` | `number` |
+| `{ type: "number", minimum, maximum }` | `NumberOf<{ minimum: 0; maximum: 100 }>` | `number` |
+| `{ type: "bigint" }` | `BigIntOf<{}>` (or `bigint` for the no-constraint case) | `bigint` |
+| `{ type: "boolean" }` | `BooleanOf<{}>` (or `boolean`) | `boolean` |
+| `{ enum: [a, b, c] }` | `"a" \| "b" \| "c"` (literal union — narrows in both variants) | same |
+| `{ const: "x" }` | `"x"` | same |
+| `{ type: "array", items: T, minItems, maxItems }` | `ArrayOf<T_emitted, { minItems: 1; maxItems: 10 }>` | `readonly T_emitted[]` |
+| `{ type: "object", properties, required }` | `{ k1: T1; k2?: T2 }` (interface form) | same |
+| `{ oneOf: [A, B] }` | `A_emitted \| B_emitted` | same |
+| `{ allOf: [A, B] }` | `A_emitted & B_emitted` | same |
+| Para extensions (`length`, `pattern`, etc.) | extra keys in the constraint object | dropped in standard |
+
+`schema X = body` emits `declare const X: SchemaValue<X_inferred, S_literal>;`
+plus the type alias `type X = <emitted>`. `parse(v)` then resolves to
+`Result<X, string>` at the call site automatically.
+
+**Phase 2 (optional)** — Add template-literal types for fixed-length strings (tracking ID formats like UUID/snowflake) where the recursion stays under tsc's limit. Cherry-pick high-value cases; skip the rest.
+
+**Phase 3 (later, if needed)** — Custom checker (Approach C) for cross-schema invariants the TS type system can't express (e.g., "either both `lat` and `lon` or neither" on a struct). Only after Phase 1 has been used long enough to know what's actually missing.
+
+### Codegen sketch
+
+`gen-dts-rewrite` walks each `schema X = body` block. For each, it:
+
+1. Parses the body as JSON Schema (Para's runtime parser).
+2. Recursively emits a TS type via the table above. The brand types
+   referenced (`StringOf`, `NumberOf`, etc.) are resolved per-audience by
+   the package-export condition; the codegen output is identical.
+3. Outputs `declare const X: SchemaValue<X, S_literal>;` plus
+   `type X = <emitted>` so callers can write `Infer<typeof X>` or
+   `Handles<typeof endpointModel>`.
+4. Adds `import type { … } from "@para/schema"` for whichever brand
+   names appear in the file.
+
+Brand types live in [`packages/para-schema/`](./packages/para-schema/),
+shipped under the `@para/schema` package name with two `exports`
+variants (extended + standard). Consumers get one shared brand symbol
+regardless of which schema-bearing package pulled it in.
+
+### Open questions
+
+1. **How aggressive about branding?** Every `string` with any constraint, or only "named" branded types (`schema Username = …`)? The first is safer; the second is less noisy.
+2. **Refinement vs replacement.** Does `parse()` return the branded type (forcing callers to brand-cast) or the unbranded primitive? If branded, every entry-point must pipe through `parse()` — clean but high-friction. If unbranded, the brand only serves as a hint at function-arg boundaries.
+3. **Cross-package type identity.** A `schema Email = …` declared in `@lyku/json-models` and a structurally-identical one in `@lyku/mapi-models` should brand-equal each other. Solution: brand by structural content hash, not by declaration site.
+4. **Recursive schemas.** `schema Tree = { children: { items: Tree } }` is fine at runtime (Proxy lazy-eval), but the TS type generator must emit a `type Tree = { children: Tree[] }` self-reference — straightforward as long as the codegen orders declarations correctly.
+5. **`format` semantics.** JSON Schema's `format` is technically advisory. Para should treat the listed formats (`email`, `uri`, `date-time`, `uuid`, `ipv4`, `ipv6`) as enforced at parse time *and* branded at the type level. Custom formats are reserved for users.
+
+### Migration
+
+- `lockstep-core` ships an `__SchemaBrand` declaration today (in `TsonHandlerModel` types). Phase 1 reuses or replaces it; consumers see no churn until they want the strictness.
+- `@lyku/json-models` and `@lyku/pg-models` both already round-trip through `gen-dts-rewrite`. Phase 1 plugs into the same pipeline — generated `.d.ts` files just gain new `type X = …` siblings.
+- HTTP endpoint shapes (post-`api`-unwind: plain `export const X = { request: schema { … }, … }`) automatically pick up the new types because each slot is already a `schema` value.

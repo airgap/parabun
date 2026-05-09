@@ -7,125 +7,177 @@
     {
       "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
       "captures": {
-        "1": { "name": "storage.type.function.parabun" }
+        "1": {
+          "name": "storage.type.function.parabun"
+        }
       }
     },
     {
       "match": "\\b(pure)\\s+(async)\\s+(fun(?:ction)?)\\b",
       "captures": {
-        "1": { "name": "keyword.other.pure.parabun" },
-        "2": { "name": "storage.modifier.async" },
-        "3": { "name": "storage.type.function.parabun" }
+        "1": {
+          "name": "keyword.other.pure.parabun"
+        },
+        "2": {
+          "name": "storage.modifier.async"
+        },
+        "3": {
+          "name": "storage.type.function.parabun"
+        }
       }
     },
     {
       "match": "\\b(pure)\\s+(fun(?:ction)?)\\b",
       "captures": {
-        "1": { "name": "keyword.other.pure.parabun" },
-        "2": { "name": "storage.type.function.parabun" }
+        "1": {
+          "name": "keyword.other.pure.parabun"
+        },
+        "2": {
+          "name": "storage.type.function.parabun"
+        }
       }
     },
     {
       "match": "\\b(pure)\\s+(async)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
       "captures": {
-        "1": { "name": "keyword.other.pure.parabun" },
-        "2": { "name": "storage.modifier.async" }
+        "1": {
+          "name": "keyword.other.pure.parabun"
+        },
+        "2": {
+          "name": "storage.modifier.async"
+        }
       }
     },
     {
       "match": "\\b(pure)\\b(?=\\s*(?:\\(|\\w+\\s*=>))",
       "captures": {
-        "1": { "name": "keyword.other.pure.parabun" }
+        "1": {
+          "name": "keyword.other.pure.parabun"
+        }
       }
     },
     {
       "match": "\\b(signal)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=,;:!])",
       "captures": {
-        "1": { "name": "storage.type.signal.parabun" }
+        "1": {
+          "name": "storage.type.signal.parabun"
+        }
       }
     },
     {
       "match": "\\b(effect)\\b(?=\\s*\\{)",
       "captures": {
-        "1": { "name": "keyword.control.effect.parabun" }
+        "1": {
+          "name": "keyword.control.effect.parabun"
+        }
       }
     },
     {
       "comment": "when EXPR { ... } / when not EXPR { ... } — edge-triggered handler",
       "match": "\\b(when)\\s+(not)\\b",
       "captures": {
-        "1": { "name": "keyword.control.when.parabun" },
-        "2": { "name": "keyword.control.when.not.parabun" }
+        "1": {
+          "name": "keyword.control.when.parabun"
+        },
+        "2": {
+          "name": "keyword.control.when.not.parabun"
+        }
       }
     },
     {
       "match": "\\b(when)\\b(?=\\s+[!A-Za-z_$])",
       "captures": {
-        "1": { "name": "keyword.control.when.parabun" }
+        "1": {
+          "name": "keyword.control.when.parabun"
+        }
       }
     },
     {
       "comment": "trailing `start` modifier on a when block — initial-truthy + edge. Only highlighted when followed by `{`.",
       "match": "\\b(start)\\b(?=\\s*\\{)",
       "captures": {
-        "1": { "name": "keyword.control.when.start.parabun" }
+        "1": {
+          "name": "keyword.control.when.start.parabun"
+        }
       }
     },
     {
       "comment": "bare `when stop { }` paired-form arm — fires on falling edge of the preceding `when` block's predicate. Only highlighted directly after `when` and followed by `{`.",
       "match": "\\b(when)\\s+(stop)\\b(?=\\s*\\{)",
       "captures": {
-        "1": { "name": "keyword.control.when.parabun" },
-        "2": { "name": "keyword.control.when.stop.parabun" }
+        "1": {
+          "name": "keyword.control.when.parabun"
+        },
+        "2": {
+          "name": "keyword.control.when.stop.parabun"
+        }
       }
     },
     {
       "comment": "derived NAME = EXPR — read-only signal",
       "match": "\\b(derived)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=,;:!])",
       "captures": {
-        "1": { "name": "storage.type.derived.parabun" }
+        "1": {
+          "name": "storage.type.derived.parabun"
+        }
       }
     },
     {
       "match": "\\b(arena)\\b(?=\\s*\\{)",
       "captures": {
-        "1": { "name": "keyword.control.arena.parabun" }
+        "1": {
+          "name": "keyword.control.arena.parabun"
+        }
       }
     },
     {
       "comment": "memo async NAME(  — statement-form async memoized fn",
       "match": "\\b(memo)\\s+(async)\\s+(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
       "captures": {
-        "1": { "name": "keyword.other.memo.parabun" },
-        "2": { "name": "storage.modifier.async" }
+        "1": {
+          "name": "keyword.other.memo.parabun"
+        },
+        "2": {
+          "name": "storage.modifier.async"
+        }
       }
     },
     {
       "comment": "memo NAME(  — statement-form memoized fn",
       "match": "\\b(memo)\\s+(?!async\\b)(?=[A-Za-z_$][\\w$]*\\s*(?:<|\\())",
       "captures": {
-        "1": { "name": "keyword.other.memo.parabun" }
+        "1": {
+          "name": "keyword.other.memo.parabun"
+        }
       }
     },
     {
       "comment": "memo async (   or   memo async NAME =>  — async arrow form",
       "match": "\\b(memo)\\s+(async)\\s+(?=\\(|[A-Za-z_$][\\w$]*\\s*=>)",
       "captures": {
-        "1": { "name": "keyword.other.memo.parabun" },
-        "2": { "name": "storage.modifier.async" }
+        "1": {
+          "name": "keyword.other.memo.parabun"
+        },
+        "2": {
+          "name": "storage.modifier.async"
+        }
       }
     },
     {
       "comment": "memo (   or   memo <T>(   or   memo NAME =>  — arrow form (sync)",
       "match": "\\b(memo)\\s+(?=\\(|<[\\w\\s,=]+>\\s*\\(|[A-Za-z_$][\\w$]*\\s*=>)",
       "captures": {
-        "1": { "name": "keyword.other.memo.parabun" }
+        "1": {
+          "name": "keyword.other.memo.parabun"
+        }
       }
     },
     {
       "match": "\\b(defer)\\b(?=\\s+[A-Za-z_$])",
       "captures": {
-        "1": { "name": "keyword.control.defer.parabun" }
+        "1": {
+          "name": "keyword.control.defer.parabun"
+        }
       }
     },
     {
@@ -135,6 +187,152 @@
     {
       "match": "(?<![\\-=<])->",
       "name": "keyword.operator.callbind.parabun"
+    },
+    {
+      "comment": "export schema NAME from <expr>",
+      "match": "\\b(export)\\s+(schema)\\s+([A-Za-z_$][\\w$]*)\\s+(from)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.control.export.ts"
+        },
+        "2": {
+          "name": "storage.type.model.parabun"
+        },
+        "3": {
+          "name": "entity.name.type.model.parabun"
+        },
+        "4": {
+          "name": "keyword.control.from.parabun"
+        }
+      }
+    },
+    {
+      "comment": "schema NAME from <expr>",
+      "match": "\\b(schema)\\s+([A-Za-z_$][\\w$]*)\\s+(from)\\b",
+      "captures": {
+        "1": {
+          "name": "storage.type.model.parabun"
+        },
+        "2": {
+          "name": "entity.name.type.model.parabun"
+        },
+        "3": {
+          "name": "keyword.control.from.parabun"
+        }
+      }
+    },
+    {
+      "comment": "export schema NAME { ... } / NAME = ...",
+      "match": "\\b(export)\\s+(schema)\\s+([A-Za-z_$][\\w$]*)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.control.export.ts"
+        },
+        "2": {
+          "name": "storage.type.model.parabun"
+        },
+        "3": {
+          "name": "entity.name.type.model.parabun"
+        }
+      }
+    },
+    {
+      "comment": "schema NAME (declaration form — coloring works whether followed by { or = or from)",
+      "match": "\\b(schema)\\s+([A-Za-z_$][\\w$]*)\\b",
+      "captures": {
+        "1": {
+          "name": "storage.type.model.parabun"
+        },
+        "2": {
+          "name": "entity.name.type.model.parabun"
+        }
+      }
+    },
+    {
+      "comment": "schema { ... } inline expression literal",
+      "match": "\\b(schema)\\b(?=\\s*\\{)",
+      "captures": {
+        "1": {
+          "name": "storage.type.model.parabun"
+        }
+      }
+    },
+    {
+      "comment": "match EXPR { ... } pattern matching",
+      "match": "\\b(match)\\b(?=\\s+[A-Za-z_$(])",
+      "captures": {
+        "1": {
+          "name": "keyword.control.match.parabun"
+        }
+      }
+    },
+    {
+      "comment": ":: per-arg validation marker",
+      "match": "::",
+      "name": "keyword.operator.validate.parabun"
+    },
+    {
+      "comment": "Ok / Err / Some constructor application",
+      "match": "\\b(Ok|Err|Some)\\b(?=\\s*\\()",
+      "captures": {
+        "1": {
+          "name": "support.function.constructor.result.parabun"
+        }
+      }
+    },
+    {
+      "comment": "None bare Option constant",
+      "match": "\\b(None)\\b(?!\\s*[\\.\\[\\(])",
+      "captures": {
+        "1": {
+          "name": "constant.language.option.none.parabun"
+        }
+      }
+    },
+    {
+      "comment": "Capitalized refinement / format types in model field positions",
+      "match": "(:|::)(\\s+)(Email|UUID|Url|Date|DateTime|IpV4|IpV6|Slug)\\b",
+      "captures": {
+        "1": {
+          "name": "punctuation.separator.key-value.ts"
+        },
+        "3": {
+          "name": "support.type.ts"
+        }
+      }
+    },
+    {
+      "comment": "Lowercase primitive types in model field positions",
+      "match": "(:)(\\s+)(int|str|string|bool|boolean|float|num|number)\\b",
+      "captures": {
+        "1": {
+          "name": "punctuation.separator.key-value.ts"
+        },
+        "3": {
+          "name": "support.type.primitive.ts"
+        }
+      }
+    },
+    {
+      "comment": "expr is not Type — runtime negated type-guard",
+      "match": "\\b(is)\\s+(not)\\b(?=\\s+[A-Z])",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.is.parabun"
+        },
+        "2": {
+          "name": "keyword.operator.is.parabun"
+        }
+      }
+    },
+    {
+      "comment": "expr is Type — runtime type-guard, lowers to Type.parse(expr).tag === \"Ok\"",
+      "match": "\\b(is)\\b(?=\\s+[A-Z])",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.is.parabun"
+        }
+      }
     }
   ]
 }

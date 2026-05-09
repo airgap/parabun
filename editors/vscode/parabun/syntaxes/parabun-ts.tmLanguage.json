@@ -4,6 +4,36 @@
   "scopeName": "source.pts",
   "patterns": [
     {
+      "include": "#parabun-is"
+    },
+    {
+      "include": "#parabun-model"
+    },
+    {
+      "include": "#parabun-match"
+    },
+    {
+      "include": "#parabun-effect"
+    },
+    {
+      "include": "#parabun-when"
+    },
+    {
+      "include": "#parabun-arena"
+    },
+    {
+      "include": "#parabun-signal"
+    },
+    {
+      "include": "#parabun-validation-marker"
+    },
+    {
+      "include": "#parabun-result-ctors"
+    },
+    {
+      "include": "#parabun-builtin-types"
+    },
+    {
       "include": "#parabun-fun"
     },
     {
@@ -23,6 +53,218 @@
     }
   ],
   "repository": {
+    "parabun-model": {
+      "patterns": [
+        {
+          "comment": "export model NAME from <expr> — ingest existing JSON Schema",
+          "match": "\\b(export)\\s+(schema)\\s+([A-Za-z_$][\\w$]*)\\s+(from)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.export.ts"
+            },
+            "2": {
+              "name": "storage.type.model.parabun"
+            },
+            "3": {
+              "name": "entity.name.type.model.parabun"
+            },
+            "4": {
+              "name": "keyword.control.from.parabun"
+            }
+          }
+        },
+        {
+          "comment": "model NAME from <expr> — ingest existing JSON Schema",
+          "match": "\\b(schema)\\s+([A-Za-z_$][\\w$]*)\\s+(from)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.model.parabun"
+            },
+            "2": {
+              "name": "entity.name.type.model.parabun"
+            },
+            "3": {
+              "name": "keyword.control.from.parabun"
+            }
+          }
+        },
+        {
+          "comment": "export model NAME { ... } — declaration",
+          "match": "\\b(export)\\s+(schema)\\s+([A-Za-z_$][\\w$]*)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.export.ts"
+            },
+            "2": {
+              "name": "storage.type.model.parabun"
+            },
+            "3": {
+              "name": "entity.name.type.model.parabun"
+            }
+          }
+        },
+        {
+          "comment": "model NAME { ... } — declaration",
+          "match": "\\b(schema)\\s+([A-Za-z_$][\\w$]*)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "storage.type.model.parabun"
+            },
+            "2": {
+              "name": "entity.name.type.model.parabun"
+            }
+          }
+        },
+        {
+          "comment": "schema { ... } — inline JSON Schema literal",
+          "match": "\\b(schema)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "storage.type.model.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-match": {
+      "patterns": [
+        {
+          "comment": "match EXPR { ... } — pattern matching expression",
+          "match": "\\b(match)\\b(?=\\s+[A-Za-z_$(])",
+          "captures": {
+            "1": {
+              "name": "keyword.control.match.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-effect": {
+      "patterns": [
+        {
+          "comment": "effect { ... } — signal effect block",
+          "match": "\\b(effect)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.effect.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-when": {
+      "patterns": [
+        {
+          "comment": "when not EXPR { ... } / when not { ... } (else)",
+          "match": "\\b(when)\\s+(not)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.when.parabun"
+            },
+            "2": {
+              "name": "keyword.control.when-not.parabun"
+            }
+          }
+        },
+        {
+          "comment": "when EXPR { ... } — guarded block",
+          "match": "\\b(when)\\b(?=\\s+[!A-Za-z_$(])",
+          "captures": {
+            "1": {
+              "name": "keyword.control.when.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-arena": {
+      "patterns": [
+        {
+          "comment": "arena { ... } — DeferGC scope",
+          "match": "\\b(arena)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.arena.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-signal": {
+      "patterns": [
+        {
+          "comment": "signal NAME = ... — reactive cell declaration",
+          "match": "\\b(signal)\\s+([A-Za-z_$][\\w$]*)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.type.signal.parabun"
+            },
+            "2": {
+              "name": "variable.other.signal.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-validation-marker": {
+      "patterns": [
+        {
+          "comment": ":: per-arg validation marker — `(req:: User)` runs User.parse at fn entry",
+          "name": "keyword.operator.validate.parabun",
+          "match": "::"
+        }
+      ]
+    },
+    "parabun-result-ctors": {
+      "patterns": [
+        {
+          "comment": "Ok / Err / Some / None — Result/Option constructor application",
+          "match": "\\b(Ok|Err|Some)\\b(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "support.function.constructor.result.parabun"
+            }
+          }
+        },
+        {
+          "comment": "None — bare Option constant",
+          "match": "\\b(None)\\b(?!\\s*[\\.\\[\\(])",
+          "captures": {
+            "1": {
+              "name": "constant.language.option.none.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-builtin-types": {
+      "patterns": [
+        {
+          "comment": "Capitalized refinement / format types in model field positions",
+          "match": "(:|::)(\\s+)(Email|UUID|Url|Date|DateTime|IpV4|IpV6|Slug)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.separator.key-value.ts"
+            },
+            "3": {
+              "name": "support.type.ts"
+            }
+          }
+        },
+        {
+          "comment": "Lowercase primitive types in model field positions",
+          "match": "(:)(\\s+)(int|str|string|bool|boolean|float|num|number)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.separator.key-value.ts"
+            },
+            "3": {
+              "name": "support.type.primitive.ts"
+            }
+          }
+        }
+      ]
+    },
     "parabun-fun": {
       "patterns": [
         {
@@ -201,6 +443,31 @@
             },
             "2": {
               "name": "keyword.other.suffix.decimal.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-is": {
+      "patterns": [
+        {
+          "comment": "expr is not Type — runtime negated type-guard",
+          "match": "\\b(is)\\s+(not)\\b(?=\\s+[A-Z])",
+          "captures": {
+            "1": {
+              "name": "keyword.operator.is.parabun"
+            },
+            "2": {
+              "name": "keyword.operator.is.parabun"
+            }
+          }
+        },
+        {
+          "comment": "expr is Type — runtime type-guard, lowers to Type.parse(expr).tag === \"Ok\"",
+          "match": "\\b(is)\\b(?=\\s+[A-Z])",
+          "captures": {
+            "1": {
+              "name": "keyword.operator.is.parabun"
             }
           }
         }

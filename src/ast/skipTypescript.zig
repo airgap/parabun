@@ -1066,7 +1066,38 @@ pub fn SkipTypescript(
             });
 
             try p.lexer.expect(.t_equals);
-            try p.skipTypeScriptType(.lowest);
+            // Parabun: if the RHS is a bare object type literal `{ ... }`,
+            // capture fields into the type registry so `(arg:: Name)` can
+            // generate a runtime validator. Otherwise fall through to the
+            // standard skip-and-discard flow.
+            //
+            // Capture is only safe when the WHOLE RHS is exactly that one
+            // object literal. If the type continues with `|`, `&`, `[]`,
+            // etc. (i.e. it's a union / intersection / array of objects),
+            // capturing produces a misleading registry entry AND leaves
+            // the lexer pointing at the unexpected continuation token,
+            // which then crashes `expectOrInsertSemicolon`. Restore +
+            // standard skip in that case.
+            if (opts.is_module_scope and p.lexer.token == .t_open_brace) {
+                const saved = p.lexer;
+                if (captureTypeScriptInterfaceBody(p, name)) |_| {
+                    if (p.lexer.token == .t_bar or p.lexer.token == .t_ampersand or
+                        p.lexer.token == .t_open_bracket or p.lexer.token == .t_question or
+                        p.lexer.token == .t_dot)
+                    {
+                        // Type continues — discard the partial capture and
+                        // restart with a full skip so the lexer ends on `;`.
+                        _ = p.para_ts_type_registry.remove(name);
+                        p.lexer.restore(&saved);
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                } else |_| {
+                    p.lexer.restore(&saved);
+                    try p.skipTypeScriptType(.lowest);
+                }
+            } else {
+                try p.skipTypeScriptType(.lowest);
+            }
             try p.lexer.expectOrInsertSemicolon();
         }
 
@@ -1083,7 +1114,14 @@ pub fn SkipTypescript(
                 .allow_empty_type_parameters = true,
             });
 
+            // Parabun: skip capture if the interface has type parameters,
+            // extends clause, or implements clause — those are out of v0
+            // scope (generics / inheritance / etc.). Mark unsupported so
+            // `(arg:: Name)` falls through to "unknown type" diagnostic.
+            var is_simple = true;
+
             if (p.lexer.token == .t_extends) {
+                is_simple = false;
                 try p.lexer.next();
 
                 while (true) {
@@ -1096,6 +1134,7 @@ pub fn SkipTypescript(
             }
 
             if (p.lexer.isContextualKeyword("implements")) {
+                is_simple = false;
                 try p.lexer.next();
                 while (true) {
                     try p.skipTypeScriptType(.lowest);
@@ -1106,7 +1145,97 @@ pub fn SkipTypescript(
                 }
             }
 
+            if (is_simple and opts.is_module_scope) {
+                // Save state so we can roll back if the body contains
+                // anything we can't capture (nested generics, method
+                // sigs, index signatures, etc.) and fall through to the
+                // standard skip.
+                const saved = p.lexer;
+                if (captureTypeScriptInterfaceBody(p, name)) |_| {
+                    return;
+                } else |_| {
+                    p.lexer.restore(&saved);
+                }
+            }
             try p.skipTypeScriptObjectType();
+        }
+
+        // Parabun: parse a TS interface body and record (name, fields[])
+        // into the parser's type registry. Same shape as
+        // `skipTypeScriptObjectType` but captures field names + their
+        // primitive type tokens. Falls back to unsupported when the body
+        // contains non-trivial types (index signatures, computed keys,
+        // method signatures, generics) — caller still consumes the body.
+        fn captureTypeScriptInterfaceBody(p: *P, name: string) anyerror!void {
+            p.markTypeScriptOnly();
+
+            try p.lexer.expect(.t_open_brace);
+
+            var fields_list = std.ArrayList(P.ParaTsTypeField){};
+
+            while (p.lexer.token != .t_close_brace) {
+                // Modifiers / index sigs / computed keys → bail; caller
+                // restores lexer state and falls through to skipTypeScriptObjectType.
+                if (p.lexer.token == .t_plus or p.lexer.token == .t_minus or p.lexer.token == .t_open_bracket) {
+                    return error.UnsupportedTypeShape;
+                }
+
+                if (p.lexer.token != .t_identifier and p.lexer.token != .t_string_literal) {
+                    return error.UnsupportedTypeShape;
+                }
+
+                const field_name = p.lexer.identifier;
+                try p.lexer.next();
+
+                const optional = p.lexer.token == .t_question;
+                if (optional) try p.lexer.next();
+
+                if (p.lexer.token == .t_open_paren or p.lexer.token == .t_less_than) {
+                    // Method signature / generic → bail.
+                    return error.UnsupportedTypeShape;
+                }
+
+                if (p.lexer.token != .t_colon) {
+                    return error.UnsupportedTypeShape;
+                }
+                try p.lexer.next();
+
+                // Capture the type's leading identifier — only triggers a
+                // generated validator when it's a primitive Para
+                // recognizes (number / string / boolean / bigint).
+                var field_type: string = "";
+                if (p.lexer.token == .t_identifier) {
+                    field_type = p.lexer.identifier;
+                }
+                try p.skipTypeScriptType(.lowest);
+
+                fields_list.append(p.allocator, .{
+                    .name = field_name,
+                    .type_name = field_type,
+                    .optional = optional,
+                }) catch unreachable;
+
+                switch (p.lexer.token) {
+                    .t_close_brace => {},
+                    .t_comma, .t_semicolon => {
+                        try p.lexer.next();
+                    },
+                    else => {
+                        if (!p.lexer.has_newline_before) {
+                            try p.lexer.unexpected();
+                            return error.SyntaxError;
+                        }
+                    },
+                }
+            }
+
+            try p.lexer.expect(.t_close_brace);
+
+            const slice = fields_list.toOwnedSlice(p.allocator) catch &[_]P.ParaTsTypeField{};
+            p.para_ts_type_registry.put(p.allocator, name, .{
+                .fields = slice,
+                .unsupported = false,
+            }) catch {};
         }
 
         pub fn skipTypeScriptTypeArguments(p: *P, comptime isInsideJSXElement: bool) anyerror!bool {

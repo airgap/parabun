@@ -1,8 +1,8 @@
 {
   "name": "parabun",
   "displayName": "Parabun",
-  "description": "Language support for Parabun (.pts/.pjs) — Bun fork with pure functions, error chaining, and pipeline operators",
-  "version": "0.1.0",
+  "description": "Language support for Parabun (.pts/.pjs) — Bun fork with pure functions, error chaining, pipelines, models, pattern matching, and runtime validation",
+  "version": "0.10.1",
   "publisher": "parabun",
   "license": "MIT",
   "repository": {
@@ -25,6 +25,38 @@
     "onLanguage:parabun-jsx"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": "storage.type.model.parabun",
+            "settings": {
+              "foreground": "#C586C0",
+              "fontStyle": "italic"
+            }
+          },
+          {
+            "scope": "entity.name.type.model.parabun",
+            "settings": {
+              "foreground": "#DCDCAA"
+            }
+          },
+          {
+            "scope": "storage.type.signal.parabun",
+            "settings": {
+              "foreground": "#4FC1FF",
+              "fontStyle": "italic"
+            }
+          },
+          {
+            "scope": "variable.other.signal.parabun",
+            "settings": {
+              "foreground": "#9CDCFE"
+            }
+          }
+        ]
+      }
+    },
     "languages": [
       {
         "id": "parabun-ts",

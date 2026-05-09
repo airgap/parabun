@@ -7,6 +7,138 @@ pub fn ParseFn(
         const P = js_parser.NewParser_(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only);
         const is_typescript_enabled = P.is_typescript_enabled;
 
+        // Parabun: emit inline typeof checks for a `(arg:: TSInterface)`
+        // boundary when the TSInterface was captured into the type
+        // registry. Builds:
+        //   if (typeof arg !== "object" || arg === null) throw new Error("...");
+        //   if (typeof arg.field !== "<primitive>") throw new Error("...");
+        //   ... (one per field; optional gates skip when undefined/null)
+        fn appendTsShapeValidator(p: *P, combined: *ListManaged(Stmt), val: P.ParaArgValidation, fields: []const P.ParaTsTypeField) anyerror!void {
+            const arg_id = p.newExpr(E.Identifier{ .ref = val.arg_ref }, val.loc);
+
+            // typeof arg !== "object" || arg === null
+            const typeof_arg = p.newExpr(E.Unary{
+                .op = .un_typeof,
+                .value = arg_id,
+            }, val.loc);
+            const not_object = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = typeof_arg,
+                .right = p.newExpr(E.String{ .data = "object" }, val.loc),
+            }, val.loc);
+            const arg_null = p.newExpr(E.Binary{
+                .op = .bin_strict_eq,
+                .left = arg_id,
+                .right = p.newExpr(E.Null{}, val.loc),
+            }, val.loc);
+            const obj_test = p.newExpr(E.Binary{
+                .op = .bin_logical_or,
+                .left = not_object,
+                .right = arg_null,
+            }, val.loc);
+            const obj_err_msg = std.fmt.allocPrint(p.allocator, "{s}: expected {s}", .{ val.arg_name, val.type_name }) catch return error.OutOfMemory;
+            try combined.append(p.s(S.If{
+                .test_ = obj_test,
+                .yes = p.s(S.Throw{
+                    .value = makeNewError(p, obj_err_msg, val.loc),
+                }, val.loc),
+                .no = null,
+            }, val.loc));
+
+            for (fields) |f| {
+                const expected = primitiveTypeofString(f.type_name) orelse continue;
+                // arg.<field>
+                const field_access = p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = val.arg_ref }, val.loc),
+                    .name = f.name,
+                    .name_loc = val.loc,
+                }, val.loc);
+                const typeof_field = p.newExpr(E.Unary{
+                    .op = .un_typeof,
+                    .value = field_access,
+                }, val.loc);
+                var test_expr = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = expected }, val.loc),
+                }, val.loc);
+
+                // Optional fields: gate the typeof check on present-ness.
+                if (f.optional) {
+                    const undef_check = p.newExpr(E.Binary{
+                        .op = .bin_strict_ne,
+                        .left = field_access,
+                        .right = p.newExpr(E.Undefined{}, val.loc),
+                    }, val.loc);
+                    const null_check = p.newExpr(E.Binary{
+                        .op = .bin_strict_ne,
+                        .left = field_access,
+                        .right = p.newExpr(E.Null{}, val.loc),
+                    }, val.loc);
+                    const present = p.newExpr(E.Binary{
+                        .op = .bin_logical_and,
+                        .left = undef_check,
+                        .right = null_check,
+                    }, val.loc);
+                    test_expr = p.newExpr(E.Binary{
+                        .op = .bin_logical_and,
+                        .left = present,
+                        .right = test_expr,
+                    }, val.loc);
+                }
+
+                const err_msg = std.fmt.allocPrint(p.allocator, "{s}.{s}: expected {s}", .{ val.arg_name, f.name, f.type_name }) catch continue;
+                try combined.append(p.s(S.If{
+                    .test_ = test_expr,
+                    .yes = p.s(S.Throw{
+                        .value = makeNewError(p, err_msg, val.loc),
+                    }, val.loc),
+                    .no = null,
+                }, val.loc));
+            }
+        }
+
+        fn makeNewError(p: *P, msg: []const u8, loc: logger.Loc) Expr {
+            const error_id = p.newExpr(E.Identifier{ .ref = p.storeNameInRef("Error") catch unreachable }, loc);
+            const new_args = p.allocator.alloc(Expr, 1) catch unreachable;
+            new_args[0] = p.newExpr(E.String{ .data = msg }, loc);
+            return p.newExpr(E.New{
+                .target = error_id,
+                .args = ExprNodeList.fromOwnedSlice(new_args),
+                .close_parens_loc = loc,
+            }, loc);
+        }
+
+        // Map TS primitive type-name to its `typeof` string. Returns null
+        // for non-primitives (Para models / unsupported types) so callers
+        // know to skip auto-generation.
+        fn primitiveTypeofString(t: []const u8) ?[]const u8 {
+            if (strings.eqlComptime(t, "number")) return "number";
+            if (strings.eqlComptime(t, "string")) return "string";
+            if (strings.eqlComptime(t, "boolean")) return "boolean";
+            if (strings.eqlComptime(t, "bigint")) return "bigint";
+            return null;
+        }
+
+        // Capitalized JS / TS builtin type names — `(s:: String) => ...`
+        // shouldn't try to call `String.parse(s)`. Skip these from
+        // `::`-marker auto-validation.
+        fn isJsBuiltinTypeName(tn: []const u8) bool {
+            const builtins = [_][]const u8{
+                "String",         "Number",     "Boolean",     "Object",        "Array",
+                "Function",       "Date",       "RegExp",      "Error",         "Map",
+                "Set",            "WeakMap",    "WeakSet",     "Promise",       "Symbol",
+                "BigInt",         "Buffer",     "ArrayBuffer", "Uint8Array",    "Int8Array",
+                "Uint16Array",    "Int16Array", "Uint32Array", "Int32Array",    "Float32Array",
+                "Float64Array",   "DataView",   "Iterator",    "AsyncIterator", "Generator",
+                "AsyncGenerator", "JSON",       "Math",        "Reflect",       "Proxy",
+            };
+            inline for (builtins) |b| {
+                if (strings.eqlComptime(tn, b)) return true;
+            }
+            return false;
+        }
+
         /// This assumes the "function" token has already been parsed
         pub fn parseFnStmt(noalias p: *P, loc: logger.Loc, noalias opts: *ParseStatementOptions, asyncRange: ?logger.Range, is_pure: bool) !Stmt {
             const is_generator = p.lexer.token == T.t_asterisk;
@@ -262,6 +394,32 @@ pub fn ParseFn(
                     // "function foo(a: any) {}"
                     if (p.lexer.token == .t_colon) {
                         try p.lexer.next();
+                        // Parabun: `::` (two consecutive colons) marks the
+                        // arg for runtime validation against a Para model.
+                        // `(req:: User)` → at fn entry, `User.parse(req)`
+                        // is run and Err is thrown. After capturing the
+                        // type identifier we still skip-typescript-skip
+                        // it so downstream codegen treats it as a normal
+                        // type annotation.
+                        if (p.lexer.token == .t_colon and !rest_arg) {
+                            try p.lexer.next();
+                            if (p.lexer.token == .t_identifier) {
+                                const validation_type = p.lexer.identifier;
+                                const validation_loc = p.lexer.loc();
+                                if (validation_type.len > 0 and validation_type[0] >= 'A' and validation_type[0] <= 'Z' and
+                                    !isJsBuiltinTypeName(validation_type))
+                                {
+                                    if (is_identifier and arg.data == .b_identifier) {
+                                        p.para_arg_validations.append(p.allocator, .{
+                                            .arg_ref = arg.data.b_identifier.ref,
+                                            .arg_name = text,
+                                            .type_name = validation_type,
+                                            .loc = validation_loc,
+                                        }) catch unreachable;
+                                    }
+                                }
+                            }
+                        }
                         if (!rest_arg) {
                             if (p.options.features.emit_decorator_metadata and
                                 opts.allow_ts_decorators and
@@ -377,7 +535,90 @@ pub fn ParseFn(
                 // that merely inherit purity keep the outer's boundary.
                 tempOpts.pure_fn_scope = p.current_scope;
             }
+            // Parabun: capture the `::`-marked validation list before
+            // parsing the body — body parsing may push nested fn parses
+            // that overwrite p.para_arg_validations. We process the list
+            // for THIS fn's args only.
+            const my_validations = p.para_arg_validations.items;
+            p.para_arg_validations.items = &.{};
+            p.para_arg_validations.capacity = 0;
+
             func.body = try p.parseFnBody(&tempOpts);
+
+            // Parabun: prepend validation prelude to the body for any args
+            // marked with `::`. Each yields:
+            //   const __paraCheck_<arg> = <Type>.parse(<arg>);
+            //   if (__paraCheck_<arg>.tag === "Err") throw new Error(__paraCheck_<arg>.error);
+            if (my_validations.len > 0) {
+                var combined = ListManaged(Stmt).init(p.allocator);
+                for (my_validations) |val| {
+                    // If the type isn't a Para model in scope but IS a TS
+                    // interface / type alias we captured in the registry,
+                    // emit inline typeof checks instead of Type.parse(arg).
+                    if (p.para_ts_type_registry.get(val.type_name)) |shape| {
+                        if (!shape.unsupported and shape.fields.len > 0) {
+                            appendTsShapeValidator(p, &combined, val, shape.fields) catch continue;
+                            continue;
+                        }
+                    }
+
+                    const check_name = std.fmt.allocPrint(p.allocator, "__paraCheck_{s}", .{val.arg_name}) catch continue;
+                    const check_ref = p.declareSymbol(.hoisted, val.loc, check_name) catch continue;
+                    const type_ref = p.storeNameInRef(val.type_name) catch continue;
+                    const parse_dot = p.newExpr(E.Dot{
+                        .target = p.newExpr(E.Identifier{ .ref = type_ref }, val.loc),
+                        .name = "parse",
+                        .name_loc = val.loc,
+                    }, val.loc);
+                    const call_args = p.allocator.alloc(Expr, 1) catch continue;
+                    call_args[0] = p.newExpr(E.Identifier{ .ref = val.arg_ref }, val.loc);
+                    const parse_call = p.newExpr(E.Call{
+                        .target = parse_dot,
+                        .args = ExprNodeList.fromOwnedSlice(call_args),
+                    }, val.loc);
+                    const decls = p.allocator.alloc(G.Decl, 1) catch continue;
+                    decls[0] = .{
+                        .binding = p.b(B.Identifier{ .ref = check_ref }, val.loc),
+                        .value = parse_call,
+                    };
+                    combined.append(p.s(S.Local{
+                        .kind = .k_const,
+                        .decls = G.Decl.List.fromOwnedSlice(decls),
+                    }, val.loc)) catch continue;
+
+                    const tag_access = p.newExpr(E.Dot{
+                        .target = p.newExpr(E.Identifier{ .ref = check_ref }, val.loc),
+                        .name = "tag",
+                        .name_loc = val.loc,
+                    }, val.loc);
+                    const tag_test = p.newExpr(E.Binary{
+                        .op = .bin_strict_eq,
+                        .left = tag_access,
+                        .right = p.newExpr(E.String{ .data = "Err" }, val.loc),
+                    }, val.loc);
+                    const err_access = p.newExpr(E.Dot{
+                        .target = p.newExpr(E.Identifier{ .ref = check_ref }, val.loc),
+                        .name = "error",
+                        .name_loc = val.loc,
+                    }, val.loc);
+                    const error_id = p.newExpr(E.Identifier{ .ref = p.storeNameInRef("Error") catch continue }, val.loc);
+                    const new_args = p.allocator.alloc(Expr, 1) catch continue;
+                    new_args[0] = err_access;
+                    const new_err = p.newExpr(E.New{
+                        .target = error_id,
+                        .args = ExprNodeList.fromOwnedSlice(new_args),
+                        .close_parens_loc = val.loc,
+                    }, val.loc);
+                    const throw_stmt = p.s(S.Throw{ .value = new_err }, val.loc);
+                    combined.append(p.s(S.If{
+                        .test_ = tag_test,
+                        .yes = throw_stmt,
+                        .no = null,
+                    }, val.loc)) catch continue;
+                }
+                for (func.body.stmts) |s| combined.append(s) catch continue;
+                func.body = G.FnBody{ .loc = func.body.loc, .stmts = combined.toOwnedSlice() catch func.body.stmts };
+            }
 
             return func;
         }
@@ -571,3 +812,5 @@ const options = js_parser.options;
 
 const std = @import("std");
 const List = std.ArrayListUnmanaged;
+const ListManaged = std.array_list.Managed;
+const B = js_ast.B;

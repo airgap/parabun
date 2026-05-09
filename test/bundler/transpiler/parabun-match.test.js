@@ -8,7 +8,7 @@ function ts(code, options = {}) {
 }
 
 describe("Parabun match expression", () => {
-  test("literal arms desugar to ternary chain", () => {
+  test("all-literal arms desugar to switch (jump-table-friendly)", () => {
     const out = ts(`
       const r = match status {
         200 => "ok",
@@ -17,22 +17,27 @@ describe("Parabun match expression", () => {
         _ => "unknown"
       }
     `);
-    expect(out).toContain("=== 200 ?");
-    expect(out).toContain('"ok"');
-    expect(out).toContain('"unknown"');
-    // IIFE wrapper passing the subject in (concise-form arrow has no
-    // brace, just a closing paren before the call).
+    expect(out).toContain("switch (");
+    expect(out).toContain("case 200:");
+    expect(out).toContain('return "ok"');
+    expect(out).toContain("default:");
+    expect(out).toContain('return "unknown"');
     expect(out).toContain(")(status)");
   });
 
-  test("OR pattern chains into `||` test", () => {
+  test("OR pattern emits one case per alternative with fall-through", () => {
     const out = ts(`
       const r = match code {
         "a" | "b" | "c" => 1,
         _ => 0
       }
     `);
-    expect(out).toMatch(/=== "a" \|\| .* === "b" \|\| .* === "c"/);
+    // Three case labels, only the last one returns; the first two
+    // fall through.
+    expect(out).toContain('case "a":');
+    expect(out).toContain('case "b":');
+    expect(out).toContain('case "c":');
+    expect(out).toMatch(/case "c":\s*return 1/);
   });
 
   test("identifier-bind pattern substitutes name with subject", () => {
@@ -47,26 +52,29 @@ describe("Parabun match expression", () => {
     expect(out).toMatch(/"got " \+ __pm/);
   });
 
-  test("wildcard `_` arm produces fallback expression", () => {
+  test("wildcard `_` arm produces default case", () => {
     const out = ts(`
       const r = match flag {
         true => 1,
         _ => -1
       }
     `);
-    expect(out).toMatch(/=== true \?/);
-    // -1 prints as `-1` (unary on number 1).
+    expect(out).toContain("case true:");
+    expect(out).toContain("default:");
     expect(out).toContain("-1");
   });
 
-  test("no catch-all → undefined fallback", () => {
+  test("no catch-all → no default case (falls through to undefined)", () => {
     const out = ts(`
       const r = match x {
         1 => "one",
         2 => "two"
       }
     `);
-    expect(out).toContain("undefined");
+    expect(out).toContain("case 1:");
+    expect(out).toContain("case 2:");
+    // No default → switch returns undefined when no arm matches.
+    expect(out).not.toContain("default:");
   });
 
   test("negative-number literal pattern works", () => {
@@ -78,7 +86,7 @@ describe("Parabun match expression", () => {
         _ => "far"
       }
     `);
-    expect(out).toContain("=== -1 ?");
+    expect(out).toContain("case -1:");
   });
 
   test("`match` as identifier still works (not followed by expression)", () => {
@@ -108,6 +116,41 @@ describe("Parabun match expression", () => {
     // The call appears once as the IIFE arg.
     const matches = out.match(/expensive\(\)/g) ?? [];
     expect(matches.length).toBe(1);
+  });
+
+  test("`_ is Type` arm runs Type.parse + Ok-tag check", () => {
+    const out = ts(`
+      const r = match x {
+        _ is User => "user",
+        _ is Post => "post",
+        _ => "neither"
+      }
+    `);
+    expect(out).toMatch(/User\.parse\(__pm\w*\$?\)\.tag === "Ok"/);
+    expect(out).toMatch(/Post\.parse\(__pm\w*\$?\)\.tag === "Ok"/);
+  });
+
+  test("`u is Type` arm binds AND type-guards (u substituted with subject)", () => {
+    const out = ts(`
+      const r = match x {
+        u is User => u.email,
+        _ => "?"
+      }
+    `);
+    // Bind: `u.email` becomes `__pm.email` after substitution.
+    expect(out).toMatch(/__pm\w*\$?\.email/);
+    // Test: User.parse + tag check.
+    expect(out).toMatch(/User\.parse\(__pm\w*\$?\)\.tag === "Ok"/);
+  });
+
+  test("`_ is not Type` arm uses !== for negation", () => {
+    const out = ts(`
+      const r = match x {
+        _ is not User => "no",
+        _ => "yes"
+      }
+    `);
+    expect(out).toMatch(/User\.parse\(__pm\w*\$?\)\.tag !== "Ok"/);
   });
 
   test("multiple match expressions in one file don't crash visit", () => {

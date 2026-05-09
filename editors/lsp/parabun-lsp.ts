@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -78,12 +78,22 @@ function containsParabunSyntax(text: string): boolean {
 
 function transformParabunToTS(source: string): string {
   if (!containsParabunSyntax(source)) return source;
+  // Multi-line transforms run before per-line work because `schema X { ... }`
+  // and `match e { ... }` span multiple lines.
+  source = transformModelDeclBlock(source);
+  source = transformInlineSchemaExpr(source);
+  source = transformMatchBlock(source);
+  // String-aware `is`-pattern rewrite at source level (skips matches
+  // inside string / template / comment content).
+  source = transformIsTypeGuardSource(source);
   const lines = source.split("\n");
   for (let i = 0; i < lines.length; i++) {
     lines[i] = transformLine(lines[i]);
   }
   let result = lines.join("\n");
   result = transformMultilinePipeline(result);
+  // Prepend typed `__paraIs_<T>` helpers so TS narrows `if (x is T) { ... }`.
+  result = injectIsHelpers(result);
   return result;
 }
 
@@ -93,6 +103,11 @@ function transformLine(line: string): string {
   line = expandFun(line);
   line = stripMemo(line);
   line = stripPure(line);
+  line = stripValidationMarker(line);
+  // `is`-guard rewrite happens at source level (string-aware) before
+  // line-splitting, so the per-line pass is skipped to avoid a second
+  // rewrite firing inside string content the source pass left alone.
+  line = transformModelFromLine(line);
   line = transformSignal(line);
   line = transformEffect(line);
   line = transformArena(line);
@@ -103,6 +118,373 @@ function transformLine(line: string): string {
   line = transformCallBind(line);
   line = transformPipeline(line);
   return line;
+}
+
+// `(req:: User)` → `(req:  User)` — second `:` becomes a space, column-preserving.
+function stripValidationMarker(line: string): string {
+  return line.replace(/(:):/g, "$1 ");
+}
+
+// `expr is Type` / `expr is not Type` → `__paraIs_Type(expr)` /
+// `!__paraIs_Type(expr)`. Helpers prepended by `injectIsHelpers` so TS
+// narrows `expr` inside `if (...) { ... }` bodies via the `v is T` predicate.
+function transformIsTypeGuard(line: string): string {
+  line = line.replace(
+    /\b([\w$.\[\]()]+)\s+is\s+not\s+([A-Z][\w$]*)\b/g,
+    (_m, lhs, type) => `!__paraIs_${type}(${lhs})`,
+  );
+  line = line.replace(/\b([\w$.\[\]()]+)\s+is\s+([A-Z][\w$]*)\b/g, (_m, lhs, type) => `__paraIs_${type}(${lhs})`);
+  return line;
+}
+
+function injectIsHelpers(source: string): string {
+  const types = new Set<string>();
+  const re = /__paraIs_([A-Z][\w$]*)\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) types.add(m[1]);
+  if (types.size === 0) return source;
+  const helpers = [...types]
+    .map(t => `const __paraIs_${t} = (v: any): v is ${t} => (${t} as any).parse(v).tag === "Ok";`)
+    .join("\n");
+  return helpers + "\n" + source;
+}
+
+// `schema X from <rest-of-line>` OR `schema X = <rest-of-line>` →
+// `const X = <rest-of-line>`. (`model` is accepted as a deprecated alias
+// for the same form.) No `: any` annotation — TS infers the const's
+// type from the value, which preserves the literal type when the source
+// ends with `as const` (matches lockstep's original
+// `export const X = {...} as const satisfies BAR;` shape).
+function transformModelFromLine(line: string): string {
+  return line.replace(
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s+(?:from\s+|=\s*)/,
+    (_m, exportKw, name) => `${exportKw ?? ""}const ${name} = `,
+  );
+}
+
+// Inline `schema { ... }` expression → `({ ... })`. Just paren-wrap so
+// the body parses as an object literal at expression position — no
+// `as const` (would compound deep-literal memory pressure across the
+// whole workspace under hot edits) and no `as any` (would blind hover
+// and diagnostics inside the body). The literal narrowness the brand
+// codegen wants is recovered offline in `gen-dts-rewrite`, which works
+// from the AST per-file and doesn't pay tsc's inference cost.
+// Brace-balanced; strings/comments skipped so a `}` inside a literal
+// can't close the body early.
+function transformInlineSchemaExpr(source: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const re = /\bschema\s*\{/g;
+  let match: RegExpExecArray | null;
+  let lastEnd = 0;
+  while ((match = re.exec(source)) !== null) {
+    // Skip if inside a comment / string — quick & dirty: walk from the
+    // start of the line and check whether the match offset is inside a
+    // recognized comment/string region. Cheaper than a full scanner and
+    // good enough for the LSP rewrite.
+    const start = match.index;
+    if (isInsideStringOrComment(source, start)) continue;
+    const openBraceIdx = start + match[0].length - 1;
+    let depth = 1;
+    let j = openBraceIdx + 1;
+    while (j < source.length && depth > 0) {
+      const ch = source[j];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        j++;
+        while (j < source.length && source[j] !== q) {
+          if (source[j] === "\\") j++;
+          j++;
+        }
+        j++;
+        continue;
+      }
+      if (ch === "/" && source[j + 1] === "/") {
+        while (j < source.length && source[j] !== "\n") j++;
+        continue;
+      }
+      if (ch === "/" && source[j + 1] === "*") {
+        j += 2;
+        while (j < source.length - 1 && !(source[j] === "*" && source[j + 1] === "/")) j++;
+        j += 2;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = j - 1;
+    const body = source.slice(openBraceIdx, closeIdx + 1);
+    out.push(source.slice(lastEnd, start));
+    out.push(`(${body})`);
+    lastEnd = closeIdx + 1;
+    re.lastIndex = closeIdx + 1;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
+// Quick check for "is offset N inside a single/double/backtick string
+// or a //- or /*-comment" — by walking from the start of the source.
+// Linear in offset, but the LSP only invokes this per regex match so
+// total work is bounded by the source length.
+function isInsideStringOrComment(source: string, offset: number): boolean {
+  let i = 0;
+  while (i < offset) {
+    const ch = source[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const q = ch;
+      i++;
+      while (i < offset && source[i] !== q) {
+        if (source[i] === "\\") i++;
+        i++;
+      }
+      if (i >= offset) return true;
+      i++;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      if (i > offset) return true;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      i += 2;
+      while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      if (i > offset) return true;
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
+// `schema X { ... }` (multi-line) → `const X: { parse, schema } = { ... }`.
+// We don't try to mirror the field shape — the LSP just needs the binding
+// to exist so go-to-def, hover, and member completions on `X.parse` /
+// `X.schema` work. The runtime owns the actual codegen. Also emits a
+// `type X = { ... }` alias so `if (v is X)` can narrow via the typed
+// `__paraIs_X` predicate prepended by `injectIsHelpers`.
+// Hybrid rewrite: open `schema NAME {` becomes `type NAME = {`, close `}`
+// is augmented with the const decl on the same line. For body lines,
+// only TYPE FRAGMENTS that are Para-specific (refinements `int(0..150)`,
+// array+bounds `[str](1..=10)`, lowercase aliases `int`/`str`/`bool`/`float`)
+// are rewritten to plain TS. Plain TS field types (`number`/`string`/etc.,
+// capitalized model refs) pass through verbatim — preserving hover
+// positions inside the body for the common pg-models case.
+function transformModelDeclBlock(source: string): string {
+  return source.replace(
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)(\s*\{)([\s\S]*?)(\n\s*)\}/g,
+    (_m, exportKw, name, openBrace, body, closeWs) => {
+      const e = exportKw ?? "";
+      const rewritten = rewriteParaFieldLines(body);
+      const constDecl =
+        ` ${e}const ${name}: { parse: (v: any) => { tag: "Ok"; value: ${name} } | { tag: "Err"; error: string }; schema: any } = ` +
+        `{ parse: (_v: any) => ({} as any), schema: {} as any };`;
+      return `${e}type ${name} =${openBrace}${rewritten}${closeWs}};${constDecl}`;
+    },
+  );
+}
+
+// Per-line rewrite: only changes a line when its TYPE fragment is
+// Para-specific. Plain TS types pass through unchanged (preserves
+// hover positions for that line).
+function rewriteParaFieldLines(body: string): string {
+  return body
+    .split("\n")
+    .map(line => {
+      const m = line.match(/^(\s*)([A-Za-z_$][\w$]*)(\??)\s*:\s*(.+?)(\?)?(\s*[,;]?\s*)$/);
+      if (!m) return line;
+      const [, leadWs, name, prefixOpt, raw, postfixOpt, trail] = m;
+      const trimmed = raw.trim();
+      const optional = prefixOpt === "?" || postfixOpt === "?";
+      // Detect Para-specific syntax: parens (refinement / range), brackets
+      // with parens (array+bounds), known Para alias names, or postfix `?`.
+      const isParaSpecific =
+        /\(/.test(trimmed) ||
+        /^\[[A-Za-z_$][\w$]*\]/.test(trimmed) ||
+        /^(int|str|bool|float|num|Email|UUID|Url|Date|DateTime|IpV4|IpV6|Slug)$/.test(trimmed) ||
+        postfixOpt === "?";
+      if (!isParaSpecific) return line;
+      const tsType = paraTypeFragmentToTsLsp(trimmed);
+      return `${leadWs}${name}${optional ? "?" : ""}: ${tsType}${trail}`;
+    })
+    .join("\n");
+}
+
+function parseModelFieldsForTypeLsp(body: string): { name: string; tsType: string; optional: boolean }[] {
+  const out: { name: string; tsType: string; optional: boolean }[] = [];
+  const stripped = body.replace(/\/\/[^\n]*/g, "");
+  const fieldRe = /([A-Za-z_$][\w$]*)\s*:\s*([^,;\n]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = fieldRe.exec(stripped)) !== null) {
+    let raw = m[2].trim();
+    const optional = raw.endsWith("?");
+    if (optional) raw = raw.slice(0, -1).trim();
+    out.push({ name: m[1], tsType: paraTypeFragmentToTsLsp(raw), optional });
+  }
+  return out;
+}
+
+function paraTypeFragmentToTsLsp(raw: string): string {
+  raw = raw.trim();
+  if (/^\s*(?:"[^"]*"|\d+(?:\.\d+)?|true|false)/.test(raw)) return raw;
+  const arrayMatch = raw.match(/^\[([A-Za-z_$][\w$]*)\](?:\([^)]*\))?$/);
+  if (arrayMatch) return `${paraBaseTypeToTsLsp(arrayMatch[1])}[]`;
+  const rangeMatch = raw.match(/^([A-Za-z_$][\w$]*)\([^)]*\)$/);
+  if (rangeMatch) return paraBaseTypeToTsLsp(rangeMatch[1]);
+  return paraBaseTypeToTsLsp(raw);
+}
+
+function paraBaseTypeToTsLsp(t: string): string {
+  switch (t) {
+    case "int":
+    case "float":
+    case "num":
+    case "number":
+      return "number";
+    case "str":
+    case "string":
+    case "Email":
+    case "UUID":
+    case "Url":
+    case "Date":
+    case "DateTime":
+    case "IpV4":
+    case "IpV6":
+    case "Slug":
+      return "string";
+    case "bool":
+    case "boolean":
+      return "boolean";
+    default:
+      return t;
+  }
+}
+
+// `match EXPR { ... }` → `((__m: any): any => null as any)(EXPR)` so TS sees
+// a typed expression. String/comment content is masked first so `match`
+// inside string literals (e.g. an English description containing the
+// word) doesn't trigger a spurious IIFE rewrite.
+function transformMatchBlock(source: string): string {
+  const masked = maskStringsAndComments(source);
+  const replacements: { start: number; end: number; replacement: string }[] = [];
+  const re = /\bmatch\s+([^{]+?)\s*\{[\s\S]*?\n\s*\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(masked)) !== null) {
+    const subjStart = m.index + "match".length;
+    const subjEnd = subjStart + (m[0].indexOf("{") - "match".length);
+    const subjOrig = source.slice(subjStart, subjEnd).trim();
+    replacements.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      replacement: `((__m: any): any => null as any)(${subjOrig})`,
+    });
+  }
+  if (replacements.length === 0) return source;
+  let out = "";
+  let cursor = 0;
+  for (const r of replacements) {
+    out += source.slice(cursor, r.start);
+    out += r.replacement;
+    cursor = r.end;
+  }
+  out += source.slice(cursor);
+  return out;
+}
+
+// Source-level `is`-pattern rewrite that skips matches inside string,
+// template, or comment content. Replaces `expr is Type` with
+// `__paraIs_Type(expr)` and `expr is not Type` with `!__paraIs_Type(expr)`.
+function transformIsTypeGuardSource(source: string): string {
+  const masked = maskStringsAndComments(source);
+  const replacements: { start: number; end: number; replacement: string }[] = [];
+  const negRe = /\b([\w$.\[\]()]+)\s+is\s+not\s+([A-Z][\w$]*)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = negRe.exec(masked)) !== null) {
+    const lhs = source.slice(m.index, m.index + m[1].length);
+    replacements.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      replacement: `!__paraIs_${m[2]}(${lhs})`,
+    });
+  }
+  const blocked: [number, number][] = replacements.map(r => [r.start, r.end]);
+  const overlaps = (s: number) => blocked.some(([a, b]) => s >= a && s < b);
+  const re = /\b([\w$.\[\]()]+)\s+is\s+([A-Z][\w$]*)\b/g;
+  while ((m = re.exec(masked)) !== null) {
+    if (overlaps(m.index)) continue;
+    const lhs = source.slice(m.index, m.index + m[1].length);
+    replacements.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      replacement: `__paraIs_${m[2]}(${lhs})`,
+    });
+  }
+  if (replacements.length === 0) return source;
+  replacements.sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const r of replacements) {
+    out += source.slice(cursor, r.start);
+    out += r.replacement;
+    cursor = r.end;
+  }
+  out += source.slice(cursor);
+  return out;
+}
+
+// Replace string-literal and comment content with same-length blanks so
+// regex passes can't fire inside them. Newlines + quote chars preserved
+// so position-anchored scans still work.
+function maskStringsAndComments(source: string): string {
+  let masked = "";
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "/" && source[i + 1] === "/") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      masked += " ".repeat(stop - i);
+      i = stop;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      const span = source.slice(i, stop);
+      masked += span.replace(/[^\n]/g, " ");
+      i = stop;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < source.length) {
+        const c = source[j];
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === quote) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      let blanked = quote;
+      for (let k = i + 1; k < j - 1; k++) blanked += source[k] === "\n" ? "\n" : " ";
+      blanked += source[j - 1] === quote ? quote : " ";
+      masked += blanked;
+      i = j;
+      continue;
+    }
+    masked += ch;
+    i++;
+  }
+  return masked;
 }
 
 // `A ~> B` → `A = B` (column-preserving: both `~>` and `= ` are 2 chars).
@@ -612,27 +994,39 @@ function mapPositionFromTransformed(
 function validate(uri: string, content: string) {
   const diagnostics: LspDiagnostic[] = [];
 
-  // Bun transpiler diagnostics (Parabun parse errors)
+  // Bun transpiler diagnostics (Parabun parse errors). The Bun
+  // AggregateError attaches each individual parse failure to `e.errors`
+  // — we iterate that and emit one diagnostic per error with the
+  // attached `position` so squiggles land on the offending tokens
+  // instead of all bunched at line 0.
   const loader = loaderForUri(uri);
   const transpiler = transpilers[loader];
+  // The transpiler ran with the rewritten LSP source. Translate its
+  // line/column back to the original `.pts` source the user is viewing
+  // — `transformParabunToTS` is line-stable for the desugars we apply
+  // here (model/api/match/etc. are line-replaced or single-line), so
+  // line indices map 1:1.
   try {
     transpiler.transformSync(transformParabunToTS(content));
   } catch (e: any) {
-    const pos = e?.position;
-    const message: string = e?.message ?? String(e);
-    const level: string = e?.level ?? "error";
-    const line = pos ? pos.line - 1 : 0;
-    const col = pos ? pos.column - 1 : 0;
-    const len = pos?.length ?? 1;
-    diagnostics.push({
-      range: {
-        start: { line, character: col },
-        end: { line, character: col + len },
-      },
-      severity: level === "warning" ? 2 : 1,
-      source: "parabun",
-      message,
-    });
+    const errs: any[] = Array.isArray(e?.errors) && e.errors.length > 0 ? e.errors : [e];
+    for (const err of errs) {
+      const pos = err?.position;
+      const message: string = err?.message ?? String(err);
+      const level: string = err?.level ?? "error";
+      const line = pos ? pos.line - 1 : 0;
+      const col = pos ? pos.column - 1 : 0;
+      const len = pos?.length ?? 1;
+      diagnostics.push({
+        range: {
+          start: { line, character: col },
+          end: { line, character: col + len },
+        },
+        severity: level === "warning" ? 2 : 1,
+        source: "parabun",
+        message,
+      });
+    }
   }
 
   // TypeScript diagnostics
@@ -679,6 +1073,14 @@ function validate(uri: string, content: string) {
   // Purity violation errors for functions already marked pure
   const pureViolations = findPureViolations(uri, content);
   diagnostics.push(...pureViolations);
+
+  // Para `::` validation marker — flag references to undefined models.
+  const unknownValidationTypes = findUnknownValidationTypeDiagnostics(content);
+  diagnostics.push(...unknownValidationTypes);
+
+  // Para `schema X = { body }` JSON Schema body validation.
+  const modelBodyDiags = findModelBodyDiagnostics(content);
+  diagnostics.push(...modelBodyDiags);
 
   publishDiagnostics(uri, diagnostics);
 }
@@ -1398,6 +1800,64 @@ function getParabunHover(content: string, line: number, character: number): stri
   const lineText = lines[line];
   const wordAt = getWordAt(lineText, character);
 
+  // Hover on a model identifier (anywhere it appears) → show field summary.
+  if (wordAt && /^[A-Za-z_$][\w$]*$/.test(wordAt)) {
+    const reg = extractModelRegistry(content);
+    const info = reg.get(wordAt);
+    if (info) {
+      const out: string[] = [`### \`schema ${info.name}\``, ""];
+      if (info.origin === "from") {
+        out.push(
+          "Ingested from a JSON Schema (`schema X from <expr>` or `schema X = <expr>`) — schema literal preserved on the binding.",
+          "",
+        );
+      } else if (info.origin === "import") {
+        out.push("Imported binding (assumed to be a Para schema). Field shape resolved cross-file.", "");
+      } else if (info.fields.length > 0) {
+        out.push("Fields:", "", "```typescript");
+        for (const f of info.fields) {
+          out.push(`  ${f.name}${f.optional ? "?" : ""}: ${f.typeName}`);
+        }
+        out.push("```", "");
+      }
+      out.push(
+        "**Members:**",
+        "- `parse(v)` → Result<T, str> — runtime validator",
+        "- `schema` → JSON Schema 2020-12 object",
+      );
+      return out.join("\n");
+    }
+  }
+
+  // Hover on a field name inside a `schema X { ... }` body → show type.
+  if (wordAt && /^[a-z_$][\w$]*$/.test(wordAt)) {
+    const reg = extractModelRegistry(content);
+    // Find which model body (if any) contains this offset.
+    const offset = positionToOffset(content, line, character);
+    const declRe = /\b(?:export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*\{([\s\S]*?)\n\s*\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = declRe.exec(content)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (offset < start || offset > end) continue;
+      const info = reg.get(match[1]);
+      if (!info) continue;
+      const field = info.fields.find(f => f.name === wordAt);
+      if (field) {
+        return [
+          `### \`${field.name}\` — field of \`${info.name}\``,
+          "",
+          "```typescript",
+          `${field.name}${field.optional ? "?" : ""}: ${field.typeName}`,
+          "```",
+          field.optional ? "\n_Optional — gated by present-check at runtime._" : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+    }
+  }
+
   if (wordAt === "fun") {
     return [
       "### `fun` — shorthand for `function`",
@@ -1479,6 +1939,85 @@ function getParabunHover(content: string, line: number, character: number): stri
     ].join("\n");
   }
 
+  if (wordAt === "schema") {
+    return [
+      "### `schema NAME = <body>` — data shape declaration",
+      "",
+      "Declares a runtime-validated JSON Schema. Emits:",
+      "",
+      "- `NAME.parse(v) → Result<NAME, str>` — fast inline validator",
+      "- `NAME.schema` — the underlying JSON Schema 2020-12 object",
+      "- field navigation accessors — `User.id.type`, `User.profile.bio.maxLength`, etc.",
+      "",
+      "Body is JSON Schema 2020-12 (Para extends `type` with `bigint`, `varchar`,",
+      "`text`, `char`, `timestamptz`, `snowflake`, `numeric`, `jsonb`, `enum`).",
+      "",
+      "Forms:",
+      "- `schema X = { ... }` — JSON Schema literal",
+      "- `schema X from <expr>` — ingest an existing schema value (file import,",
+      "  remote fetch, lockstep pg-models output)",
+      "- `schema X { id: int, name: str(1..50) }` — Para-DSL with refinement types",
+      "- `schema { ... }` (expression) — inline literal at value position",
+      "",
+      "```typescript",
+      "schema User = {",
+      "  type: 'object',",
+      "  properties: { id: { type: 'bigint' }, email: { type: 'string', format: 'email' } },",
+      "  required: ['id', 'email'],",
+      "};",
+      "",
+      "const ok = User.parse(input);  // { tag: 'Ok', value: ... } | { tag: 'Err', error: ... }",
+      "// Composing inline at a value slot:",
+      "const ep = { request: schema { type: 'bigint' }, response: User };",
+      "```",
+    ].join("\n");
+  }
+
+  if (wordAt === "match") {
+    return [
+      "### `match EXPR { arm => result, ... }` — pattern matching expression",
+      "",
+      "Lowers to a switch (when arms are all literal-only or all Result/Option",
+      "constructors) or a ternary chain (otherwise). Returns the result of the",
+      "matching arm. The subject is evaluated once.",
+      "",
+      "Patterns:",
+      '- Literals: `200 => "ok"`, OR alternatives via `1 | 2 | 3 => ...`',
+      "- Wildcard: `_ => fallback`",
+      "- Identifier bind: `n => n + 1` (n bound to subject)",
+      "- Result/Option ctors: `Ok(user) => user.id`, `Err(e) => e`, `Some(x)`, `None`",
+      "",
+      "```typescript",
+      "const msg = match status {",
+      "  200 => 'ok',",
+      "  400 | 404 => 'client error',",
+      "  _ => 'unknown'",
+      "};",
+      "```",
+    ].join("\n");
+  }
+
+  if (wordAt === "from" && /\bschema\s+[A-Za-z_$][\w$]*\s+from\b/.test(lineText)) {
+    return [
+      "### `schema X from <expr>` — ingest existing JSON Schema",
+      "",
+      "Lowers to `const X = __paraFromSchema(<expr>)`. Returns the same",
+      "`{ parse, schema }` interface as native `schema X = { ... }` declarations.",
+      "Works with any expression that evaluates to a JSON Schema 2020-12 object",
+      "— file imports, locally-built schemas, lockstep pg-models output, etc.",
+      "",
+      "Runtime walker handles JSON Schema 2020-12 plus lockstep aliases",
+      "(`bigint`, `varchar`, `text`, `char`, `timestamptz`, `snowflake`,",
+      "`numeric`, `jsonb`, `enum`).",
+      "",
+      "```typescript",
+      "import userSchema from './pg-models/user.json';",
+      "schema User from userSchema;",
+      "User.parse({ id: 1, email: 'a@b.c' });",
+      "```",
+    ].join("\n");
+  }
+
   if (wordAt === "effect" && isEffectBlockAt(lineText, character)) {
     return [
       "### `effect { ... }` — reactive effect block",
@@ -1502,6 +2041,50 @@ function getParabunHover(content: string, line: number, character: number): stri
   }
 
   const around = lineText.slice(Math.max(0, character - 3), character + 3);
+
+  if (wordAt === "is" && /\bis\s+(?:not\s+)?[A-Z]/.test(lineText)) {
+    return [
+      "### `is` — runtime type-guard",
+      "",
+      "`expr is Type` returns true when `expr` validates as `Type`. Lowers to",
+      '`(Type.parse(expr).tag === "Ok")` — never throws, just a boolean.',
+      "Negate with `is not Type`.",
+      "",
+      "Triggers only when the right-hand side is a Capitalized identifier, so",
+      "variables named `is` (`is + 1`, `is === foo`) keep their normal meaning.",
+      "",
+      "Composes with `if`, `when`, ternary, `&&`/`||`, and any other boolean",
+      "context. For boundary enforcement (throw on bad shape) use `(arg:: Type)` instead.",
+      "",
+      "```typescript",
+      "if (req is User) handleUser(req);",
+      "const isUser = req is User;",
+      "match input {",
+      "  // _ is Type pattern coming in a follow-up",
+      "}",
+      "```",
+    ].join("\n");
+  }
+
+  if (around.includes("::")) {
+    return [
+      "### `::` — per-arg validation marker",
+      "",
+      "Opts a function parameter into runtime validation. `(req:: User)` injects",
+      "`User.parse(req)` at function entry, throwing on Err. Plain `(req: User)`",
+      "stays as a TS-only annotation with no runtime overhead.",
+      "",
+      "Type must be a Para `model`-declared identifier in scope; JS builtins",
+      "(`String`, `Number`, `Buffer`, `Promise`, etc.) are skipped to avoid",
+      "phantom `.parse()` calls.",
+      "",
+      "```typescript",
+      "function handler(req:: User, ctx) {",
+      "  return req.email;  // req validated at entry — guaranteed shape",
+      "}",
+      "```",
+    ].join("\n");
+  }
 
   if (around.includes("..=")) {
     return [
@@ -1763,6 +2346,546 @@ function getDefinition(uri: string, content: string, line: number, character: nu
 }
 
 // ---------------------------------------------------------------------------
+// Para schema registry — symbol-aware completions + diagnostics
+// ---------------------------------------------------------------------------
+//
+// Scans the source for `schema X { ... }` / `schema X from <expr>` / imported
+// models, and tracks them in a per-document registry. Used by completion to
+// suggest `.parse` / `.schema` after a model identifier, and by diagnostics
+// to flag `(req:: Foo)` when Foo isn't in scope.
+
+interface ParaModelField {
+  name: string;
+  typeName: string; // raw type-name token (Email/UUID/User/int/...)
+  optional: boolean;
+}
+
+interface ParaModelInfo {
+  name: string;
+  origin: "decl" | "from" | "import";
+  fields: ParaModelField[]; // empty for from/import — opaque externally
+}
+
+// Recognized builtin refinement / format types (capitalized) — completions
+// should offer these alongside user-defined models. Matches what the parser
+// supports today.
+const PARA_BUILTIN_TYPES = ["Email", "UUID", "Url", "Date", "DateTime", "IpV4", "IpV6", "Slug"];
+
+// Lowercase primitives accepted in field-type positions inside `schema { ... }`.
+const PARA_PRIMITIVE_TYPES = ["int", "str", "string", "bool", "boolean", "float", "num", "number"];
+
+// JS/TS builtin type names skipped from `::` validation (mirrors parseFn.zig).
+const JS_BUILTIN_TYPE_NAMES = new Set([
+  "String",
+  "Number",
+  "Boolean",
+  "Object",
+  "Array",
+  "Function",
+  "Date",
+  "RegExp",
+  "Error",
+  "Map",
+  "Set",
+  "WeakMap",
+  "WeakSet",
+  "Promise",
+  "Symbol",
+  "BigInt",
+  "Buffer",
+  "ArrayBuffer",
+  "Uint8Array",
+  "Int8Array",
+  "Uint16Array",
+  "Int16Array",
+  "Uint32Array",
+  "Int32Array",
+  "Float32Array",
+  "Float64Array",
+  "DataView",
+  "Iterator",
+  "AsyncIterator",
+  "Generator",
+  "AsyncGenerator",
+  "JSON",
+  "Math",
+  "Reflect",
+  "Proxy",
+]);
+
+function extractModelRegistry(content: string): Map<string, ParaModelInfo> {
+  const reg = new Map<string, ParaModelInfo>();
+
+  // model X { fields }   — capture body to parse fields
+  const declRe = /\b(?:export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*\{([\s\S]*?)\n\s*\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = declRe.exec(content)) !== null) {
+    reg.set(m[1], { name: m[1], origin: "decl", fields: parseFieldsBlock(m[2]) });
+  }
+
+  // model X from <expr> — opaque field list
+  const fromRe = /\b(?:export\s+)?schema\s+([A-Za-z_$][\w$]*)\s+from\b/g;
+  while ((m = fromRe.exec(content)) !== null) {
+    if (!reg.has(m[1])) reg.set(m[1], { name: m[1], origin: "from", fields: [] });
+  }
+
+  // model X = <expr> — lockstep-style ingestion. Same opaque-field
+  // treatment as `from`. Excludes the `schema X { ... }` form (which
+  // has no `=`) since that's caught by declRe above.
+  const eqRe = /\b(?:export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=/g;
+  while ((m = eqRe.exec(content)) !== null) {
+    if (!reg.has(m[1])) reg.set(m[1], { name: m[1], origin: "from", fields: [] });
+  }
+
+  // import { X, Y as Z } from "..." — anything imported as a capitalized
+  // name MIGHT be a model. Add as opaque so `(req:: X)` doesn't false-flag.
+  // Also catches `import default, { X } from "..."` patterns.
+  const importRe = /\bimport\b[^{}]*\{([^}]+)\}\s*from\b/g;
+  while ((m = importRe.exec(content)) !== null) {
+    for (const part of m[1].split(",")) {
+      const seg = part.trim();
+      if (!seg) continue;
+      // `Foo` or `Foo as Bar` — pick the local binding name (after `as`).
+      const asMatch = seg.match(/(?:[A-Za-z_$][\w$]*\s+as\s+)?([A-Z][\w$]*)\s*$/);
+      if (asMatch && !reg.has(asMatch[1])) {
+        reg.set(asMatch[1], { name: asMatch[1], origin: "import", fields: [] });
+      }
+    }
+  }
+
+  return reg;
+}
+
+function parseFieldsBlock(body: string): ParaModelField[] {
+  const fields: ParaModelField[] = [];
+  // Strip line comments for cleaner parsing.
+  const stripped = body.replace(/\/\/[^\n]*/g, "");
+  // Each field: `name: type` (with optional `(...)` range / `[T]` array /
+  // `?` optional / `"a" | "b"` literal-union). We capture name + raw type
+  // segment up to `,` / `;` / newline.
+  const fieldRe = /([A-Za-z_$][\w$]*)\s*:\s*([^,;\n]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = fieldRe.exec(stripped)) !== null) {
+    const name = m[1];
+    let typeFrag = m[2].trim();
+    const optional = typeFrag.endsWith("?");
+    if (optional) typeFrag = typeFrag.slice(0, -1).trim();
+    // Strip range `(0..150)` / array brackets / literal-union — keep the
+    // base type name for hover/completion purposes.
+    typeFrag = typeFrag.replace(/\([^)]*\)/g, "").trim();
+    typeFrag = typeFrag.replace(/^\[|\](.*)/g, "").trim();
+    const baseMatch = typeFrag.match(/^([A-Za-z_$][\w$]*)/);
+    const typeName = baseMatch ? baseMatch[1] : typeFrag;
+    fields.push({ name, typeName, optional });
+  }
+  return fields;
+}
+
+// Diagnostic: `(arg:: Type)` where Type isn't in the model registry.
+function findUnknownValidationTypeDiagnostics(content: string): LspDiagnostic[] {
+  const diags: LspDiagnostic[] = [];
+  const reg = extractModelRegistry(content);
+  // Match `argname:: TypeName` and capture the position of TypeName.
+  // Skip JS builtins (matches parseFn skip list).
+  const re = /([A-Za-z_$][\w$]*)\s*::\s*([A-Z][\w$]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    const typeName = m[2];
+    if (JS_BUILTIN_TYPE_NAMES.has(typeName)) continue;
+    if (PARA_BUILTIN_TYPES.includes(typeName)) continue;
+    if (reg.has(typeName)) continue;
+    const start = m.index + m[1].length + (m[0].length - m[1].length - typeName.length);
+    const end = m.index + m[0].length;
+    diags.push({
+      range: { start: offsetToPosition(content, start), end: offsetToPosition(content, end) },
+      severity: 1,
+      source: "parabun",
+      message: `Unknown type '${typeName}' for \`::\` validation marker — declare a \`schema ${typeName} = { ... }\` or import one`,
+      code: "parabun-unknown-validate-type",
+    });
+  }
+  return diags;
+}
+
+// ---------------------------------------------------------------------------
+// `schema X = { body }` / `schema { body }` JSON Schema body validation
+// ---------------------------------------------------------------------------
+//
+// `schema` is the data-shape primitive. Top-level keys must come from
+// the JSON Schema 2020-12 vocabulary (plus a small set of Para / lockstep
+// DDL extensions). HTTP-endpoint shapes are no longer in scope for the
+// `schema` primitive — those live in plain JS objects and are
+// lockstep's concern, not Para's.
+
+const SCHEMA_KEYWORDS = new Set([
+  "type",
+  "properties",
+  "items",
+  "enum",
+  "const",
+  "oneOf",
+  "anyOf",
+  "allOf",
+  "not",
+  "$ref",
+  "$id",
+  "$defs",
+  "$schema",
+  "$comment",
+  "$anchor",
+  "$dynamicRef",
+  "$dynamicAnchor",
+  "$vocabulary",
+  "definitions",
+  "required",
+  "additionalProperties",
+  "minProperties",
+  "maxProperties",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+  "prefixItems",
+  "contains",
+  "minContains",
+  "maxContains",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "format",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "default",
+  "examples",
+  "description",
+  "title",
+  "propertyNames",
+  "dependencies",
+  "dependentRequired",
+  "dependentSchemas",
+  "if",
+  "then",
+  "else",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "contentEncoding",
+  "contentMediaType",
+  "contentSchema",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  // Para / lockstep DDL extensions — recognized on column-shape models
+  // (pg-models) and treated as schema keywords for diagnostic purposes.
+  "length",
+  "unique",
+  "primaryKey",
+  "indexed",
+  "references",
+  "foreignKey",
+  "autoIncrement",
+  "generated",
+  "collation",
+  "nullable",
+]);
+
+interface ModelTopEntry {
+  key: string;
+  keyStart: number;
+  keyEnd: number;
+  valueStart: number;
+  valueEnd: number;
+  valueText: string;
+}
+
+// Walk a `schema X = { ... }` body (between `{` and `}`, exclusive) and
+// return every top-level `key: value` pair. Tracks string/comment/brace
+// state so nested `properties: { foo: ... }` keys aren't mistaken for
+// top-level. `baseOffset` is where the body sits in the original document
+// so emitted positions can be mapped back without an extra pass.
+function walkModelTopEntries(body: string, baseOffset: number): ModelTopEntry[] {
+  const entries: ModelTopEntry[] = [];
+  let i = 0;
+  let depth = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const q = ch;
+      i++;
+      while (i < body.length && body[i] !== q) {
+        if (body[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "/" && body[i + 1] === "/") {
+      while (i < body.length && body[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && body[i + 1] === "*") {
+      i += 2;
+      while (i < body.length - 1 && !(body[i] === "*" && body[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === "}" || ch === "]" || ch === ")") {
+      depth--;
+      i++;
+      continue;
+    }
+    if (depth === 0 && /[A-Za-z_$]/.test(ch)) {
+      const keyStart = i;
+      while (i < body.length && /[\w$]/.test(body[i])) i++;
+      const keyEnd = i;
+      const key = body.slice(keyStart, keyEnd);
+      let j = i;
+      while (j < body.length && /\s/.test(body[j])) j++;
+      // Shorthand `{ request, response }` — the identifier is both the
+      // key and (an implicit reference to) the value. Treat the value
+      // span as the identifier itself so type-checks see "identifier".
+      if (body[j] === "," || body[j] === "}" || j === body.length) {
+        entries.push({
+          key,
+          keyStart: baseOffset + keyStart,
+          keyEnd: baseOffset + keyEnd,
+          valueStart: baseOffset + keyStart,
+          valueEnd: baseOffset + keyEnd,
+          valueText: key,
+        });
+        i = j;
+        continue;
+      }
+      if (body[j] !== ":") continue;
+      let k = j + 1;
+      while (k < body.length && /\s/.test(body[k])) k++;
+      const valueStart = k;
+      let valDepth = 0;
+      while (k < body.length) {
+        const vc = body[k];
+        if (vc === '"' || vc === "'" || vc === "`") {
+          const q = vc;
+          k++;
+          while (k < body.length && body[k] !== q) {
+            if (body[k] === "\\") k++;
+            k++;
+          }
+          k++;
+          continue;
+        }
+        if (vc === "/" && body[k + 1] === "/") {
+          while (k < body.length && body[k] !== "\n") k++;
+          continue;
+        }
+        if (vc === "/" && body[k + 1] === "*") {
+          k += 2;
+          while (k < body.length - 1 && !(body[k] === "*" && body[k + 1] === "/")) k++;
+          k += 2;
+          continue;
+        }
+        if (vc === "{" || vc === "[" || vc === "(") valDepth++;
+        else if (vc === "}" || vc === "]" || vc === ")") valDepth--;
+        else if (valDepth === 0 && (vc === "," || vc === ";")) break;
+        k++;
+      }
+      let valueEnd = k;
+      while (valueEnd > valueStart && /\s/.test(body[valueEnd - 1])) valueEnd--;
+      entries.push({
+        key,
+        keyStart: baseOffset + keyStart,
+        keyEnd: baseOffset + keyEnd,
+        valueStart: baseOffset + valueStart,
+        valueEnd: baseOffset + valueEnd,
+        valueText: body.slice(valueStart, valueEnd),
+      });
+      i = k;
+      continue;
+    }
+    i++;
+  }
+  return entries;
+}
+
+function classifyModelValue(
+  text: string,
+): "boolean-true" | "boolean-false" | "number" | "string" | "array" | "object" | "identifier" | "unknown" {
+  const t = text.trim();
+  if (t === "true") return "boolean-true";
+  if (t === "false") return "boolean-false";
+  if (/^-?\d/.test(t)) return "number";
+  if (/^["'`]/.test(t)) return "string";
+  if (t.startsWith("[")) return "array";
+  if (t.startsWith("{")) return "object";
+  if (/^[A-Za-z_$]/.test(t)) return "identifier";
+  return "unknown";
+}
+
+// Quick edit-distance for "did you mean…" — full Levenshtein but capped at
+// distance 4 (cheap enough for these short keyword sets).
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length,
+    n = b.length;
+  if (Math.abs(m - n) > 4) return 99;
+  const prev = new Array(n + 1);
+  const curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= n; j++) prev[j] = curr[j];
+  }
+  return prev[n];
+}
+
+function suggestKey(unknown: string, candidates: Iterable<string>): string | null {
+  let best: string | null = null;
+  let bestDist = 4;
+  for (const c of candidates) {
+    const d = editDistance(unknown.toLowerCase(), c.toLowerCase());
+    if (d < bestDist) {
+      bestDist = d;
+      best = c;
+    }
+  }
+  return best;
+}
+
+function findModelBodyDiagnostics(content: string): LspDiagnostic[] {
+  const diags: LspDiagnostic[] = [];
+  const declRe = /\b(?:export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = declRe.exec(content)) !== null) {
+    const modelName = m[1];
+    const openIdx = m.index + m[0].length - 1; // position of `{`
+    // Walk to matching `}` with string/comment awareness.
+    let i = openIdx + 1;
+    let depth = 1;
+    while (i < content.length && depth > 0) {
+      const ch = content[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        i++;
+        while (i < content.length && content[i] !== q) {
+          if (content[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === "/" && content[i + 1] === "/") {
+        while (i < content.length && content[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && content[i + 1] === "*") {
+        i += 2;
+        while (i < content.length - 1 && !(content[i] === "*" && content[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = i - 1;
+    const body = content.slice(openIdx + 1, closeIdx);
+    const entries = walkModelTopEntries(body, openIdx + 1);
+    if (entries.length === 0) continue;
+
+    const keysSeen = new Set(entries.map(e => e.key));
+    // Lockstep records have `properties` without top-level `type` — leave
+    // those alone since they're an established pattern that lockstep
+    // generates from postgres column shapes.
+    const looksLikeRecord = keysSeen.has("properties") && !keysSeen.has("type");
+    if (looksLikeRecord) continue;
+    for (const entry of entries) {
+      if (SCHEMA_KEYWORDS.has(entry.key)) continue;
+      const suggestion = suggestKey(entry.key, SCHEMA_KEYWORDS);
+      const hint = suggestion ? ` — did you mean '${suggestion}'?` : "";
+      diags.push({
+        range: {
+          start: offsetToPosition(content, entry.keyStart),
+          end: offsetToPosition(content, entry.keyEnd),
+        },
+        severity: 1,
+        source: "parabun",
+        message: `'${entry.key}' is not a JSON Schema keyword on \`schema ${modelName}\`${hint}`,
+        code: "parabun-unknown-schema-key",
+      });
+    }
+  }
+  return diags;
+}
+
+// Scan back from the cursor to detect "we're after a known model identifier
+// followed by `.`" — used to inject `parse` / `schema` completions.
+function detectModelMemberAccessContext(content: string, line: number, character: number): string | null {
+  const offset = positionToOffset(content, line, character);
+  // Walk backwards: skip whitespace, then identifier chars, then a `.`,
+  // then identifier chars again. The second identifier is the model name.
+  let i = offset - 1;
+  while (i >= 0 && /[\w$]/.test(content[i])) i--;
+  if (i < 0 || content[i] !== ".") return null;
+  let nameEnd = i;
+  let nameStart = i - 1;
+  while (nameStart >= 0 && /[\w$]/.test(content[nameStart])) nameStart--;
+  const ident = content.slice(nameStart + 1, nameEnd);
+  if (!ident || !/^[A-Z]/.test(ident)) return null;
+  return ident;
+}
+
+// Detect "we're after `arg:: ` (typing the type identifier)" — used to
+// suggest known model names + builtin types.
+function detectValidationMarkerContext(content: string, line: number, character: number): boolean {
+  const offset = positionToOffset(content, line, character);
+  // Walk back over the partially-typed identifier.
+  let i = offset - 1;
+  while (i >= 0 && /[\w$]/.test(content[i])) i--;
+  // Skip whitespace.
+  while (i >= 0 && /\s/.test(content[i])) i--;
+  // Expect `::`.
+  return i >= 1 && content[i] === ":" && content[i - 1] === ":";
+}
+
+// Detect "we're inside a `schema X { ... }` body, typing a field type
+// (after `:` but before `,`/`;`/`}`)" — used to suggest builtin types
+// + other models.
+function detectModelFieldTypeContext(content: string, line: number, character: number): boolean {
+  const offset = positionToOffset(content, line, character);
+  // Look back to find the nearest `:` that's not preceded by another `:`.
+  let i = offset - 1;
+  while (i >= 0 && /[\w$\s\[\]\?]/.test(content[i])) i--;
+  if (i < 0 || content[i] !== ":" || content[i - 1] === ":") return false;
+  // Now walk back further, find a `{`. If we find `,` or `;` before `{`,
+  // we're separating fields — still inside a model body.
+  let depth = 0;
+  for (let j = i - 1; j >= 0; j--) {
+    const ch = content[j];
+    if (ch === "}") depth++;
+    else if (ch === "{") {
+      if (depth === 0) {
+        // Look for `schema NAME` on the line containing this `{`.
+        const lineStart = content.lastIndexOf("\n", j) + 1;
+        const head = content.slice(lineStart, j);
+        return /\bmodel\s+[A-Za-z_$][\w$]*\s*$/.test(head);
+      }
+      depth--;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Completions — TypeScript + Parabun keywords
 // ---------------------------------------------------------------------------
 
@@ -1896,6 +3019,65 @@ function getCompletions(
 ): { isIncomplete: boolean; items: any[] } {
   const items: any[] = [...parabunCompletions];
 
+  // ── Para model-aware completions ──────────────────────────────────
+  // 1. After `<ModelName>.` → suggest `parse` and `schema`.
+  const memberAccess = detectModelMemberAccessContext(content, line, character);
+  if (memberAccess) {
+    const reg = extractModelRegistry(content);
+    if (reg.has(memberAccess)) {
+      items.push(
+        {
+          label: "parse",
+          kind: 2, // method
+          detail: "(v: any) → Result<T, str>",
+          documentation:
+            "Validate a value against this model's schema. Returns `{ tag: 'Ok', value }` or `{ tag: 'Err', error }`.",
+          insertText: "parse(${1:value})",
+          insertTextFormat: 2,
+          sortText: "0parse",
+        },
+        {
+          label: "schema",
+          kind: 10, // property
+          detail: "JSON Schema 2020-12 object",
+          documentation:
+            "JSON Schema object describing this model's shape — hand off to OpenAPI / MongoDB / external validators.",
+          sortText: "0schema",
+        },
+      );
+    }
+  }
+
+  // 2. After `arg:: ` → suggest known models + builtin refinement types.
+  if (detectValidationMarkerContext(content, line, character)) {
+    const reg = extractModelRegistry(content);
+    for (const name of reg.keys()) {
+      items.push({
+        label: name,
+        kind: 8, // interface
+        detail: `Para schema${reg.get(name)!.origin === "from" ? " (ingested)" : reg.get(name)!.origin === "import" ? " (imported)" : ""}`,
+        sortText: "0" + name,
+      });
+    }
+    for (const t of PARA_BUILTIN_TYPES) {
+      items.push({ label: t, kind: 7, detail: "Para builtin refinement", sortText: "1" + t });
+    }
+  }
+
+  // 3. Inside `schema X { fieldname: <here>` → suggest builtin types + other models.
+  if (detectModelFieldTypeContext(content, line, character)) {
+    const reg = extractModelRegistry(content);
+    for (const t of PARA_PRIMITIVE_TYPES) {
+      items.push({ label: t, kind: 7, detail: "Para primitive", sortText: "0" + t });
+    }
+    for (const t of PARA_BUILTIN_TYPES) {
+      items.push({ label: t, kind: 7, detail: "Para refinement", sortText: "1" + t });
+    }
+    for (const name of reg.keys()) {
+      items.push({ label: name, kind: 8, detail: "Para schema (nested ref)", sortText: "2" + name });
+    }
+  }
+
   if (tsService && ts) {
     const fileName = toTsPath(uriToPath(uri));
     const transformed = transformParabunToTS(content);
@@ -1955,6 +3137,208 @@ interface CodeAction {
   kind: string;
   diagnostics?: LspDiagnostic[];
   edit?: { changes: Record<string, TextEdit[]> };
+}
+
+// Convert a TS `interface NAME { ... }` or `type NAME = { ... }` to one or
+// more Para `schema NAME { ... }` declarations. Nested object types are
+// auto-extracted to separate models named `<Parent><Field>` (capitalized);
+// the outer field then references that synthetic model by name.
+//
+// Mapping notes:
+//   `interface X { ... }`     → `schema X { ... }`
+//   `type X = { ... }`         → `schema X { ... }`
+//   `field?: T`                → `field: T?`            (Para uses postfix optional)
+//   `field: T[]`               → `field: [T]`            (Para uses bracket array)
+//   `field: Array<T>`          → `field: [T]`
+//   `field: { ... }`           → `field: <Parent><Field>` + extracted nested model
+//   `field: "a" | "b"`         → preserved verbatim
+//   primitives passed through  (`number` / `string` / `boolean` accepted by Para).
+function buildInterfaceToModelEdit(
+  content: string,
+  lines: string[],
+  startLine: number,
+  match: RegExpMatchArray,
+): { range: LspRange; newText: string } | null {
+  const indent = match[1] || "";
+  const exportKw = match[2] || "";
+  const name = match[4];
+
+  // Find the line offset of `{` (after the optional `=` for type aliases).
+  let openLine = startLine;
+  let openCol = -1;
+  for (let i = startLine; i < lines.length; i++) {
+    const idx = lines[i].indexOf("{", i === startLine ? match[0].length : 0);
+    if (idx !== -1) {
+      openLine = i;
+      openCol = idx;
+      break;
+    }
+  }
+  if (openCol === -1) return null;
+
+  // Scan from after `{` to find matching `}`.
+  let depth = 1;
+  let endLine = openLine;
+  let endCol = openCol + 1;
+  outer: for (let i = openLine; i < lines.length; i++) {
+    const startC = i === openLine ? openCol + 1 : 0;
+    for (let c = startC; c < lines[i].length; c++) {
+      const ch = lines[i][c];
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          endLine = i;
+          endCol = c + 1;
+          break outer;
+        }
+      }
+    }
+  }
+  if (depth !== 0) return null;
+
+  const bodyStart = positionToOffset(content, openLine, openCol + 1);
+  const bodyEnd = positionToOffset(content, endLine, endCol - 1);
+  const body = content.slice(bodyStart, bodyEnd);
+
+  const fields = parseInterfaceBody(body);
+  if (!fields) return null;
+
+  // Emit nested schemas first, outermost last (parent depends on children).
+  const extracted: string[] = [];
+  const mainBody = emitFieldsAndExtract(fields, name, extracted, indent);
+  const allModels = [
+    ...extracted.map(m => `${exportKw}schema ${m}`),
+    `${indent}${exportKw}schema ${name} {${mainBody}${indent}}`,
+  ].join("\n\n");
+
+  // Drop our own indent prefix from the front of the combined output —
+  // the edit range starts at column 0 of `startLine`, so the first
+  // `${indent}` would double-indent. We re-add it on later lines via
+  // `${indent}` but let the first line stand on its own.
+  const newText = allModels.replace(/^\s+/, indent);
+
+  return {
+    range: {
+      start: { line: startLine, character: 0 },
+      end: { line: endLine, character: endCol },
+    },
+    newText,
+  };
+}
+
+// Field decl tree.
+type ConvField = { name: string; optional: boolean; type: ConvType };
+type ConvType = { kind: "ref"; ref: string } | { kind: "object"; fields: ConvField[] };
+
+// Parse a TS object-type body into a flat list of field decls. Nested
+// `{ ... }` types become `ConvType.object`; primitives and other type
+// references become `ConvType.ref` (the raw type text). Returns null
+// on malformed input. Brace-depth aware so nested objects are captured
+// as a single field rather than getting eaten by the field separator.
+function parseInterfaceBody(body: string): ConvField[] | null {
+  const fields: ConvField[] = [];
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    // Skip whitespace + comments.
+    while (i < n && /\s/.test(body[i])) i++;
+    if (i >= n) break;
+    if (body[i] === "/" && body[i + 1] === "/") {
+      while (i < n && body[i] !== "\n") i++;
+      continue;
+    }
+    if (body[i] === "/" && body[i + 1] === "*") {
+      i += 2;
+      while (i < n && !(body[i] === "*" && body[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    // Read field name.
+    const nameMatch = body.slice(i).match(/^([A-Za-z_$][\w$]*)/);
+    if (!nameMatch) return null;
+    const fname = nameMatch[1];
+    i += fname.length;
+    // Optional.
+    while (i < n && /\s/.test(body[i])) i++;
+    let optional = false;
+    if (body[i] === "?") {
+      optional = true;
+      i++;
+    }
+    while (i < n && /\s/.test(body[i])) i++;
+    if (body[i] !== ":") return null;
+    i++;
+    while (i < n && /\s/.test(body[i])) i++;
+    // Read type — either a nested `{ ... }` or text up to `,` / `;` / newline at depth 0.
+    let typeNode: ConvType;
+    if (body[i] === "{") {
+      // Nested object — capture body to matching close.
+      let depth = 1;
+      i++;
+      const innerStart = i;
+      while (i < n && depth > 0) {
+        if (body[i] === "{") depth++;
+        else if (body[i] === "}") depth--;
+        if (depth > 0) i++;
+      }
+      const innerBody = body.slice(innerStart, i);
+      i++; // consume closing `}`
+      const inner = parseInterfaceBody(innerBody);
+      if (!inner) return null;
+      typeNode = { kind: "object", fields: inner };
+    } else {
+      // Read type text up to top-level `,` or `;` or newline.
+      let depth = 0;
+      const tStart = i;
+      while (i < n) {
+        const ch = body[i];
+        if (depth === 0 && (ch === "," || ch === ";" || ch === "\n")) break;
+        if (ch === "{" || ch === "[" || ch === "<" || ch === "(") depth++;
+        else if (ch === "}" || ch === "]" || ch === ">" || ch === ")") depth--;
+        i++;
+      }
+      const typeText = body.slice(tStart, i).trim();
+      typeNode = { kind: "ref", ref: typeText };
+    }
+    fields.push({ name: fname, optional, type: typeNode });
+    // Consume separator + whitespace.
+    while (i < n && (/\s/.test(body[i]) || body[i] === "," || body[i] === ";")) i++;
+  }
+  return fields;
+}
+
+// Walk fields, extract nested objects into separate model decls (queued
+// in `extracted`), and emit the body of the parent model with field-type
+// references swapped to the synthetic names.
+function emitFieldsAndExtract(fields: ConvField[], parentName: string, extracted: string[], indent: string): string {
+  const lines: string[] = [""];
+  const childIndent = `${indent}  `;
+  for (const f of fields) {
+    let typeRef: string;
+    if (f.type.kind === "object") {
+      const childName = `${parentName}${capitalize(f.name)}`;
+      const childBody = emitFieldsAndExtract(f.type.fields, childName, extracted, indent);
+      extracted.push(`${childName} {${childBody}${indent}}`);
+      typeRef = childName;
+    } else {
+      typeRef = convertTsTypeToParaType(f.type.ref);
+    }
+    lines.push(`${childIndent}${f.name}: ${typeRef}${f.optional ? "?" : ""},`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+function convertTsTypeToParaType(t: string): string {
+  const arrayMatch = t.match(/^([A-Za-z_$][\w$]*)\[\]$/);
+  if (arrayMatch) return `[${arrayMatch[1]}]`;
+  const arrayGenMatch = t.match(/^Array<\s*([A-Za-z_$][\w$]*)\s*>$/);
+  if (arrayGenMatch) return `[${arrayGenMatch[1]}]`;
+  return t;
 }
 
 function getCodeActions(uri: string, content: string, range: LspRange, params?: any): CodeAction[] {
@@ -2036,6 +3420,23 @@ function getCodeActions(uri: string, content: string, range: LspRange, params?: 
           },
         },
       });
+    }
+
+    // Convert TS interface / type alias to Para schema
+    const interfaceMatch = line.match(/^(\s*)(export\s+)?(interface|type)\s+([A-Za-z_$][\w$]*)\b/);
+    if (interfaceMatch && interfaceMatch.index !== undefined) {
+      const conversion = buildInterfaceToModelEdit(content, lines, i, interfaceMatch);
+      if (conversion) {
+        actions.push({
+          title: `Convert ${interfaceMatch[3]} ${interfaceMatch[4]} to Para schema`,
+          kind: "refactor.rewrite",
+          edit: {
+            changes: {
+              [uri]: [conversion],
+            },
+          },
+        });
+      }
     }
 
     const fnMatch = line.match(/^(\s*)(export\s+)?(async\s+)?fun(?:ction)?\b/);

@@ -1797,6 +1797,53 @@ pub fn Parse(
             }, parallel_range.loc);
         }
 
+        // Parabun: parse a `schema { ... }` expression literal — an inline
+        // JSON Schema body that desugars to `__paraFromSchema(() => ({ ... }))`
+        // at the call site. The thunk wrap mirrors `model X = body` so
+        // self/mutual recursion through the surrounding scope still works
+        // (the thunk is invoked once at runtime, after the surrounding
+        // bindings exist).
+        //
+        // At entry: `schema` has been consumed; p.lexer is on the `{`.
+        pub fn parseSchemaObjectExpr(p: *P, schema_range: logger.Range) !Expr {
+            const body_loc = p.lexer.loc();
+
+            // Push function scopes so identifier refs in the body belong to
+            // the synthesized arrow, not the outer scope. Without this the
+            // visit pass would walk a Stmt whose contents were registered
+            // to the wrong scope.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, schema_range.loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+            // `.comma` (not `.lowest`) so we stop AT the outer property
+            // separator — the body is just the `{ ... }`, no sequence
+            // continuations. Without this, `{ a: schema { ... }, b: ... }`
+            // would have schema swallow the `, b: ...` as a sequence expr.
+            const body_expr = try p.parseExpr(.comma);
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            arrow_stmts[0] = p.s(S.Return{ .value = body_expr }, body_loc);
+            const thunk = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = arrow_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, schema_range.loc);
+
+            p.popScope();
+            p.popScope();
+
+            const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            args[0] = thunk;
+            return p.callRuntime(schema_range.loc, "__paraFromSchema", args);
+        }
+
         // Parabun: parse a `match SUBJECT { pat => result, ... }` expression
         // and lower it to an IIFE wrapping a ternary chain:
         //
@@ -1853,7 +1900,29 @@ pub fn Parse(
             // The test for an OR / literal pattern is `__pm === lit` (chained
             // with || for OR). The wildcard / identifier-bind arms have no
             // test (they always match).
-            const Arm = struct { test_expr: ?Expr, result: Expr };
+            // Each arm tracks both forms so we can decide at the end
+            // which lowering to emit:
+            //   ternary chain — universal, used when any arm has a binding,
+            //                   constructor pattern, or other non-switchable
+            //                   shape.
+            //   switch        — used when every arm is either literal-only
+            //                   (with optional OR alternatives) or a
+            //                   wildcard. JS engines compile dense integer
+            //                   switches to jump tables.
+            const Arm = struct {
+                test_expr: ?Expr, // for ternary path; null = catch-all
+                result: Expr,
+                // `literals` is non-null when the arm's pattern was purely
+                // literal(s) — its values are usable as switch case labels.
+                // null for wildcard / bind / constructor patterns.
+                literals: ?[]Expr,
+                is_wildcard: bool,
+                // `tag` is non-null for Result/Option constructor patterns
+                // (Ok/Err/Some/None). When every arm has a tag (or is
+                // wildcard), we can switch on `__pm.tag` instead of a
+                // ternary chain.
+                tag: ?[]const u8,
+            };
             var arms = ListManaged(Arm).init(p.allocator);
 
             while (p.lexer.token != .t_close_brace) {
@@ -1869,15 +1938,62 @@ pub fn Parse(
                 //   None / _ / lit: no substitution
                 const SubKind = enum { none, plain, dot_value, dot_error };
                 var sub_kind: SubKind = .none;
+                var literals: ?[]Expr = null;
+                var is_wildcard = false;
+                var tag: ?[]const u8 = null;
 
-                // Wildcard `_`.
+                // Wildcard `_` — possibly followed by `is Type` for a
+                // type-guard arm.
                 if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "_")) {
                     try p.lexer.next();
+                    // `_ is Type` / `_ is not Type` — runtime type-guard arm.
+                    if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "is") and !p.lexer.has_newline_before) {
+                        try p.lexer.next();
+                        var negate = false;
+                        if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "not")) {
+                            negate = true;
+                            try p.lexer.next();
+                        }
+                        if (p.lexer.token == .t_identifier and p.lexer.raw().len > 0 and p.lexer.raw()[0] >= 'A' and p.lexer.raw()[0] <= 'Z') {
+                            const type_name = p.lexer.identifier;
+                            const type_loc = p.lexer.loc();
+                            try p.lexer.next();
+                            const type_ref = p.storeNameInRef(type_name) catch unreachable;
+                            const parse_dot = p.newExpr(E.Dot{
+                                .target = p.newExpr(E.Identifier{ .ref = type_ref }, type_loc),
+                                .name = "parse",
+                                .name_loc = type_loc,
+                            }, type_loc);
+                            const call_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                            call_args[0] = p.newExpr(E.Identifier{ .ref = m_ref }, args_loc);
+                            const parse_call = p.newExpr(E.Call{
+                                .target = parse_dot,
+                                .args = js_ast.ExprNodeList.fromOwnedSlice(call_args),
+                            }, type_loc);
+                            const tag_dot = p.newExpr(E.Dot{
+                                .target = parse_call,
+                                .name = "tag",
+                                .name_loc = type_loc,
+                            }, type_loc);
+                            test_expr = p.newExpr(E.Binary{
+                                .op = if (negate) .bin_strict_ne else .bin_strict_eq,
+                                .left = tag_dot,
+                                .right = p.newExpr(E.String{ .data = "Ok" }, type_loc),
+                            }, type_loc);
+                        } else {
+                            // No type after `is` — bare `_ is` is meaningless,
+                            // fall back to wildcard.
+                            is_wildcard = true;
+                        }
+                    } else {
+                        is_wildcard = true;
+                    }
                 }
                 // Result / Option constructor patterns.
                 else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "Ok")) {
                     try p.lexer.next();
                     test_expr = buildTagTestExpr(p, m_ref, args_loc, "Ok");
+                    tag = "Ok";
                     if (try parseCtorArgIdent(p)) |bn| {
                         bind_name = bn;
                         sub_kind = .dot_value;
@@ -1885,6 +2001,7 @@ pub fn Parse(
                 } else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "Some")) {
                     try p.lexer.next();
                     test_expr = buildTagTestExpr(p, m_ref, args_loc, "Some");
+                    tag = "Some";
                     if (try parseCtorArgIdent(p)) |bn| {
                         bind_name = bn;
                         sub_kind = .dot_value;
@@ -1892,6 +2009,7 @@ pub fn Parse(
                 } else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "Err")) {
                     try p.lexer.next();
                     test_expr = buildTagTestExpr(p, m_ref, args_loc, "Err");
+                    tag = "Err";
                     if (try parseCtorArgIdent(p)) |bn| {
                         bind_name = bn;
                         sub_kind = .dot_error;
@@ -1899,14 +2017,57 @@ pub fn Parse(
                 } else if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "None")) {
                     try p.lexer.next();
                     test_expr = buildTagTestExpr(p, m_ref, args_loc, "None");
+                    tag = "None";
                 } else if (p.lexer.token == .t_identifier) {
-                    // Identifier-bind: `n => n + 1`.
+                    // Identifier-bind: `n => n + 1`. Optionally followed by
+                    // `is Type` / `is not Type` for a binding type-guard:
+                    // `u is User => u.email`.
                     bind_name = p.lexer.identifier;
                     sub_kind = .plain;
                     try p.lexer.next();
+                    if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "is") and !p.lexer.has_newline_before) {
+                        try p.lexer.next();
+                        var negate = false;
+                        if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "not")) {
+                            negate = true;
+                            try p.lexer.next();
+                        }
+                        if (p.lexer.token == .t_identifier and p.lexer.raw().len > 0 and p.lexer.raw()[0] >= 'A' and p.lexer.raw()[0] <= 'Z') {
+                            const type_name = p.lexer.identifier;
+                            const type_loc = p.lexer.loc();
+                            try p.lexer.next();
+                            const type_ref = p.storeNameInRef(type_name) catch unreachable;
+                            const parse_dot = p.newExpr(E.Dot{
+                                .target = p.newExpr(E.Identifier{ .ref = type_ref }, type_loc),
+                                .name = "parse",
+                                .name_loc = type_loc,
+                            }, type_loc);
+                            const call_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                            call_args[0] = p.newExpr(E.Identifier{ .ref = m_ref }, args_loc);
+                            const parse_call = p.newExpr(E.Call{
+                                .target = parse_dot,
+                                .args = js_ast.ExprNodeList.fromOwnedSlice(call_args),
+                            }, type_loc);
+                            const tag_dot = p.newExpr(E.Dot{
+                                .target = parse_call,
+                                .name = "tag",
+                                .name_loc = type_loc,
+                            }, type_loc);
+                            test_expr = p.newExpr(E.Binary{
+                                .op = if (negate) .bin_strict_ne else .bin_strict_eq,
+                                .left = tag_dot,
+                                .right = p.newExpr(E.String{ .data = "Ok" }, type_loc),
+                            }, type_loc);
+                        }
+                    }
                 } else {
-                    // Literal pattern (with possible OR chain).
-                    test_expr = try buildArmTestForLiteral(p, m_ref, args_loc);
+                    // Literal pattern (with possible OR chain). Capture
+                    // the raw lit values too — if every arm in the match
+                    // turns out to be literal-only, we'll lower to a
+                    // switch instead of a ternary chain.
+                    var lits = ListManaged(Expr).init(p.allocator);
+                    test_expr = try buildArmTestForLiteralCollecting(p, m_ref, args_loc, &lits);
+                    literals = bun.handleOom(lits.toOwnedSlice());
                 }
 
                 try p.lexer.expect(.t_equals_greater_than);
@@ -1937,6 +2098,9 @@ pub fn Parse(
                 bun.handleOom(arms.append(.{
                     .test_expr = test_expr,
                     .result = result_expr,
+                    .literals = literals,
+                    .is_wildcard = is_wildcard,
+                    .tag = tag,
                 }));
 
                 if (p.lexer.token == .t_comma) {
@@ -1948,44 +2112,77 @@ pub fn Parse(
 
             try p.lexer.expect(.t_close_brace);
 
+            // Decide lowering. Three options:
+            //   literal-switch — every arm is literal-only or wildcard.
+            //                    Switch on `__pm`. Dense ints get jump
+            //                    tables.
+            //   tag-switch     — every arm is a Result/Option ctor (Ok,
+            //                    Err, Some, None) or wildcard. Switch on
+            //                    `__pm.tag`. String switches still
+            //                    optimize well in V8/JSC.
+            //   ternary        — anything else (bindings, mixed shapes).
+            var all_literal = true;
+            var all_tag = true;
+            var saw_tag = false;
+            for (arms.items) |arm| {
+                if (!arm.is_wildcard and arm.literals == null) all_literal = false;
+                if (!arm.is_wildcard and arm.tag == null) all_tag = false;
+                if (arm.tag != null) saw_tag = true;
+            }
+            if (!saw_tag) all_tag = false; // all-wildcard or all-literal: don't claim tag mode
+            const use_switch = all_literal or all_tag;
+
+            // The switch path needs an extra block scope inside the
+            // function_body. visitStmt's s_switch handler pushes a block
+            // scope at data.body_loc, so we have to provide one. Push it
+            // BEFORE popping function_body so it parents correctly.
+            const switch_body_loc = p.lexer.loc();
+            if (use_switch) {
+                _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.block, switch_body_loc);
+                p.popScope();
+            }
+
             p.popScope();
             p.popScope();
 
-            // Build the ternary chain right-to-left. Fallback is the last
-            // catch-all arm's result, or `undefined` if no catch-all exists.
-            var fallback: Expr = p.newExpr(E.Undefined{}, args_loc);
-            var first_test_idx: usize = arms.items.len;
-            // Find the first catch-all arm (test_expr == null). Everything
-            // after it is unreachable; ignore for the chain. Its result is
-            // the fallback.
-            for (arms.items, 0..) |arm, i| {
-                if (arm.test_expr == null) {
-                    fallback = arm.result;
-                    first_test_idx = i;
-                    break;
+            const arrow_body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            if (all_literal) {
+                arrow_body_stmts[0] = buildMatchSwitchStmt(p, m_ref, args_loc, switch_body_loc, arms.items) catch return error.SyntaxError;
+            } else if (all_tag) {
+                arrow_body_stmts[0] = buildMatchTagSwitchStmt(p, m_ref, args_loc, switch_body_loc, arms.items) catch return error.SyntaxError;
+            } else {
+                // Ternary chain — right-to-left, fallback = first catch-all's
+                // result or `undefined`.
+                var fallback: Expr = p.newExpr(E.Undefined{}, args_loc);
+                var first_test_idx: usize = arms.items.len;
+                for (arms.items, 0..) |arm, i| {
+                    if (arm.test_expr == null) {
+                        fallback = arm.result;
+                        first_test_idx = i;
+                        break;
+                    }
                 }
+                var chain: Expr = fallback;
+                var i = first_test_idx;
+                while (i > 0) {
+                    i -= 1;
+                    const arm = arms.items[i];
+                    chain = p.newExpr(E.If{
+                        .test_ = arm.test_expr.?,
+                        .yes = arm.result,
+                        .no = chain,
+                    }, args_loc);
+                }
+                arrow_body_stmts[0] = p.s(S.Return{ .value = chain }, body_loc);
             }
-            // Build right-to-left across arms BEFORE the catch-all.
-            var chain: Expr = fallback;
-            var i = first_test_idx;
-            while (i > 0) {
-                i -= 1;
-                const arm = arms.items[i];
-                chain = p.newExpr(E.If{
-                    .test_ = arm.test_expr.?,
-                    .yes = arm.result,
-                    .no = chain,
-                }, args_loc);
-            }
-            // Wrap in ((__pm) => chain)(subject).
+
+            // Wrap in ((__pm) => body)(subject).
             const arrow_args = bun.handleOom(p.allocator.alloc(G.Arg, 1));
             arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = m_ref }, args_loc) };
-            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
-            body_stmts[0] = p.s(S.Return{ .value = chain }, body_loc);
             const arrow = p.newExpr(E.Arrow{
                 .args = arrow_args,
-                .body = .{ .loc = body_loc, .stmts = body_stmts },
-                .prefer_expr = true,
+                .body = .{ .loc = body_loc, .stmts = arrow_body_stmts },
+                .prefer_expr = !use_switch, // switch body needs braces
                 .is_async = false,
             }, args_loc);
             const call_args2 = bun.handleOom(p.allocator.alloc(Expr, 1));
@@ -2129,24 +2326,125 @@ pub fn Parse(
             return name;
         }
 
+        // Build `switch (__pm.tag) { case "Ok": ... }` for arms that are
+        // all Result/Option constructor patterns (Ok / Err / Some / None)
+        // or a wildcard. Each arm's body is a single `return result;`.
+        // Result expressions have already had their bind names substituted
+        // (`user` → `__pm.value`, `e` → `__pm.error`) during arm parse.
+        fn buildMatchTagSwitchStmt(
+            p: *P,
+            m_ref: js_ast.Ref,
+            m_loc: logger.Loc,
+            body_loc: logger.Loc,
+            arms: anytype,
+        ) anyerror!Stmt {
+            var cases = ListManaged(js_ast.Case).init(p.allocator);
+            for (arms) |arm| {
+                const body = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                body[0] = p.s(S.Return{ .value = arm.result }, body_loc);
+                if (arm.is_wildcard) {
+                    bun.handleOom(cases.append(.{
+                        .loc = body_loc,
+                        .value = null,
+                        .body = body,
+                    }));
+                } else {
+                    bun.handleOom(cases.append(.{
+                        .loc = body_loc,
+                        .value = p.newExpr(E.String{ .data = arm.tag.? }, m_loc),
+                        .body = body,
+                    }));
+                }
+            }
+            const tag_access = p.newExpr(E.Dot{
+                .target = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),
+                .name = "tag",
+                .name_loc = m_loc,
+            }, m_loc);
+            return p.s(S.Switch{
+                .test_ = tag_access,
+                .body_loc = body_loc,
+                .cases = bun.handleOom(cases.toOwnedSlice()),
+            }, body_loc);
+        }
+
+        // Build a `switch (__pm) { ... }` statement covering all arms.
+        // For an OR pattern (`400 | 404 => result`), emit one `case` label
+        // per literal — the first ones with empty bodies fall through to
+        // the last, which has the `return result;` body. The wildcard
+        // becomes `default:`. Subject is already bound to m_ref by the
+        // surrounding IIFE arrow.
+        fn buildMatchSwitchStmt(
+            p: *P,
+            m_ref: js_ast.Ref,
+            m_loc: logger.Loc,
+            body_loc: logger.Loc,
+            arms: anytype,
+        ) anyerror!Stmt {
+            var cases = ListManaged(js_ast.Case).init(p.allocator);
+            for (arms) |arm| {
+                if (arm.is_wildcard) {
+                    const body = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                    body[0] = p.s(S.Return{ .value = arm.result }, body_loc);
+                    bun.handleOom(cases.append(.{
+                        .loc = body_loc,
+                        .value = null, // null = default
+                        .body = body,
+                    }));
+                    continue;
+                }
+                const lits = arm.literals.?;
+                // For N OR alternatives, emit N case labels. The first
+                // N-1 have empty bodies (fall-through into the next case),
+                // the last has the return.
+                for (lits, 0..) |lit, i| {
+                    if (i < lits.len - 1) {
+                        bun.handleOom(cases.append(.{
+                            .loc = body_loc,
+                            .value = lit,
+                            .body = &[_]Stmt{},
+                        }));
+                    } else {
+                        const body = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                        body[0] = p.s(S.Return{ .value = arm.result }, body_loc);
+                        bun.handleOom(cases.append(.{
+                            .loc = body_loc,
+                            .value = lit,
+                            .body = body,
+                        }));
+                    }
+                }
+            }
+            return p.s(S.Switch{
+                .test_ = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),
+                .body_loc = body_loc,
+                .cases = bun.handleOom(cases.toOwnedSlice()),
+            }, body_loc);
+        }
+
         // Parse a literal pattern (with optional OR chain) and return the
-        // test expression `__pm === lit (|| __pm === lit2)*`.
-        fn buildArmTestForLiteral(p: *P, m_ref: js_ast.Ref, m_loc: logger.Loc) anyerror!Expr {
-            // Parse the first literal — accepts numbers, strings, booleans,
-            // null, and unary-prefixed numbers (-3). Use parseExpr at .pipe
-            // so the OR `|` doesn't get consumed as bitwise OR.
+        // test expression `__pm === lit (|| __pm === lit2)*`. Also appends
+        // each literal expression to `lits_out` so the caller can use them
+        // as switch case labels if the whole match turns out to be
+        // switchable.
+        fn buildArmTestForLiteralCollecting(
+            p: *P,
+            m_ref: js_ast.Ref,
+            m_loc: logger.Loc,
+            lits_out: *ListManaged(Expr),
+        ) anyerror!Expr {
             const first = try p.parseExpr(.bitwise_or);
+            bun.handleOom(lits_out.append(first));
             var test_expr = p.newExpr(E.Binary{
                 .op = .bin_strict_eq,
                 .left = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),
                 .right = first,
             }, m_loc);
 
-            // OR alternatives: `| pat | pat ...`. The lexer token for `|`
-            // at this level is t_bar. We chain with `||`.
             while (p.lexer.token == .t_bar) {
                 try p.lexer.next();
                 const next_pat = try p.parseExpr(.bitwise_or);
+                bun.handleOom(lits_out.append(next_pat));
                 const next_test = p.newExpr(E.Binary{
                     .op = .bin_strict_eq,
                     .left = p.newExpr(E.Identifier{ .ref = m_ref }, m_loc),

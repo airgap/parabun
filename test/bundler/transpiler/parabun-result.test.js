@@ -56,31 +56,35 @@ describe("Parabun Result / Option", () => {
   });
 
   describe("match patterns", () => {
-    test("Ok(x) / Err(e) destructure binds the inner field", () => {
+    // All-constructor (or wildcard) arms lower to `switch (__pm.tag)`
+    // — V8/JSC compile string switches efficiently, and no per-arm `.tag`
+    // re-comparison is needed.
+    test("Ok(x) / Err(e) destructure binds the inner field (tag-switch)", () => {
       const out = ts(`
         const msg = match result {
           Ok(user) => "got " + user.name,
           Err(e) => "error: " + e
         }
       `);
-      // Tag tests.
-      expect(out).toMatch(/__pm\w*\$?\.tag === "Ok"/);
-      expect(out).toMatch(/__pm\w*\$?\.tag === "Err"/);
-      // user.name → __pm.value.name.
+      // Switch on __pm.tag with one case per ctor.
+      expect(out).toMatch(/switch \(__pm\w*\$?\.tag\)/);
+      expect(out).toContain('case "Ok":');
+      expect(out).toContain('case "Err":');
+      // user.name → __pm.value.name; e → __pm.error.
       expect(out).toMatch(/\.value\.name/);
-      // e → __pm.error.
       expect(out).toMatch(/__pm\w*\$?\.error/);
     });
 
-    test("Some(n) / None destructure", () => {
+    test("Some(n) / None destructure (tag-switch)", () => {
       const out = ts(`
         const v = match opt {
           Some(n) => n * 2,
           None => 0
         }
       `);
-      expect(out).toMatch(/__pm\w*\$?\.tag === "Some"/);
-      expect(out).toMatch(/__pm\w*\$?\.tag === "None"/);
+      expect(out).toMatch(/switch \(__pm\w*\$?\.tag\)/);
+      expect(out).toContain('case "Some":');
+      expect(out).toContain('case "None":');
       // n * 2 → __pm.value * 2.
       expect(out).toMatch(/\.value \* 2/);
     });
@@ -92,9 +96,11 @@ describe("Parabun Result / Option", () => {
           _ => false
         }
       `);
-      expect(out).toMatch(/__pm\w*\$?\.tag === "Ok"/);
+      expect(out).toMatch(/switch \(__pm\w*\$?\.tag\)/);
+      expect(out).toContain('case "Ok":');
       // No binding, no .value access required.
-      expect(out).toContain("? true");
+      expect(out).toContain("return true");
+      expect(out).toContain("default:");
     });
 
     test("constructor without parens matches tag only", () => {
@@ -104,7 +110,8 @@ describe("Parabun Result / Option", () => {
           _ => "filled"
         }
       `);
-      expect(out).toMatch(/__pm\w*\$?\.tag === "None"/);
+      expect(out).toMatch(/switch \(__pm\w*\$?\.tag\)/);
+      expect(out).toContain('case "None":');
     });
 
     test("mixed Ok / Err / None arms in same match", () => {
@@ -116,9 +123,11 @@ describe("Parabun Result / Option", () => {
           _ => "fallback"
         }
       `);
-      expect(out).toMatch(/\.tag === "Ok"/);
-      expect(out).toMatch(/\.tag === "Err"/);
-      expect(out).toMatch(/\.tag === "None"/);
+      expect(out).toMatch(/switch \(__pm\w*\$?\.tag\)/);
+      expect(out).toContain('case "Ok":');
+      expect(out).toContain('case "Err":');
+      expect(out).toContain('case "None":');
+      expect(out).toContain("default:");
     });
   });
 });

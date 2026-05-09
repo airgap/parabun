@@ -172,6 +172,12 @@ pub fn ParsePrefix(
             // be a parse error in standard JS.
             if (strings.eqlComptime(name, "match") and (raw.ptr == name.ptr and raw.len == name.len)) {
                 if (!p.lexer.has_newline_before) {
+                    // NOTE: `t_open_bracket` is intentionally excluded —
+                    // `match[4]` is array indexing on a variable named
+                    // `match` (common in JS code that uses regex result
+                    // arrays). Including `[` here causes the parser to
+                    // treat `match[…]` as the start of a match expression,
+                    // which fails when there's no `{ ... }` body.
                     switch (p.lexer.token) {
                         .t_identifier,
                         .t_numeric_literal,
@@ -180,7 +186,6 @@ pub fn ParsePrefix(
                         .t_false,
                         .t_null,
                         .t_open_paren,
-                        .t_open_bracket,
                         .t_minus,
                         .t_plus,
                         .t_exclamation,
@@ -201,6 +206,21 @@ pub fn ParsePrefix(
             if ((strings.eqlComptime(name, "parallel") or strings.eqlComptime(name, "para")) and (raw.ptr == name.ptr and raw.len == name.len)) {
                 if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
                     return try p.parseParallelObjectExpr(name_range);
+                }
+            }
+
+            // Parabun: Handle `schema { ... }` expression form — inline
+            // JSON Schema literal that desugars to `__paraFromSchema(() => ({ ... }))`.
+            // Used for inline schemas inside lockstep endpoint records, e.g.
+            //   const ep = { request: schema { type: "bigint" }, response: user };
+            // so `ep.request.parse(v)` and `ep.request.type === "bigint"` both
+            // work without naming the schema as a top-level binding. Only
+            // triggers when `schema` is immediately followed (no newline)
+            // by `{`; any other continuation leaves `schema` as a plain
+            // identifier so `import { schema } from "..."` still works.
+            if (strings.eqlComptime(name, "schema") and (raw.ptr == name.ptr and raw.len == name.len)) {
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
+                    return try p.parseSchemaObjectExpr(name_range);
                 }
             }
 

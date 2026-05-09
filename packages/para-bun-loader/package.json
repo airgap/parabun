@@ -1,0 +1,17 @@
+{
+  "name": "@para/bun-loader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bun plugin: transpiles .pts/.pjs/.ptsx/.pjsx files via parabun, lets system Bun load Para sources transparently.",
+  "type": "module",
+  "main": "./src/loader.ts",
+  "exports": {
+    ".": "./src/loader.ts",
+    "./preload": "./src/preload.ts",
+    "./transpile-one": "./src/transpile-one.ts"
+  },
+  "bin": {
+    "para-transpile-one": "./src/transpile-one.ts",
+    "para-check": "./src/check.ts"
+  }
+}

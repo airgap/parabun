@@ -1,4 +1,4 @@
-export * from "./runtime";
+export * from "./runtime-base.js";
 
 // TODO: these are duplicated from bundle_v2.js, can we ... not do that?
 export var __using = (stack, value, async) => {
@@ -262,17 +262,6 @@ __paraDec.Decimal = Decimal;
 // minimum/maximum/exclusive*, minLength/maxLength, pattern, format
 // (email/uuid/uri/date/date-time/ipv4/ipv6).
 export var __paraFromSchema = schemaOrThunk => {
-  // Accept either a schema VALUE or a thunk returning a schema. The
-  // parser always wraps `model X = body` and `api X = body` bodies in
-  // `() => body` so self-referencing schemas (e.g. `Comment` whose
-  // `replies.items` points back at `Comment`) can evaluate without
-  // hitting TDZ on the const binding.
-  //
-  // Eager attempt: run the thunk now. If it throws ReferenceError,
-  // the body references an identifier that's still in TDZ — typically
-  // the const we're being assigned to. Fall back to the lazy/Proxy
-  // path so evaluation defers until first use, by which time the
-  // const binding is established.
   if (typeof schemaOrThunk === "function") {
     try {
       return __paraFromSchemaEager(schemaOrThunk());
@@ -284,10 +273,6 @@ export var __paraFromSchema = schemaOrThunk => {
   return __paraFromSchemaEager(schemaOrThunk);
 };
 
-// Lazy-evaluating model wrapper for recursive schemas. Returns a Proxy
-// that defers thunk evaluation to first access. The Proxy traps
-// reproduce the surface area of the eager model: `parse`, `schema`,
-// spread keys, navigation accessors, JSON.stringify, Object.keys.
 var __paraFromSchemaLazy = thunk => {
   var inner = null;
   var get = () => inner ?? (inner = __paraFromSchemaEager(thunk()));
@@ -297,10 +282,6 @@ var __paraFromSchemaLazy = thunk => {
       get: (_t, prop) => get()[prop],
       has: (_t, prop) => prop in get(),
       ownKeys: _t => Reflect.ownKeys(get()),
-      // Proxy invariant: descriptors for keys the *target* doesn't own
-      // must be `configurable: true`. Force configurability on all
-      // forwarded descriptors so the proxy stays consistent regardless
-      // of how the inner schema's keys were defined.
       getOwnPropertyDescriptor: (_t, prop) => {
         var d = Reflect.getOwnPropertyDescriptor(get(), prop);
         return d ? Object.assign({}, d, { configurable: true }) : undefined;
@@ -420,24 +401,12 @@ var __paraFromSchemaEager = schema => {
     writable: false,
     configurable: false,
   });
-  // Field navigation: for an object-shape schema, expose each property
-  // as a non-enumerable accessor that returns the wrapped sub-schema.
-  // Lets consumers walk the schema graph naturally:
-  //   `User.profile.bio` ≡ `User.schema.properties.profile.properties.bio`
-  // (only when `properties` exists; leaves don't get accessors).
   __paraAddFieldAccessors(result, schema);
-
   return result;
 };
 
-// Wrap a sub-schema value so it can be navigated like a model:
-//   - if `val` is already a wrapped model (has `.parse` + `.schema`), return as-is;
-//   - if `val` is an object-shape schema (`{type:'object', properties:...}`),
-//     wrap recursively so its fields are navigable;
-//   - if `val` is an array schema (`{type:'array', items: <subSchema>}`),
-//     return the schema with a non-enumerable `.element` pointing at the
-//     wrapped item type — explicit descent per LYK-826's API design;
-//   - otherwise return `val` as-is — leaf JSON Schema fragments stay raw.
+// Wrap a sub-schema value so it can be navigated like a model.
+// See src/runtime.bun.js for full design notes (kept in sync).
 var __paraWrapField = val => {
   if (val && typeof val === "object" && typeof val.parse === "function" && val.schema) return val;
   if (val && typeof val === "object" && !Array.isArray(val)) {
@@ -458,11 +427,6 @@ var __paraWrapField = val => {
   return val;
 };
 
-// Add navigable field-accessors to a wrapped model. For each entry in
-// the schema's `.properties`, expose a non-enumerable getter on the
-// result whose value is the wrapped sub-schema. We don't shadow keys
-// that already exist on the result (e.g. `type`, `properties`,
-// `required` are spread-copied keys of the parent schema).
 var __paraAddFieldAccessors = (result, schema) => {
   // Only add field-navigation accessors when the schema EXPLICITLY
   // declares itself an object schema. Lockstep-style records often
@@ -485,13 +449,65 @@ var __paraAddFieldAccessors = (result, schema) => {
   }
 };
 
-// Note: HTTP envelope auto-detection was dropped. `__paraFromSchema`
-// is a pure JSON Schema decorator now — it adds `.parse`, `.schema`,
-// `.is`, and field-navigation accessors. Endpoint shapes
-// (`{ request, response, throws, ... }`) are plain JS objects whose
-// schema slots hold either an imported `schema X = ...` binding or an
-// inline `schema { ... }` literal; lockstep (or any consumer) is
-// responsible for any per-slot helpers like `parseRequest`.
+// Parabun: `api X = { ... }` desugars to `const X = __paraFromApiSchema(<body>)`.
+export var __paraFromApiSchema = bodyOrThunk => {
+  if (typeof bodyOrThunk === "function") {
+    try {
+      return __paraFromApiSchemaEager(bodyOrThunk());
+    } catch (e) {
+      if (e instanceof ReferenceError) {
+        var inner = null;
+        var get = () => inner ?? (inner = __paraFromApiSchemaEager(bodyOrThunk()));
+        return new Proxy(
+          {},
+          {
+            get: (_t, prop) => get()[prop],
+            has: (_t, prop) => prop in get(),
+            ownKeys: _t => Reflect.ownKeys(get()),
+            getOwnPropertyDescriptor: (_t, prop) => {
+              var d = Reflect.getOwnPropertyDescriptor(get(), prop);
+              return d ? Object.assign({}, d, { configurable: true }) : undefined;
+            },
+            getPrototypeOf: _t => Reflect.getPrototypeOf(get()),
+          },
+        );
+      }
+      throw e;
+    }
+  }
+  return __paraFromApiSchemaEager(bodyOrThunk);
+};
+
+var __paraFromApiSchemaEager = body => {
+  var result = __paraFromSchema(body);
+  var SCHEMA_KEYS = ["request", "response", "body", "params", "query", "headers"];
+  var capitalize = s => s[0].toUpperCase() + s.slice(1);
+  for (var i = 0; i < SCHEMA_KEYS.length; i++) {
+    var k = SCHEMA_KEYS[i];
+    if (body[k] === undefined) continue;
+    var fieldSchema = body[k];
+    Object.defineProperty(result, "parse" + capitalize(k), {
+      value: (sub => v => {
+        var subParser = __paraFromSchema(sub);
+        return subParser.parse(v);
+      })(fieldSchema),
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+  for (var i = 0; i < SCHEMA_KEYS.length; i++) {
+    var k = SCHEMA_KEYS[i];
+    if (body[k] === undefined) continue;
+    Object.defineProperty(result, k, {
+      value: __paraWrapField(body[k]),
+      enumerable: true,
+      writable: false,
+      configurable: true,
+    });
+  }
+  return result;
+};
 
 export var __callDispose = (stack, error, hasError) => {
   let fail = e =>

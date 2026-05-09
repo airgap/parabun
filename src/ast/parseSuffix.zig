@@ -2898,6 +2898,62 @@ pub fn ParseSuffix(
                     }
                 }
 
+                // Parabun: `expr is TypeName` / `expr is not TypeName` —
+                // runtime type-guard against a Para model. Lowers to
+                //   (TypeName.parse(expr).tag === "Ok")
+                // (or `!== "Ok"` for the negated form). Triggers only when
+                // RHS is a capitalized identifier in scope, so plain
+                // expressions like `is + 1` (variable named `is`) still
+                // parse as an identifier reference.
+                if (level.lt(.compare) and
+                    p.lexer.token == .t_identifier and
+                    bun.strings.eqlComptime(p.lexer.raw(), "is") and
+                    !p.lexer.has_newline_before)
+                {
+                    const saved = p.lexer;
+                    try p.lexer.next();
+                    var negate = false;
+                    if (p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "not") and !p.lexer.has_newline_before) {
+                        const saved_not = p.lexer;
+                        try p.lexer.next();
+                        if (p.lexer.token == .t_identifier and p.lexer.raw().len > 0 and p.lexer.raw()[0] >= 'A' and p.lexer.raw()[0] <= 'Z') {
+                            negate = true;
+                        } else {
+                            p.lexer.restore(&saved_not);
+                        }
+                    }
+                    if (p.lexer.token == .t_identifier and p.lexer.raw().len > 0 and p.lexer.raw()[0] >= 'A' and p.lexer.raw()[0] <= 'Z') {
+                        const type_name = p.lexer.identifier;
+                        const type_loc = p.lexer.loc();
+                        try p.lexer.next();
+
+                        const type_ref = p.storeNameInRef(type_name) catch unreachable;
+                        const parse_dot = p.newExpr(E.Dot{
+                            .target = p.newExpr(E.Identifier{ .ref = type_ref }, type_loc),
+                            .name = "parse",
+                            .name_loc = type_loc,
+                        }, type_loc);
+                        const call_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                        call_args[0] = left.*;
+                        const parse_call = p.newExpr(E.Call{
+                            .target = parse_dot,
+                            .args = js_ast.ExprNodeList.fromOwnedSlice(call_args),
+                        }, type_loc);
+                        const tag_dot = p.newExpr(E.Dot{
+                            .target = parse_call,
+                            .name = "tag",
+                            .name_loc = type_loc,
+                        }, type_loc);
+                        left.* = p.newExpr(E.Binary{
+                            .op = if (negate) .bin_strict_ne else .bin_strict_eq,
+                            .left = tag_dot,
+                            .right = p.newExpr(E.String{ .data = "Ok" }, type_loc),
+                        }, type_loc);
+                        continue;
+                    }
+                    p.lexer.restore(&saved);
+                }
+
                 // Reset the optional chain flag by default. That way we won't accidentally
                 // treat "c.d" as OptionalChainContinue in "a?.b + c.d".
                 const old_optional_chain = optional_chain.*;

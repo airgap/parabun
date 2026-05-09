@@ -104,6 +104,7 @@ pub fn NewParser_(
         pub const parseMemoPrefixExpr = parse_zig.parseMemoPrefixExpr;
         pub const parseMemoAsyncPrefixExpr = parse_zig.parseMemoAsyncPrefixExpr;
         pub const parseParallelObjectExpr = parse_zig.parseParallelObjectExpr;
+        pub const parseSchemaObjectExpr = parse_zig.parseSchemaObjectExpr;
         pub const parseMatchExpr = parse_zig.parseMatchExpr;
         pub const parseResultCtor = parse_zig.parseResultCtor;
         pub const parseNoneLiteral = parse_zig.parseNoneLiteral;
@@ -183,6 +184,21 @@ pub fn NewParser_(
         // Populated by parseFnStmt when a pure function has a single parameter
         // and a single-return body. Consumed by the |> desugaring.
         pure_inline_fns: List(PureInlineInfo) = .{},
+
+        // Parabun: arg-level validation markers from `(req:: User)` syntax.
+        // Each entry maps an arg ref to the Para model name that should be
+        // used to validate it at function entry. parseFn populates this
+        // during arg parsing; parseFn prepends validation stmts to the
+        // body after parseFnBody returns. Cleared per fn parse.
+        para_arg_validations: List(ParaArgValidation) = .{},
+
+        // Parabun: TS interface / type-alias shape registry for
+        // auto-validating `(arg:: TSType)` against types that aren't Para
+        // models. Captured during skipTypeScriptInterfaceStmt /
+        // skipTypeScriptTypeStmt; consumed in parseFn's `::` flow when
+        // the type identifier doesn't resolve to a runtime model.
+        // v0: object-type interfaces / type aliases with primitive fields.
+        para_ts_type_registry: bun.StringHashMapUnmanaged(ParaTsTypeShape) = .{},
         allocated_names: List(string) = .{},
         // allocated_names: ListManaged(string) = ListManaged(string).init(bun.default_allocator),
         // allocated_names_pool: ?*AllocatedNamesPool.Node = null,
@@ -603,6 +619,30 @@ pub fn NewParser_(
             fn_name: string,
             param_name: string,
             body_expr: Expr,
+        };
+
+        // Parabun: per-arg validation marker from `(req:: User)` syntax.
+        // Captured during parseFn arg parsing; consumed at body construction.
+        pub const ParaArgValidation = struct {
+            arg_ref: Ref,
+            arg_name: string,
+            type_name: string,
+            loc: logger.Loc,
+        };
+
+        // Parabun: captured TS interface / type-alias shape — name + flat
+        // field list. v0 supports primitive field types only (number /
+        // string / boolean / bigint); anything more complex sets
+        // `unsupported = true` so the `::` flow falls back to lookup-fail
+        // diagnostics rather than emitting wrong validators.
+        pub const ParaTsTypeField = struct {
+            name: string,
+            type_name: string,
+            optional: bool,
+        };
+        pub const ParaTsTypeShape = struct {
+            fields: []const ParaTsTypeField,
+            unsupported: bool,
         };
 
         pub fn checkDynamicSpecifier(p: *P, arg: Expr, loc: logger.Loc, comptime kind: []const u8) !void {

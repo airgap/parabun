@@ -85,6 +85,19 @@ pub fn ParseStmt(
                         }
                     }
 
+                    // Parabun: "export schema NAME = <expr>" / "export schema NAME from <expr>"
+                    // / "export schema NAME { ... }".
+                    if (p.lexer.isContextualKeyword("schema")) {
+                        const kw_range = p.lexer.range();
+                        try p.lexer.next();
+                        if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                            opts.is_export = true;
+                            return try parseModelStmt(p, kw_range, opts);
+                        }
+                        // `export schema` not followed by an identifier name —
+                        // unexpected; let downstream handle.
+                    }
+
                     // Parabun: "export memo name(...)" / "export memo async name(...)"
                     if (p.lexer.isContextualKeyword("memo")) {
                         const memo_range = p.lexer.range();
@@ -2043,11 +2056,78 @@ pub fn ParseStmt(
         // a pure data shape with a runtime validator, no methods. Field
         // types: int / str / bool / float / num. Optional via `T?` suffix.
         // Arrays and nested-model refs are deferred (not in this MVP).
+
+        // Capitalized identifiers that are JS / TS builtins — exclude
+        // these from `::`-marker auto-validation so `(s:: String) => ...`
+        // doesn't try to call `String.parse(s)` on a TS-builtin annotation.
+        pub fn isJsBuiltinTypeName(tn: []const u8) bool {
+            const builtins = [_][]const u8{
+                "String",        "Number",      "Boolean",        "Object",       "Array",        "Function",  "Date",
+                "RegExp",        "Error",       "Map",            "Set",          "WeakMap",      "WeakSet",   "Promise",
+                "Symbol",        "BigInt",      "Buffer",         "ArrayBuffer",  "Uint8Array",   "Int8Array", "Uint16Array",
+                "Int16Array",    "Uint32Array", "Int32Array",     "Float32Array", "Float64Array", "DataView",  "Iterator",
+                "AsyncIterator", "Generator",   "AsyncGenerator", "JSON",         "Math",         "Reflect",   "Proxy",
+            };
+            inline for (builtins) |b| {
+                if (strings.eqlComptime(tn, b)) return true;
+            }
+            return false;
+        }
+
         fn parseModelStmt(p: *P, model_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
             const name = p.lexer.identifier;
             const name_loc = p.lexer.loc();
             const name_ref = try p.declareSymbol(.constant, name_loc, name);
             try p.lexer.next();
+
+            // `model X from <expr>` OR `model X = <expr>` — ingest an
+            // existing JSON Schema at runtime. Both forms desugar to
+            // `const X = __paraFromSchema(<expr>)`. The `=` form mirrors
+            // lockstep's `export const x = { properties: ... }` pattern
+            // — friendlier when porting existing pg-models / TSON files.
+            const is_from = p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "from");
+            const is_eq = p.lexer.token == .t_equals;
+            if (is_from or is_eq) {
+                try p.lexer.next();
+                // Push scopes BEFORE parsing so the body's identifiers
+                // belong to the arrow we're about to construct around it.
+                // Without this the visit pass walks a Stmt whose contents
+                // were registered to the outer scope — crashes.
+                const body_loc = p.lexer.loc();
+                _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, model_range.loc) catch bun.outOfMemory();
+                _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+                const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+                var arrow_data = p.fn_or_arrow_data_parse;
+                arrow_data.allow_await = .allow_ident;
+                arrow_data.allow_yield = .allow_ident;
+                p.fn_or_arrow_data_parse = arrow_data;
+                const schema_expr = try p.parseExpr(.lowest);
+                p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+                p.popScope();
+                p.popScope();
+
+                const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                arrow_stmts[0] = p.s(S.Return{ .value = schema_expr }, body_loc);
+                const thunk = p.newExpr(E.Arrow{
+                    .args = &.{},
+                    .body = .{ .loc = body_loc, .stmts = arrow_stmts },
+                    .prefer_expr = true,
+                    .is_async = false,
+                }, model_range.loc);
+                const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                args[0] = thunk;
+                const call = p.callRuntime(model_range.loc, "__paraFromSchema", args);
+                const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+                decls[0] = .{
+                    .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc),
+                    .value = call,
+                };
+                return p.s(S.Local{
+                    .kind = .k_const,
+                    .decls = G.Decl.List.fromOwnedSlice(decls),
+                    .is_export = opts.is_export,
+                }, model_range.loc);
+            }
 
             try p.lexer.expect(.t_open_brace);
 
@@ -2055,6 +2135,19 @@ pub fn ParseStmt(
                 name: []const u8,
                 type_name: []const u8,
                 optional: bool,
+                is_array: bool,
+                // Inner-value bounds: `int(0..150)` or `str(1..=100)`.
+                range_min: ?f64,
+                range_max: ?f64,
+                inclusive_max: bool,
+                // Array-length bounds: `tags: [Tag](1..=10)`.
+                array_min: ?f64,
+                array_max: ?f64,
+                array_inclusive_max: bool,
+                // Literal-union pattern: `"a" | "b" | "c"`. When non-null,
+                // type_name is empty; the field must equal one of these
+                // string/number literals.
+                literals: ?[]Expr,
                 loc: logger.Loc,
             };
             var fields = ListManaged(Field).init(p.allocator);
@@ -2064,15 +2157,106 @@ pub fn ParseStmt(
                 const field_loc = p.lexer.loc();
                 try p.lexer.next();
                 try p.lexer.expect(.t_colon);
-                if (p.lexer.token != .t_identifier) break;
-                const type_name = p.lexer.identifier;
-                try p.lexer.next();
+
+                var type_name: []const u8 = "";
+                var is_array = false;
+                var range_min: ?f64 = null;
+                var range_max: ?f64 = null;
+                var inclusive_max = false;
+                var array_min: ?f64 = null;
+                var array_max: ?f64 = null;
+                var array_inclusive_max = false;
+                var literals: ?[]Expr = null;
+
+                if (p.lexer.token == .t_string_literal or p.lexer.token == .t_numeric_literal) {
+                    // Literal-union field type: `"a" | "b" | 42`.
+                    var lits = ListManaged(Expr).init(p.allocator);
+                    while (true) {
+                        if (p.lexer.token == .t_string_literal) {
+                            const s = try p.lexer.toUTF8EString();
+                            bun.handleOom(lits.append(p.newExpr(s, p.lexer.loc())));
+                            try p.lexer.next();
+                        } else if (p.lexer.token == .t_numeric_literal) {
+                            bun.handleOom(lits.append(p.newExpr(E.Number{ .value = p.lexer.number }, p.lexer.loc())));
+                            try p.lexer.next();
+                        } else break;
+                        if (p.lexer.token == .t_bar) {
+                            try p.lexer.next();
+                        } else break;
+                    }
+                    literals = bun.handleOom(lits.toOwnedSlice());
+                } else {
+                    // Array field: `field: [T]`. Inner type is parsed as
+                    // a plain identifier; nested arrays not supported.
+                    if (p.lexer.token == .t_open_bracket) {
+                        is_array = true;
+                        try p.lexer.next();
+                    }
+                    if (p.lexer.token != .t_identifier) break;
+                    type_name = p.lexer.identifier;
+                    try p.lexer.next();
+
+                    // Inner-value range refinement: `int(0..150)`,
+                    // `str(1..=100)`. Numeric/string base types only;
+                    // other types parse-and-ignore the range (so it's not
+                    // a syntax error to attach one to a model ref).
+                    if (!is_array and p.lexer.token == .t_open_paren) {
+                        try p.lexer.next();
+                        if (p.lexer.token == .t_numeric_literal) {
+                            range_min = p.lexer.number;
+                            try p.lexer.next();
+                        }
+                        if (p.lexer.token == .t_dot_dot_equals) {
+                            inclusive_max = true;
+                            try p.lexer.next();
+                        } else if (p.lexer.token == .t_dot_dot) {
+                            try p.lexer.next();
+                        }
+                        if (p.lexer.token == .t_numeric_literal) {
+                            range_max = p.lexer.number;
+                            try p.lexer.next();
+                        }
+                        try p.lexer.expect(.t_close_paren);
+                    }
+
+                    if (is_array) {
+                        try p.lexer.expect(.t_close_bracket);
+                        // Array-length bounds: `[T](1..=10)`.
+                        if (p.lexer.token == .t_open_paren) {
+                            try p.lexer.next();
+                            if (p.lexer.token == .t_numeric_literal) {
+                                array_min = p.lexer.number;
+                                try p.lexer.next();
+                            }
+                            if (p.lexer.token == .t_dot_dot_equals) {
+                                array_inclusive_max = true;
+                                try p.lexer.next();
+                            } else if (p.lexer.token == .t_dot_dot) {
+                                try p.lexer.next();
+                            }
+                            if (p.lexer.token == .t_numeric_literal) {
+                                array_max = p.lexer.number;
+                                try p.lexer.next();
+                            }
+                            try p.lexer.expect(.t_close_paren);
+                        }
+                    }
+                }
+
                 const optional = p.lexer.token == .t_question;
                 if (optional) try p.lexer.next();
                 bun.handleOom(fields.append(.{
                     .name = field_name,
                     .type_name = type_name,
                     .optional = optional,
+                    .is_array = is_array,
+                    .range_min = range_min,
+                    .range_max = range_max,
+                    .inclusive_max = inclusive_max,
+                    .array_min = array_min,
+                    .array_max = array_max,
+                    .array_inclusive_max = array_inclusive_max,
+                    .literals = literals,
                     .loc = field_loc,
                 }));
                 if (p.lexer.token == .t_comma or p.lexer.token == .t_semicolon) {
@@ -2081,9 +2265,12 @@ pub fn ParseStmt(
             }
             try p.lexer.expect(.t_close_brace);
 
-            // Synth arrow scopes for the parse fn — locs at lexer.loc so
-            // they're strictly later than anything the field parses pushed.
-            const args_loc = p.lexer.loc();
+            // Synth arrow scopes at model_range.loc — at the START of the
+            // `model` keyword. This lets array-field inner-arrow scopes
+            // (synthesized later at field.loc + offset) fit naturally
+            // between the outer body_loc and the model's closing brace
+            // without overshooting subsequent stmts' natural lexer locs.
+            const args_loc = model_range.loc;
             const body_loc = logger.Loc{ .start = args_loc.start + 1 };
 
             _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc);
@@ -2122,16 +2309,93 @@ pub fn ParseStmt(
                 }, body_loc)));
             }
 
-            // Per-field type check.
+            // Per-field type check. Array fields synthesize an inner
+            // `.some(x => ...)` arrow that needs its own scopes pushed.
+            // Use field.loc + offset for inner scopes — field locs are
+            // monotonically increasing during the field-decl parse and
+            // strictly between outer body_loc (model_range.loc + 1) and
+            // the model's closing brace, so they don't overshoot the
+            // next stmt's natural lexer position.
             for (fields.items) |field| {
                 const field_access = p.newExpr(E.Dot{
                     .target = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
                     .name = field.name,
                     .name_loc = field.loc,
                 }, field.loc);
-                const test_expr_opt = buildTypeMismatchTest(p, field_access, field.type_name, field.optional, field.loc);
-                if (test_expr_opt) |test_expr| {
-                    const err_msg = bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected {s}", .{ field.name, field.type_name }));
+                // Build the un-gated mismatch test. Pass optional=false to
+                // the inner builders — they don't need to worry about the
+                // optional gate; we wrap the whole combined test at the
+                // end so layered range/length/literal checks all share
+                // the single "field is present" guard.
+                var test_expr_opt = if (field.literals) |lits|
+                    buildLiteralUnionMismatch(p, field_access, lits, field.loc)
+                else if (field.is_array) blk: {
+                    const inner_args_loc = logger.Loc{ .start = field.loc.start + 1 };
+                    const inner_body_loc = logger.Loc{ .start = field.loc.start + 2 };
+                    break :blk buildArrayMismatchTest(p, field_access, field.type_name, false, field.loc, inner_args_loc, inner_body_loc) catch null;
+                } else buildTypeMismatchTest(p, field_access, field.type_name, false, field.loc);
+
+                // Layer range refinement on top (inner-value bounds).
+                if (field.range_min != null or field.range_max != null) {
+                    if (buildRangeMismatchTest(p, field_access, field.type_name, field.range_min, field.range_max, field.inclusive_max, field.loc)) |range_test| {
+                        test_expr_opt = if (test_expr_opt) |existing|
+                            p.newExpr(E.Binary{
+                                .op = .bin_logical_or,
+                                .left = existing,
+                                .right = range_test,
+                            }, field.loc)
+                        else
+                            range_test;
+                    }
+                }
+
+                // Array-length bounds: `[T](1..=10)`.
+                if (field.is_array and (field.array_min != null or field.array_max != null)) {
+                    if (buildArrayLengthMismatchTest(p, field_access, field.array_min, field.array_max, field.array_inclusive_max, field.loc)) |len_test| {
+                        test_expr_opt = if (test_expr_opt) |existing|
+                            p.newExpr(E.Binary{
+                                .op = .bin_logical_or,
+                                .left = existing,
+                                .right = len_test,
+                            }, field.loc)
+                        else
+                            len_test;
+                    }
+                }
+
+                if (test_expr_opt) |raw_test| {
+                    // Wrap the combined test in an optional-presence gate
+                    // when the field is optional: only run the mismatch
+                    // checks if the field is actually present.
+                    const test_expr = if (field.optional) blk: {
+                        const not_undef = p.newExpr(E.Binary{
+                            .op = .bin_strict_ne,
+                            .left = field_access,
+                            .right = p.newExpr(E.Undefined{}, field.loc),
+                        }, field.loc);
+                        const not_null = p.newExpr(E.Binary{
+                            .op = .bin_strict_ne,
+                            .left = field_access,
+                            .right = p.newExpr(E.Null{}, field.loc),
+                        }, field.loc);
+                        const present = p.newExpr(E.Binary{
+                            .op = .bin_logical_and,
+                            .left = not_undef,
+                            .right = not_null,
+                        }, field.loc);
+                        break :blk p.newExpr(E.Binary{
+                            .op = .bin_logical_and,
+                            .left = present,
+                            .right = raw_test,
+                        }, field.loc);
+                    } else raw_test;
+
+                    const err_msg = if (field.literals != null)
+                        bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected one of the allowed literals", .{field.name}))
+                    else if (field.is_array)
+                        bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected [{s}]", .{ field.name, field.type_name }))
+                    else
+                        bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected {s}", .{ field.name, field.type_name }));
                     const err_obj = buildResultErrLiteral(p, err_msg, field.loc);
                     const ret_stmt = p.s(S.Return{ .value = err_obj }, field.loc);
                     bun.handleOom(stmts.append(p.s(S.If{
@@ -2161,11 +2425,29 @@ pub fn ParseStmt(
                 .is_async = false,
             }, args_loc);
 
-            // Model object: { parse: arrow }.
-            const props = bun.handleOom(p.allocator.alloc(G.Property, 1));
+            // Build the JSON Schema object alongside the parse fn so the
+            // model is bidirectional — parse for fast inline validation,
+            // schema for interop with OpenAPI / MongoDB validators / any
+            // tool that speaks JSON Schema 2020-12.
+            const schema_obj = buildModelSchema(p, fields.items, body_loc);
+
+            // Model object: spread the schema first so existing consumers
+            // can read `User.properties` / `User.required` directly, then
+            // add `parse` and `schema` on top. Drop-in compatible with
+            // pre-existing JSON-Schema-style consumers.
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 3));
             props[0] = .{
+                .kind = .spread,
+                .key = p.newExpr(E.Missing{}, body_loc),
+                .value = schema_obj,
+            };
+            props[1] = .{
                 .key = p.newExpr(E.String{ .data = "parse" }, body_loc),
                 .value = arrow,
+            };
+            props[2] = .{
+                .key = p.newExpr(E.String{ .data = "schema" }, body_loc),
+                .value = schema_obj,
             };
             const model_obj = p.newExpr(E.Object{
                 .properties = G.Property.List.fromOwnedSlice(props),
@@ -2183,6 +2465,12 @@ pub fn ParseStmt(
                 .is_export = opts.is_export,
             }, model_range.loc);
         }
+
+        // (Endpoint shapes — `{ request, response, throws, ... }` — are
+        // not handled by the parser. They're plain JS objects whose schema
+        // slots are written either as imported `schema X = ...` bindings
+        // or inline via the `schema { ... }` expression literal. Lockstep
+        // or any other consumer provides per-slot helpers from there.)
 
         // For a given field expression and type name, returns a test
         // expression that's TRUE when the value is INVALID (used as the
@@ -2239,8 +2527,58 @@ pub fn ParseStmt(
                     .left = typeof_field,
                     .right = p.newExpr(E.String{ .data = "number" }, loc),
                 }, loc);
+            } else if (strings.eqlComptime(type_name, "Email")) blk: {
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "UUID")) blk: {
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "Url")) blk: {
+                // Pragmatic URL matcher: scheme + "://" + at least one non-space char.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[a-z][a-z0-9+.-]*:\\/\\/[^\\s]+$/i", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "IpV4")) blk: {
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "IpV6")) blk: {
+                // Coarse IPv6 — accepts canonical and `::`-shortened forms.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,7}:$|^::([0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,6}(:[0-9a-f]{1,4})+$/i", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "Date")) blk: {
+                // ISO calendar date: YYYY-MM-DD.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^\\d{4}-\\d{2}-\\d{2}$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "DateTime")) blk: {
+                // ISO 8601 datetime with optional ms and timezone.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})?$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "Slug")) blk: {
+                // URL-safe lowercase slug.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[a-z0-9]+(-[a-z0-9]+)*$/", loc) orelse return null;
+            } else if (type_name.len > 0 and type_name[0] >= 'A' and type_name[0] <= 'Z') blk: {
+                // Capitalized identifier — treat as a model reference.
+                // Emit `TypeName.parse(field).tag !== "Ok"`. Allows
+                // nested models without forward-decl tracking. If
+                // TypeName isn't actually a model at runtime, JS will
+                // throw — that's a programmer error, not something we
+                // try to handle gracefully here.
+                const ref = p.storeNameInRef(type_name) catch return null;
+                const parse_dot = p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = ref }, loc),
+                    .name = "parse",
+                    .name_loc = loc,
+                }, loc);
+                const args = p.allocator.alloc(Expr, 1) catch return null;
+                args[0] = field_access;
+                const parse_call = p.newExpr(E.Call{
+                    .target = parse_dot,
+                    .args = js_ast.ExprNodeList.fromOwnedSlice(args),
+                }, loc);
+                const tag_access = p.newExpr(E.Dot{
+                    .target = parse_call,
+                    .name = "tag",
+                    .name_loc = loc,
+                }, loc);
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = tag_access,
+                    .right = p.newExpr(E.String{ .data = "Ok" }, loc),
+                }, loc);
             } else {
-                // Unknown type — skip the check.
+                // Unknown lowercase type — permissive (skip the check).
                 return null;
             };
 
@@ -2262,6 +2600,453 @@ pub fn ParseStmt(
                 .op = .bin_logical_and,
                 .left = not_undef,
                 .right = not_null2,
+            }, loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = present,
+                .right = inner_check,
+            }, loc);
+        }
+
+        // Build the JSON Schema object for the model:
+        //   { type: "object", properties: { ... }, required: [ ... ] }
+        // Calls buildFieldSchema for each field's value-side schema.
+        fn buildModelSchema(p: *P, fields: anytype, loc: logger.Loc) Expr {
+            // properties: { name: <field-schema>, ... }
+            var prop_props = ListManaged(G.Property).init(p.allocator);
+            for (fields) |field| {
+                bun.handleOom(prop_props.append(.{
+                    .key = p.newExpr(E.String{ .data = field.name }, loc),
+                    .value = buildFieldSchema(p, field, loc),
+                }));
+            }
+            const properties_obj = p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(prop_props.toOwnedSlice())),
+            }, loc);
+
+            // required: [ "name", "name", ... ] — only non-optional fields.
+            var req_items = ListManaged(Expr).init(p.allocator);
+            for (fields) |field| {
+                if (!field.optional) {
+                    bun.handleOom(req_items.append(p.newExpr(E.String{ .data = field.name }, loc)));
+                }
+            }
+            const required_arr = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(bun.handleOom(req_items.toOwnedSlice())),
+            }, loc);
+
+            // Top-level: { type: "object", properties: ..., required: [...] }
+            const top_props = bun.handleOom(p.allocator.alloc(G.Property, 3));
+            top_props[0] = .{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = "object" }, loc),
+            };
+            top_props[1] = .{
+                .key = p.newExpr(E.String{ .data = "properties" }, loc),
+                .value = properties_obj,
+            };
+            top_props[2] = .{
+                .key = p.newExpr(E.String{ .data = "required" }, loc),
+                .value = required_arr,
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(top_props),
+            }, loc);
+        }
+
+        // Build the JSON Schema sub-object for a single field, including
+        // type, format, bounds, enum, and array wrapping.
+        fn buildFieldSchema(p: *P, field: anytype, loc: logger.Loc) Expr {
+            // Literal-union → { enum: [lit1, lit2, ...] }
+            if (field.literals) |lits| {
+                const enum_items = bun.handleOom(p.allocator.alloc(Expr, lits.len));
+                for (lits, 0..) |lit, i| enum_items[i] = lit;
+                const enum_arr = p.newExpr(E.Array{
+                    .items = js_ast.ExprNodeList.fromOwnedSlice(enum_items),
+                }, loc);
+                const props = bun.handleOom(p.allocator.alloc(G.Property, 1));
+                props[0] = .{
+                    .key = p.newExpr(E.String{ .data = "enum" }, loc),
+                    .value = enum_arr,
+                };
+                return p.newExpr(E.Object{
+                    .properties = G.Property.List.fromOwnedSlice(props),
+                }, loc);
+            }
+
+            // Array → { type: "array", items: <inner>, minItems?, maxItems? }
+            if (field.is_array) {
+                var arr_props = ListManaged(G.Property).init(p.allocator);
+                bun.handleOom(arr_props.append(.{
+                    .key = p.newExpr(E.String{ .data = "type" }, loc),
+                    .value = p.newExpr(E.String{ .data = "array" }, loc),
+                }));
+                bun.handleOom(arr_props.append(.{
+                    .key = p.newExpr(E.String{ .data = "items" }, loc),
+                    .value = buildBaseTypeSchema(p, field.type_name, null, null, false, loc),
+                }));
+                if (field.array_min) |amin| {
+                    bun.handleOom(arr_props.append(.{
+                        .key = p.newExpr(E.String{ .data = "minItems" }, loc),
+                        .value = p.newExpr(E.Number{ .value = amin }, loc),
+                    }));
+                }
+                if (field.array_max) |amax| {
+                    // JSON Schema's maxItems is inclusive. Map our excl
+                    // `..` form to maxItems = amax - 1.
+                    const json_max: f64 = if (field.array_inclusive_max) amax else amax - 1;
+                    bun.handleOom(arr_props.append(.{
+                        .key = p.newExpr(E.String{ .data = "maxItems" }, loc),
+                        .value = p.newExpr(E.Number{ .value = json_max }, loc),
+                    }));
+                }
+                return p.newExpr(E.Object{
+                    .properties = G.Property.List.fromOwnedSlice(bun.handleOom(arr_props.toOwnedSlice())),
+                }, loc);
+            }
+
+            // Scalar / refinement / nested-model.
+            return buildBaseTypeSchema(p, field.type_name, field.range_min, field.range_max, field.inclusive_max, loc);
+        }
+
+        // Map a Para base-type-name to its JSON Schema sub-object.
+        // Capitalized non-builtin names → `<TypeName>.schema` reference,
+        // composing nested model schemas at runtime via the const binding.
+        fn buildBaseTypeSchema(p: *P, type_name: []const u8, range_min: ?f64, range_max: ?f64, inclusive_max: bool, loc: logger.Loc) Expr {
+            // Range-aware numeric / string types.
+            if (strings.eqlComptime(type_name, "int")) {
+                return numericSchema(p, "integer", range_min, range_max, inclusive_max, loc);
+            } else if (strings.eqlComptime(type_name, "float") or strings.eqlComptime(type_name, "num") or strings.eqlComptime(type_name, "number")) {
+                return numericSchema(p, "number", range_min, range_max, inclusive_max, loc);
+            } else if (strings.eqlComptime(type_name, "str") or strings.eqlComptime(type_name, "string")) {
+                return stringSchema(p, null, null, range_min, range_max, inclusive_max, loc);
+            } else if (strings.eqlComptime(type_name, "bool") or strings.eqlComptime(type_name, "boolean")) {
+                return singleTypeSchema(p, "boolean", loc);
+            } else if (strings.eqlComptime(type_name, "Email")) {
+                return stringSchema(p, "email", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "UUID")) {
+                return stringSchema(p, "uuid", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "Url")) {
+                return stringSchema(p, "uri", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "Date")) {
+                return stringSchema(p, "date", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "DateTime")) {
+                return stringSchema(p, "date-time", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "IpV4")) {
+                return stringSchema(p, "ipv4", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "IpV6")) {
+                return stringSchema(p, "ipv6", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "Slug")) {
+                return stringSchema(p, null, "^[a-z0-9]+(-[a-z0-9]+)*$", null, null, false, loc);
+            } else if (type_name.len > 0 and type_name[0] >= 'A' and type_name[0] <= 'Z') {
+                // Nested model reference → `<TypeName>.schema`.
+                const ref = p.storeNameInRef(type_name) catch unreachable;
+                return p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = ref }, loc),
+                    .name = "schema",
+                    .name_loc = loc,
+                }, loc);
+            }
+            // Lowercase unknown → empty schema (permissive).
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(p.allocator.alloc(G.Property, 0))),
+            }, loc);
+        }
+
+        fn singleTypeSchema(p: *P, comptime type_str: []const u8, loc: logger.Loc) Expr {
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 1));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = type_str }, loc),
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, loc);
+        }
+
+        fn numericSchema(p: *P, comptime type_str: []const u8, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) Expr {
+            var props = ListManaged(G.Property).init(p.allocator);
+            bun.handleOom(props.append(.{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = type_str }, loc),
+            }));
+            if (min) |min_v| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "minimum" }, loc),
+                    .value = p.newExpr(E.Number{ .value = min_v }, loc),
+                }));
+            }
+            if (max) |max_v| {
+                const key: []const u8 = if (inclusive_max) "maximum" else "exclusiveMaximum";
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = key }, loc),
+                    .value = p.newExpr(E.Number{ .value = max_v }, loc),
+                }));
+            }
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(props.toOwnedSlice())),
+            }, loc);
+        }
+
+        fn stringSchema(p: *P, format_or_null: ?[]const u8, pattern_or_null: ?[]const u8, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) Expr {
+            var props = ListManaged(G.Property).init(p.allocator);
+            bun.handleOom(props.append(.{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = "string" }, loc),
+            }));
+            if (format_or_null) |fmt| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "format" }, loc),
+                    .value = p.newExpr(E.String{ .data = fmt }, loc),
+                }));
+            }
+            if (pattern_or_null) |pat| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "pattern" }, loc),
+                    .value = p.newExpr(E.String{ .data = pat }, loc),
+                }));
+            }
+            if (min) |min_v| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "minLength" }, loc),
+                    .value = p.newExpr(E.Number{ .value = min_v }, loc),
+                }));
+            }
+            if (max) |max_v| {
+                const v: f64 = if (inclusive_max) max_v else max_v - 1;
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "maxLength" }, loc),
+                    .value = p.newExpr(E.Number{ .value = v }, loc),
+                }));
+            }
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(props.toOwnedSlice())),
+            }, loc);
+        }
+
+        // Literal-union mismatch test: `field !== lit1 && field !== lit2 && ...`
+        // (= true when the field doesn't equal ANY of the literals).
+        fn buildLiteralUnionMismatch(p: *P, field_access: Expr, literals: []const Expr, loc: logger.Loc) ?Expr {
+            if (literals.len == 0) return null;
+            var combined: ?Expr = null;
+            for (literals) |lit| {
+                const ne = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = field_access,
+                    .right = lit,
+                }, loc);
+                combined = if (combined) |existing|
+                    p.newExpr(E.Binary{
+                        .op = .bin_logical_and,
+                        .left = existing,
+                        .right = ne,
+                    }, loc)
+                else
+                    ne;
+            }
+            return combined;
+        }
+
+        // Array-length bounds: `field.length < min || field.length > max`
+        // (or `>= max` when the max is exclusive).
+        fn buildArrayLengthMismatchTest(p: *P, field_access: Expr, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) ?Expr {
+            const len = p.newExpr(E.Dot{
+                .target = field_access,
+                .name = "length",
+                .name_loc = loc,
+            }, loc);
+            var combined: ?Expr = null;
+            if (min) |min_val| {
+                combined = p.newExpr(E.Binary{
+                    .op = .bin_lt,
+                    .left = len,
+                    .right = p.newExpr(E.Number{ .value = min_val }, loc),
+                }, loc);
+            }
+            if (max) |max_val| {
+                const gt = p.newExpr(E.Binary{
+                    .op = if (inclusive_max) .bin_gt else .bin_ge,
+                    .left = len,
+                    .right = p.newExpr(E.Number{ .value = max_val }, loc),
+                }, loc);
+                combined = if (combined) |existing|
+                    p.newExpr(E.Binary{
+                        .op = .bin_logical_or,
+                        .left = existing,
+                        .right = gt,
+                    }, loc)
+                else
+                    gt;
+            }
+            return combined;
+        }
+
+        // Range refinement check: `int(0..150)` or `str(1..=100)`.
+        // For numeric base types, compares the field directly. For string
+        // base types, compares `.length`. min/max are nullable —
+        // half-open ranges are allowed.
+        fn buildRangeMismatchTest(p: *P, field_access: Expr, type_name: []const u8, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) ?Expr {
+            const is_string = strings.eqlComptime(type_name, "str") or strings.eqlComptime(type_name, "string");
+            const compare_expr: Expr = if (is_string)
+                p.newExpr(E.Dot{
+                    .target = field_access,
+                    .name = "length",
+                    .name_loc = loc,
+                }, loc)
+            else
+                field_access;
+
+            var combined: ?Expr = null;
+            if (min) |min_val| {
+                const lt_min = p.newExpr(E.Binary{
+                    .op = .bin_lt,
+                    .left = compare_expr,
+                    .right = p.newExpr(E.Number{ .value = min_val }, loc),
+                }, loc);
+                combined = lt_min;
+            }
+            if (max) |max_val| {
+                const gt_max = p.newExpr(E.Binary{
+                    .op = if (inclusive_max) .bin_gt else .bin_ge,
+                    .left = compare_expr,
+                    .right = p.newExpr(E.Number{ .value = max_val }, loc),
+                }, loc);
+                combined = if (combined) |existing|
+                    p.newExpr(E.Binary{
+                        .op = .bin_logical_or,
+                        .left = existing,
+                        .right = gt_max,
+                    }, loc)
+                else
+                    gt_max;
+            }
+            return combined;
+        }
+
+        // Helper for refinement types whose mismatch is "not a string OR
+        // string fails regex.test(field)". `regex_literal` is the full
+        // /pattern/flags form; we hand it to the AST as an E.RegExp.
+        fn buildStringRegexMismatch(p: *P, field_access: Expr, typeof_field: Expr, comptime regex_literal: []const u8, loc: logger.Loc) ?Expr {
+            const not_str = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = typeof_field,
+                .right = p.newExpr(E.String{ .data = "string" }, loc),
+            }, loc);
+            const regex_expr = p.newExpr(E.RegExp{ .value = regex_literal }, loc);
+            const test_dot = p.newExpr(E.Dot{
+                .target = regex_expr,
+                .name = "test",
+                .name_loc = loc,
+            }, loc);
+            const test_args = p.allocator.alloc(Expr, 1) catch return null;
+            test_args[0] = field_access;
+            const test_call = p.newExpr(E.Call{
+                .target = test_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(test_args),
+            }, loc);
+            const not_test = p.newExpr(E.Unary{
+                .op = .un_not,
+                .value = test_call,
+            }, loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_logical_or,
+                .left = not_str,
+                .right = not_test,
+            }, loc);
+        }
+
+        // Mismatch test for array field types `[T]`. Emits
+        //   !Array.isArray(field) || field.some(x => <T-mismatch>(x))
+        // — i.e. true (= invalid) when the field isn't an array, or
+        // when any element fails the inner type check. The `.some(...)`
+        // arrow needs its own pair of scopes (function_args + function_body)
+        // pushed at fresh locs so the visit pass can walk it.
+        fn buildArrayMismatchTest(p: *P, field_access: Expr, inner_type: []const u8, optional: bool, loc: logger.Loc, inner_args_loc: logger.Loc, inner_body_loc: logger.Loc) anyerror!?Expr {
+            // Array.isArray(field)
+            const array_id = p.newExpr(E.Identifier{ .ref = p.storeNameInRef("Array") catch return null }, loc);
+            const is_array_dot = p.newExpr(E.Dot{
+                .target = array_id,
+                .name = "isArray",
+                .name_loc = loc,
+            }, loc);
+            const is_array_args = p.allocator.alloc(Expr, 1) catch return null;
+            is_array_args[0] = field_access;
+            const is_array_call = p.newExpr(E.Call{
+                .target = is_array_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(is_array_args),
+            }, loc);
+            const not_array = p.newExpr(E.Unary{
+                .op = .un_not,
+                .value = is_array_call,
+            }, loc);
+
+            // Push scopes for the .some(x => ...) arrow. Declare `x`
+            // inside the function_args scope so the inner mismatch test
+            // resolves it correctly.
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, inner_args_loc);
+            const x_ref = try p.declareSymbol(.hoisted, inner_args_loc, "x");
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, inner_body_loc);
+
+            const x_expr = p.newExpr(E.Identifier{ .ref = x_ref }, inner_args_loc);
+            const inner_mismatch_opt = buildTypeMismatchTest(p, x_expr, inner_type, false, inner_args_loc);
+
+            p.popScope();
+            p.popScope();
+
+            const has_inner_check = inner_mismatch_opt != null;
+
+            // .some((x) => inner_mismatch(x))
+            var some_test: ?Expr = null;
+            if (inner_mismatch_opt) |inner_mismatch| {
+                const some_args = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+                some_args[0] = .{ .binding = p.b(B.Identifier{ .ref = x_ref }, inner_args_loc) };
+                const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                body_stmts[0] = p.s(S.Return{ .value = inner_mismatch }, inner_body_loc);
+                const some_arrow = p.newExpr(E.Arrow{
+                    .args = some_args,
+                    .body = .{ .loc = inner_body_loc, .stmts = body_stmts },
+                    .prefer_expr = true,
+                    .is_async = false,
+                }, inner_args_loc);
+                const some_dot = p.newExpr(E.Dot{
+                    .target = field_access,
+                    .name = "some",
+                    .name_loc = loc,
+                }, loc);
+                const some_args_call = p.allocator.alloc(Expr, 1) catch return null;
+                some_args_call[0] = some_arrow;
+                some_test = p.newExpr(E.Call{
+                    .target = some_dot,
+                    .args = js_ast.ExprNodeList.fromOwnedSlice(some_args_call),
+                }, loc);
+            }
+
+            const inner_check: Expr = if (has_inner_check)
+                p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = not_array,
+                    .right = some_test.?,
+                }, loc)
+            else
+                not_array;
+
+            if (!optional) return inner_check;
+
+            // Optional gate: (field !== undefined && field !== null) && inner.
+            const not_undef = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Undefined{}, loc),
+            }, loc);
+            const not_null = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Null{}, loc),
+            }, loc);
+            const present = p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = not_undef,
+                .right = not_null,
             }, loc);
             return p.newExpr(E.Binary{
                 .op = .bin_logical_and,
@@ -2834,17 +3619,14 @@ pub fn ParseStmt(
                 }
                 p.lexer.restore(&saved);
             }
-            // Parabun: `model NAME { field: type, ... }` declaration —
-            // a pure data shape with a runtime validator, no methods.
-            // Desugars to a const binding holding `{ __schema, parse, is }`.
-            // Parse-time checks the field types are recognized; runtime
-            // parse() returns a Result<T, str>.
-            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "model")) {
-                const model_range = p.lexer.range();
+            // Parabun: `schema NAME = <expr>` / `schema NAME from <expr>` /
+            // `schema NAME { ... }` — declares a JSON Schema binding.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "schema")) {
+                const kw_range = p.lexer.range();
                 const saved = p.lexer;
                 try p.lexer.next();
                 if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
-                    return try parseModelStmt(p, model_range, opts);
+                    return try parseModelStmt(p, kw_range, opts);
                 }
                 p.lexer.restore(&saved);
             }

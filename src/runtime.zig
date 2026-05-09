@@ -381,6 +381,7 @@ pub const Runtime = struct {
         __parabunRange: ?Ref = null,
         __parabunRangeInclusive: ?Ref = null,
         __paraDec: ?Ref = null,
+        __paraFromSchema: ?Ref = null,
 
         pub const all = [_][]const u8{
             "__name",
@@ -414,6 +415,7 @@ pub const Runtime = struct {
             "__parabunRange",
             "__parabunRangeInclusive",
             "__paraDec",
+            "__paraFromSchema",
         };
         const all_sorted: [all.len]string = brk: {
             @setEvalBranchQuota(1000000);
