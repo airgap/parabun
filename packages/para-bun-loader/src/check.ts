@@ -157,14 +157,42 @@ const fileSet = new Set<string>([...parsedCfg.fileNames, ...transformed.keys()])
 const host = ts.createCompilerHost(compilerOptions);
 const origReadFile = host.readFile.bind(host);
 const origFileExists = host.fileExists.bind(host);
+
+// Auto-discover .pts/.ptsx shadows of any .ts/.tsx tsc is looking for.
+// When tsc resolves an import like `@polybus/chain` via tsconfig paths
+// or workspace symlinks, it asks `fileExists('.../index.ts')`. If a
+// sibling `.pts` exists, transform it on demand and serve as if it
+// were the requested `.ts`. Eliminates the "tsc only sees explicitly-
+// listed .pts files" gap that used to require .d.ts shims in source
+// dirs for cross-package imports.
+function shadowParaPath(path: string): string | undefined {
+  // .ts → .pts, .tsx → .ptsx. No effect on .d.ts / non-TS paths.
+  const m = path.match(/^(.*)\.(tsx?)$/);
+  if (!m) return undefined;
+  if (m[0].endsWith(".d.ts")) return undefined;
+  return m[2] === "tsx" ? m[1] + ".ptsx" : m[1] + ".pts";
+}
+
 host.fileExists = path => {
   if (transformed.has(path)) return true;
-  return origFileExists(path);
+  if (origFileExists(path)) return true;
+  const para = shadowParaPath(path);
+  return para !== undefined && origFileExists(para);
 };
 host.readFile = path => {
   const t = transformed.get(path);
   if (t !== undefined) return t;
-  return origReadFile(path);
+  if (origFileExists(path)) return origReadFile(path);
+  const para = shadowParaPath(path);
+  if (para !== undefined && origFileExists(para)) {
+    const src = origReadFile(para);
+    if (src !== undefined) {
+      const out = transformParabunToTS(src);
+      transformed.set(path, out); // cache so getSourceFile() etc. stay consistent
+      return out;
+    }
+  }
+  return undefined;
 };
 
 const program = ts.createProgram({
