@@ -514,21 +514,29 @@ function paraBaseTypeToTsLsp(t: string): string {
 // `match EXPR { ... }` → `((__m: any): any => null as any)(EXPR)` so TS sees
 // a typed expression. String/comment content is masked first so `match`
 // inside string literals (e.g. an English description containing the
-// word) doesn't trigger a spurious IIFE rewrite.
+// word) doesn't trigger a spurious IIFE rewrite. Match-body close is
+// found by depth-balanced scan from the opening `{` — the older regex
+// (`[\s\S]*?\n\s*\}`) couldn't terminate a single-line `match e { ... }`
+// and swallowed the enclosing function's closing brace, which made
+// downstream tsc parse past EOF.
 function transformMatchBlock(source: string): string {
   const masked = maskStringsAndComments(source);
   const replacements: { start: number; end: number; replacement: string }[] = [];
-  const re = /\bmatch\s+([^{]+?)\s*\{[\s\S]*?\n\s*\}/g;
+  const re = /\bmatch\s+([^{]+?)\s*\{/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(masked)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    const closeIdx = findMatchingBrace(masked, openIdx);
+    if (closeIdx < 0) continue;
     const subjStart = m.index + "match".length;
-    const subjEnd = subjStart + (m[0].indexOf("{") - "match".length);
+    const subjEnd = m.index + m[0].length - 1;
     const subjOrig = source.slice(subjStart, subjEnd).trim();
     replacements.push({
       start: m.index,
-      end: m.index + m[0].length,
+      end: closeIdx + 1,
       replacement: `((__m: any): any => null as any)(${subjOrig})`,
     });
+    re.lastIndex = closeIdx + 1;
   }
   if (replacements.length === 0) return source;
   let out = "";
@@ -540,6 +548,22 @@ function transformMatchBlock(source: string): string {
   }
   out += source.slice(cursor);
   return out;
+}
+
+// Depth-balanced match for `{` at `openIdx` in already-masked source
+// (strings/comments blanked so quoted braces don't perturb depth).
+// Returns the index of the matching `}` or -1 if not found.
+function findMatchingBrace(masked: string, openIdx: number): number {
+  let depth = 1;
+  for (let i = openIdx + 1; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 // Source-level `is`-pattern rewrite that skips matches inside string,

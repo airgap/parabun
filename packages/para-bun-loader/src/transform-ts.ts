@@ -573,25 +573,35 @@ function transformMatchBlock(source: string): string {
     i++;
   }
 
-  // Run the match-block transform on the masked source. Then re-emit
-  // unmasked content for any positions the regex didn't consume.
-  // Track which spans the regex replaced, then for everything else,
-  // restore original text.
+  // Run the match-block transform on the masked source. Body close is
+  // found by depth-balanced scan from the opening `{` — the older
+  // regex (`[\s\S]*?\n\s*\}`) couldn't terminate a single-line
+  // `match e { ... }` and swallowed the enclosing function's closing
+  // brace, which made tsc parse past EOF in `parabun check`.
   const replacements: { start: number; end: number; replacement: string }[] = [];
-  const re = /\bmatch\s+([^{]+?)\s*\{[\s\S]*?\n\s*\}/g;
+  const re = /\bmatch\s+([^{]+?)\s*\{/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(masked)) !== null) {
-    const subjectMasked = m[1];
-    // Subject text comes from MASKED — for the IIFE arg, restore
-    // original content from the same range in `source`.
+    const openIdx = m.index + m[0].length - 1;
+    let depth = 1;
+    let j = openIdx + 1;
+    while (j < masked.length && depth > 0) {
+      const ch = masked[j];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = j - 1;
     const subjStart = m.index + "match".length;
-    const subjEnd = subjStart + (m[0].indexOf("{") - "match".length);
+    const subjEnd = m.index + m[0].length - 1;
     const subjOrig = source.slice(subjStart, subjEnd).trim();
     replacements.push({
       start: m.index,
-      end: m.index + m[0].length,
+      end: closeIdx + 1,
       replacement: `((__m: any): any => null as any)(${subjOrig})`,
     });
+    re.lastIndex = closeIdx + 1;
   }
 
   if (replacements.length === 0) return source;

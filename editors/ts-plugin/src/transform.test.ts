@@ -124,6 +124,29 @@ const r = match status {
       expect(out).not.toContain("match status");
     });
 
+    // Regression: a single-line `match e { ... }` used to swallow the
+    // enclosing function's closing brace because the body regex required
+    // `\n\s*\}` to terminate. With the brace-balanced scan, the close
+    // `}` of the function survives.
+    test("single-line match preserves enclosing braces", () => {
+      const out = transformParabunToTS(
+        `function f(v: unknown): string {\n  return match typeof v { 'string' => 'S', _ => 'O' }\n}`,
+      );
+      expect(out).toContain("((__m: any): any => null as any)(typeof v)");
+      expect(out).not.toContain("match typeof");
+      // Both the function's open and close brace must remain.
+      expect(out.split("{").length).toBe(out.split("}").length);
+    });
+
+    test("match with object-literal arms doesn't get truncated by inner `}`", () => {
+      const out = transformParabunToTS(
+        `function f(v: unknown): { k: string } {\n  return match typeof v {\n    'string' => { k: 'S' },\n    _ => { k: 'O' },\n  }\n}`,
+      );
+      expect(out).toContain("((__m: any): any => null as any)(typeof v)");
+      // Function body's outer `}` survives the transform.
+      expect(out.trim().endsWith("}")).toBe(true);
+    });
+
     test("`effect { body }` → IIFE", () => {
       const out = transformParabunToTS(`effect { console.log("hi") }`);
       expect(out).toContain('(() => { console.log("hi") }');

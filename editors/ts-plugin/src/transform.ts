@@ -493,12 +493,54 @@ function paraBaseTypeToTs(t: string): string {
 
 // `match EXPR { arm => result, ... }` → `((__m: any): any => null as any)(EXPR)`
 // Same shape as the runtime emit (IIFE consuming the subject) so TS sees a
-// well-typed expression.
+// well-typed expression. Body close is found by depth-balanced scan from
+// the opening `{` — the older regex (`[\s\S]*?\n\s*\}`) couldn't terminate
+// a single-line `match e { ... }` and swallowed the enclosing function's
+// closing brace, which made tsc parse past EOF.
 function transformMatchExprs(source: string): string {
-  return source.replace(
-    /\bmatch\s+([^{]+?)\s*\{[\s\S]*?\n\s*\}/g,
-    (_m, subject) => `((__m: any): any => null as any)(${subject.trim()})`,
-  );
+  const out: string[] = [];
+  const re = /\bmatch\s+([^{]+?)\s*\{/g;
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    let depth = 1;
+    let j = openIdx + 1;
+    while (j < source.length && depth > 0) {
+      const ch = source[j];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        j++;
+        while (j < source.length && source[j] !== q) {
+          if (source[j] === "\\") j++;
+          j++;
+        }
+        j++;
+        continue;
+      }
+      if (ch === "/" && source[j + 1] === "/") {
+        while (j < source.length && source[j] !== "\n") j++;
+        continue;
+      }
+      if (ch === "/" && source[j + 1] === "*") {
+        j += 2;
+        while (j < source.length - 1 && !(source[j] === "*" && source[j + 1] === "/")) j++;
+        j += 2;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = j - 1;
+    out.push(source.slice(lastEnd, m.index));
+    out.push(`((__m: any): any => null as any)(${m[1].trim()})`);
+    lastEnd = closeIdx + 1;
+    re.lastIndex = closeIdx + 1;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
 }
 
 // Replace `pure` keyword with same-length whitespace (position-preserving).
