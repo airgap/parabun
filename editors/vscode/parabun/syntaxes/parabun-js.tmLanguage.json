@@ -34,7 +34,10 @@
       "include": "#parabun-builtin-types"
     },
     {
-      "include": "#parabun-fun"
+      "include": "#parabun-function-declaration"
+    },
+    {
+      "include": "#parabun-function-expression"
     },
     {
       "include": "#parabun-pure"
@@ -265,19 +268,6 @@
         }
       ]
     },
-    "parabun-fun": {
-      "patterns": [
-        {
-          "comment": "fun keyword (shorthand for function)",
-          "match": "\\b(fun)\\b(?=\\s*[a-zA-Z_$*(<])",
-          "captures": {
-            "1": {
-              "name": "storage.type.function.js"
-            }
-          }
-        }
-      ]
-    },
     "parabun-pure": {
       "patterns": [
         {
@@ -470,6 +460,66 @@
               "name": "keyword.operator.is.parabun"
             }
           }
+        }
+      ]
+    },
+    "parabun-function-declaration": {
+      "name": "meta.function.ts",
+      "begin": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(?:(\\bexport)\\s+)?(?:(\\bdeclare)\\s+)?(?:(async)\\s+)?(fun\\b)(?:\\s*(\\*))?(?:(?:\\s+|(?<=\\*))([_$[:alpha:]][_$[:alnum:]]*))?\\s*",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.export.ts"
+        },
+        "2": {
+          "name": "storage.modifier.ts"
+        },
+        "3": {
+          "name": "storage.modifier.async.ts"
+        },
+        "4": {
+          "name": "storage.type.function.ts"
+        },
+        "5": {
+          "name": "keyword.generator.asterisk.ts"
+        },
+        "6": {
+          "name": "meta.definition.function.ts entity.name.function.ts"
+        }
+      },
+      "end": "(?=;|^\\s*$|(?:^\\s*(?:abstract|async|break|case|catch|class|const|continue|declare|do|else|enum|export|finally|function|fun|for|goto|if|import|interface|let|module|namespace|switch|return|throw|try|type|var|while)\\b))|(?<=\\})",
+      "patterns": [
+        {
+          "include": "source.js#function-name"
+        },
+        {
+          "include": "source.js#function-body"
+        }
+      ]
+    },
+    "parabun-function-expression": {
+      "name": "meta.function.expression.ts",
+      "begin": "(?<![_$[:alnum:]])(?:(?<=\\.\\.\\.)|(?<!\\.))(?:(async)\\s+)?(fun\\b)(?:\\s*(\\*))?(?:(?:\\s+|(?<=\\*))([_$[:alpha:]][_$[:alnum:]]*))?\\s*",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.modifier.async.ts"
+        },
+        "2": {
+          "name": "storage.type.function.ts"
+        },
+        "3": {
+          "name": "keyword.generator.asterisk.ts"
+        },
+        "4": {
+          "name": "meta.definition.function.ts entity.name.function.ts"
+        }
+      },
+      "end": "(?=;)|(?<=\\})",
+      "patterns": [
+        {
+          "include": "source.js#function-name"
+        },
+        {
+          "include": "source.js#function-body"
         }
       ]
     }
