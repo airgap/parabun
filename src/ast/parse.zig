@@ -2161,8 +2161,52 @@ pub fn Parse(
             p.popScope();
             p.popScope();
 
+            // Discriminated-union narrowing path: when the subject is a
+            // simple expression (identifier or property-access chain) AND
+            // every arm is literal-only or wildcard, emit a ternary
+            // chain that tests the SUBJECT directly at each site
+            // (`e.kind === "click" ? ... : ...`) rather than the captured
+            // `__pm` ref. tsc narrows the parent value (`e`) through
+            // these `subject === literal` checks in conditional-expression
+            // branches the same way it would for a hand-written
+            // `if (e.kind === "click")`. The captured-ref switch lowering
+            // produces faster jump-table dispatch but doesn't narrow,
+            // forcing users into `as` casts in arm bodies.
             const arrow_body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
-            if (all_literal) {
+            if (all_literal and isSimpleSubject(subject)) {
+                var fallback: Expr = p.newExpr(E.Undefined{}, args_loc);
+                var first_test_idx: usize = arms.items.len;
+                for (arms.items, 0..) |arm, i| {
+                    if (arm.is_wildcard) {
+                        fallback = arm.result;
+                        first_test_idx = i;
+                        break;
+                    }
+                }
+                var chain: Expr = fallback;
+                var i = first_test_idx;
+                while (i > 0) {
+                    i -= 1;
+                    const arm = arms.items[i];
+                    const lits = arm.literals.?;
+                    var test_expr = buildSubjectEqLit(p, subject, lits[0], args_loc);
+                    for (lits[1..]) |lit| {
+                        test_expr = p.newExpr(E.Binary{
+                            .op = .bin_logical_or,
+                            .left = test_expr,
+                            .right = buildSubjectEqLit(p, subject, lit, args_loc),
+                        }, args_loc);
+                    }
+                    chain = p.newExpr(E.If{
+                        .test_ = test_expr,
+                        .yes = arm.result,
+                        .no = chain,
+                    }, args_loc);
+                }
+                const ternary_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                ternary_stmts[0] = p.s(S.Return{ .value = chain }, switch_body_loc);
+                arrow_body_stmts[0] = p.s(S.Block{ .stmts = ternary_stmts }, switch_body_loc);
+            } else if (all_literal) {
                 arrow_body_stmts[0] = buildMatchSwitchStmt(p, m_ref, args_loc, switch_body_loc, arms.items) catch return error.SyntaxError;
             } else if (all_tag) {
                 arrow_body_stmts[0] = buildMatchTagSwitchStmt(p, m_ref, args_loc, switch_body_loc, arms.items) catch return error.SyntaxError;
@@ -2251,6 +2295,51 @@ pub fn Parse(
             return p.newExpr(E.Object{
                 .properties = G.Property.List.fromOwnedSlice(properties),
             }, loc);
+        }
+
+        // Returns true when the match subject is safe to re-emit verbatim
+        // at each arm test site for the discriminated-union narrowing
+        // path. Restricted to identifiers and property-access chains —
+        // anything with a call, computed index, or operator could have
+        // side effects or arbitrary evaluation cost, and double-evaluating
+        // would change semantics. tsc narrows `e` through `e.kind ===
+        // "click"` checks only when the discriminant expression appears
+        // literally at each branch.
+        fn isSimpleSubject(expr: Expr) bool {
+            return switch (expr.data) {
+                .e_identifier => true,
+                .e_dot => |dot| isSimpleSubject(dot.target),
+                else => false,
+            };
+        }
+
+        // Build `<subject> === <lit>` for the inline-ternary narrowing
+        // lowering. Each call clones the subject's AST so the resulting
+        // tree owns its own nodes — visit mutates Expr in place in a few
+        // spots, so sharing the same Identifier/Dot across N test sites
+        // would corrupt later visits.
+        fn buildSubjectEqLit(p: *P, subject: Expr, lit: Expr, loc: logger.Loc) Expr {
+            return p.newExpr(E.Binary{
+                .op = .bin_strict_eq,
+                .left = cloneSimpleSubject(p, subject),
+                .right = lit,
+            }, loc);
+        }
+
+        fn cloneSimpleSubject(p: *P, expr: Expr) Expr {
+            return switch (expr.data) {
+                .e_identifier => |id| p.newExpr(E.Identifier{ .ref = id.ref }, expr.loc),
+                .e_dot => |dot| p.newExpr(E.Dot{
+                    .target = cloneSimpleSubject(p, dot.target),
+                    .name = dot.name,
+                    .name_loc = dot.name_loc,
+                }, expr.loc),
+                // isSimpleSubject already rejected anything else; if we
+                // somehow get here, fall back to a fresh undefined which
+                // will surface as a tsc / runtime error rather than a
+                // silent mis-emit.
+                else => p.newExpr(E.Undefined{}, expr.loc),
+            };
         }
 
         // Helper: substitute every occurrence of identifier `name` in

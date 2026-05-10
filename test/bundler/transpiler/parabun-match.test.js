@@ -8,7 +8,7 @@ function ts(code, options = {}) {
 }
 
 describe("Parabun match expression", () => {
-  test("all-literal arms desugar to switch (jump-table-friendly)", () => {
+  test("all-literal arms with simple subject use inline ternary (TS narrows)", () => {
     const out = ts(`
       const r = match status {
         200 => "ok",
@@ -17,27 +17,29 @@ describe("Parabun match expression", () => {
         _ => "unknown"
       }
     `);
-    expect(out).toContain("switch (");
-    expect(out).toContain("case 200:");
-    expect(out).toContain('return "ok"');
-    expect(out).toContain("default:");
-    expect(out).toContain('return "unknown"');
+    // Inline form keeps the original subject expression at each test
+    // site so tsc narrows discriminated-union shapes (`e.kind === "x"`
+    // narrows `e`). The IIFE wrapper is still present — only its body
+    // changed from switch-on-__pm to inline-test ternary.
+    expect(out).toContain("status === 200");
+    expect(out).toContain("status === 404");
+    expect(out).toContain("status === 500");
+    expect(out).toContain('? "ok"');
+    expect(out).toContain('"unknown"');
     expect(out).toContain(")(status)");
   });
 
-  test("OR pattern emits one case per alternative with fall-through", () => {
+  test("OR pattern joins alternatives with `||` in inline ternary", () => {
     const out = ts(`
       const r = match code {
         "a" | "b" | "c" => 1,
         _ => 0
       }
     `);
-    // Three case labels, only the last one returns; the first two
-    // fall through.
-    expect(out).toContain('case "a":');
-    expect(out).toContain('case "b":');
-    expect(out).toContain('case "c":');
-    expect(out).toMatch(/case "c":\s*return 1/);
+    // Each OR alternative becomes its own `subject === lit` check
+    // joined by ||, then the whole disjunction is one ternary branch.
+    expect(out).toMatch(/code === "a".*\|\|.*code === "b".*\|\|.*code === "c"/);
+    expect(out).toContain("? 1");
   });
 
   test("identifier-bind pattern substitutes name with subject", () => {
@@ -52,29 +54,29 @@ describe("Parabun match expression", () => {
     expect(out).toMatch(/"got " \+ __pm/);
   });
 
-  test("wildcard `_` arm produces default case", () => {
+  test("wildcard `_` arm becomes the final ternary fallback", () => {
     const out = ts(`
       const r = match flag {
         true => 1,
         _ => -1
       }
     `);
-    expect(out).toContain("case true:");
-    expect(out).toContain("default:");
-    expect(out).toContain("-1");
+    expect(out).toContain("flag === true");
+    // Fallback (the `_` arm result) appears after the last `:`.
+    expect(out).toMatch(/:\s*-1/);
   });
 
-  test("no catch-all → no default case (falls through to undefined)", () => {
+  test("no catch-all → fallback is undefined", () => {
     const out = ts(`
       const r = match x {
         1 => "one",
         2 => "two"
       }
     `);
-    expect(out).toContain("case 1:");
-    expect(out).toContain("case 2:");
-    // No default → switch returns undefined when no arm matches.
-    expect(out).not.toContain("default:");
+    expect(out).toContain("x === 1");
+    expect(out).toContain("x === 2");
+    // No explicit wildcard → fallback is `undefined`.
+    expect(out).toContain("undefined");
   });
 
   test("negative-number literal pattern works", () => {
@@ -86,7 +88,7 @@ describe("Parabun match expression", () => {
         _ => "far"
       }
     `);
-    expect(out).toContain("case -1:");
+    expect(out).toContain("diff === -1");
   });
 
   test("`match` as identifier still works (not followed by expression)", () => {
@@ -192,6 +194,45 @@ describe("Parabun match expression", () => {
     `);
     expect(out).toMatch(/typeof v/);
     expect(out).toMatch(/__pm_\w+\$?/);
+  });
+
+  // Discriminated-union narrowing: when subject is a property-access
+  // chain (`e.kind`), the lowering emits `e.kind === "click" ? ... :
+  // ...` instead of capturing `e.kind` into __pm. tsc narrows `e`
+  // through the discriminant check in each ternary branch — without
+  // this, users had to `as`-cast inside every arm body.
+  test("property-access subject keeps discriminant inline at each test site", () => {
+    const out = ts(`
+      type Ev = { kind: 'click', x: number } | { kind: 'key', k: string }
+      function f(e: Ev) {
+        return match e.kind {
+          'click' => e.x,
+          'key' => e.k,
+        }
+      }
+    `);
+    // Discriminant must appear literally at each test site, not as __pm.
+    expect(out).toMatch(/e\.kind === "click"/);
+    expect(out).toMatch(/e\.kind === "key"/);
+    // The arm result expressions reference the narrowed properties
+    // directly — never wrapped or aliased.
+    expect(out).toContain("e.x");
+    expect(out).toContain("e.k");
+  });
+
+  // Subject classification: anything other than identifier/dot-chain
+  // falls back to the captured-__pm switch lowering. Function calls
+  // could have side effects; double-evaluating would be wrong.
+  test("call-expression subject keeps switch lowering (no double-evaluation)", () => {
+    const out = ts(`
+      const r = match getStatus() {
+        200 => "ok",
+        _ => "bad"
+      }
+    `);
+    expect(out).toContain("switch (");
+    expect(out).toContain("case 200:");
+    expect(out).toContain(")(getStatus())");
   });
 
   test("nested `match` — outer ternary path, inner switch path", () => {
