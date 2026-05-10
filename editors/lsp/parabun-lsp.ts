@@ -81,6 +81,7 @@ function transformParabunToTS(source: string): string {
   // Multi-line transforms run before per-line work because `schema X { ... }`
   // and `match e { ... }` span multiple lines.
   source = transformModelDeclBlock(source);
+  source = transformSchemaEqualsBlock(source);
   source = transformInlineSchemaExpr(source);
   source = transformMatchBlock(source);
   // String-aware `is`-pattern rewrite at source level (skips matches
@@ -94,6 +95,10 @@ function transformParabunToTS(source: string): string {
   result = transformMultilinePipeline(result);
   // Prepend typed `__paraIs_<T>` helpers so TS narrows `if (x is T) { ... }`.
   result = injectIsHelpers(result);
+  // Prepend the typed `__paraFromSchema` ambient declaration so
+  // `schema X = body` and `schema { ... }` results carry `.parse` /
+  // `.is` / `.schema` / field-accessors for tsc.
+  result = injectSchemaHelper(result);
   return result;
 }
 
@@ -149,28 +154,106 @@ function injectIsHelpers(source: string): string {
   return helpers + "\n" + source;
 }
 
-// `schema X from <rest-of-line>` OR `schema X = <rest-of-line>` →
-// `const X = <rest-of-line>`. (`model` is accepted as a deprecated alias
-// for the same form.) No `: any` annotation — TS infers the const's
-// type from the value, which preserves the literal type when the source
-// ends with `as const` (matches lockstep's original
-// `export const X = {...} as const satisfies BAR;` shape).
+// Single-line `schema X from <expr>` and single-line `schema X = <expr>`
+// (where `<expr>` is NOT an open-brace literal — `transformSchemaEqualsBlock`
+// already handled `schema X = { ... }` at whole-source scope). Both
+// wrap the rhs in `__paraFromSchema(() => (<expr>))` so tsc sees the
+// typed result with `.parse` / `.is` / `.schema` resolved.
 function transformModelFromLine(line: string): string {
-  return line.replace(
-    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s+(?:from\s+|=\s*)/,
-    (_m, exportKw, name) => `${exportKw ?? ""}const ${name} = `,
+  // `from` form
+  line = line.replace(
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s+from\s+(.+?)(\s*;?\s*)$/,
+    (_m, exportKw, name, expr, trailing) =>
+      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}`,
   );
+  // Single-line `=` form, only when the rhs is not an object-literal
+  // opening (`transformSchemaEqualsBlock` handled those).
+  line = line.replace(
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=\s*(?!\{)(.+?)(\s*;?\s*)$/,
+    (_m, exportKw, name, expr, trailing) =>
+      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}`,
+  );
+  return line;
 }
 
-// Inline `schema { ... }` expression → `({ ... })`. Just paren-wrap so
-// the body parses as an object literal at expression position — no
-// `as const` (would compound deep-literal memory pressure across the
-// whole workspace under hot edits) and no `as any` (would blind hover
-// and diagnostics inside the body). The literal narrowness the brand
-// codegen wants is recovered offline in `gen-dts-rewrite`, which works
-// from the AST per-file and doesn't pay tsc's inference cost.
-// Brace-balanced; strings/comments skipped so a `}` inside a literal
-// can't close the body early.
+// `[export ]schema NAME = { ...body... }[ as const][ satisfies T];` →
+// `[export ]const NAME = __paraFromSchema(() => ({ ...body... }))[ as const][ satisfies T];`.
+// Multi-line and brace-balanced. Strings / comments respected.
+function transformSchemaEqualsBlock(source: string): string {
+  const re = /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=\s*\{/g;
+  const out: string[] = [];
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const exportKw = m[1] ?? "";
+    const name = m[2];
+    const openIdx = m.index + m[0].length - 1;
+    let i = openIdx + 1;
+    let depth = 1;
+    while (i < source.length && depth > 0) {
+      const ch = source[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        i++;
+        while (i < source.length && source[i] !== q) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = i - 1;
+    const body = source.slice(openIdx, closeIdx + 1);
+    out.push(source.slice(lastEnd, m.index));
+    out.push(`${exportKw}const ${name} = __paraFromSchema(() => (${body}))`);
+    lastEnd = closeIdx + 1;
+    re.lastIndex = closeIdx + 1;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
+// Prepend an ambient declaration of `__paraFromSchema` to the source
+// when any of the schema transforms emitted a call. The return type is
+// the JSON Schema literal `S` plus runtime decoration — `.parse` /
+// `.is` / `.schema` / field-accessors all resolve at the call site
+// without per-file `.d.ts` shims. Wide `S` (no `<const>` type
+// parameter) so we don't compound tsc's literal-inference memory
+// pressure across hundreds of open endpoint files; narrow types come
+// back from the offline `gen-dts-rewrite` pipeline (Phase 1 brand
+// codegen sketched in PROPOSALS.md).
+function injectSchemaHelper(source: string): string {
+  if (!/\b__paraFromSchema\b/.test(source)) return source;
+  const helper =
+    `declare function __paraFromSchema<S>(s: () => S): { ` +
+    `readonly parse: (v: unknown) => { tag: "Ok"; value: unknown } | { tag: "Err"; error: string }; ` +
+    `readonly is: (v: unknown) => boolean; ` +
+    `readonly schema: S ` +
+    `} & S;`;
+  return helper + "\n" + source;
+}
+
+// Inline `schema { ... }` expression → `__paraFromSchema(() => ({ ... }))`.
+// Wrapping in the typed helper (declared by `injectSchemaHelper`) means
+// tsc sees the expression's type as `SchemaShape & body` — `.parse` /
+// `.is` / `.schema` / field-accessors resolve at the call site without
+// per-file `.d.ts` shims. Brace-balanced; strings/comments skipped so a
+// `}` inside a literal can't close the body early.
 function transformInlineSchemaExpr(source: string): string {
   const out: string[] = [];
   let i = 0;
@@ -217,7 +300,7 @@ function transformInlineSchemaExpr(source: string): string {
     const closeIdx = j - 1;
     const body = source.slice(openBraceIdx, closeIdx + 1);
     out.push(source.slice(lastEnd, start));
-    out.push(`(${body})`);
+    out.push(`__paraFromSchema(() => (${body}))`);
     lastEnd = closeIdx + 1;
     re.lastIndex = closeIdx + 1;
   }

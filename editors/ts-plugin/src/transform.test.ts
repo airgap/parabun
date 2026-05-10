@@ -85,28 +85,32 @@ export schema User {
       expect(out).toContain("export const User:");
     });
 
-    test("`schema X from EXPR` → const without explicit type (TS infers)", () => {
+    test("`schema X from EXPR` → typed wrapper call so tsc sees parse/is/schema", () => {
       const out = transformParabunToTS(`schema User from userSchema`);
-      expect(out).toContain("const User = userSchema");
+      expect(out).toContain("const User = __paraFromSchema(() => (userSchema))");
+      expect(out).toContain("declare function __paraFromSchema");
       expect(out).not.toContain("const User: any");
     });
 
-    test("`schema X = EXPR` (lockstep-style) → const without explicit type", () => {
+    test("`schema X = EXPR` (single-line, non-brace) → typed wrapper call", () => {
       const out = transformParabunToTS(`schema User = userSchema`);
-      expect(out).toContain("const User = userSchema");
+      expect(out).toContain("const User = __paraFromSchema(() => (userSchema))");
+      expect(out).toContain("declare function __paraFromSchema");
       expect(out).not.toContain("const User: any");
     });
 
-    test("`export schema X = { multi-line }` preserves the body", () => {
+    test("`export schema X = { multi-line }` wraps the body in __paraFromSchema", () => {
       const out = transformParabunToTS(`
 export schema User = {
   properties: { id: { type: "integer" } },
   required: ["id"]
 }
 `);
-      expect(out).toContain("export const User = {");
+      // The body is wrapped so `User.parse(...)` / `User.id` resolve.
+      expect(out).toContain("export const User = __paraFromSchema(() => (");
       expect(out).toContain('properties: { id: { type: "integer" } }');
       expect(out).toContain('required: ["id"]');
+      expect(out).toContain("declare function __paraFromSchema");
     });
 
     test("`match EXPR { ... }` → IIFE stub", () => {
