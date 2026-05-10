@@ -172,12 +172,14 @@ pub fn ParsePrefix(
             // be a parse error in standard JS.
             if (strings.eqlComptime(name, "match") and (raw.ptr == name.ptr and raw.len == name.len)) {
                 if (!p.lexer.has_newline_before) {
-                    // NOTE: `t_open_bracket` is intentionally excluded —
-                    // `match[4]` is array indexing on a variable named
-                    // `match` (common in JS code that uses regex result
-                    // arrays). Including `[` here causes the parser to
-                    // treat `match[…]` as the start of a match expression,
-                    // which fails when there's no `{ ... }` body.
+                    // NOTE: `t_open_bracket` AND `t_open_paren` are
+                    // intentionally excluded — `match[4]` (array indexing on
+                    // a variable named `match`) and `match(node)` (function
+                    // call to a `match` parameter — common in TypeScript /
+                    // regex / parser code) are both regular JS that
+                    // shouldn't be hijacked. For Para code that wants a
+                    // parenthesized subject, use `const m = ...; match m
+                    // { ... }` instead of inline `match (m) { ... }`.
                     switch (p.lexer.token) {
                         .t_identifier,
                         .t_numeric_literal,
@@ -185,7 +187,6 @@ pub fn ParsePrefix(
                         .t_true,
                         .t_false,
                         .t_null,
-                        .t_open_paren,
                         .t_minus,
                         .t_plus,
                         .t_exclamation,

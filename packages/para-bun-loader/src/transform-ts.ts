@@ -15,7 +15,7 @@
 // rewrite the opening/closing lines so body content maps 1:1 to source.
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bmodel\s+[A-Za-z_$]|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
 
 export function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -23,9 +23,11 @@ export function containsParabunSyntax(text: string): boolean {
 
 export function transformParabunToTS(source: string): string {
   if (!containsParabunSyntax(source)) return source;
-  // Multi-line transforms run before per-line work because `model X { ... }`
+  // Multi-line transforms run before per-line work because `schema X { ... }`
   // and `match e { ... }` span multiple lines.
   source = transformModelDeclBlock(source);
+  source = transformSchemaEqualsBlock(source);
+  source = transformInlineSchemaExpr(source);
   source = transformMatchBlock(source);
   // String-aware `is`-pattern rewrite at source level, so `is X` inside
   // string literals (e.g. an English description containing "is X") is
@@ -38,6 +40,7 @@ export function transformParabunToTS(source: string): string {
   let result = lines.join("\n");
   result = transformMultilinePipeline(result);
   result = injectIsHelpers(result);
+  result = injectSchemaHelper(result);
   return result;
 }
 
@@ -185,16 +188,31 @@ function injectIsHelpers(source: string): string {
   return helpers + "\n" + source;
 }
 
+// Single-line `schema X from <expr>` and single-line `schema X = <expr>`
+// (non-brace rhs only — `transformSchemaEqualsBlock` handles `=` with
+// an object-literal body). Wraps in `__paraFromSchema(() => (<expr>))`
+// so tsc sees the typed result.
 function transformModelFromLine(line: string): string {
-  return line.replace(
-    /\b(export\s+)?model\s+([A-Za-z_$][\w$]*)\s+(?:from\s+|=\s*)/,
-    (_m, exportKw, name) => `${exportKw ?? ""}const ${name} = `,
+  line = line.replace(
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s+from\s+(.+?)(\s*;?\s*)$/,
+    (_m, exportKw, name, expr, trailing) =>
+      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}`,
   );
+  line = line.replace(
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=\s*(?!\{)(.+?)(\s*;?\s*)$/,
+    (_m, exportKw, name, expr, trailing) =>
+      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}`,
+  );
+  return line;
 }
 
+// `[export ]schema NAME { fields }` — refinement-typed DSL form. Emits
+// a typed `const NAME: { parse, schema } = ...` plus a `type NAME = {
+// ... }` alias. Body's Para-specific type fragments (refinements,
+// arrays + bounds, lowercase aliases) get rewritten to plain TS.
 function transformModelDeclBlock(source: string): string {
   return source.replace(
-    /\b(export\s+)?model\s+([A-Za-z_$][\w$]*)(\s*\{)([\s\S]*?)(\n\s*)\}/g,
+    /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)(\s*\{)([\s\S]*?)(\n\s*)\}/g,
     (_m, exportKw, name, openBrace, body, closeWs) => {
       const e = exportKw ?? "";
       const rewritten = rewriteParaFieldLines(body);
@@ -204,6 +222,125 @@ function transformModelDeclBlock(source: string): string {
       return `${e}type ${name} =${openBrace}${rewritten}${closeWs}};${constDecl}`;
     },
   );
+}
+
+// Multi-line `[export ]schema NAME = { ... }` → typed wrapper call.
+function transformSchemaEqualsBlock(source: string): string {
+  const re = /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=\s*\{/g;
+  const out: string[] = [];
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const exportKw = m[1] ?? "";
+    const name = m[2];
+    const openIdx = m.index + m[0].length - 1;
+    let i = openIdx + 1;
+    let depth = 1;
+    while (i < source.length && depth > 0) {
+      const ch = source[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        i++;
+        while (i < source.length && source[i] !== q) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = i - 1;
+    const body = source.slice(openIdx, closeIdx + 1);
+    out.push(source.slice(lastEnd, m.index));
+    out.push(`${exportKw}const ${name} = __paraFromSchema(() => (${body}))`);
+    lastEnd = closeIdx + 1;
+    re.lastIndex = closeIdx + 1;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
+// Inline `schema { ... }` expression literal → `__paraFromSchema(() => ({...}))`.
+function transformInlineSchemaExpr(source: string): string {
+  const out: string[] = [];
+  const re = /\bschema\s*\{/g;
+  let lastEnd = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(source)) !== null) {
+    const start = match.index;
+    const openBraceIdx = start + match[0].length - 1;
+    let depth = 1;
+    let j = openBraceIdx + 1;
+    while (j < source.length && depth > 0) {
+      const ch = source[j];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        j++;
+        while (j < source.length && source[j] !== q) {
+          if (source[j] === "\\") j++;
+          j++;
+        }
+        j++;
+        continue;
+      }
+      if (ch === "/" && source[j + 1] === "/") {
+        while (j < source.length && source[j] !== "\n") j++;
+        continue;
+      }
+      if (ch === "/" && source[j + 1] === "*") {
+        j += 2;
+        while (j < source.length - 1 && !(source[j] === "*" && source[j + 1] === "/")) j++;
+        j += 2;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      j++;
+    }
+    if (depth !== 0) continue;
+    const closeIdx = j - 1;
+    const body = source.slice(openBraceIdx, closeIdx + 1);
+    out.push(source.slice(lastEnd, start));
+    out.push(`__paraFromSchema(() => (${body}))`);
+    lastEnd = closeIdx + 1;
+    re.lastIndex = closeIdx + 1;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
+// Ambient declaration of `__paraFromSchema` so the typed wrapper-call
+// emit above resolves. Mirrors `__paraAddFieldAccessors` + `__paraWrapField`
+// behaviour at runtime: `.parse` / `.is` / `.schema` always present;
+// `& S` so the schema's own keys pass through; recursive `__ParaSchemaValue`
+// wrap under `properties` / `items` so deep navigation
+// (`User.id.type`, `Tags.element.type`) resolves.
+function injectSchemaHelper(source: string): string {
+  if (!/\b__paraFromSchema\b/.test(source)) return source;
+  const helper =
+    `type __ParaResult<T> = { tag: "Ok"; value: T } | { tag: "Err"; error: string };\n` +
+    `type __ParaSchemaValue<S> = {\n` +
+    `  readonly parse: (v: unknown) => __ParaResult<unknown>;\n` +
+    `  readonly is: (v: unknown) => boolean;\n` +
+    `  readonly schema: S;\n` +
+    `  readonly element: S extends { items: infer I } ? __ParaSchemaValue<I> : never;\n` +
+    `} & S & (S extends { properties: infer P } ? { readonly [K in keyof P]: __ParaSchemaValue<P[K]> } : {});\n` +
+    `declare function __paraFromSchema<S>(s: () => S): __ParaSchemaValue<S>;`;
+  return helper + "\n" + source;
 }
 
 function rewriteParaFieldLines(body: string): string {
