@@ -126,6 +126,15 @@
               "name": "storage.type.model.parabun"
             }
           }
+        },
+        {
+          "comment": "Bare `schema` keyword fallback — highlights as soon as the user types it, the way `class` / `interface` / `enum` do. Skipped when `schema` is followed by `=` / `(` / `.` (which means it's being used as an identifier — `const schema = ...`, `schema(args)`, `obj.schema`).",
+          "match": "\\b(schema)\\b(?![\\s]*[=.(])",
+          "captures": {
+            "1": {
+              "name": "storage.type.model.parabun"
+            }
+          }
         }
       ]
     },
@@ -204,6 +213,15 @@
             },
             "2": {
               "name": "variable.other.signal.parabun"
+            }
+          }
+        },
+        {
+          "comment": "Bare `signal` keyword fallback — highlights as soon as the user types it. Skipped when `signal` is followed by `=` / `(` / `.` so an identifier-named-`signal` (`const signal = ...`, `signal(...)`, `obj.signal`) doesn't false-positive.",
+          "match": "\\b(signal)\\b(?![\\s]*[=.(])",
+          "captures": {
+            "1": {
+              "name": "storage.type.signal.parabun"
             }
           }
         }
