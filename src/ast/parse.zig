@@ -1896,6 +1896,32 @@ pub fn Parse(
             const m_ref = try p.declareSymbol(.hoisted, args_loc, m_name);
             _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc);
 
+            // Push the block scope that will wrap the arrow body BEFORE
+            // arm parsing, and keep it as the current scope while arms
+            // are parsed. Two reasons:
+            //
+            //  1. visit's `s_switch` / `s_block` handler always pushes
+            //     this block right after function_body. If we delayed
+            //     the push until after arms, a nested `match` inside an
+            //     arm RHS would inject its own scopes BETWEEN body and
+            //     block at parse-time, while visit-time still expects
+            //     block to come next — the queue order diverges and
+            //     visit panics with "Scope mismatch while visiting".
+            //
+            //  2. Inner scopes pushed during arm parsing must have
+            //     their `parent` set to THIS block (not function_body)
+            //     so that visit-time `popScope` walks back through the
+            //     same chain visit pushed. Keeping the block current
+            //     during arm parsing makes inner-arm scopes child of
+            //     block, matching the visit-side stack.
+            //
+            // The arrow body is always wrapped in a block (S.Switch for
+            // the switch lowering, S.Block wrapping the ternary return
+            // for the ternary lowering) so visit consumes the scope
+            // either way.
+            const switch_body_loc = logger.Loc{ .start = args_loc.start + 2 };
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.block, switch_body_loc);
+
             // Collect arms: each is { test_expr | null = wildcard, result }.
             // The test for an OR / literal pattern is `__pm === lit` (chained
             // with || for OR). The wildcard / identifier-bind arms have no
@@ -2130,18 +2156,8 @@ pub fn Parse(
                 if (arm.tag != null) saw_tag = true;
             }
             if (!saw_tag) all_tag = false; // all-wildcard or all-literal: don't claim tag mode
-            const use_switch = all_literal or all_tag;
 
-            // The switch path needs an extra block scope inside the
-            // function_body. visitStmt's s_switch handler pushes a block
-            // scope at data.body_loc, so we have to provide one. Push it
-            // BEFORE popping function_body so it parents correctly.
-            const switch_body_loc = p.lexer.loc();
-            if (use_switch) {
-                _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.block, switch_body_loc);
-                p.popScope();
-            }
-
+            p.popScope();
             p.popScope();
             p.popScope();
 
@@ -2152,7 +2168,12 @@ pub fn Parse(
                 arrow_body_stmts[0] = buildMatchTagSwitchStmt(p, m_ref, args_loc, switch_body_loc, arms.items) catch return error.SyntaxError;
             } else {
                 // Ternary chain — right-to-left, fallback = first catch-all's
-                // result or `undefined`.
+                // result or `undefined`. Wrapped in an S.Block at
+                // switch_body_loc so that visit's `s_block` handler
+                // consumes the block scope we pushed at parse-time
+                // (which inner-arm scopes parent into). Without this
+                // wrap, the block scope would have no visit-time
+                // consumer for the ternary path and balance breaks.
                 var fallback: Expr = p.newExpr(E.Undefined{}, args_loc);
                 var first_test_idx: usize = arms.items.len;
                 for (arms.items, 0..) |arm, i| {
@@ -2173,7 +2194,9 @@ pub fn Parse(
                         .no = chain,
                     }, args_loc);
                 }
-                arrow_body_stmts[0] = p.s(S.Return{ .value = chain }, body_loc);
+                const ternary_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                ternary_stmts[0] = p.s(S.Return{ .value = chain }, switch_body_loc);
+                arrow_body_stmts[0] = p.s(S.Block{ .stmts = ternary_stmts }, switch_body_loc);
             }
 
             // Wrap in ((__pm) => body)(subject).
@@ -2182,7 +2205,10 @@ pub fn Parse(
             const arrow = p.newExpr(E.Arrow{
                 .args = arrow_args,
                 .body = .{ .loc = body_loc, .stmts = arrow_body_stmts },
-                .prefer_expr = !use_switch, // switch body needs braces
+                // Body is always a block-style statement (S.Switch or
+                // S.Block wrapping S.Return) — never a single
+                // expression — so the arrow always prints braces.
+                .prefer_expr = false,
                 .is_async = false,
             }, args_loc);
             const call_args2 = bun.handleOom(p.allocator.alloc(Expr, 1));

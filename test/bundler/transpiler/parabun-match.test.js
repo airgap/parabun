@@ -162,4 +162,46 @@ describe("Parabun match expression", () => {
     // Three separate IIFEs.
     expect((out.match(/__pm_/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
+
+  // Regression: a `match` in an arm RHS used to crash the parser's
+  // visit pass. The outer match's switch-body block scope was pushed
+  // AFTER arms (visit pushes it BEFORE), and inner-arm scopes were
+  // parented to function_body instead of the block. Now the block is
+  // pushed before arms and kept current during arm parsing.
+  test("nested `match` in an arm RHS — all-literal patterns", () => {
+    const out = ts(`
+      const r = match 1 {
+        1 => match 2 { 2 => "inner", _ => "fail" },
+        _ => "outer-no"
+      }
+    `);
+    expect(out).toMatch(/__pm_\w+\$?/);
+    // Two distinct IIFE param names (outer + inner).
+    const names = new Set(out.match(/__pm_\w+\$/g));
+    expect(names.size).toBeGreaterThanOrEqual(2);
+  });
+
+  test("nested `match` — `match typeof` outer with object-arm inner", () => {
+    const out = ts(`
+      function f(v) {
+        return match typeof v {
+          "object" => match v { null => "null-obj", _ => "obj" },
+          _ => "other"
+        }
+      }
+    `);
+    expect(out).toMatch(/typeof v/);
+    expect(out).toMatch(/__pm_\w+\$?/);
+  });
+
+  test("nested `match` — outer ternary path, inner switch path", () => {
+    const out = ts(`
+      const r = match x {
+        n => match n { 1 => "one", _ => "other" }
+      }
+    `);
+    // Outer arm uses identifier binding (n) → ternary lowering.
+    // Inner is all-literal → switch lowering. Both must coexist.
+    expect(out).toMatch(/__pm_\w+\$?/);
+  });
 });
