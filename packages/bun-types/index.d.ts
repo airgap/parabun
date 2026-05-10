@@ -24,7 +24,7 @@
 /// <reference path="./sql.d.ts" />
 /// <reference path="./security.d.ts" />
 /// <reference path="./bundle.d.ts" />
-/// <reference path="./parabun.d.ts" />
+/// <reference path="../para-bun-types/parabun.d.ts" />
 
 /// <reference path="./bun.ns.d.ts" />
 
