@@ -15,7 +15,7 @@
 // rewrite the opening/closing lines so body content maps 1:1 to source.
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->|(?:\|\||&&|\?\??|=>|:)\s*throw\s/;
 
 export function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -28,6 +28,7 @@ export function transformParabunToTS(source: string): string {
   source = transformModelDeclBlock(source);
   source = transformSchemaEqualsBlock(source);
   source = transformInlineSchemaExpr(source);
+  source = transformThrowExpr(source);
   source = transformMatchBlock(source);
   // String-aware `is`-pattern rewrite at source level, so `is X` inside
   // string literals (e.g. an English description containing "is X") is
@@ -91,6 +92,43 @@ function transformIsTypeGuardSource(source: string): string {
 // Replace string-literal and comment content with same-length blanks
 // so regex passes can't fire inside them. Newlines and quote-chars
 // preserved so position-anchored scans still work.
+// Cheap "is offset N inside a string / line comment / block comment"
+// scan. Used by `transformInlineSchemaExpr` and `transformThrowExpr`
+// to skip matches inside string literals (e.g. an English description
+// containing the literal word "throw"). Linear-from-start; called per
+// regex match site, so O(n²) worst case but bounded by source length.
+function isInsideStringOrComment(source: string, offset: number): boolean {
+  let i = 0;
+  while (i < offset) {
+    const ch = source[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const q = ch;
+      i++;
+      while (i < offset && source[i] !== q) {
+        if (source[i] === "\\") i++;
+        i++;
+      }
+      if (i >= offset) return true;
+      i++;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      if (i > offset) return true;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      i += 2;
+      while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      if (i > offset) return true;
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 function maskStringsAndComments(source: string): string {
   let masked = "";
   let i = 0;
@@ -329,6 +367,78 @@ function transformInlineSchemaExpr(source: string): string {
 // `& S` so the schema's own keys pass through; recursive `__ParaSchemaValue`
 // wrap under `properties` / `items` so deep navigation
 // (`User.id.type`, `Tags.element.type`) resolves.
+// Rewrite `<trigger> throw E` (where E ends at the next depth-0
+// `;` / `,` / `)` / `}` / `]`) into `<trigger> (() => { throw E; })()`.
+// Mirrors what the Zig parser does at runtime — Para allows `throw` at
+// any expression position, but plain TS doesn't (TS1109). Triggers are
+// the documented expression-position openers: `||` / `&&` / `??` /
+// `?` (ternary) / `:` (ternary) / `=>` (arrow body).
+//
+// `?.` (optional chaining) is excluded — only `?` followed by something
+// that isn't `.` triggers. `:` matches only when the line context is
+// ternary, but we keep it simple here and let nested object-literal
+// `{ key: throw E }` ride through too — that's also legal Para and the
+// same desugar applies.
+function transformThrowExpr(source: string): string {
+  const out: string[] = [];
+  const re = /(\|\||&&|\?\?|\?(?!\.)|:|=>)\s*throw\s+/g;
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const start = m.index;
+    if (isInsideStringOrComment(source, start)) continue;
+    const trigger = m[1];
+    let i = re.lastIndex;
+    const operandStart = i;
+    let depth = 0;
+    while (i < source.length) {
+      const ch = source[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        i++;
+        while (i < source.length && source[i] !== q) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "(" || ch === "{" || ch === "[") {
+        depth++;
+        i++;
+        continue;
+      }
+      if (ch === ")" || ch === "}" || ch === "]") {
+        if (depth === 0) break;
+        depth--;
+        i++;
+        continue;
+      }
+      if (depth === 0 && (ch === ";" || ch === ",")) break;
+      i++;
+    }
+    const operandEnd = i;
+    const operand = source.slice(operandStart, operandEnd).trim();
+    if (!operand) continue; // bail on empty operand — leave for tsc to flag
+    out.push(source.slice(lastEnd, start));
+    out.push(`${trigger} (() => { throw ${operand}; })()`);
+    lastEnd = operandEnd;
+    re.lastIndex = operandEnd;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
 function injectSchemaHelper(source: string): string {
   if (!/\b__paraFromSchema\b/.test(source)) return source;
   const helper =

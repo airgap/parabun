@@ -70,7 +70,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->|(?:\|\||&&|\?\??|=>|:)\s*throw\s/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -83,6 +83,7 @@ function transformParabunToTS(source: string): string {
   source = transformModelDeclBlock(source);
   source = transformSchemaEqualsBlock(source);
   source = transformInlineSchemaExpr(source);
+  source = transformThrowExpr(source);
   source = transformMatchBlock(source);
   // String-aware `is`-pattern rewrite at source level (skips matches
   // inside string / template / comment content).
@@ -237,6 +238,69 @@ function transformSchemaEqualsBlock(source: string): string {
 // pressure across hundreds of open endpoint files; narrow types come
 // back from the offline `gen-dts-rewrite` pipeline (Phase 1 brand
 // codegen sketched in PROPOSALS.md).
+// `<trigger> throw E` → `<trigger> (() => { throw E; })()`. Mirrors the
+// Zig parser's runtime handling of throw-as-expression. Triggers:
+// `||` / `&&` / `??` / `?` (ternary) / `:` / `=>`. `?.` excluded.
+function transformThrowExpr(source: string): string {
+  const out: string[] = [];
+  const re = /(\|\||&&|\?\?|\?(?!\.)|:|=>)\s*throw\s+/g;
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const start = m.index;
+    if (isInsideStringOrComment(source, start)) continue;
+    const trigger = m[1];
+    let i = re.lastIndex;
+    const operandStart = i;
+    let depth = 0;
+    while (i < source.length) {
+      const ch = source[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        i++;
+        while (i < source.length && source[i] !== q) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "(" || ch === "{" || ch === "[") {
+        depth++;
+        i++;
+        continue;
+      }
+      if (ch === ")" || ch === "}" || ch === "]") {
+        if (depth === 0) break;
+        depth--;
+        i++;
+        continue;
+      }
+      if (depth === 0 && (ch === ";" || ch === ",")) break;
+      i++;
+    }
+    const operandEnd = i;
+    const operand = source.slice(operandStart, operandEnd).trim();
+    if (!operand) continue;
+    out.push(source.slice(lastEnd, start));
+    out.push(`${trigger} (() => { throw ${operand}; })()`);
+    lastEnd = operandEnd;
+    re.lastIndex = operandEnd;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
 function injectSchemaHelper(source: string): string {
   if (!/\b__paraFromSchema\b/.test(source)) return source;
   const helper =

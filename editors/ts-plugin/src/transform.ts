@@ -10,7 +10,7 @@
  */
 
 const PARABUN_SYNTAX_RE =
-  /\bpure\s|\bfun\b|\.\.=|\.\.!|\.\.&|\|>|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|\beffect\s*\{|\bwhen(?:\s+not)?\s+|\bsignal\s+[A-Za-z_$]|\barena\s*\{|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]/;
+  /\bpure\s|\bfun\b|\.\.=|\.\.!|\.\.&|\|>|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|\beffect\s*\{|\bwhen(?:\s+not)?\s+|\bsignal\s+[A-Za-z_$]|\barena\s*\{|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|(?:\|\||&&|\?\??|=>|:)\s*throw\s/;
 
 export function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -24,6 +24,7 @@ export function transformParabunToTS(source: string): string {
   source = transformModelDecls(source);
   source = transformSchemaEqualsBlock(source);
   source = transformInlineSchemaExpr(source);
+  source = transformThrowExpr(source);
   source = transformMatchExprs(source);
 
   const lines = source.split("\n");
@@ -270,6 +271,71 @@ function transformInlineSchemaExpr(source: string): string {
 // type parameter) so we don't compound tsc's literal-inference memory
 // pressure across the workspace; narrow types come back from the
 // offline `gen-dts-rewrite` pipeline (Phase 1 of the brand codegen).
+// `<trigger> throw E` → `<trigger> (() => { throw E; })()`. Triggers:
+// `||` / `&&` / `??` / `?` (ternary) / `:` / `=>`. `?.` excluded.
+// Operand ends at the next depth-0 `;` / `,` / closing bracket. Strings
+// and comments respected so a `}` inside a literal can't terminate
+// the operand early.
+function transformThrowExpr(source: string): string {
+  const out: string[] = [];
+  const re = /(\|\||&&|\?\?|\?(?!\.)|:|=>)\s*throw\s+/g;
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const start = m.index;
+    if (isInsideStringOrComment(source, start)) continue;
+    const trigger = m[1];
+    let i = re.lastIndex;
+    const operandStart = i;
+    let depth = 0;
+    while (i < source.length) {
+      const ch = source[i];
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const q = ch;
+        i++;
+        while (i < source.length && source[i] !== q) {
+          if (source[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < source.length && source[i] !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < source.length - 1 && !(source[i] === "*" && source[i + 1] === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "(" || ch === "{" || ch === "[") {
+        depth++;
+        i++;
+        continue;
+      }
+      if (ch === ")" || ch === "}" || ch === "]") {
+        if (depth === 0) break;
+        depth--;
+        i++;
+        continue;
+      }
+      if (depth === 0 && (ch === ";" || ch === ",")) break;
+      i++;
+    }
+    const operandEnd = i;
+    const operand = source.slice(operandStart, operandEnd).trim();
+    if (!operand) continue;
+    out.push(source.slice(lastEnd, start));
+    out.push(`${trigger} (() => { throw ${operand}; })()`);
+    lastEnd = operandEnd;
+    re.lastIndex = operandEnd;
+  }
+  out.push(source.slice(lastEnd));
+  return out.join("");
+}
+
 function injectSchemaHelper(source: string): string {
   if (!/\b__paraFromSchema\b/.test(source)) return source;
   // Recursive `SchemaValueOf<S>` mirrors the runtime decoration:
