@@ -905,12 +905,26 @@ function fromTsPath(tsPath: string): string {
 function initTypeScriptService() {
   if (!workspaceRoot) return;
 
-  try {
-    const tsPath = require.resolve("typescript", {
-      paths: [workspaceRoot],
-    });
-    ts = require(tsPath);
-  } catch {
+  // Search order:
+  //   1. workspace root — pick up the user's pinned typescript so .pts
+  //      files in their project see the same lib & strictness they
+  //      configured for tsc.
+  //   2. directory containing this LSP script — when the VS Code
+  //      extension bundles a typescript copy, it lives here. Without
+  //      this fallback, users whose workspace has no typescript dep
+  //      saw "type features disabled" and zero diagnostics.
+  //   3. plain `require("typescript")` — global / parent-of-cwd
+  //      resolutions, last-resort.
+  const nodePath = require("path");
+  const lspDir = nodePath.dirname(__filename);
+  for (const root of [workspaceRoot, lspDir]) {
+    try {
+      const tsPath = require.resolve("typescript", { paths: [root] });
+      ts = require(tsPath);
+      break;
+    } catch {}
+  }
+  if (!ts) {
     try {
       ts = require("typescript");
     } catch {

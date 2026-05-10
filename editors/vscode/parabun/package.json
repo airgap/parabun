@@ -2,7 +2,7 @@
   "name": "parabun",
   "displayName": "Parabun",
   "description": "Language support for Parabun (.pts/.pjs) — Bun fork with pure functions, error chaining, pipelines, models, pattern matching, and runtime validation",
-  "version": "0.11.5",
+  "version": "0.11.6",
   "publisher": "parabun",
   "license": "MIT",
   "repository": {
@@ -201,12 +201,12 @@
     }
   },
   "dependencies": {
+    "typescript": "^5.0.0",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.80.0",
-    "typescript": "^5.0.0"
+    "@types/vscode": "^1.80.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.js"
