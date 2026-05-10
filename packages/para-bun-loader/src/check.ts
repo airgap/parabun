@@ -8,10 +8,13 @@
 //   parabun check [path]               # check files under path (defaults to cwd)
 //   parabun check --tsconfig=p.json    # use explicit tsconfig
 //   parabun check file.pts             # check a single file
+//   parabun check --emit-types         # also write .d.ts files (defaults to
+//                                       tsconfig outDir, or sibling-to-source)
+//   parabun check --emit-types --out-dir=dist
 //
 // Exit code 1 if any errors found.
 
-import { readFileSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, statSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve, dirname, join, relative, isAbsolute } from "node:path";
 import { transformParabunToTS } from "./transform-ts";
 
@@ -30,8 +33,12 @@ try {
 const args = process.argv.slice(2);
 let target = ".";
 let tsconfigArg: string | undefined;
+let emitTypes = false;
+let outDirArg: string | undefined;
 for (const a of args) {
   if (a.startsWith("--tsconfig=")) tsconfigArg = a.slice("--tsconfig=".length);
+  else if (a === "--emit-types") emitTypes = true;
+  else if (a.startsWith("--out-dir=")) outDirArg = a.slice("--out-dir=".length);
   else if (a.startsWith("--")) {
     /* unknown flag — ignore for now */
   } else target = a;
@@ -120,10 +127,25 @@ for (const f of paraFiles) {
   );
 }
 
+// Resolve the .d.ts output directory when --emit-types is set:
+//   1. explicit --out-dir wins
+//   2. otherwise tsconfig outDir
+//   3. otherwise emit alongside each source file (the lockstep-style
+//      sibling pattern used by gen-dts-rewrite).
+const declarationDir =
+  emitTypes && outDirArg
+    ? resolve(process.cwd(), outDirArg)
+    : emitTypes && parsedCfg.options.outDir
+      ? parsedCfg.options.outDir
+      : undefined; // emit sibling-to-source
+
 const compilerOptions: import("typescript").CompilerOptions = {
   ...parsedCfg.options,
-  noEmit: true,
+  noEmit: !emitTypes,
+  declaration: emitTypes,
+  emitDeclarationOnly: emitTypes,
   skipLibCheck: true,
+  ...(declarationDir ? { declarationDir, outDir: declarationDir } : {}),
   // Suppress "cannot find module" for missing .d.ts on workspace deps;
   // we only care about type errors in the Para sources themselves.
   // (Caller can override via tsconfig for stricter cross-file checks.)
@@ -200,11 +222,79 @@ for (const d of allDiagnostics) {
   process.stderr.write(rewriteFilenames(formatted));
 }
 
+// ---- emit .d.ts files ------------------------------------------------------
+// Done AFTER diagnostics so we never write stale types when the source
+// has type errors. Skipped if any error fired.
+let emittedFiles: string[] = [];
+if (emitTypes && errorCount === 0) {
+  // Scope the emit-program to just our virtual `.pts`-derived files —
+  // tsconfig `include` matches stay in the diagnostic program but
+  // shouldn't trigger bystander `.d.ts` writes here.
+  const emitRootNames = [...transformed.keys()];
+  // Pre-compute expected output paths and remap them to where the
+  // user wants the .d.ts written. With `declarationDir` set, tsc
+  // emits to `<declarationDir>/<rel-from-rootDir>`; without it, we
+  // park the .d.ts next to the original `.pts` (lockstep parity).
+  const expectedTargets = new Map<string, string>(); // fileName tsc passes → real destination
+  const emitRootDir = parsedCfg.options.rootDir ?? commonAncestor(emitRootNames) ?? cwd;
+  for (const [virtual, orig] of virtualToOriginal) {
+    const rel = relative(emitRootDir, virtual).replace(/\.tsx?$/, ".d.ts");
+    if (declarationDir) {
+      const tscPath = join(declarationDir, rel);
+      expectedTargets.set(tscPath, tscPath);
+    } else {
+      const tscPath = join(emitRootDir, rel);
+      const dest = orig.replace(/\.(pts|ptsx)$/, ".d.ts");
+      expectedTargets.set(tscPath, dest);
+    }
+  }
+  const writeHost: import("typescript").CompilerHost = {
+    ...host,
+    writeFile: (fileName, text) => {
+      const target = expectedTargets.get(fileName);
+      if (!target) return; // not one of ours
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, text);
+      emittedFiles.push(target);
+    },
+  };
+  const emitProgram = ts.createProgram({
+    rootNames: emitRootNames,
+    options: compilerOptions,
+    host: writeHost,
+  });
+  const emitResult = emitProgram.emit();
+  for (const d of emitResult.diagnostics) {
+    if (d.category === ts.DiagnosticCategory.Error) errorCount++;
+    const formatted = ts.formatDiagnosticsWithColorAndContext([d], formatHost);
+    process.stderr.write(rewriteFilenames(formatted));
+  }
+}
+
+// Compute the longest directory prefix shared by all paths — used as
+// rootDir when the tsconfig doesn't set one explicitly.
+function commonAncestor(paths: string[]): string | undefined {
+  if (paths.length === 0) return undefined;
+  if (paths.length === 1) return dirname(paths[0]);
+  const split = paths.map(p => p.split("/"));
+  const minLen = Math.min(...split.map(s => s.length));
+  let i = 0;
+  for (; i < minLen; i++) {
+    const seg = split[0][i];
+    if (!split.every(s => s[i] === seg)) break;
+  }
+  return split[0].slice(0, i).join("/") || "/";
+}
+
 if (errorCount > 0) {
   console.error(
     `\nparabun check: ${errorCount} error${errorCount === 1 ? "" : "s"} in ${paraFiles.length} file${paraFiles.length === 1 ? "" : "s"}`,
   );
   process.exit(1);
 } else {
-  console.log(`parabun check: no errors in ${paraFiles.length} file${paraFiles.length === 1 ? "" : "s"}`);
+  const suffix =
+    emitTypes && emittedFiles.length > 0
+      ? `, emitted ${emittedFiles.length} .d.ts file${emittedFiles.length === 1 ? "" : "s"}`
+      : "";
+  console.log(`parabun check: no errors in ${paraFiles.length} file${paraFiles.length === 1 ? "" : "s"}${suffix}`);
 }
