@@ -180,6 +180,12 @@ pub fn ParsePrefix(
                     // shouldn't be hijacked. For Para code that wants a
                     // parenthesized subject, use `const m = ...; match m
                     // { ... }` instead of inline `match (m) { ... }`.
+                    //
+                    // Unary keyword starters (`typeof X`, `void X`, `delete
+                    // X.y`, `new Foo()`) ARE included — they unambiguously
+                    // start an expression, and none of them are legal JS
+                    // when followed by `{ ... }`, so adding them can't
+                    // conflict with any existing code.
                     switch (p.lexer.token) {
                         .t_identifier,
                         .t_numeric_literal,
@@ -191,6 +197,10 @@ pub fn ParsePrefix(
                         .t_plus,
                         .t_exclamation,
                         .t_tilde,
+                        .t_typeof,
+                        .t_void,
+                        .t_delete,
+                        .t_new,
                         => return try p.parseMatchExpr(name_range),
                         else => {},
                     }
