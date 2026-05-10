@@ -41,6 +41,10 @@
       "name": "@para/arrow",
       "version": "0.0.0-dev",
     },
+    "packages/para-bun-types": {
+      "name": "@para/bun-types",
+      "version": "0.0.0-dev",
+    },
     "packages/para-csv": {
       "name": "@para/csv",
       "version": "0.0.0-dev",
@@ -214,6 +218,8 @@
     "@para/arena": ["@para/arena@workspace:packages/para-arena"],
 
     "@para/arrow": ["@para/arrow@workspace:packages/para-arrow"],
+
+    "@para/bun-types": ["@para/bun-types@workspace:packages/para-bun-types"],
 
     "@para/csv": ["@para/csv@workspace:packages/para-csv"],
 
