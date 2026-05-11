@@ -1176,7 +1176,38 @@ function mapPositionFromTransformed(
 // Validation — combined Bun transpiler + TypeScript diagnostics
 // ---------------------------------------------------------------------------
 
+// Debounce + staleness guard. A full validate (transpile + tsc
+// semantic + tsc syntactic) takes ~9s on a cold first run and ~200ms
+// warm. Per-keystroke validation would back-pressure the queue: VS
+// Code sends a didChange per keystroke, and because the JSON-RPC
+// loop is single-threaded each validate blocks the next. The user
+// would see diagnostics flap warn→unwarn long after they had stopped
+// typing because validates for OLD document versions kept arriving.
+//
+// Fix: coalesce didChange events per-URI via a setTimeout window
+// (cancelling the prior timer on each edit) so only the latest
+// content gets validated. Inside validate, capture the document
+// version at entry and recheck before publishing — if the user typed
+// again while tsc was working, we skip the publish so stale
+// diagnostics for an old version don't overwrite the latest editor
+// state.
+const VALIDATE_DEBOUNCE_MS = 250;
+const validateTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleValidate(uri: string) {
+  const prev = validateTimers.get(uri);
+  if (prev !== undefined) clearTimeout(prev);
+  const timer = setTimeout(() => {
+    validateTimers.delete(uri);
+    const content = documents.get(uri);
+    if (content === undefined) return;
+    validate(uri, content);
+  }, VALIDATE_DEBOUNCE_MS);
+  validateTimers.set(uri, timer);
+}
+
 function validate(uri: string, content: string) {
+  const startedAtVersion = docVersions.get(uri);
   const diagnostics: LspDiagnostic[] = [];
 
   // Bun transpiler diagnostics (Parabun parse errors). The Bun
@@ -1267,6 +1298,13 @@ function validate(uri: string, content: string) {
   const modelBodyDiags = findModelBodyDiagnostics(content);
   diagnostics.push(...modelBodyDiags);
 
+  // Staleness guard. If the document changed while tsc was working
+  // (the validate function blocks the event loop, but a debounced
+  // re-validate could already be queued for newer content), drop our
+  // result rather than overwriting the editor with diagnostics for a
+  // version the user no longer sees. The next debounced validate will
+  // publish fresh ones.
+  if (docVersions.get(uri) !== startedAtVersion) return;
   publishDiagnostics(uri, diagnostics);
 }
 
@@ -3812,7 +3850,7 @@ function handleMessage(msg: any) {
       logMessage(3, `[parabun-lsp] didOpen: uri=${uri} lang=${languageId} len=${text?.length ?? 0}`);
       documents.set(uri, text);
       docVersions.set(uri, version ?? 1);
-      validate(uri, text);
+      scheduleValidate(uri);
       break;
     }
 
@@ -3822,13 +3860,18 @@ function handleMessage(msg: any) {
       if (content !== undefined) {
         documents.set(uri, content);
         docVersions.set(uri, (docVersions.get(uri) ?? 0) + 1);
-        validate(uri, content);
+        scheduleValidate(uri);
       }
       break;
     }
 
     case "textDocument/didClose": {
       const uri = params.textDocument.uri;
+      const t = validateTimers.get(uri);
+      if (t !== undefined) {
+        clearTimeout(t);
+        validateTimers.delete(uri);
+      }
       documents.delete(uri);
       docVersions.delete(uri);
       publishDiagnostics(uri, []);
