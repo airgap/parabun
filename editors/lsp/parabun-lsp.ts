@@ -14,6 +14,18 @@
  */
 
 // ---------------------------------------------------------------------------
+// Dual-mode: same file runs as the LSP main process OR as the tsc helper
+// subprocess (depending on the `--tsc-helper` flag). The helper offloads
+// `getSemanticDiagnostics` to a separate process so the main LSP's
+// event loop stays responsive — hover, completions, parabun fast-pass
+// diagnostics all keep working while tsc is mid-validate. Cancellation
+// is "implicit by versioning": the main process discards any helper
+// response whose document version no longer matches the latest content.
+// ---------------------------------------------------------------------------
+
+const HELPER_MODE = process.argv.includes("--tsc-helper");
+
+// ---------------------------------------------------------------------------
 // JSON-RPC / LSP message framing
 // ---------------------------------------------------------------------------
 
@@ -1210,53 +1222,160 @@ function mapPositionFromTransformed(
 // again while tsc was working, we skip the publish so stale
 // diagnostics for an old version don't overwrite the latest editor
 // state.
-const VALIDATE_DEBOUNCE_MS = 250;
-const validateTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Fast pass (parabun-syntax) fires after a short idle window — long
+// enough to coalesce a typing burst, short enough that error feedback
+// feels live. Slow pass (tsc semantic) waits longer because the
+// per-edit tsc cost on @lyku-sized workspaces is 0.5-1 s warm; firing
+// it every 250 ms while typing burns CPU for no benefit. The slow pass
+// runs in a subprocess so the LSP main loop stays responsive
+// regardless of how long tsc takes — hover, completions, parabun
+// diagnostics all keep working during the validate.
+const FAST_DEBOUNCE_MS = 250;
+const SLOW_DEBOUNCE_MS = 1500;
+const fastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const slowTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function scheduleValidate(uri: string) {
-  const prev = validateTimers.get(uri);
-  if (prev !== undefined) clearTimeout(prev);
-  const timer = setTimeout(() => {
-    validateTimers.delete(uri);
+  const prevFast = fastTimers.get(uri);
+  if (prevFast !== undefined) clearTimeout(prevFast);
+  const fast = setTimeout(() => {
+    fastTimers.delete(uri);
     const content = documents.get(uri);
     if (content === undefined) return;
-    validate(uri, content);
-  }, VALIDATE_DEBOUNCE_MS);
-  validateTimers.set(uri, timer);
+    runFastValidate(uri, content);
+  }, FAST_DEBOUNCE_MS);
+  fastTimers.set(uri, fast);
+
+  const prevSlow = slowTimers.get(uri);
+  if (prevSlow !== undefined) clearTimeout(prevSlow);
+  const slow = setTimeout(() => {
+    slowTimers.delete(uri);
+    const content = documents.get(uri);
+    if (content === undefined) return;
+    const version = docVersions.get(uri);
+    if (version === undefined) return;
+    requestTscDiagnostics(uri, content, version);
+  }, SLOW_DEBOUNCE_MS);
+  slowTimers.set(uri, slow);
 }
 
-// Two-phase validate. Phase 1 (fast — typically <50 ms): Bun
-// transpiler parse errors + all parabun-specific regex validators.
-// Phase 2 (slow — tsc semantic + syntactic, can be 15-20 s on a
-// cold @lyku-sized workspace and ~0.5 s warm): runs after a
-// setTimeout(0) yield so the fast publish actually leaves the
-// pipe before tsc blocks the event loop.
+// Fast pass — Bun transpiler parse errors + all parabun-specific regex
+// validators. Runs in the main LSP process, synchronously, on every
+// debounced didChange. Publishes a `fast-only` diagnostic set
+// immediately. The slow pass (tsc) arrives later via the helper
+// subprocess and republishes a merged set.
 //
-// Both phases re-check `docVersions` against the version captured
-// at validate entry. If the user typed again in between (only
-// possible across event-loop ticks, not during the synchronous tsc
-// call), the late publish is dropped so stale diagnostics never
-// overwrite the editor.
-function validate(uri: string, content: string) {
+// `lastFastDiagnostics` is kept per URI so that when the helper's tsc
+// diagnostics arrive we can republish [fast + tsc] without re-running
+// the fast pass (cheap, but no need).
+const lastFastDiagnostics = new Map<string, LspDiagnostic[]>();
+
+function runFastValidate(uri: string, content: string): void {
   const startedAtVersion = docVersions.get(uri);
   const fastDiagnostics = computeFastDiagnostics(uri, content);
 
   if (docVersions.get(uri) !== startedAtVersion) return;
+  lastFastDiagnostics.set(uri, fastDiagnostics);
   publishDiagnostics(uri, fastDiagnostics);
+}
 
-  // Yield so the fast publish actually flushes before tsc starts.
-  // Without this, both publishes leave the pipe in the same tick
-  // and the user sees no incremental feedback — they just wait for
-  // tsc and then everything appears at once.
-  setTimeout(() => {
-    if (docVersions.get(uri) !== startedAtVersion) return;
-    if (!(tsService && ts)) return;
+// ---------------------------------------------------------------------------
+// tsc helper subprocess. Long-lived companion that owns the TypeScript
+// LanguageService so the main LSP stays responsive. Spawned lazily on
+// first request and respawned if it dies. Communicates via
+// newline-delimited JSON over stdio.
+// ---------------------------------------------------------------------------
 
-    const tsDiagnostics = computeTsDiagnostics(uri, content);
+let tscHelper: ReturnType<typeof import("child_process").spawn> | undefined;
+let tscHelperBuf = "";
+const helperOpenDocs = new Set<string>();
 
-    if (docVersions.get(uri) !== startedAtVersion) return;
-    publishDiagnostics(uri, [...fastDiagnostics, ...tsDiagnostics]);
-  }, 0);
+function ensureTscHelper(): void {
+  if (tscHelper && !tscHelper.killed && tscHelper.exitCode === null) return;
+  const { spawn } = require("child_process") as typeof import("child_process");
+  const helperArgs = ["run", __filename, "--tsc-helper"];
+  tscHelper = spawn(process.execPath, helperArgs, {
+    cwd: workspaceRoot,
+    env: { ...process.env, BUN_DEBUG_QUIET_LOGS: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  tscHelperBuf = "";
+  helperOpenDocs.clear();
+  tscHelper.stdout!.setEncoding("utf8");
+  tscHelper.stdout!.on("data", (chunk: string) => {
+    tscHelperBuf += chunk;
+    let nl: number;
+    while ((nl = tscHelperBuf.indexOf("\n")) !== -1) {
+      const line = tscHelperBuf.slice(0, nl);
+      tscHelperBuf = tscHelperBuf.slice(nl + 1);
+      if (!line) continue;
+      let msg: any;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      handleHelperReply(msg);
+    }
+  });
+  tscHelper.stderr!.on("data", (chunk: Buffer) => {
+    const text = chunk.toString();
+    if (text.trim()) logMessage(2, `[parabun-lsp tsc-helper stderr] ${text.trim()}`);
+  });
+  tscHelper.on("exit", (code, signal) => {
+    logMessage(2, `[parabun-lsp tsc-helper exited code=${code} signal=${signal}]`);
+    tscHelper = undefined;
+  });
+  // Resync every currently-open document so the helper can serve
+  // diagnostics for files the user already had open before its first
+  // spawn / after a respawn.
+  for (const [uri, content] of documents) {
+    const version = docVersions.get(uri) ?? 1;
+    sendToHelper({ type: "open", uri, content, version });
+    helperOpenDocs.add(uri);
+  }
+}
+
+function sendToHelper(msg: object): void {
+  ensureTscHelper();
+  try {
+    tscHelper!.stdin!.write(JSON.stringify(msg) + "\n");
+  } catch (e: any) {
+    logMessage(2, `[parabun-lsp tsc-helper write failed: ${e?.message ?? e}]`);
+  }
+}
+
+function handleHelperReply(msg: any): void {
+  if (msg.type === "ready") return;
+  if (msg.type === "log") {
+    logMessage(msg.level ?? 3, msg.message ?? "");
+    return;
+  }
+  if (msg.type !== "diagnostics") return;
+
+  const { uri, version, diagnostics } = msg as {
+    uri: string;
+    version: number;
+    diagnostics: LspDiagnostic[];
+  };
+  // Staleness guard — discard tsc results for any version that's no
+  // longer the latest content. The fast pass already published for
+  // the current version; ignoring stale tsc just means we wait for
+  // the next debounced slow pass to fire on the latest content.
+  if (docVersions.get(uri) !== version) return;
+  const fast = lastFastDiagnostics.get(uri) ?? [];
+  publishDiagnostics(uri, [...fast, ...diagnostics]);
+}
+
+function requestTscDiagnostics(uri: string, content: string, version: number): void {
+  ensureTscHelper();
+  if (!helperOpenDocs.has(uri)) {
+    sendToHelper({ type: "open", uri, content, version });
+    helperOpenDocs.add(uri);
+  } else {
+    sendToHelper({ type: "update", uri, content, version });
+  }
+  sendToHelper({ type: "validate", uri, version });
 }
 
 function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
@@ -3897,13 +4016,23 @@ function handleMessage(msg: any) {
 
     case "textDocument/didClose": {
       const uri = params.textDocument.uri;
-      const t = validateTimers.get(uri);
-      if (t !== undefined) {
-        clearTimeout(t);
-        validateTimers.delete(uri);
+      const f = fastTimers.get(uri);
+      if (f !== undefined) {
+        clearTimeout(f);
+        fastTimers.delete(uri);
+      }
+      const s = slowTimers.get(uri);
+      if (s !== undefined) {
+        clearTimeout(s);
+        slowTimers.delete(uri);
       }
       documents.delete(uri);
       docVersions.delete(uri);
+      lastFastDiagnostics.delete(uri);
+      if (tscHelper && helperOpenDocs.has(uri)) {
+        sendToHelper({ type: "close", uri });
+        helperOpenDocs.delete(uri);
+      }
       publishDiagnostics(uri, []);
       break;
     }
@@ -3990,40 +4119,130 @@ function handleMessage(msg: any) {
 }
 
 // ---------------------------------------------------------------------------
-// stdin reader — Content-Length framed messages
+// stdin reader — Content-Length framed messages (main LSP only)
 // ---------------------------------------------------------------------------
 
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk: string) => {
-  inputBuffer += chunk;
+if (!HELPER_MODE) {
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk: string) => {
+    inputBuffer += chunk;
 
-  while (true) {
-    const sepIdx = inputBuffer.indexOf(HEADER_SEP);
-    if (sepIdx === -1) break;
+    while (true) {
+      const sepIdx = inputBuffer.indexOf(HEADER_SEP);
+      if (sepIdx === -1) break;
 
-    const header = inputBuffer.slice(0, sepIdx);
-    const match = header.match(/Content-Length:\s*(\d+)/i);
-    if (!match) {
-      inputBuffer = inputBuffer.slice(sepIdx + HEADER_SEP.length);
-      continue;
+      const header = inputBuffer.slice(0, sepIdx);
+      const match = header.match(/Content-Length:\s*(\d+)/i);
+      if (!match) {
+        inputBuffer = inputBuffer.slice(sepIdx + HEADER_SEP.length);
+        continue;
+      }
+
+      const contentLength = parseInt(match[1], 10);
+      const bodyStart = sepIdx + HEADER_SEP.length;
+
+      if (inputBuffer.length < bodyStart + contentLength) {
+        break;
+      }
+
+      const body = inputBuffer.slice(bodyStart, bodyStart + contentLength);
+      inputBuffer = inputBuffer.slice(bodyStart + contentLength);
+
+      try {
+        handleMessage(JSON.parse(body));
+      } catch {
+        // Ignore malformed JSON
+      }
     }
+  });
 
-    const contentLength = parseInt(match[1], 10);
-    const bodyStart = sepIdx + HEADER_SEP.length;
+  process.stdin.resume();
+} else {
+  runTscHelperMode();
+}
 
-    if (inputBuffer.length < bodyStart + contentLength) {
-      break;
+// ---------------------------------------------------------------------------
+// tsc helper subprocess mode. Reads newline-delimited JSON messages from
+// stdin (one message per line — no Content-Length framing because the
+// payloads are bounded and we control both sides). Maintains its own
+// `documents` / `docVersions` state synced from the main process, runs
+// the same tsService setup as `initTypeScriptService`, and replies with
+// `{ type: "diagnostics", uri, version, diagnostics }`. Crash-safe: any
+// thrown error inside `validate` is caught and turned into an empty
+// diagnostics reply so the main process never hangs.
+//
+// Wire protocol (newline-delimited JSON):
+//   ← { type: "open" | "update", uri, content, version }
+//   ← { type: "close", uri }
+//   ← { type: "validate", uri, version }
+//   → { type: "ready" }                          (once after init)
+//   → { type: "diagnostics", uri, version, diagnostics: LspDiagnostic[] }
+//   → { type: "log", level, message }            (forwarded to client)
+// ---------------------------------------------------------------------------
+
+function runTscHelperMode(): void {
+  // Reuse the main LSP's tsService setup. workspaceRoot defaults from
+  // cwd; main process sends the actual root via the first message.
+  workspaceRoot = process.cwd();
+  initTypeScriptService();
+  process.stdout.write(JSON.stringify({ type: "ready" }) + "\n");
+
+  let buf = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk: string) => {
+    buf += chunk;
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let msg: any;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      handleHelperMessage(msg);
     }
+  });
+  process.stdin.resume();
+}
 
-    const body = inputBuffer.slice(bodyStart, bodyStart + contentLength);
-    inputBuffer = inputBuffer.slice(bodyStart + contentLength);
-
-    try {
-      handleMessage(JSON.parse(body));
-    } catch {
-      // Ignore malformed JSON
+function handleHelperMessage(msg: any): void {
+  switch (msg.type) {
+    case "open":
+    case "update":
+      documents.set(msg.uri, msg.content);
+      docVersions.set(msg.uri, msg.version);
+      return;
+    case "close":
+      documents.delete(msg.uri);
+      docVersions.delete(msg.uri);
+      return;
+    case "validate": {
+      const content = documents.get(msg.uri);
+      if (content === undefined) {
+        process.stdout.write(
+          JSON.stringify({ type: "diagnostics", uri: msg.uri, version: msg.version, diagnostics: [] }) + "\n",
+        );
+        return;
+      }
+      let diagnostics: LspDiagnostic[] = [];
+      try {
+        diagnostics = computeTsDiagnostics(msg.uri, content);
+      } catch (e: any) {
+        process.stdout.write(
+          JSON.stringify({
+            type: "log",
+            level: 2,
+            message: `[parabun-lsp tsc-helper] validate threw: ${e?.message ?? e}`,
+          }) + "\n",
+        );
+      }
+      process.stdout.write(
+        JSON.stringify({ type: "diagnostics", uri: msg.uri, version: msg.version, diagnostics }) + "\n",
+      );
+      return;
     }
   }
-});
-
-process.stdin.resume();
+}
