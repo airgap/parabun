@@ -179,13 +179,21 @@ function transformModelFromLine(line: string): string {
 
 // Emit a TS type alias so a `schema X` declaration is usable in BOTH
 // value AND type position: `satisfies PostgresTableModel<X>` works
-// without `typeof X`. tsc namespaces values and types separately so
-// `const X = ...; type X = typeof X;` lives without collision. Keep
-// it semicolon-prefixed + same-line so generated text doesn't shift
-// source-line indices that diagnostics use to map back to the
-// original .pts file.
+// without `typeof X`. The alias resolves to `(typeof X)["schema"]`
+// — the UNWRAPPED JSON Schema body literal — rather than the full
+// `__paraFromSchema` helper return (`{schema, parse, is} & S`).
+// Measured on lyku's sharedDrafts.pts: unwrapped form makes tsc
+// ~2x faster cold (18.8s → 9.7s) and 1.5-2.2x faster on warm edits
+// (1.0-1.7s → 0.55-0.88s), because the helper's `{...} & S`
+// intersection forces tsc to walk both sides for every
+// `T['properties']` / `keyof T` lookup in heavy generics like
+// `PostgresTableModel<S>`. tsc namespaces values and types
+// separately so `const X = ...; type X = ...;` coexists. Keep the
+// emit semicolon-prefixed + same-line so generated text doesn't
+// shift source-line indices that diagnostics use to map back to
+// the original .pts file.
 function schemaTypeAlias(exportKw: string | undefined, name: string): string {
-  return `;${exportKw ?? ""}type ${name} = typeof ${name}`;
+  return `;${exportKw ?? ""}type ${name} = (typeof ${name})["schema"]`;
 }
 
 // `[export ]schema NAME = { ...body... }[ as const][ satisfies T];` →

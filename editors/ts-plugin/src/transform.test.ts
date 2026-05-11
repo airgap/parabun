@@ -113,15 +113,18 @@ export schema User = {
       expect(out).toContain("declare function __paraFromSchema");
     });
 
-    // schema X declarations also emit a `type X = typeof X` so users
-    // can write `satisfies Foo<X>` without `typeof X`. Without this
-    // tsc errors with "refers to a value, but is being used as a type".
-    test("`schema X = ...` emits a type alias so X works in type position", () => {
+    // schema X declarations also emit a `type X = (typeof X)["schema"]`
+    // so users can write `satisfies Foo<X>` without `typeof X` AND get
+    // the unwrapped schema body — which is 1.5-2.2x faster for heavy
+    // generics like `PostgresTableModel<S>` because tsc doesn't have to
+    // walk the `{...} & S` intersection that the full helper return
+    // type carries.
+    test("`schema X = ...` emits a type alias bound to the unwrapped body", () => {
       const out = transformParabunToTS(`
 schema User = { properties: { id: { type: "integer" } } }
 `);
       expect(out).toContain("const User = __paraFromSchema(() => (");
-      expect(out).toContain("type User = typeof User");
+      expect(out).toContain(`type User = (typeof User)["schema"]`);
     });
 
     test("`export schema X = ...` exports BOTH the const and the type alias", () => {
@@ -129,7 +132,7 @@ schema User = { properties: { id: { type: "integer" } } }
 export schema User = { properties: { id: { type: "integer" } } }
 `);
       expect(out).toContain("export const User = __paraFromSchema(() => (");
-      expect(out).toContain("export type User = typeof User");
+      expect(out).toContain(`export type User = (typeof User)["schema"]`);
     });
 
     test("`schema X from <expr>` (ingest form) also emits the type alias", () => {
@@ -138,7 +141,7 @@ import schemaJSON from "./external.json"
 schema External from schemaJSON
 `);
       expect(out).toContain("const External = __paraFromSchema(() => (schemaJSON))");
-      expect(out).toContain("type External = typeof External");
+      expect(out).toContain(`type External = (typeof External)["schema"]`);
     });
 
     test("`match EXPR { ... }` → IIFE stub", () => {

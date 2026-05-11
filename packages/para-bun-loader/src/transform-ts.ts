@@ -245,11 +245,13 @@ function transformModelFromLine(line: string): string {
 }
 
 // Emit a TS type alias so a `schema X` declaration is usable in BOTH
-// value AND type position: `satisfies PostgresTableModel<X>` works
-// without `typeof X`. tsc namespaces values and types separately so
-// `const X = ...; type X = typeof X;` coexists without collision.
+// value AND type position. The alias resolves to `(typeof X)["schema"]`
+// — the unwrapped JSON Schema body — so `PostgresTableModel<X>` and
+// other heavy generics skip the `{...} & S` intersection walk that
+// the full helper return type forces. Measured 1.5-2.2x speedup on
+// warm edits in lyku.
 function schemaTypeAlias(exportKw: string | undefined, name: string): string {
-  return `;${exportKw ?? ""}type ${name} = typeof ${name}`;
+  return `;${exportKw ?? ""}type ${name} = (typeof ${name})["schema"]`;
 }
 
 // `[export ]schema NAME { fields }` — refinement-typed DSL form. Emits
