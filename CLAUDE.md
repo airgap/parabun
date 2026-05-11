@@ -2,6 +2,8 @@ This is **Parabun**, a fork of Bun that adds language extensions for purity, err
 
 **Parabun-specific files**: `src/ast/parsePrefix.zig` (pure/this checks), `src/ast/parseSuffix.zig` (..! ..& |> operators), `src/ast/parse.zig` (pure prefix expressions), `src/ast/parseFn.zig` (is_pure threading), `src/options.zig` (.pts/.pjs extensions), `editors/` (LSP + editor extensions). Tests: `test/bundler/transpiler/parabun-*.test.js`.
 
+**VS Code extension uses release builds only.** `editors/vscode/parabun/scripts/copy-assets.js` checks `parabun --revision` at .vsix build time and aborts if it points to a debug build; `editors/vscode/parabun/src/extension.ts` checks at runtime and refuses to start. The debug build's ASAN + tracing overhead makes cold LSP startup ~10× slower (38 s vs 4 s on @lyku-sized workspaces). When working on the extension, ensure `/usr/local/bin/parabun` (or whatever's on PATH) is release-built before packaging: `bun run build:release && sudo ln -sf /raid/parabun/build/release/bun /usr/local/bin/parabun`.
+
 Upstream Bun is an all-in-one JavaScript runtime & toolkit designed for speed, with a bundler, test runner, and Node.js-compatible package manager. It's written primarily in Zig with C++ for JavaScriptCore integration, powered by WebKit's JavaScriptCore engine.
 
 ## Building and Running Bun

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { execFileSync } from "node:child_process";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
@@ -501,6 +502,18 @@ async function updatePureCallDecorations(editor: vscode.TextEditor, defNameRange
   }
 }
 
+// Returns the parabun binary's --revision output (e.g. "1.3.14-canary.1+abcdef0"
+// for release, "1.3.14-debug+abcdef0" for debug). Empty string if the binary
+// can't be found or doesn't respond. Synchronous + capped at 5 s — runs once
+// at extension activation, not on hot paths.
+function parabunRevision(lspPath: string): string {
+  try {
+    return execFileSync(lspPath, ["--revision"], { encoding: "utf8", timeout: 5000 }).trim();
+  } catch {
+    return "";
+  }
+}
+
 export function activate(context: vscode.ExtensionContext) {
   log = vscode.window.createOutputChannel("Parabun Extension");
   log.appendLine("Parabun extension activating...");
@@ -508,6 +521,27 @@ export function activate(context: vscode.ExtensionContext) {
   const config = vscode.workspace.getConfiguration("parabun");
   const lspPath = config.get<string>("lsp.path", "parabun");
   const lspScript = context.asAbsolutePath("server/parabun-lsp.ts");
+
+  // Refuse to start against a debug-build parabun. The ASAN + tracing
+  // overhead in debug makes the LSP unusable — typescript module load
+  // alone takes ~10 s (vs 100 ms release), and cold semantic-diagnostic
+  // latency on @lyku-sized graphs goes from ~4 s release to ~40 s
+  // debug. Better to fail loudly with a clear message than to silently
+  // ship a broken-feeling extension.
+  const revision = parabunRevision(lspPath);
+  if (revision.includes("-debug")) {
+    const msg =
+      `Parabun LSP refusing to start: \`${lspPath}\` is a debug build (${revision}). ` +
+      `Debug builds are 10-100x slower than release and make the LSP unusable. ` +
+      `Either: (1) point \`/usr/local/bin/parabun\` at a release build ` +
+      `(\`sudo ln -sf /raid/parabun/build/release/bun /usr/local/bin/parabun\`), ` +
+      `or (2) set "parabun.lsp.path" in your VS Code settings to an absolute path ` +
+      `to a release-built parabun binary.`;
+    log.appendLine(msg);
+    vscode.window.showErrorMessage(msg);
+    return;
+  }
+  if (revision) log.appendLine(`Parabun binary: ${revision}`);
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
