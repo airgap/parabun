@@ -1416,6 +1416,7 @@ function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
   diagnostics.push(...findPureViolations(uri, content));
   diagnostics.push(...findUnknownValidationTypeDiagnostics(content));
   diagnostics.push(...findModelBodyDiagnostics(content));
+  diagnostics.push(...findUnknownIdentifierDiagnostics(content, uri));
 
   return diagnostics;
 }
@@ -2853,6 +2854,390 @@ function parseFieldsBlock(body: string): ParaModelField[] {
   return fields;
 }
 
+// Lightweight "Cannot find name" detection that runs in the fast pass
+// (no tsc, ~5 ms per file). Catches the most common kind of typo — a
+// referenced identifier that isn't imported, declared anywhere in the
+// file, or a known global. tsc would catch the same error eventually
+// via TS2304/TS2552 but only after the cold semantic pass (10-40 s on
+// @lyku-sized graphs). Surfacing this in the fast pass means the user
+// sees `schsharedDraft` flagged within ~270 ms of typing it instead
+// of waiting for the helper subprocess to cold-load.
+//
+// Conservative on purpose: false positives are worse than missed
+// catches because every spurious squiggle erodes trust. The scanner
+// SKIPS identifiers in any of these positions because resolving them
+// correctly needs the full TS type-checker:
+//   - After `.` (property access)
+//   - Inside a type annotation (after `:` but not `::`)
+//   - Inside `typeof X` / `keyof X` / `infer X` / `extends X` /
+//     `implements X` / `new X` / `as X`
+//   - In a JSX tag-name position
+//   - Inside a string literal, template literal, regex, or comment
+//   - On the LHS of a declaration
+//   - As an object-literal property key
+function findUnknownIdentifierDiagnostics(content: string, sourceUri: string): LspDiagnostic[] {
+  if (!/\.(pts|ptsx|pjs|pjsx)$/.test(uriToPath(sourceUri))) return [];
+
+  // Mask string/template/regex/comment content so identifier scanning
+  // doesn't pick up words inside them. Length-preserving so all offsets
+  // stay valid for line/column conversion downstream.
+  const masked = maskStringsAndComments(content);
+
+  // Collect the in-scope name set: imports + top-level declarations +
+  // function/method parameters + catch-bindings + common globals.
+  const inScope = new Set<string>(KNOWN_GLOBAL_IDENTIFIERS);
+
+  // 1. Imports.
+  const importRe =
+    /\bimport(?:\s+type)?\s+(?:(\*\s+as\s+[A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)(?:\s*,\s*\{([^}]*)\})?|\{([^}]*)\})\s+from\s+["'][^"']+["']/g;
+  let im: RegExpExecArray | null;
+  while ((im = importRe.exec(masked)) !== null) {
+    if (im[1]) {
+      const m2 = im[1].match(/\*\s+as\s+([A-Za-z_$][\w$]*)/);
+      if (m2) inScope.add(m2[1]);
+    }
+    if (im[2]) inScope.add(im[2]);
+    const namedList = im[3] ?? im[4];
+    if (namedList) {
+      for (const raw of namedList.split(",")) {
+        const item = raw.trim().replace(/^type\s+/, "");
+        if (!item) continue;
+        const asMatch = item.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+        const local = asMatch ? asMatch[2] : item.match(/^([A-Za-z_$][\w$]*)/)?.[1];
+        if (local) inScope.add(local);
+      }
+    }
+  }
+
+  // 2. Declarations: const/let/var/function/class/enum/type/interface.
+  const declRe =
+    /\b(?:export\s+(?:default\s+)?)?(?:const|let|var|function|async\s+function|class|enum|type|interface|namespace|module)\s+([A-Za-z_$][\w$]*)/g;
+  let dm: RegExpExecArray | null;
+  while ((dm = declRe.exec(masked)) !== null) inScope.add(dm[1]);
+
+  // 3. Top-level destructuring: `const { a, b: c, d = 1 } = ...`.
+  //    Bails on nested `{` because we don't have a real parser.
+  const destructRe = /\b(?:const|let|var)\s+\{([^{}]*)\}\s*=/g;
+  let dem: RegExpExecArray | null;
+  while ((dem = destructRe.exec(masked)) !== null) {
+    for (const raw of dem[1].split(",")) {
+      const item = raw.trim();
+      if (!item) continue;
+      const colonMatch = item.match(/^[A-Za-z_$][\w$]*\s*:\s*([A-Za-z_$][\w$]*)/);
+      const eqMatch = item.match(/^([A-Za-z_$][\w$]*)\s*=/);
+      const bareMatch = item.match(/^([A-Za-z_$][\w$]*)$/);
+      const name = colonMatch?.[1] ?? eqMatch?.[1] ?? bareMatch?.[1];
+      if (name) inScope.add(name);
+    }
+  }
+
+  // 4. Function / arrow / method parameters. Skips destructured params.
+  const paramRe = /(?:\bfunction\b|\bfun\b|=>)\s*[A-Za-z_$\w$]*\s*\(([^()]*)\)|\b[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{/g;
+  let pm: RegExpExecArray | null;
+  while ((pm = paramRe.exec(masked)) !== null) {
+    const params = pm[1] ?? pm[2];
+    if (!params || /[{[]/.test(params)) continue;
+    for (const raw of params.split(",")) {
+      const stripped = raw
+        .trim()
+        .replace(/^\.\.\./, "")
+        .replace(/=\s*[\s\S]*$/, "")
+        .replace(/:\s*[\s\S]*$/, "")
+        .replace(/\?/, "")
+        .trim();
+      const m2 = stripped.match(/^([A-Za-z_$][\w$]*)$/);
+      if (m2) inScope.add(m2[1]);
+    }
+  }
+
+  // 5. catch bindings.
+  const catchRe = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g;
+  let cm: RegExpExecArray | null;
+  while ((cm = catchRe.exec(masked)) !== null) inScope.add(cm[1]);
+
+  // Now scan identifier USES.
+  const diags: LspDiagnostic[] = [];
+  const useRe = /(?<![\w$.])([A-Za-z_$][\w$]*)(?![\w$])/g;
+  let um: RegExpExecArray | null;
+  while ((um = useRe.exec(masked)) !== null) {
+    const name = um[1];
+    if (inScope.has(name)) continue;
+    if (RESERVED_WORDS.has(name)) continue;
+
+    const start = um.index;
+    const before = masked.slice(Math.max(0, start - 64), start);
+    const after = masked.slice(start + name.length, start + name.length + 16);
+
+    // Skip if this is a declaration site (regex order means newly-declared
+    // names may not yet be added when first encountered).
+    if (
+      /\b(?:const|let|var|function|async\s+function|fun|class|enum|type|interface|namespace|module|import(?:\s+type)?)\s*(?:\{\s*)?$/.test(
+        before,
+      )
+    )
+      continue;
+    // Object-literal property key (`name:`, but not `name::`).
+    if (/^\s*:(?!:)/.test(after)) continue;
+    // Object-shorthand method: `{ name() { ... } }`.
+    if (/^\s*\(/.test(after) && /[,{]\s*$/.test(before)) continue;
+    // NOTE: deliberately do NOT skip identifiers after `: ` — that
+    // boundary is ambiguous between type-annotation position
+    // (`const x: Type`) and object-literal value position
+    // (`{ key: value }`). Skipping all `: ` swallowed the most useful
+    // catch (`{ schema: schsharedDraft }`). Rely on the allowlist
+    // (KNOWN_GLOBAL_IDENTIFIERS + COMMON_TYPE_NAMES) to avoid
+    // false-positives on the type-annotation form.
+    // `as Type` cast.
+    if (/\bas\s+$/.test(before)) continue;
+    // Generic arg position.
+    if (/<\s*$/.test(before)) continue;
+    // `typeof X` / `keyof X` / `infer X`.
+    if (/\b(?:typeof|keyof|infer)\s+$/.test(before)) continue;
+    // `extends X` / `implements X` / `new X`.
+    if (/\b(?:extends|implements|new)\s+$/.test(before)) continue;
+    // JSX tag (capitalized followed by `<` or `/>`).
+    if (/^[A-Z]/.test(name) && /^\s*[</]/.test(after)) continue;
+
+    const startPos = offsetToPosition(content, start);
+    const endPos = offsetToPosition(content, start + name.length);
+    diags.push({
+      range: { start: startPos, end: endPos },
+      severity: 1,
+      source: "parabun",
+      message: `Cannot find name '${name}'`,
+      code: "parabun-unknown-identifier",
+    });
+  }
+
+  return diags;
+}
+
+// Common globals — conservative list. A missed global = false positive
+// squiggle (annoying); a wrongly-allowed identifier = missed real error.
+const KNOWN_GLOBAL_IDENTIFIERS = new Set<string>([
+  "globalThis",
+  "window",
+  "document",
+  "console",
+  "process",
+  "Math",
+  "JSON",
+  "Object",
+  "Array",
+  "String",
+  "Number",
+  "Boolean",
+  "Date",
+  "RegExp",
+  "Map",
+  "Set",
+  "WeakMap",
+  "WeakSet",
+  "Promise",
+  "Symbol",
+  "BigInt",
+  "Proxy",
+  "Reflect",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "URIError",
+  "EvalError",
+  "Function",
+  "ArrayBuffer",
+  "SharedArrayBuffer",
+  "DataView",
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+  "setTimeout",
+  "clearTimeout",
+  "setInterval",
+  "clearInterval",
+  "setImmediate",
+  "clearImmediate",
+  "queueMicrotask",
+  "parseInt",
+  "parseFloat",
+  "isNaN",
+  "isFinite",
+  "encodeURI",
+  "decodeURI",
+  "encodeURIComponent",
+  "decodeURIComponent",
+  "NaN",
+  "Infinity",
+  "undefined",
+  "Atomics",
+  "Intl",
+  "WebAssembly",
+  "fetch",
+  "Request",
+  "Response",
+  "Headers",
+  "Blob",
+  "File",
+  "FormData",
+  "URL",
+  "URLSearchParams",
+  "TextEncoder",
+  "TextDecoder",
+  "ReadableStream",
+  "WritableStream",
+  "TransformStream",
+  "AbortController",
+  "AbortSignal",
+  "crypto",
+  "WebSocket",
+  "Worker",
+  "MessageChannel",
+  "MessagePort",
+  "BroadcastChannel",
+  "Event",
+  "EventTarget",
+  "CustomEvent",
+  "MessageEvent",
+  "Bun",
+  "require",
+  "module",
+  "exports",
+  "__dirname",
+  "__filename",
+  "Buffer",
+  "performance",
+  "React",
+  "Ok",
+  "Err",
+  "Some",
+  "None",
+  "this",
+  "super",
+  "arguments",
+  // Common TS type names — included so type-position identifiers
+  // don't false-positive (we deliberately don't skip `: T`
+  // boundaries because they're ambiguous with object-literal
+  // values).
+  "string",
+  "number",
+  "boolean",
+  "void",
+  "any",
+  "unknown",
+  "never",
+  "object",
+  "bigint",
+  "symbol",
+  "Record",
+  "Partial",
+  "Required",
+  "Readonly",
+  "Pick",
+  "Omit",
+  "Exclude",
+  "Extract",
+  "NonNullable",
+  "Parameters",
+  "ReturnType",
+  "InstanceType",
+  "ConstructorParameters",
+  "ThisType",
+  "Awaited",
+  "Capitalize",
+  "Uncapitalize",
+  "Uppercase",
+  "Lowercase",
+  "ReadonlyArray",
+  "Iterable",
+  "AsyncIterable",
+  "IterableIterator",
+  "Iterator",
+  "ArrayLike",
+  "PromiseLike",
+]);
+
+const RESERVED_WORDS = new Set<string>([
+  "if",
+  "else",
+  "while",
+  "for",
+  "do",
+  "return",
+  "break",
+  "continue",
+  "switch",
+  "case",
+  "default",
+  "throw",
+  "try",
+  "catch",
+  "finally",
+  "function",
+  "fun",
+  "class",
+  "interface",
+  "extends",
+  "implements",
+  "const",
+  "let",
+  "var",
+  "import",
+  "export",
+  "from",
+  "as",
+  "type",
+  "enum",
+  "namespace",
+  "module",
+  "declare",
+  "abstract",
+  "static",
+  "public",
+  "private",
+  "protected",
+  "readonly",
+  "async",
+  "await",
+  "yield",
+  "of",
+  "in",
+  "instanceof",
+  "typeof",
+  "void",
+  "delete",
+  "new",
+  "true",
+  "false",
+  "null",
+  "is",
+  "satisfies",
+  "infer",
+  "keyof",
+  "unique",
+  "out",
+  "override",
+  "schema",
+  "signal",
+  "derived",
+  "effect",
+  "when",
+  "memo",
+  "pure",
+  "match",
+  "arena",
+  "parallel",
+  "para",
+]);
+
 // Diagnostic: `(arg:: Type)` where Type isn't in the model registry.
 function findUnknownValidationTypeDiagnostics(content: string): LspDiagnostic[] {
   const diags: LspDiagnostic[] = [];
@@ -3999,7 +4384,17 @@ function handleMessage(msg: any) {
       logMessage(3, `[parabun-lsp] didOpen: uri=${uri} lang=${languageId} len=${text?.length ?? 0}`);
       documents.set(uri, text);
       docVersions.set(uri, version ?? 1);
+      // Fast pass debounced as usual; ALSO dispatch a slow tsc request
+      // immediately (no 1.5 s debounce) so the helper subprocess can
+      // begin its cold load in parallel with the user reading the
+      // file. Without this, the first slow pass waits for didChange
+      // and the user-perceived "open file → see TS error" latency is
+      // 1.5 s longer than necessary.
       scheduleValidate(uri);
+      const initialVersion = docVersions.get(uri);
+      if (initialVersion !== undefined) {
+        requestTscDiagnostics(uri, text, initialVersion);
+      }
       break;
     }
 
