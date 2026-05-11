@@ -113,6 +113,34 @@ export schema User = {
       expect(out).toContain("declare function __paraFromSchema");
     });
 
+    // schema X declarations also emit a `type X = typeof X` so users
+    // can write `satisfies Foo<X>` without `typeof X`. Without this
+    // tsc errors with "refers to a value, but is being used as a type".
+    test("`schema X = ...` emits a type alias so X works in type position", () => {
+      const out = transformParabunToTS(`
+schema User = { properties: { id: { type: "integer" } } }
+`);
+      expect(out).toContain("const User = __paraFromSchema(() => (");
+      expect(out).toContain("type User = typeof User");
+    });
+
+    test("`export schema X = ...` exports BOTH the const and the type alias", () => {
+      const out = transformParabunToTS(`
+export schema User = { properties: { id: { type: "integer" } } }
+`);
+      expect(out).toContain("export const User = __paraFromSchema(() => (");
+      expect(out).toContain("export type User = typeof User");
+    });
+
+    test("`schema X from <expr>` (ingest form) also emits the type alias", () => {
+      const out = transformParabunToTS(`
+import schemaJSON from "./external.json"
+schema External from schemaJSON
+`);
+      expect(out).toContain("const External = __paraFromSchema(() => (schemaJSON))");
+      expect(out).toContain("type External = typeof External");
+    });
+
     test("`match EXPR { ... }` → IIFE stub", () => {
       const out = transformParabunToTS(`
 const r = match status {

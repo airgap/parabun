@@ -234,14 +234,22 @@ function transformModelFromLine(line: string): string {
   line = line.replace(
     /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s+from\s+(.+?)(\s*;?\s*)$/,
     (_m, exportKw, name, expr, trailing) =>
-      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}`,
+      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}${schemaTypeAlias(exportKw, name)}`,
   );
   line = line.replace(
     /\b(export\s+)?schema\s+([A-Za-z_$][\w$]*)\s*=\s*(?!\{)(.+?)(\s*;?\s*)$/,
     (_m, exportKw, name, expr, trailing) =>
-      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}`,
+      `${exportKw ?? ""}const ${name} = __paraFromSchema(() => (${expr}))${trailing}${schemaTypeAlias(exportKw, name)}`,
   );
   return line;
+}
+
+// Emit a TS type alias so a `schema X` declaration is usable in BOTH
+// value AND type position: `satisfies PostgresTableModel<X>` works
+// without `typeof X`. tsc namespaces values and types separately so
+// `const X = ...; type X = typeof X;` coexists without collision.
+function schemaTypeAlias(exportKw: string | undefined, name: string): string {
+  return `;${exportKw ?? ""}type ${name} = typeof ${name}`;
 }
 
 // `[export ]schema NAME { fields }` — refinement-typed DSL form. Emits
@@ -304,7 +312,7 @@ function transformSchemaEqualsBlock(source: string): string {
     const closeIdx = i - 1;
     const body = source.slice(openIdx, closeIdx + 1);
     out.push(source.slice(lastEnd, m.index));
-    out.push(`${exportKw}const ${name} = __paraFromSchema(() => (${body}))`);
+    out.push(`${exportKw}const ${name} = __paraFromSchema(() => (${body}))${schemaTypeAlias(exportKw, name)}`);
     lastEnd = closeIdx + 1;
     re.lastIndex = closeIdx + 1;
   }
