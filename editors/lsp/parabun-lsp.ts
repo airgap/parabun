@@ -1206,8 +1206,41 @@ function scheduleValidate(uri: string) {
   validateTimers.set(uri, timer);
 }
 
+// Two-phase validate. Phase 1 (fast — typically <50 ms): Bun
+// transpiler parse errors + all parabun-specific regex validators.
+// Phase 2 (slow — tsc semantic + syntactic, can be 15-20 s on a
+// cold @lyku-sized workspace and ~0.5 s warm): runs after a
+// setTimeout(0) yield so the fast publish actually leaves the
+// pipe before tsc blocks the event loop.
+//
+// Both phases re-check `docVersions` against the version captured
+// at validate entry. If the user typed again in between (only
+// possible across event-loop ticks, not during the synchronous tsc
+// call), the late publish is dropped so stale diagnostics never
+// overwrite the editor.
 function validate(uri: string, content: string) {
   const startedAtVersion = docVersions.get(uri);
+  const fastDiagnostics = computeFastDiagnostics(uri, content);
+
+  if (docVersions.get(uri) !== startedAtVersion) return;
+  publishDiagnostics(uri, fastDiagnostics);
+
+  // Yield so the fast publish actually flushes before tsc starts.
+  // Without this, both publishes leave the pipe in the same tick
+  // and the user sees no incremental feedback — they just wait for
+  // tsc and then everything appears at once.
+  setTimeout(() => {
+    if (docVersions.get(uri) !== startedAtVersion) return;
+    if (!(tsService && ts)) return;
+
+    const tsDiagnostics = computeTsDiagnostics(uri, content);
+
+    if (docVersions.get(uri) !== startedAtVersion) return;
+    publishDiagnostics(uri, [...fastDiagnostics, ...tsDiagnostics]);
+  }, 0);
+}
+
+function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
   const diagnostics: LspDiagnostic[] = [];
 
   // Bun transpiler diagnostics (Parabun parse errors). The Bun
@@ -1217,11 +1250,6 @@ function validate(uri: string, content: string) {
   // instead of all bunched at line 0.
   const loader = loaderForUri(uri);
   const transpiler = transpilers[loader];
-  // The transpiler ran with the rewritten LSP source. Translate its
-  // line/column back to the original `.pts` source the user is viewing
-  // — `transformParabunToTS` is line-stable for the desugars we apply
-  // here (model/api/match/etc. are line-replaced or single-line), so
-  // line indices map 1:1.
   try {
     transpiler.transformSync(transformParabunToTS(content));
   } catch (e: any) {
@@ -1245,67 +1273,50 @@ function validate(uri: string, content: string) {
     }
   }
 
-  // TypeScript diagnostics
-  if (tsService && ts) {
-    const fileName = toTsPath(uriToPath(uri));
-    const transformed = transformParabunToTS(content);
+  diagnostics.push(...findPureEligibleHints(content));
+  diagnostics.push(...findMemoHints(uri, content));
+  diagnostics.push(...findPureViolations(uri, content));
+  diagnostics.push(...findUnknownValidationTypeDiagnostics(content));
+  diagnostics.push(...findModelBodyDiagnostics(content));
 
-    try {
-      const semanticDiags = tsService.getSemanticDiagnostics(fileName);
-      const syntacticDiags = tsService.getSyntacticDiagnostics(fileName);
+  return diagnostics;
+}
 
-      for (const diag of [...syntacticDiags, ...semanticDiags]) {
-        if (diag.start === undefined || diag.length === undefined) continue;
+function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
+  const diagnostics: LspDiagnostic[] = [];
+  if (!(tsService && ts)) return diagnostics;
 
-        const startPos = offsetToPosition(transformed, diag.start);
-        const endPos = offsetToPosition(transformed, diag.start + diag.length);
+  const fileName = toTsPath(uriToPath(uri));
+  const transformed = transformParabunToTS(content);
 
-        const origStart = mapPositionFromTransformed(content, transformed, startPos.line, startPos.character);
-        const origEnd = mapPositionFromTransformed(content, transformed, endPos.line, endPos.character);
+  try {
+    const semanticDiags = tsService.getSemanticDiagnostics(fileName);
+    const syntacticDiags = tsService.getSyntacticDiagnostics(fileName);
 
-        const message = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
+    for (const diag of [...syntacticDiags, ...semanticDiags]) {
+      if (diag.start === undefined || diag.length === undefined) continue;
 
-        diagnostics.push({
-          range: { start: origStart, end: origEnd },
-          severity:
-            diag.category === ts.DiagnosticCategory.Error ? 1 : diag.category === ts.DiagnosticCategory.Warning ? 2 : 3,
-          source: "ts",
-          message: `TS${diag.code}: ${message}`,
-        });
-      }
-    } catch (e: any) {
-      logMessage(2, `[parabun-lsp] TS diagnostics error: ${e?.message ?? e}`);
+      const startPos = offsetToPosition(transformed, diag.start);
+      const endPos = offsetToPosition(transformed, diag.start + diag.length);
+
+      const origStart = mapPositionFromTransformed(content, transformed, startPos.line, startPos.character);
+      const origEnd = mapPositionFromTransformed(content, transformed, endPos.line, endPos.character);
+
+      const message = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
+
+      diagnostics.push({
+        range: { start: origStart, end: origEnd },
+        severity:
+          diag.category === ts.DiagnosticCategory.Error ? 1 : diag.category === ts.DiagnosticCategory.Warning ? 2 : 3,
+        source: "ts",
+        message: `TS${diag.code}: ${message}`,
+      });
     }
+  } catch (e: any) {
+    logMessage(2, `[parabun-lsp] TS diagnostics error: ${e?.message ?? e}`);
   }
 
-  // Pure-eligibility hints
-  const pureHints = findPureEligibleHints(content);
-  diagnostics.push(...pureHints);
-
-  // Memo suggest/warn hints
-  const memoHints = findMemoHints(uri, content);
-  diagnostics.push(...memoHints);
-
-  // Purity violation errors for functions already marked pure
-  const pureViolations = findPureViolations(uri, content);
-  diagnostics.push(...pureViolations);
-
-  // Para `::` validation marker — flag references to undefined models.
-  const unknownValidationTypes = findUnknownValidationTypeDiagnostics(content);
-  diagnostics.push(...unknownValidationTypes);
-
-  // Para `schema X = { body }` JSON Schema body validation.
-  const modelBodyDiags = findModelBodyDiagnostics(content);
-  diagnostics.push(...modelBodyDiags);
-
-  // Staleness guard. If the document changed while tsc was working
-  // (the validate function blocks the event loop, but a debounced
-  // re-validate could already be queued for newer content), drop our
-  // result rather than overwriting the editor with diagnostics for a
-  // version the user no longer sees. The next debounced validate will
-  // publish fresh ones.
-  if (docVersions.get(uri) !== startedAtVersion) return;
-  publishDiagnostics(uri, diagnostics);
+  return diagnostics;
 }
 
 const PURE_HINT_CODE = "parabun-pure-eligible";
