@@ -10,29 +10,41 @@ const root = path.resolve(__dirname, "..");
 // 38 s cold start vs 4 s release), but catching it earlier at build
 // time keeps a developer from packaging + installing a .vsix that
 // will then refuse to start.
-try {
-  const revision = execFileSync("parabun", ["--revision"], { encoding: "utf8", timeout: 5000 }).trim();
-  if (revision.includes("-debug")) {
+//
+// CI escape hatch: PARABUN_VSIX_SKIP_BINARY_CHECK=1. The Jenkins VSIX
+// stage runs in a docker container that doesn't ship a parabun binary
+// (it's published as a separate artifact by the build stages, paired
+// by SHA in the release notes). Skipping the check there is safe —
+// the local-dev footgun the check is guarding against doesn't apply
+// to CI.
+if (process.env.PARABUN_VSIX_SKIP_BINARY_CHECK === "1") {
+  console.log("parabun binary check skipped (PARABUN_VSIX_SKIP_BINARY_CHECK=1)");
+} else {
+  try {
+    const revision = execFileSync("parabun", ["--revision"], { encoding: "utf8", timeout: 5000 }).trim();
+    if (revision.includes("-debug")) {
+      console.error(
+        `\nERROR: the \`parabun\` binary on PATH is a debug build (${revision}).\n` +
+          `Debug builds are 10-100x slower than release and make the installed\n` +
+          `extension unusable — and its activate() now refuses to start.\n\n` +
+          `Fix one of:\n` +
+          `  1. Build & symlink release:\n` +
+          `       cd /raid/parabun && bun run build:release\n` +
+          `       sudo ln -sf /raid/parabun/build/release/bun /usr/local/bin/parabun\n` +
+          `  2. Adjust your PATH so a release-build parabun comes first.\n`,
+      );
+      process.exit(1);
+    }
+    console.log("parabun binary check ok:", revision);
+  } catch (e) {
     console.error(
-      `\nERROR: the \`parabun\` binary on PATH is a debug build (${revision}).\n` +
-        `Debug builds are 10-100x slower than release and make the installed\n` +
-        `extension unusable — and its activate() now refuses to start.\n\n` +
-        `Fix one of:\n` +
-        `  1. Build & symlink release:\n` +
-        `       cd /raid/parabun && bun run build:release\n` +
-        `       sudo ln -sf /raid/parabun/build/release/bun /usr/local/bin/parabun\n` +
-        `  2. Adjust your PATH so a release-build parabun comes first.\n`,
+      "\nERROR: failed to invoke `parabun --revision` to verify the binary is a release build.\n" +
+        "Make sure `parabun` is on PATH and points to a release build.\n" +
+        "(Set PARABUN_VSIX_SKIP_BINARY_CHECK=1 to bypass — only do this in CI.)\n" +
+        `Underlying error: ${e.message ?? e}\n`,
     );
     process.exit(1);
   }
-  console.log("parabun binary check ok:", revision);
-} catch (e) {
-  console.error(
-    "\nERROR: failed to invoke `parabun --revision` to verify the binary is a release build.\n" +
-      "Make sure `parabun` is on PATH and points to a release build.\n" +
-      `Underlying error: ${e.message ?? e}\n`,
-  );
-  process.exit(1);
 }
 
 // Copy LSP server

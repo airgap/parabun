@@ -308,6 +308,12 @@ pipeline {
                             export HOME="${WORKSPACE}"
                             export npm_config_cache="${WORKSPACE}/.npm"
                             mkdir -p "${npm_config_cache}"
+                            # The CI image doesn't ship a parabun binary on PATH —
+                            # the matched binary is published as a separate
+                            # artifact by the build stages. copy-assets.js has a
+                            # PATH check meant to catch local devs packaging a
+                            # debug build; we bypass it explicitly here.
+                            export PARABUN_VSIX_SKIP_BINARY_CHECK=1
                             # Build the TS plugin first — copy-assets.js
                             # copies its output into the VSIX.
                             cd editors/ts-plugin
