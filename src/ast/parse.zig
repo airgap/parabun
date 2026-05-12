@@ -14,6 +14,13 @@ pub fn Parse(
         // synthesize `(__pcv) => __pcv.<chain>` when an argument starts
         // with `.`. Same machinery used by chain-op handlers.
         pub const parseLeadingDotLambda = @import("./parseSuffix.zig").ParseSuffix(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseLeadingDotChainHandler;
+        // Parabun (LYK-827): expression-context `_` lambda shorthand.
+        // parseCallArgs runs this after each arg is parsed: if the arg
+        // expression contains a free `_` not nested in an arrow / function
+        // and isn't itself bare `_`, wrap it in `(__pu => <expr with _ → __pu>)`.
+        // Bare `_` at top-level arg position is left alone — that's the
+        // pipeline placeholder slot handled by `tryPipelinePlaceholder`.
+        pub const maybeWrapUnderscoreLambda = @import("./parseSuffix.zig").ParseSuffix(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).maybeWrapUnderscoreLambda;
         pub const parseStmt = @import("./parseStmt.zig").ParseStmt(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseStmt;
         pub const parseProperty = @import("./parseProperty.zig").ParseProperty(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseProperty;
         pub const parseFn = @import("./parseFn.zig").ParseFn(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only).parseFn;
@@ -291,6 +298,15 @@ pub fn Parse(
                     try p.parseLeadingDotLambda(loc)
                 else
                     try p.parseExpr(.comma);
+                // Parabun (LYK-827): expression-context `_` lambda. If the
+                // arg contains a free `_` and isn't bare `_` itself, wrap
+                // in `(__pu => <arg with _ → __pu>)`. Bare `_` at top
+                // level stays untouched (pipeline placeholder slot).
+                // Spread args don't get wrapped — `f(..._)` would mean
+                // something different (rest of iterable).
+                if (!is_spread) {
+                    arg = p.maybeWrapUnderscoreLambda(arg, loc);
+                }
                 if (is_spread) {
                     arg = p.newExpr(E.Spread{ .value = arg }, loc);
                 }

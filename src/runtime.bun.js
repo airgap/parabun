@@ -405,11 +405,23 @@ var __paraFromSchemaEager = schema => {
   // copy them — important when downstream code spreads model fields
   // into other schema literals (e.g. `aiSettings: { ...aiSettings }`).
   var result = Object.assign({}, schema);
+  var parseFn = v => {
+    var e = validate(schema, v);
+    return e ? { tag: "Err", error: e } : { tag: "Ok", value: v };
+  };
   Object.defineProperty(result, "parse", {
-    value: v => {
-      var e = validate(schema, v);
-      return e ? { tag: "Err", error: e } : { tag: "Ok", value: v };
-    },
+    value: parseFn,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  // `validate` is an alias for `parse` today — both validate an already-
+  // parsed value against the schema. The semantic split (parse handles
+  // strings via JSON.parse, validate operates on already-parsed objects)
+  // is a follow-up; the alias gives consumers the .validate name to
+  // reach for in the meantime.
+  Object.defineProperty(result, "validate", {
+    value: parseFn,
     enumerable: false,
     writable: false,
     configurable: false,

@@ -436,10 +436,12 @@ All forms desugar to a `__paraFromSchema(() => <body>)` runtime helper call. The
 The runtime helper returns the JSON Schema body decorated with:
 
 - `parse(v) → Result<T, string>` — validates `v` against the schema, returns `{ tag: "Ok", value: v }` or `{ tag: "Err", error: msg }`.
-- `is(v) → boolean` — true when `parse(v).tag === "Ok"`. Used by the `is` type-guard operator.
+- `validate(v) → Result<T, string>` — alias for `parse`. Both methods validate an already-parsed value against the schema and return the same Result shape. The semantic split (`parse` accepts JSON strings via `JSON.parse`, `validate` accepts only objects) is a planned follow-up; today the two are interchangeable.
 - `schema` — the literal back-reference (the JSON Schema object itself).
 - Field-navigation accessors — for an object-shape schema, each property is exposed as a non-enumerable getter that walks into the sub-schema. Lets consumers read `User.profile.bio.maxLength` without spelling out `User.schema.properties.profile.properties.bio.maxLength`.
 - For arrays: `.element` returns the wrapped item schema (so `Tags.element.type === "string"`).
+
+Note: an earlier draft listed `is(v) → boolean` as a method on the binding. That method is **not** emitted by the runtime. The `is` operator (`expr is User`) lowers to `User.parse(expr).tag === "Ok"` at parse time and works without any `User.is` callable. (If a callable-shaped predicate is needed — e.g. as an array callback `arr.filter(...)` — wrap the keyword: `arr.filter(x => x is User)`.)
 
 The thunk-wrap (`() => <body>`) lets self- and mutual-recursion through declared bindings work: the body isn't evaluated until the surrounding scope's bindings exist.
 

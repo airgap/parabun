@@ -574,22 +574,88 @@ function open(path: string): Chip {
  * Throws if no gpiochip device is present at all (non-Linux, no
  * /dev/gpiochip*, or the user lacks permission to read /dev/).
  */
+// Module-private cache for `openDefaultChip()` + the `gpio.line()` /
+// `gpio.bank()` top-level shortcuts. The first call resolves the
+// path (GPIO_CHIP env / pinctrl-rp1 label / gpiochip0) and opens
+// the chip; subsequent calls reuse the same Chip handle. If the
+// cached chip gets `.close()`d externally, the next call re-opens.
+//
+// The motivation is splash-grade ergonomics — `gpio.line(17, …)` is
+// the "I just want a pin" call, hiding the chip-handle ceremony.
+// DIY users almost never want multiple chips on the same host; if
+// they do, `gpio.open(path)` is still there for explicit control.
+let _defaultChip: Chip | null = null;
+
 function openDefaultChip(): Chip {
+  if (_defaultChip !== null && _defaultChip.alive.peek()) {
+    return _defaultChip;
+  }
   const envOverride = (globalThis as any).process?.env?.GPIO_CHIP;
   if (typeof envOverride === "string" && envOverride.length > 0) {
-    return open(envOverride);
+    _defaultChip = open(envOverride);
+    return _defaultChip;
   }
   const all = chips();
   if (all.length === 0) {
     throw new Error("parabun:gpio.openDefaultChip: no /dev/gpiochip* found — Linux + GPIO required");
   }
   const rp1 = all.find(c => c.label === "pinctrl-rp1");
-  if (rp1) return open(rp1.path);
-  return open(all[0].path);
+  _defaultChip = rp1 ? open(rp1.path) : open(all[0].path);
+  return _defaultChip;
+}
+
+/**
+ * Single-line shortcut against the default chip. Equivalent to
+ * `openDefaultChip().line(offset, opts)`, but without the ceremony of
+ * naming the chip handle. The first call resolves the default chip
+ * (an extra few ms of `/dev/gpiochip*` enumeration); every subsequent
+ * call reuses the cached handle.
+ *
+ * Use `gpio.open(path).line(...)` instead when you need a specific
+ * chip on a multi-controller board, or `chip.line(...)` directly when
+ * you want explicit lifecycle control over the chip handle.
+ *
+ * For mode-specific shortcuts (which are most calls in practice),
+ * prefer `gpio.in(pin, opts?)` / `gpio.out(pin, opts?)` — they hide
+ * the `mode:` key, which is the only required field of `LineOptions`
+ * and is implied by the input-vs-output distinction anyway.
+ */
+function line(offset: number, opts: LineOptions): Line {
+  return openDefaultChip().line(offset, opts);
+}
+
+/** Output-line shortcut. `gpio.out(17)` = `gpio.line(17, { mode: "out", initial: 0 })`. */
+function outFn(offset: number, opts: { initial?: 0 | 1 } = {}): Line {
+  return openDefaultChip().line(offset, { mode: "out", initial: opts.initial ?? 0 });
+}
+
+/** Input-line shortcut. `gpio.in(27)` = `gpio.line(27, { mode: "in" })`.
+ *  Accepts the input-only options (`pull` / `debounceMs` / `edge` /
+ *  `pollHz`) without forcing the caller to spell out `mode: "in"`. */
+function inFn(offset: number, opts: Omit<LineOptions, "mode" | "initial"> = {}): Line {
+  return openDefaultChip().line(offset, { mode: "in", ...opts });
+}
+
+/**
+ * Multi-line shortcut against the default chip. Equivalent to
+ * `openDefaultChip().bank(offsets, opts)`. Same caching behavior as
+ * `line()` above — first call opens, rest reuse.
+ */
+function bank(offsets: number[], opts: Omit<LineOptions, "initial"> & { initial?: bigint | number }): LineBank {
+  return openDefaultChip().bank(offsets, opts);
 }
 
 export default {
   chips,
   open,
   openDefaultChip,
+  line,
+  bank,
+  // Property names use reserved-word identifiers (`in`); legal in
+  // object literals + member expressions (`gpio.in(...)`), only
+  // banned as bare statements (`const in = …`). Underlying functions
+  // are named `inFn` / `outFn` since the function declaration form
+  // does require non-reserved identifiers.
+  in: inFn,
+  out: outFn,
 };

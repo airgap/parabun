@@ -996,12 +996,18 @@ pub fn VisitExpr(
                 // accesses one of the reserved signal method names, suppress
                 // the NAME → NAME.get() rewrite on the target so the call
                 // pattern `NAME.set(v)` / `NAME.get()` stays intact.
+                //
+                // `.stop` joins the list for `signal NAME = EXPR every MS`
+                // bindings — the resulting signal carries a `.stop()`
+                // method to clear the interval, and `now.stop()` should
+                // mean "stop the timer" not "call .stop on now.get()".
                 const suppress_signal_get = e_.target.data == .e_identifier and
                     (strings.eqlComptime(e_.name, "get") or
                         strings.eqlComptime(e_.name, "set") or
                         strings.eqlComptime(e_.name, "peek") or
                         strings.eqlComptime(e_.name, "subscribe") or
-                        strings.eqlComptime(e_.name, "update"));
+                        strings.eqlComptime(e_.name, "update") or
+                        strings.eqlComptime(e_.name, "stop"));
 
                 e_.target = p.visitExprInOut(e_.target, .{
                     .property_access_for_method_call_maybe_should_replace_with_undefined = in.property_access_for_method_call_maybe_should_replace_with_undefined,

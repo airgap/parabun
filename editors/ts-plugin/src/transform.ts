@@ -12,8 +12,33 @@
 const PARABUN_SYNTAX_RE =
   /\bpure\s|\bfun\b|\.\.=|\.\.!|\.\.&|\|>|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|\beffect\s*\{|\bwhen(?:\s+not)?\s+|\bsignal\s+[A-Za-z_$]|\barena\s*\{|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|(?:\|\||&&|\?\??|=>|:)\s*throw\s/;
 
+// LYK-827: `_` in expression contexts (e.g. `arr.filter(_ > 0)`) wraps
+// in `(__pu => _ > 0)` at parse time in the Zig parser. The ts-plugin
+// doesn't replicate that wrap — too risky with regex on real-world
+// expressions — but it still has to make tsc accept the source as-is
+// for IDE type-checking on unstaged Para code. Pattern matches a `_`
+// token used in expression position (with an operator on at least one
+// side or inside a function-call arg expression), distinguishing from
+// `const _ = ...` / `_:` / `_(` etc. where `_` is a real binding the
+// user declared.
+const UNDERSCORE_EXPR_RE = /(?<![A-Za-z0-9$_."])_(?=\s*(?:[<>=!+\-*/%&|^?:.,)]|\?\?|===|!==|==|!=|\|\||&&))/;
+const UNDERSCORE_DECL_RE = /(?:^|[\s;{(,])(?:const|let|var)\s+_\b/m;
+
 export function containsParabunSyntax(text: string): boolean {
-  return PARABUN_SYNTAX_RE.test(text);
+  // The `_`-lambda check is its own predicate (gated by the declaration
+  // sniff) — we don't want to fire the full Para transform pipeline on
+  // any file that happens to use lodash with `_.map`, only on files
+  // where `_` appears as a free expression-position reference.
+  if (PARABUN_SYNTAX_RE.test(text)) return true;
+  if (UNDERSCORE_EXPR_RE.test(text) && !UNDERSCORE_DECL_RE.test(text)) {
+    // Defend against import / param forms — same checks
+    // `injectUnderscoreLambdaHelper` uses, lifted here so the
+    // detection and the inject agree.
+    if (/import\s*\{[^}]*\b_\b[^}]*\}/.test(text)) return false;
+    if (/\bfunction\s+[A-Za-z0-9_$]*\s*\([^)]*\b_\b[^)]*\)/.test(text)) return false;
+    return true;
+  }
+  return false;
 }
 
 export function transformParabunToTS(source: string): string {
@@ -40,6 +65,13 @@ export function transformParabunToTS(source: string): string {
   // Inject the `__paraFromSchema` ambient declaration so `schema X = body`
   // and `schema { ... }` results carry `.parse` / `.is` / `.schema` for tsc.
   result = injectSchemaHelper(result);
+  // LYK-827: when the source uses `_` as a lambda shorthand in an
+  // expression position (`arr.filter(_ > 0)`), inject an ambient
+  // `declare const _: any;` so tsc doesn't flag the reference. The
+  // Zig parser handles the actual lambda wrap at parse time; tsc just
+  // needs `_` to resolve to something. Skipped when the source already
+  // binds `_` (so we don't redeclare a user-owned name).
+  result = injectUnderscoreLambdaHelper(result);
   return result;
 }
 
@@ -215,7 +247,22 @@ function transformArenaLine(line: string): string {
 
 // `signal NAME = EXPR` → `let NAME: any = EXPR` — type-check fidelity only.
 function transformSignalLine(line: string): string {
-  return line.replace(/\b(signal)\s+([A-Za-z_$][\w$]*)\b/g, (_m, _kw, name) => `let ${name}: any`);
+  // Rewrite `signal NAME` to `let NAME: any` so tsc accepts the decl.
+  // Also strip the `every MS_EXPR` postfix — that part of the syntax
+  // tells the parser to wrap the binding in a setInterval, but tsc
+  // can't parse `=> RHS every MS` as a value-expression. Dropping the
+  // postfix at the ts-plugin layer leaves tsc with `let NAME: any =
+  // RHS;` which is well-formed. The runtime emission is unaffected
+  // because the Zig parser handles the real lowering — the ts-plugin
+  // is IDE-only.
+  let out = line.replace(/\b(signal)\s+([A-Za-z_$][\w$]*)\b/g, (_m, _kw, name) => `let ${name}: any`);
+  // `every <expr>` up to end-of-line / `;` / `,`. The regex is loose
+  // (no nested-paren tracking) — fine for `every 1_000` / `every
+  // config.tickMs` / `every fn()` style postfixes; edge cases with
+  // commas inside the MS expression would need a real parser, but
+  // those don't show up in practice for an interval period.
+  out = out.replace(/\bevery\s+[^;,\n]+/g, "");
+  return out;
 }
 
 // Inline `schema { ... }` expression → `__paraFromSchema(() => ({ ... }))`.
@@ -360,12 +407,41 @@ function injectSchemaHelper(source: string): string {
     `type __ParaResult<T> = { tag: "Ok"; value: T } | { tag: "Err"; error: string };\n` +
     `type __ParaSchemaValue<S> = {\n` +
     `  readonly parse: (v: unknown) => __ParaResult<unknown>;\n` +
-    `  readonly is: (v: unknown) => boolean;\n` +
+    `  readonly validate: (v: unknown) => __ParaResult<unknown>;\n` +
     `  readonly schema: S;\n` +
     `  readonly element: S extends { items: infer I } ? __ParaSchemaValue<I> : never;\n` +
     `} & S & (S extends { properties: infer P } ? { readonly [K in keyof P]: __ParaSchemaValue<P[K]> } : {});\n` +
     `declare function __paraFromSchema<S>(s: () => S): __ParaSchemaValue<S>;`;
   return helper + "\n" + source;
+}
+
+// LYK-827: when `_` is used as a lambda shorthand (`arr.filter(_ > 0)`),
+// the Zig parser wraps the surrounding arg expression in a fresh
+// `(__pu => ...)` arrow at parse time. The ts-plugin lives on the
+// IDE side and feeds tsc unstaged Para source — without help, tsc
+// would flag every expression-position `_` as "Cannot find name _".
+//
+// Rather than replicate the full expression-tree walk in regex (the
+// arg shapes that need wrapping are arbitrary JS expressions —
+// fragile), we inject a single ambient `declare const _: any;`. tsc
+// then accepts `_` as a valid identifier of type `any`, and `any`
+// flows through any operation including being assigned to a callable
+// param. The runtime emit (from the Zig parser) still gets the real
+// lambda wrap, so this only affects IDE type-checking.
+//
+// Skipped when the source already binds `_` (so a user-owned name
+// isn't shadowed). The detection is conservative: any `const _ = …`,
+// `let _ = …`, `var _ = …`, or `function _(…)` / param `_` declaration
+// suppresses the inject.
+function injectUnderscoreLambdaHelper(source: string): string {
+  if (!UNDERSCORE_EXPR_RE.test(source)) return source;
+  if (UNDERSCORE_DECL_RE.test(source)) return source;
+  // Also bail if `_` is destructured (import { _ }) or a function
+  // parameter — both look like declarations to a human, and our
+  // ambient `_` would conflict.
+  if (/import\s*\{[^}]*\b_\b[^}]*\}/.test(source)) return source;
+  if (/\bfunction\s+[A-Za-z0-9_$]*\s*\([^)]*\b_\b[^)]*\)/.test(source)) return source;
+  return `declare const _: any;\n` + source;
 }
 
 function isInsideStringOrComment(source: string, offset: number): boolean {

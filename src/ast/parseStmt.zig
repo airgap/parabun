@@ -1658,6 +1658,23 @@ pub fn ParseStmt(
                     p.popScope();
                     p.popScope();
 
+                    // Parabun: optional `every MS_EXPR` postfix after a
+                    // `signal NAME = RHS` decl turns the signal into an
+                    // interval-driven cell. The RHS becomes the tick
+                    // function (re-evaluated every MS); the resulting
+                    // signal carries a `.stop()` method to clear the
+                    // interval. `every` is a contextual keyword — only
+                    // recognized here, parses as an identifier in any
+                    // other position.
+                    var every_ms: ?Expr = null;
+                    if (!force_derive and
+                        p.lexer.token == .t_identifier and
+                        strings.eqlComptime(p.lexer.raw(), "every"))
+                    {
+                        try p.lexer.next();
+                        every_ms = try p.parseExpr(.comma);
+                    }
+
                     switch (local.data) {
                         .b_identifier => |id| {
                             bun.handleOom(p.signal_bound_refs.put(p.allocator, id.ref, {}));
@@ -1686,27 +1703,55 @@ pub fn ParseStmt(
                                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
                             }, signal_range.loc);
 
-                            const wrap_name: []const u8 = if (should_derive) "derived" else "signal";
+                            // Three lowering paths, picked off the postfix shape:
+                            //   `derived NAME = RHS`            → derived(arrow)
+                            //   `signal NAME = RHS every MS`    → signalEvery(arrow, ms)
+                            //   `signal NAME = RHS`             → signal((arrow)())
+                            const wrap_name: []const u8 = if (should_derive)
+                                "derived"
+                            else if (every_ms != null)
+                                "signalEvery"
+                            else
+                                "signal";
                             const wrap_dot = p.newExpr(E.Dot{
                                 .target = require_call,
                                 .name = wrap_name,
                                 .name_loc = signal_range.loc,
                             }, signal_range.loc);
 
-                            const wrap_arg: Expr = if (should_derive) arrow else blk: {
-                                // Non-derive: invoke the arrow immediately so
-                                // `signal()` sees a concrete value. The arrow
-                                // wrapper exists only to keep scopes_in_order
-                                // consistent at parse time.
+                            const wrap_args = if (every_ms) |ms| blk: {
+                                // signalEvery(() => RHS, MS). The arrow node
+                                // (already built for scope-tracking) becomes
+                                // the tick fn; the runtime helper calls it for
+                                // both the initial value and every interval
+                                // tick, and attaches `.stop()` to the result.
+                                const args = bun.handleOom(p.allocator.alloc(Expr, 2));
+                                args[0] = arrow;
+                                args[1] = ms;
+                                break :blk args;
+                            } else if (should_derive) blk: {
+                                // derived(() => RHS). Pure thunk semantics —
+                                // the derived signal calls the arrow each
+                                // time its deps change.
+                                const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                                args[0] = arrow;
+                                break :blk args;
+                            } else blk: {
+                                // signal((() => RHS)()). The arrow wrapper
+                                // is invoked immediately so signal() sees a
+                                // concrete value. The arrow exists only to
+                                // keep scopes_in_order consistent at parse
+                                // time.
                                 const invoke_args = js_ast.ExprNodeList.empty;
-                                break :blk p.newExpr(E.Call{
+                                const invoked = p.newExpr(E.Call{
                                     .target = arrow,
                                     .args = invoke_args,
                                 }, arrow_loc);
+                                const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                                args[0] = invoked;
+                                break :blk args;
                             };
 
-                            const wrap_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                            wrap_args[0] = wrap_arg;
                             const wrap_call = p.newExpr(E.Call{
                                 .target = wrap_dot,
                                 .args = js_ast.ExprNodeList.fromOwnedSlice(wrap_args),
@@ -2433,9 +2478,35 @@ pub fn ParseStmt(
 
             // Model object: spread the schema first so existing consumers
             // can read `User.properties` / `User.required` directly, then
-            // add `parse` and `schema` on top. Drop-in compatible with
-            // pre-existing JSON-Schema-style consumers.
-            const props = bun.handleOom(p.allocator.alloc(G.Property, 3));
+            // add `parse`, `validate`, and `schema` on top.
+            //
+            // `validate` should be a second emission of the same
+            // validation arrow — but the visit pass crashes if the
+            // SAME E.Arrow is referenced from two properties (scope-
+            // frame double-registration), and `Expr.clone()` only
+            // shallow-copies the outer pointer so the inner body
+            // slices still alias. The simplest fix: bind the arrow to
+            // a synthetic const first, then have both `parse` and
+            // `validate` reference that const by identifier. Two
+            // separate variable declarations emitted in one
+            // statement:
+            //
+            //   const __pa_NAME = <arrow>, NAME = { parse: __pa_NAME, validate: __pa_NAME, schema: ... };
+            //
+            // Shared identifier refs are first-class in the visit
+            // pass (every variable read is one); only shared subtrees
+            // are problematic.
+            //
+            // Today the two methods are behaviorally identical. The
+            // semantic split (parse takes a JSON string + JSON.parses,
+            // validate takes an already-parsed object) is a planned
+            // follow-up.
+            const fn_name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__pa_{s}", .{name}));
+            const fn_ref = try p.declareSymbol(.constant, name_loc, fn_name);
+            const fn_ident_for_parse = p.newExpr(E.Identifier{ .ref = fn_ref }, body_loc);
+            const fn_ident_for_validate = p.newExpr(E.Identifier{ .ref = fn_ref }, body_loc);
+
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 4));
             props[0] = .{
                 .kind = .spread,
                 .key = p.newExpr(E.Missing{}, body_loc),
@@ -2443,9 +2514,13 @@ pub fn ParseStmt(
             };
             props[1] = .{
                 .key = p.newExpr(E.String{ .data = "parse" }, body_loc),
-                .value = arrow,
+                .value = fn_ident_for_parse,
             };
             props[2] = .{
+                .key = p.newExpr(E.String{ .data = "validate" }, body_loc),
+                .value = fn_ident_for_validate,
+            };
+            props[3] = .{
                 .key = p.newExpr(E.String{ .data = "schema" }, body_loc),
                 .value = schema_obj,
             };
@@ -2453,9 +2528,13 @@ pub fn ParseStmt(
                 .properties = G.Property.List.fromOwnedSlice(props),
             }, model_range.loc);
 
-            // const NAME = { parse: ... }
-            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            // const __pa_NAME = <arrow>, NAME = { parse: __pa_NAME, validate: __pa_NAME, schema: ... }
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 2));
             decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = fn_ref }, name_loc),
+                .value = arrow,
+            };
+            decls[1] = .{
                 .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc),
                 .value = model_obj,
             };

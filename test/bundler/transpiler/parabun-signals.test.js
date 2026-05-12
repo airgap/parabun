@@ -1013,4 +1013,27 @@ describe("parabun: signal-bound assignment rewriting", () => {
     expect(stdout).toBe("11,22,33");
     expect(exitCode).toBe(0);
   });
+
+  it("signal X = EXPR every MS — interval-driven cell with .stop()", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "sig-every",
+      `
+        let n = 0;
+        signal tick = ++n every 50;
+        // signalEvery runs fn() once immediately for the initial value.
+        const initial = tick.get();
+        // Wait long enough for ~3 ticks (50ms × 3 = 150ms, plus slack).
+        await new Promise(r => setTimeout(r, 220));
+        const grown = tick.get();
+        // .stop() clears the interval so further ticks don't fire.
+        tick.stop();
+        const afterStop = tick.get();
+        await new Promise(r => setTimeout(r, 150));
+        const stillStopped = tick.get();
+        console.log(initial === 1, grown >= 3, stillStopped === afterStop);
+      `,
+    );
+    expect(stdout).toBe("true true true");
+    expect(exitCode).toBe(0);
+  });
 });

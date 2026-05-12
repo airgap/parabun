@@ -2930,13 +2930,45 @@ function findUnknownIdentifierDiagnostics(content: string, sourceUri: string): L
       if (name) inScope.add(name);
     }
   }
+  // Array-form destructure: `const [a, b, ...rest] = ...`. Same
+  // over-permissive shape as the param handler — extract every
+  // identifier in the bracket body. Holes like `const [, x] = arr`
+  // work because empty splits get skipped via the identifier match.
+  const arrayDestructRe = /\b(?:const|let|var)\s+\[([^\[\]]*)\]\s*=/g;
+  let adm: RegExpExecArray | null;
+  while ((adm = arrayDestructRe.exec(masked)) !== null) {
+    const idRe = /[A-Za-z_$][\w$]*/g;
+    let im: RegExpExecArray | null;
+    while ((im = idRe.exec(adm[1])) !== null) inScope.add(im[0]);
+  }
 
-  // 4. Function / arrow / method parameters. Skips destructured params.
-  const paramRe = /(?:\bfunction\b|\bfun\b|=>)\s*[A-Za-z_$\w$]*\s*\(([^()]*)\)|\b[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{/g;
+  // 4. Function / arrow / method parameters. Earlier rev bailed out
+  // when params contained `{` or `[` (destructuring), which silently
+  // missed every name bound inside an array/object pattern — including
+  // the common case `[, table]` / `{ a, b }` / `{ a: b }`. Real fix
+  // would need an AST, but the over-permissive heuristic below clears
+  // ~90% of the false-positive squiggles: when destructuring is
+  // detected, just add every identifier in the param substring to
+  // inScope. The cost is occasional over-permission (e.g. property
+  // keys in `{ a: b }` get added even though `a` is the key not the
+  // binding) — but inScope is an allowlist; over-broad permission
+  // doesn't cause MISSED-name diagnostics, only restrictive checks do.
+  // Reserved words / built-ins are filtered separately by the use-
+  // scanner so adding `return` etc. is harmless.
+  const paramRe =
+    /(?:\bfunction\b|\bfun\b)\s*[A-Za-z_$][\w$]*?\s*\(([^()]*)\)|\b[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{|\(([^()]*)\)\s*=>/g;
   let pm: RegExpExecArray | null;
   while ((pm = paramRe.exec(masked)) !== null) {
-    const params = pm[1] ?? pm[2];
-    if (!params || /[{[]/.test(params)) continue;
+    const params = pm[1] ?? pm[2] ?? pm[3];
+    if (!params) continue;
+    if (/[{[]/.test(params)) {
+      // Destructuring path — extract every identifier.
+      const idRe = /[A-Za-z_$][\w$]*/g;
+      let im: RegExpExecArray | null;
+      while ((im = idRe.exec(params)) !== null) inScope.add(im[0]);
+      continue;
+    }
+    // Flat-param path — pre-existing per-binding strip.
     for (const raw of params.split(",")) {
       const stripped = raw
         .trim()
@@ -3015,6 +3047,30 @@ function findUnknownIdentifierDiagnostics(content: string, sourceUri: string): L
 // Common globals — conservative list. A missed global = false positive
 // squiggle (annoying); a wrongly-allowed identifier = missed real error.
 const KNOWN_GLOBAL_IDENTIFIERS = new Set<string>([
+  // ─── codegen:lsp-allowlist:begin ──────────────────────────────────
+  // AUTO-GENERATED from src/language-surface.ts. Run `bun scripts/generate-lsp-allowlist.ts`
+  // to regenerate. The CI gate at scripts/codegen/check-clean.ts fails
+  // if the committed contents drift from the catalog. Do not hand-edit
+  // — add new Para tokens to LSP_ALLOWLIST_TOKENS in language-surface.ts
+  // instead.
+  "_",
+  "signal",
+  "derived",
+  "effect",
+  "when",
+  "arena",
+  "memo",
+  "defer",
+  "schema",
+  "match",
+  "pure",
+  "Ok",
+  "Err",
+  "Some",
+  "None",
+  "para",
+  "parallel",
+  // ─── codegen:lsp-allowlist:end ────────────────────────────────────
   "globalThis",
   "window",
   "document",

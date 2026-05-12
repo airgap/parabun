@@ -208,5 +208,35 @@ const r = match status {
       expect(out).toContain("function foo()");
       expect(out).toContain(".catch(");
     });
+
+    test("LYK-827: injects `declare const _: any` when `_` is used as expression-context lambda", () => {
+      const out = transformParabunToTS(`const r = arr.filter(_ > 0);`);
+      expect(out).toContain("declare const _: any");
+    });
+
+    test("LYK-827: does NOT inject when `_` is declared as a const", () => {
+      const out = transformParabunToTS(`const _ = require("lodash"); const r = _.map(arr, x => x);`);
+      expect(out).not.toContain("declare const _: any");
+    });
+
+    test("LYK-827: does NOT inject when `_` is declared as let/var", () => {
+      const out = transformParabunToTS(`let _ = "placeholder"; arr.filter(x => x._);`);
+      expect(out).not.toContain("declare const _: any");
+    });
+
+    test("LYK-827: does NOT inject when `_` is a function parameter", () => {
+      const out = transformParabunToTS(`function ignore(_) { return null; }`);
+      expect(out).not.toContain("declare const _: any");
+    });
+
+    test("LYK-827: does NOT inject when `_` is an import binding", () => {
+      const out = transformParabunToTS(`import { _ } from "underscore"; const r = arr.map(x => _(x));`);
+      expect(out).not.toContain("declare const _: any");
+    });
+
+    test("LYK-827: does NOT inject when source has no `_` at all", () => {
+      const out = transformParabunToTS(`const r = arr.filter(x => x > 0);`);
+      expect(out).not.toContain("declare const _: any");
+    });
   });
 });

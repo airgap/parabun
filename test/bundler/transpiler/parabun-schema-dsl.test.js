@@ -19,8 +19,26 @@ describe("Parabun schema DSL declaration", () => {
         name: str
       }
     `);
-    expect(out).toContain("const User =");
+    // `User = ` (no `const` prefix) because the emit puts the helper
+    // and the schema binding in one `const __pa_User = ..., User = ...`
+    // declaration. The `User` name still ends up as a top-level const;
+    // we just can't grep for `const User =` as a literal substring.
+    expect(out).toContain("User =");
     expect(out).toContain("parse:");
+    expect(out).toContain("validate:");
+  });
+
+  test("DSL schema emits both `parse` and `validate` referencing the same helper", () => {
+    // Both methods are aliases today; the splash demo (and the docs)
+    // expose both names so the parser must wire them up. Tested by
+    // string substrings since the emit uses a `const __pa_X = ..., X
+    // = { parse: __pa_X, validate: __pa_X, schema: ... }` shape.
+    const out = ts(`
+      schema User { id: int }
+    `);
+    expect(out).toContain("parse: __pa_User");
+    expect(out).toContain("validate: __pa_User");
+    expect(out).toContain("schema:");
   });
 
   test("primitive type checks: int/str/bool/float", () => {
@@ -65,8 +83,14 @@ describe("Parabun schema DSL declaration", () => {
     const out = ts(`
       export schema User { id: int }
     `);
-    expect(out).toContain("export const User =");
+    // Same `__pa_User = ..., User = ...` two-decl pattern as the non-
+    // exported case, but with `export` on the leading keyword. The
+    // helper `__pa_User` ends up exported alongside `User`; that's an
+    // acceptable trade-off vs. emitting two separate statements.
+    expect(out).toContain("export const __pa_User");
+    expect(out).toContain("User =");
     expect(out).toContain("parse:");
+    expect(out).toContain("validate:");
     expect(out).toContain("schema:");
   });
 
@@ -433,7 +457,7 @@ describe("Parabun schema DSL declaration", () => {
         right: Tree?
       }
     `);
-    expect(out).toContain("const Tree =");
+    expect(out).toContain("Tree =");
     expect(out).toMatch(/Tree\.parse\(v\.left\)\.tag !== "Ok"/);
     expect(out).toMatch(/Tree\.parse\(v\.right\)\.tag !== "Ok"/);
   });

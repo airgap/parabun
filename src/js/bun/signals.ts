@@ -215,6 +215,47 @@ function signal<T>(v: T): StateSignal<T> {
   return new StateSignal(v);
 }
 
+/**
+ * Backing helper for `signal NAME = EXPR every MS_EXPR` syntax. Same
+ * shape as `signal()` — returns a writable cell — but seeded with
+ * `fn()` and re-set to `fn()` every `periodMs`. Unlike `fromInterval`
+ * (which returns `{ signal, dispose }`), this returns the signal
+ * directly with a `.stop()` method monkey-patched on, so the Para
+ * `signal X = ... every ...` keyword's bare-read sugar (auto-`.get()`)
+ * works without unwrapping a wrapper object.
+ *
+ *   signal now = Date.now() every 1_000;
+ *   // ↓ desugars to ↓
+ *   const now = require("@para/signals").signalEvery(() => Date.now(), 1_000);
+ *
+ * `now.stop()` clears the interval; the internal timer is `.unref()`d
+ * so a bare declaration doesn't pin the event loop. Errors thrown by
+ * `fn` are swallowed and the signal keeps its previous value — same
+ * convention as `fromInterval`.
+ */
+function signalEvery<T>(fn: () => T, periodMs: number): StateSignal<T> & { stop: () => void } {
+  if (!$isCallable(fn)) {
+    throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
+  }
+  if (typeof periodMs !== "number" || !Number.isFinite(periodMs) || periodMs < 1) {
+    throw new RangeError("@para/signals.signalEvery: periodMs must be a positive finite number");
+  }
+  const sig = new StateSignal<T>(fn());
+  const id = setInterval(() => {
+    try {
+      sig.set(fn());
+    } catch {
+      // Swallow — failed ticks shouldn't crash the process; the signal
+      // keeps its previous value. Callers who want to react to errors
+      // can wrap `fn` themselves.
+    }
+  }, periodMs);
+  (id as any)?.unref?.();
+  const augmented = sig as StateSignal<T> & { stop: () => void };
+  augmented.stop = () => clearInterval(id);
+  return augmented;
+}
+
 function derived<T>(fn: () => T): ComputedSignal<T> {
   if (!$isCallable(fn)) {
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
@@ -779,6 +820,7 @@ function cooldown<A extends unknown[]>(
 
 export default {
   signal,
+  signalEvery,
   derived,
   effect,
   batch,

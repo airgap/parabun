@@ -1444,6 +1444,217 @@ pub fn ParseSuffix(
             };
         }
 
+        // ─── LYK-827: expression-context `_` lambda shorthand ─────────────
+        // `arr.filter(_ > 0)` → `arr.filter(__pu => __pu > 0)`. The wrap
+        // happens in parseCallArgs after each arg is parsed: if an arg
+        // expression contains a free `_` (not nested inside an arrow /
+        // function literal) and isn't itself bare `_` (that's the
+        // pipeline-placeholder slot, handled later by `tryPipelinePlaceholder`),
+        // it becomes the body of a synthetic single-arg arrow whose param
+        // is named `__pu`. Multiple `_` in one arg share the same param.
+        //
+        // The two semantics — bare `_` arg = pipeline placeholder, deeper
+        // `_` = element lambda — are intentional: `data |> f(_, opts)`
+        // means "pass data through to f's first slot", while
+        // `data |> filter(_ > 0)` means "filter each element against 0".
+        // Both spellings of `_` work because they sit in different
+        // syntactic positions.
+
+        fn isBareUnderscore(p: *P, expr: Expr) bool {
+            return isUnderscorePlaceholder(p, expr);
+        }
+
+        /// True if `expr` reads a `_` identifier somewhere not nested under
+        /// an arrow / function literal. Walks supported expression shapes;
+        /// unsupported shapes return false (conservative — we'd rather miss
+        /// a wrap than corrupt the AST).
+        fn containsFreeUnderscore(p: *P, expr: Expr) bool {
+            return switch (expr.data) {
+                .e_identifier => |id| bun.strings.eqlComptime(p.loadNameFromRef(id.ref), "_"),
+                .e_binary => |bin| containsFreeUnderscore(p, bin.left) or containsFreeUnderscore(p, bin.right),
+                .e_unary => |un| containsFreeUnderscore(p, un.value),
+                .e_dot => |dot| containsFreeUnderscore(p, dot.target),
+                .e_index => |idx| containsFreeUnderscore(p, idx.target) or containsFreeUnderscore(p, idx.index),
+                .e_call => |call| blk: {
+                    if (containsFreeUnderscore(p, call.target)) break :blk true;
+                    for (call.args.slice()) |a| if (containsFreeUnderscore(p, a)) break :blk true;
+                    break :blk false;
+                },
+                .e_new => |nw| blk: {
+                    if (containsFreeUnderscore(p, nw.target)) break :blk true;
+                    for (nw.args.slice()) |a| if (containsFreeUnderscore(p, a)) break :blk true;
+                    break :blk false;
+                },
+                .e_if => |cond| containsFreeUnderscore(p, cond.test_) or
+                    containsFreeUnderscore(p, cond.yes) or
+                    containsFreeUnderscore(p, cond.no),
+                .e_spread => |sp| containsFreeUnderscore(p, sp.value),
+                .e_await => |aw| containsFreeUnderscore(p, aw.value),
+                .e_yield => |yld| if (yld.value) |v| containsFreeUnderscore(p, v) else false,
+                // Arrow / function literals introduce a new scope — any `_`
+                // inside is either bound by that scope or is itself a nested
+                // underscore lambda that's already been wrapped during its
+                // own parse pass. Stop here.
+                .e_arrow, .e_function => false,
+                else => false,
+            };
+        }
+
+        /// Substitute every free `_` identifier in `expr` with a reference
+        /// to `replacement_ref`. Mirrors `containsFreeUnderscore`'s scope
+        /// rule (skip nested arrows / functions). Returns null on
+        /// unsupported expression shapes so the caller can bail rather than
+        /// emitting a broken AST.
+        fn substituteFreeUnderscore(p: *P, expr: Expr, replacement_ref: js_ast.Ref) ?Expr {
+            return switch (expr.data) {
+                .e_identifier => |id| if (bun.strings.eqlComptime(p.loadNameFromRef(id.ref), "_"))
+                    Expr.init(E.Identifier, .{ .ref = replacement_ref }, expr.loc)
+                else
+                    expr,
+                .e_binary => |bin| blk: {
+                    const new_left = substituteFreeUnderscore(p, bin.left, replacement_ref) orelse break :blk null;
+                    const new_right = substituteFreeUnderscore(p, bin.right, replacement_ref) orelse break :blk null;
+                    break :blk Expr.init(E.Binary, .{
+                        .op = bin.op,
+                        .left = new_left,
+                        .right = new_right,
+                    }, expr.loc);
+                },
+                .e_unary => |un| blk: {
+                    const new_val = substituteFreeUnderscore(p, un.value, replacement_ref) orelse break :blk null;
+                    break :blk Expr.init(E.Unary, .{ .op = un.op, .value = new_val }, expr.loc);
+                },
+                .e_dot => |dot| blk: {
+                    const new_target = substituteFreeUnderscore(p, dot.target, replacement_ref) orelse break :blk null;
+                    break :blk Expr.init(E.Dot, .{
+                        .target = new_target,
+                        .name = dot.name,
+                        .name_loc = dot.name_loc,
+                        .optional_chain = dot.optional_chain,
+                    }, expr.loc);
+                },
+                .e_index => |idx| blk: {
+                    const new_target = substituteFreeUnderscore(p, idx.target, replacement_ref) orelse break :blk null;
+                    const new_index = substituteFreeUnderscore(p, idx.index, replacement_ref) orelse break :blk null;
+                    break :blk Expr.init(E.Index, .{
+                        .target = new_target,
+                        .index = new_index,
+                        .optional_chain = idx.optional_chain,
+                    }, expr.loc);
+                },
+                .e_call => |call| blk: {
+                    const new_target = substituteFreeUnderscore(p, call.target, replacement_ref) orelse break :blk null;
+                    const new_args = p.allocator.alloc(Expr, call.args.len) catch break :blk null;
+                    for (call.args.slice(), 0..) |a, i| {
+                        new_args[i] = substituteFreeUnderscore(p, a, replacement_ref) orelse break :blk null;
+                    }
+                    break :blk Expr.init(E.Call, .{
+                        .target = new_target,
+                        .args = ExprNodeList.fromOwnedSlice(new_args),
+                        .close_paren_loc = call.close_paren_loc,
+                        .optional_chain = call.optional_chain,
+                    }, expr.loc);
+                },
+                .e_if => |cond| blk: {
+                    const new_test = substituteFreeUnderscore(p, cond.test_, replacement_ref) orelse break :blk null;
+                    const new_yes = substituteFreeUnderscore(p, cond.yes, replacement_ref) orelse break :blk null;
+                    const new_no = substituteFreeUnderscore(p, cond.no, replacement_ref) orelse break :blk null;
+                    break :blk Expr.init(E.If, .{
+                        .test_ = new_test,
+                        .yes = new_yes,
+                        .no = new_no,
+                    }, expr.loc);
+                },
+                .e_spread => |sp| blk: {
+                    const new_val = substituteFreeUnderscore(p, sp.value, replacement_ref) orelse break :blk null;
+                    break :blk Expr.init(E.Spread, .{ .value = new_val }, expr.loc);
+                },
+                // Arrow / function bodies aren't ours. Leave them as-is —
+                // any `_` inside has its own meaning (bound param, or
+                // already-wrapped inner lambda).
+                .e_arrow, .e_function => expr,
+                // Leaf shapes: no `_` to substitute.
+                .e_number,
+                .e_string,
+                .e_boolean,
+                .e_null,
+                .e_undefined,
+                .e_missing,
+                .e_big_int,
+                .e_reg_exp,
+                .e_this,
+                .e_super,
+                => expr,
+                // Anything else we don't yet support — bail.
+                else => null,
+            };
+        }
+
+        /// Wrap an arg expression containing free `_` in an arrow lambda.
+        /// Returns the synthesized arrow, or null if the wrap can't be
+        /// constructed (unsupported expression shape, scope conflict, etc.).
+        ///
+        /// `arrow_loc` must be strictly less than the body's loc so the
+        /// visit pass's scope-ordering invariant holds. parseCallArgs
+        /// passes the open-paren / comma loc captured before parsing the
+        /// arg — already < arg.loc except in the pathological case of an
+        /// arg starting at byte 0.
+        pub fn tryWrapUnderscoreLambda(p: *P, body: Expr, arrow_loc_in: logger.Loc) ?Expr {
+            // Guarantee strict-increase for the scope locations. If the
+            // caller's loc is ≥ body.loc, step back one byte; this matches
+            // the trick parseLeadingDotChainHandler uses in arg-position.
+            const arrow_loc: logger.Loc = if (arrow_loc_in.start < body.loc.start)
+                arrow_loc_in
+            else if (body.loc.start > 0)
+                .{ .start = body.loc.start - 1 }
+            else
+                arrow_loc_in;
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch return null;
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body.loc) catch {
+                p.popScope();
+                return null;
+            };
+
+            const param_name = "__pu";
+            const param_ref = p.declareSymbol(.constant, body.loc, param_name) catch {
+                p.popScope();
+                p.popScope();
+                return null;
+            };
+
+            const subst_body = substituteFreeUnderscore(p, body, param_ref) orelse {
+                p.popScope();
+                p.popScope();
+                return null;
+            };
+
+            p.popScope();
+            p.popScope();
+
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            body_stmts[0] = p.s(S.Return{ .value = subst_body }, body.loc);
+
+            const args_slice = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+            args_slice[0] = .{ .binding = p.b(B.Identifier{ .ref = param_ref }, body.loc) };
+
+            return p.newExpr(E.Arrow{
+                .args = args_slice,
+                .body = .{ .loc = body.loc, .stmts = body_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, arrow_loc);
+        }
+
+        /// Convenience entry: wrap `arg` in a `_`-lambda if it contains a
+        /// free `_` and isn't itself bare `_`. Returns the original arg
+        /// when nothing to do.
+        pub fn maybeWrapUnderscoreLambda(p: *P, arg: Expr, arrow_loc: logger.Loc) Expr {
+            if (isBareUnderscore(p, arg)) return arg;
+            if (!containsFreeUnderscore(p, arg)) return arg;
+            return tryWrapUnderscoreLambda(p, arg, arrow_loc) orelse arg;
+        }
+
         // Parabun: stream-fusion shapes recognized by tryFuseStreamPipeline.
         const StreamTerminal = union(enum) {
             sum,
