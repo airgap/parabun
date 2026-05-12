@@ -12,6 +12,11 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
+
+// Repo-root relative — works in any checkout location (dev box at
+// /raid/parabun, CI docker workspace at /raid/jenkins-workspaces/…).
+const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 
 interface Generator {
   description: string;
@@ -27,7 +32,7 @@ const GENERATORS: Generator[] = [
     outputs: [
       // Inject grammars (editor + site) — applied via injectTo on top
       // of base TS/JS scopes.
-      "/raid/parabun/editors/vscode/parabun/syntaxes/parabun-inject.tmLanguage.json",
+      path.join(REPO_ROOT, "editors/vscode/parabun/syntaxes/parabun-inject.tmLanguage.json"),
       "/raid/para-site/src/grammars/parabun-inject.tmLanguage.json",
       // Per-extension main grammars for the site (Shiki reads these,
       // falls back to embedded TS/JS for non-Para tokens). Editor main
@@ -43,7 +48,7 @@ const GENERATORS: Generator[] = [
   {
     description: "LSP allowlist (parabun-lsp.ts marker block)",
     script: "scripts/generate-lsp-allowlist.ts",
-    outputs: ["/raid/parabun/editors/lsp/parabun-lsp.ts"],
+    outputs: [path.join(REPO_ROOT, "editors/lsp/parabun-lsp.ts")],
   },
   {
     description: "Splash demo highlighter kw regex (para-site transpile.js marker block)",
@@ -78,7 +83,7 @@ function diffSnapshots(before: Map<string, string>, after: Map<string, string>):
 
 function runOne(gen: Generator): void {
   const result = spawnSync("bun", [gen.script], {
-    cwd: "/raid/parabun",
+    cwd: REPO_ROOT,
     stdio: "inherit",
   });
   if (result.status !== 0) {

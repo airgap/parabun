@@ -19,6 +19,12 @@ import { LANGUAGE_SURFACE, type LanguageEntry } from "../src/language-surface";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+// Repo-root relative for the editor target (works on dev box AND CI
+// docker workspace). Site target stays absolute — it's a sibling repo
+// that may or may not be present; the existsSync guards below handle
+// the "not present" case.
+const REPO_ROOT = path.resolve(import.meta.dirname, "..");
+
 type Target = "editor" | "site";
 
 /** Per-extension main grammar metadata. Shape mirrors what Shiki and
@@ -81,7 +87,7 @@ const PER_EXTENSION: PerExtension[] = [
 
 const TARGETS: Record<Target, { injectPath: string; injectWrapper: (patterns: any[]) => any; mainDir?: string }> = {
   editor: {
-    injectPath: "/raid/parabun/editors/vscode/parabun/syntaxes/parabun-inject.tmLanguage.json",
+    injectPath: path.join(REPO_ROOT, "editors/vscode/parabun/syntaxes/parabun-inject.tmLanguage.json"),
     injectWrapper: patterns => ({
       $schema: "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
       name: "Parabun Keyword Injection",

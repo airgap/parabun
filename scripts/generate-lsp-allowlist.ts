@@ -20,8 +20,9 @@
 
 import { LSP_ALLOWLIST_TOKENS } from "../src/language-surface";
 import * as fs from "node:fs";
+import * as path from "node:path";
 
-const TARGET = "/raid/parabun/editors/lsp/parabun-lsp.ts";
+const TARGET = path.resolve(import.meta.dirname, "../editors/lsp/parabun-lsp.ts");
 const BEGIN_MARKER = "// ─── codegen:lsp-allowlist:begin ──────────────────────────────────";
 const END_MARKER = "// ─── codegen:lsp-allowlist:end ────────────────────────────────────";
 
