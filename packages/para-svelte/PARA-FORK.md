@@ -1,0 +1,184 @@
+# Para Svelte — Surgical Map
+
+This fork swaps Svelte's reactive primitives for `@para/signals` while preserving
+Svelte's compiler, template binding, and render scheduler. It is the F0 work
+item ([LYK-872](https://linear.app/lyku/issue/LYK-872)) for the `.pui`
+([LYK-829](https://linear.app/lyku/issue/LYK-829)) component format.
+
+## Why fork instead of preprocess
+
+A preprocess pass that lowers `.pui` keywords to Svelte 5 runes works today
+(`@para/ui-preprocess` ships in parabun), but it leaves a value-store
+seam: state lives in Svelte's `Source` struct, not in para signals. Code outside
+the component can't observe it without re-deriving. Forking lets us:
+
+- Make `signalOf(svelteSource)` a first-class operation.
+- Run `.pui` files through Svelte's compiler unchanged — every existing Svelte
+  control-flow primitive (`{#each}`, `{#await}`, transitions, snippets) works
+  on day one.
+- Stage Phase 1+ keyword features (`signal`, `derived`, `effect`, `using`,
+  `provide`/`inject`, `emit`) without inventing a render engine.
+
+## Two-axis architecture
+
+Svelte's runtime has two concerns that are intertwined but logically separable:
+
+1. **Storage / observability** — `Source` holds a value and a `reactions: Reaction[]`
+   list. Reads call `get(source)`; writes call `set(source, v)`. Reactivity
+   bookkeeping (push current reaction into `source.reactions`, mark reactions
+   dirty on write) lives here.
+2. **Scheduling** — `Batch`, `schedule_effect`, `flush`, the eager-effect path.
+   Decides _when_ effects run after sources change.
+
+This fork swaps **axis 1** (storage / observability) and keeps **axis 2**
+(scheduling). Long-term we may also swap axis 2 (full scheduler replacement) —
+that's F3+, not F0.
+
+## Surgical map (axis 1 swap)
+
+### `internal/client/reactivity/sources.js` — primary target
+
+The `Source` struct (lines 76–95) becomes:
+
+```js
+{
+  f: 0,
+  v,                   // KEEP — Svelte's hot read path reads source.v directly
+  reactions: null,     // KEEP — Svelte's reaction list, ordering decisions live here
+  equals,
+  rv: 0,
+  wv: 0,
+  paraSignal,          // NEW — @para/signals signal mirroring .v
+}
+```
+
+`source(v)` allocates the para signal alongside `.v`. `internal_set(source, v)`
+writes `source.v = v` AND `source.paraSignal.set(v)` (the para signal write is
+guarded by the same `!source.equals(value)` check that already gates the rest
+of the write path). Reads stay on `.v`.
+
+After this lands, two consumers can observe the same value:
+- Svelte's scheduler (via `.v` + `.reactions`)
+- External para code (via `signalOf(source).get()`)
+
+The expensive part is not the field allocation — it's making sure every write
+goes through `internal_set`. Audit:
+
+- `set(source, value, should_proxy)` — already routes to `internal_set`.
+- `mutate(source, value)` — routes to `set`, OK.
+- `update(source, d)` / `update_pre(source, d)` — route to `set`, OK.
+- `increment(source)` — routes to `set`, OK.
+
+So one site: `internal_set`. No other write seam.
+
+### `internal/client/reactivity/deriveds.js`
+
+`Derived` extends `Source`. Same struct shape; the bridge from `sources.js`
+covers it for free. The recompute path (`execute_derived` in this file) writes
+through the same `internal_set`-equivalent, which already updates `.v`.
+
+Risk: `Derived` recomputes _lazily_ (on read, when dirty). The para signal must
+reflect post-recompute value, not stale-but-being-recomputed. Solution: bump
+the para signal at the end of `execute_derived` after `.v` is committed, not
+inside the `internal_set` path (deriveds don't go through that on recompute).
+
+### `internal/client/reactivity/effects.js`
+
+Effects don't store values — they hold side-effect closures and lifecycle flags.
+**No bridge required here.** External code consumes effects-as-observed-state
+indirectly: subscribe to the sources the effect reads via `signalOf`.
+
+Exception: when we add `using`/`provide`/`inject` to the keyword layer, those
+desugar to context-stored effects. The lowering target is unchanged.
+
+### `internal/client/reactivity/batch.js` (1425 lines — heaviest file)
+
+**Keep entirely.** Svelte's batch semantics are not what `@para/signals.batch`
+does. Svelte batches all writes within a synchronous task; para batches a
+single explicit `batch(() => ...)` call. Cross-coordination — para writes inside
+a Svelte batch, or vice versa — is F2 work.
+
+When the bridge writes both `.v` and `paraSignal`, the para signal's effect
+listeners fire on each write (no batching from para's side). That's correct
+for the consumer-of-svelte-state case (`signalOf(s).get()` in a para effect):
+the para effect sees every write, in order. Order-of-firing relative to Svelte
+effects scheduled by the same write is undefined — para listeners run
+synchronously (microtask), Svelte effects run at the next batch flush. Document
+this; do not "fix" it.
+
+### `internal/client/reactivity/async.js`
+
+Async deriveds (the Svelte 5 `await` rune machinery). These wrap a Source with
+Promise lifecycle (pending / resolved / rejected). The bridge in sources.js
+covers the underlying Source. The Promise lifecycle itself is reflected
+through Svelte's own state machine — para consumers see the resolved value
+when the underlying Source updates, which is the right semantics.
+
+### `internal/client/reactivity/props.js`
+
+Component props are backed by Sources (one per prop). The bridge applies:
+`signalOf(propsSource)` lets a parent observe a child's prop state, and lets
+the `prop`/`emit` keyword layer in `@para/ui-preprocess` thread props as
+real para signals.
+
+Risk: legacy mode (`legacy_mode_flag`) does a lot of magic around prop
+mutation. F0 covers _runes mode only_ (`.pui` files are always runes); the
+legacy path stays untouched.
+
+### `internal/client/proxy.js` (the `$state` deep proxy)
+
+The proxy holds a `Map<key, Source>`. Each property's source already has a
+para signal once the sources.js bridge lands. So `proxySignal(svelteProxy)` is
+trivially derivable.
+
+But there's a subtlety: para's `proxySignal()` (added to `@para/signals` in the
+prior session) and Svelte's `proxy()` are TWO different proxy implementations.
+For `.pui`, we use Svelte's because the compiler's `$state` lowering targets
+it. The bridge in sources.js means a Svelte proxy's per-property signals are
+para-observable — same outcome, different internal proxy.
+
+Don't try to unify the two implementations in F0. They coexist. `.pui` writes
+through Svelte's proxy (because the compiler emits `proxy(value)`), and any
+direct para code can use `@para/signals.proxySignal`.
+
+## Implementation order
+
+1. **F0.1** ✅ Rename inner package to `@para/svelte`, private+dev version.
+2. **F0.2** ✅ This document.
+3. **F0.3** Plant additive bridge — `Source.paraSignal` field + `signalOf()`
+   export. Sources.js only. Svelte's test suite must still pass unmodified.
+4. **F0.4** Wire `@para/signals` as the resolved dep. Wire up an integration
+   test harness that imports a compiled `.pui` from `@para/ui-preprocess`,
+   runs through `@para/svelte`, and asserts `signalOf(...)` works end-to-end.
+5. **F0.5** Audit derived recompute path — bump para signal post-recompute in
+   `execute_derived`.
+6. **F0.6** Props bridge audit — confirm `signalOf(propSource)` returns the
+   parent's underlying signal when prop is forwarded.
+7. **F0.7** Performance regression check vs. unmodified Svelte. Acceptance bar:
+   < 5% degradation on the standard Svelte microbenchmarks.
+
+## What this fork is NOT
+
+- **Not a competitor to Svelte.** Upstream Svelte updates flow in via merge.
+  The `paraSignal` field and `signalOf` export are the only invasive changes
+  in F0. Everything else is upstream Svelte.
+- **Not a scheduler replacement.** Batch.js stays. The render pipeline is
+  Svelte's. Para code observes; Svelte renders.
+- **Not a proxy replacement.** Svelte's `$state` proxy continues to be the
+  proxy `.pui` files use for deep-reactive state. `@para/signals.proxySignal`
+  is for non-component code.
+
+## What we publish
+
+Nothing from this tree publishes until parity is proven. Package stays
+`"private": true`, version `0.0.0-dev`. `.pui` files using `@para/ui-preprocess`
+continue to lower to Svelte runes targeting unmodified `svelte` from npm. The
+flip happens when:
+
+1. All F0.3–F0.7 work lands.
+2. Svelte's full test suite passes against the forked tree.
+3. `signalOf` is documented at the `@para/svelte` public boundary.
+4. `@para/ui-preprocess` is retargeted to emit imports against `@para/svelte`.
+
+That last step is the user-facing flip. Until then, the fork is invisible to
+consumers.
