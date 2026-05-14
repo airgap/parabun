@@ -77,11 +77,10 @@ export function source(v, stack) {
     equals,
     rv: 0,
     wv: 0,
-    // Para Svelte bridge: mirror .v through a @para/signals signal so external
-    // para code can observe Svelte state via signalOf(source). Reads stay on
-    // .v (Svelte's hot path); writes flow through internal_set, which also
-    // updates this signal. See PARA-FORK.md.
-    paraSignal: para_signal(v),
+    // Para Svelte bridge: paraSignal is allocated lazily on the first
+    // signalOf() call (seeded from the current .v at that moment) so sources
+    // nothing ever observes pay zero allocation/mirror cost. See PARA-FORK.md.
+    paraSignal: undefined,
   };
 
   if (DEV && tracing_mode_flag) {
@@ -107,7 +106,35 @@ export function source(v, stack) {
  * @returns {{ get(): V, peek(): V, subscribe(fn: (v: V) => void): () => void } | undefined}
  */
 export function signalOf(source) {
-  return source && /** @type {any} */ (source).paraSignal;
+  if (!source) return undefined;
+  var s = /** @type {any} */ (source);
+  if (s.paraSignal === undefined) {
+    // Lazy allocation: seed at the source's current value. After this point,
+    // every mirror_to_para call updates the signal. Para observers added now
+    // see the initial value; observers added before this seed point would
+    // have nothing to observe (paraSignal didn't exist) — by design.
+    s.paraSignal = para_signal(s.v);
+  }
+  return s.paraSignal;
+}
+
+/**
+ * Para Svelte: mirror a write to a Source's backing para signal. Called from
+ * every site that mutates `source.v` (Batch.capture, batch fork-commit, the
+ * derived recompute no-batch fallback). Idempotent — para signals short-circuit
+ * Object.is-equal writes internally — so over-calling is cheap and safe.
+ *
+ * @template V
+ * @param {Source<V>} source
+ * @param {V} value
+ */
+export function mirror_to_para(source, value) {
+  var p = /** @type {any} */ (source).paraSignal;
+  // If signalOf has never been called on this Source, paraSignal is undefined
+  // and we skip entirely — no allocation, no function call, no Set iteration.
+  // For Svelte-only apps with no para observers, the bridge cost is one
+  // .paraSignal undefined-check per write.
+  if (p !== undefined) p.set(value);
 }
 
 /**
@@ -249,13 +276,9 @@ export function internal_set(source, value, updated_during_traversal = null) {
 
     source.wv = increment_write_version();
 
-    // Para Svelte bridge: mirror the write to the backing para signal. Already
-    // gated by !source.equals(value) above. Para listeners fire synchronously
-    // (microtask) — Svelte effects fire later via the scheduler; the order
-    // between the two is undefined by design. See PARA-FORK.md.
-    if (/** @type {any} */ (source).paraSignal !== undefined) {
-      /** @type {any} */ (source).paraSignal.set(value);
-    }
+    // Para Svelte bridge: paraSignal mirroring now happens inside Batch.capture
+    // (the chokepoint for all .v writes — set(), update_derived(), fork commit).
+    // See PARA-FORK.md.
 
     // For debugging, in case you want to know which reactions are being scheduled:
     // log_reactions(source);

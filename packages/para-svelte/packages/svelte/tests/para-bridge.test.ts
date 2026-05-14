@@ -17,7 +17,7 @@
 //   - Cross-batch coordination semantics.
 
 import { describe, expect, it } from "vitest";
-import { state, set, signalOf } from "svelte/internal/client";
+import { state, set, signalOf, derived, get, mutable_source } from "svelte/internal/client";
 // @ts-expect-error — link: dep, types are .js JSDoc-only
 import { effect } from "@para/signals";
 
@@ -47,6 +47,41 @@ describe("para bridge — sources.js", () => {
     stop();
     set(s, "after-stop");
     expect(seen).toEqual(["initial", "second", "third"]);
+  });
+
+  it("derived recompute mirrors to its para signal (F0.5)", () => {
+    const a = state(2);
+    const d = derived(() => get(a) * 10);
+    // Force compute first — signalOf is lazy and would otherwise seed from
+    // Svelte's UNINITIALIZED sentinel. After a real read, paraSignal seeds
+    // from the computed value.
+    expect(get(d)).toBe(20);
+    expect(signalOf(d)!.peek()).toBe(20);
+
+    const seen: number[] = [];
+    const stop = effect(() => seen.push(signalOf(d)!.get()));
+    expect(seen[0]).toBe(20);
+
+    // Recompute only happens when something reads the derived. A para
+    // observer of signalOf(d) doesn't trigger Svelte's get(d) on its own —
+    // that's by design (the bridge mirrors Svelte's view, doesn't drive it).
+    // In a real .pui component, Svelte's render effects do the reads.
+    set(a, 5);
+    expect(get(d)).toBe(50);
+    set(a, 7);
+    expect(get(d)).toBe(70);
+    expect(seen).toEqual([20, 50, 70]);
+    stop();
+  });
+
+  it("mutable_source (legacy store/prop backing) gets the bridge (F0.6)", () => {
+    // Props.js routes writable props through derived(); legacy stores route
+    // through mutable_source(). Both ultimately call source() — confirm
+    // mutable_source allocates paraSignal too.
+    const m = mutable_source(42);
+    expect(signalOf(m)!.peek()).toBe(42);
+    set(m, 100);
+    expect(signalOf(m)!.peek()).toBe(100);
   });
 
   it("equality short-circuit applies to both axes (no spurious notify)", () => {
