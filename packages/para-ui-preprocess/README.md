@@ -20,10 +20,7 @@ import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 import { parabunPreprocess } from "@para/ui-preprocess";
 
 export default {
-  preprocess: [
-    parabunPreprocess(),
-    vitePreprocess(),
-  ],
+  preprocess: [parabunPreprocess(), vitePreprocess()],
 };
 ```
 
@@ -51,8 +48,8 @@ Then in a component:
 ```ts
 parabunPreprocess({
   langs: ["parabun", "pts", "pjs"], // lang attribute values to transform
-  all: false,                        // also transform plain/ts scripts
-  runtime: "@para/ui",               // target runtime for injected imports
+  all: false, // also transform plain/ts scripts
+  runtime: "@para/ui", // target runtime for injected imports
 });
 ```
 
@@ -70,7 +67,7 @@ Wire it up in SvelteKit by adding the extension to `kit.extensions`:
 // svelte.config.js
 const config = {
   kit: {
-    extensions: ['.svelte', '.pui'],
+    extensions: [".svelte", ".pui"],
   },
   preprocess: [parabunPreprocess(), vitePreprocess()],
 };
@@ -83,6 +80,6 @@ After this, `.pui` files build via the standard SvelteKit/Vite pipeline. Inside 
 ## Caveats
 
 - Sourcemaps are not currently forwarded. `Bun.Transpiler.transformSync` doesn't emit them, so this preprocessor returns only transformed code. Line numbers stay close enough to original for most debugging; precise mapping is a follow-up.
-- Chain with `vitePreprocess()` (or your TS-aware preprocessor) *after* this one. We emit plain TS, which Svelte then type-strips.
+- Chain with `vitePreprocess()` (or your TS-aware preprocessor) _after_ this one. We emit plain TS, which Svelte then type-strips.
 - Only the `script` hook is implemented. Parabun syntax is not meaningful in `style` or `markup`.
 - When running under Node (`svelte-language-server`, `svelte-check`) rather than Parabun, the preprocessor passes script content through unchanged but still sets `lang="ts"` so downstream tools type-check correctly. Parabun-specific operators (`..!`, `|>`, `pure`) in that path won't transpile — but parabun-LSP handles them independently in `.pts` / `.pui` files.

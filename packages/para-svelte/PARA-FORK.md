@@ -5,7 +5,6 @@ descriptive of what it physically is (a Svelte fork). The two names are
 intentional: the directory says how it's built, the package name says what
 it's for (powering `.pui` files).
 
-
 This fork swaps Svelte's reactive primitives for `@para/signals` while preserving
 Svelte's compiler, template binding, and render scheduler. It is the F0 work
 item ([LYK-872](https://linear.app/lyku/issue/LYK-872)) for the `.pui`
@@ -64,6 +63,7 @@ guarded by the same `!source.equals(value)` check that already gates the rest
 of the write path). Reads stay on `.v`.
 
 After this lands, two consumers can observe the same value:
+
 - Svelte's scheduler (via `.v` + `.reactions`)
 - External para code (via `signalOf(source).get()`)
 
