@@ -1,0 +1,369 @@
+import type { PreprocessorGroup, Processed } from "svelte/compiler";
+
+export type ParabunPreprocessOptions = {
+  /**
+   * Which `<script lang="...">` values should be treated as Parabun.
+   * Defaults to ["parabun", "pts", "pjs"].
+   */
+  langs?: string[];
+  /**
+   * Also transform plain `<script>` blocks (no `lang`) and `<script lang="ts">`.
+   * Useful if you want every script to go through the Parabun transpiler so
+   * files can freely use Parabun operators without annotating each block.
+   */
+  all?: boolean;
+  /**
+   * Which runtime to emit injected imports against (`setContext`,
+   * `getContext`, `onDestroy`, etc. — used by `provide`/`inject`/`using`
+   * keyword lowering).
+   *
+   * - `"@para/ui"` (default): targets the Para UI fork
+   *   (packages/para-svelte/packages/svelte). Para signals run at the
+   *   reactive core; `signalOf()` is available. Consumers must have
+   *   `@para/ui` resolvable (currently workspace-only — see
+   *   PARA-FORK.md).
+   * - `"svelte"`: targets unmodified Svelte from npm. The escape hatch
+   *   for projects that haven't wired the fork yet. The lowering still
+   *   uses `$state`/`$derived`/`$effect`; the only difference is the
+   *   import specifier.
+   */
+  runtime?: "@para/ui" | "svelte";
+};
+
+const DEFAULT_LANGS = ["parabun", "pts", "pjs"];
+
+function pickLoader(lang: string | undefined): "ts" | "tsx" | "jsx" {
+  switch (lang) {
+    case "pts":
+    case "parabun":
+    case "ts":
+    case undefined:
+      return "ts";
+    case "ptsx":
+    case "tsx":
+      return "tsx";
+    case "pjs":
+    case "pjsx":
+    case "jsx":
+      return "jsx";
+    default:
+      return "ts";
+  }
+}
+
+// The preprocessor runs in two very different environments:
+//   - Build time: SvelteKit + Vite under `parabun`, where `Bun.Transpiler`
+//     is available and we transpile parabun → standard TS.
+//   - Editor time: `svelte-language-server` / `svelte-check` under Node,
+//     where `Bun` is undefined. Calling `new Bun.Transpiler(...)` there
+//     throws `ReferenceError: Bun is not defined`, which Svelte surfaces
+//     as a diagnostic on the offending line, and the downstream TS service
+//     then treats the script as JS (emitting TS8010 on every type
+//     annotation).
+//
+// When Bun isn't available we relabel the block as `lang="ts"` and pass
+// the original content through unchanged. The Svelte LSP type-checks it
+// as TS, which works for any parabun script that's a syntactic TS subset;
+// parabun-specific syntax (`..!`, `|>`, `pure`, etc.) is left to the
+// parabun LSP, which runs in parallel via its own VSCode extension.
+const HAS_BUN_TRANSPILER = typeof (globalThis as { Bun?: { Transpiler?: unknown } }).Bun?.Transpiler === "function";
+
+// ---------------------------------------------------------------------------
+// `.pui`-specific lowerings for the para reactive keywords. These keywords
+// have their own meaning in para's core language, but inside a `.pui`
+// component they need to bridge to Svelte's reactivity so the template
+// re-renders. Each lowering produces standard TS so the downstream Svelte
+// compiler sees something it understands.
+//
+// `signal X = Y` →
+//     const __sig_X = signal(Y);
+//     let X = $state(__sig_X.peek());
+//     $effect.pre(() => { X = __sig_X.get(); });
+//
+// `X = Z` (where X is a known signal) → `__sig_X.set(Z);`
+//
+// v1 is regex-based; handles simple single-line declarations and
+// assignments. Multi-declarator forms (`signal a = 1, b = 2`) and
+// destructured assignments are explicit follow-up.
+// ---------------------------------------------------------------------------
+
+// Brace-aware scan: given the offset of an opening `{`, return the offset
+// just AFTER its matching `}`. Skips braces inside strings, templates, and
+// line/block comments. Returns -1 if unmatched.
+function findMatchingBrace(source: string, openOffset: number): number {
+  let depth = 1;
+  let i = openOffset + 1;
+  while (i < source.length && depth > 0) {
+    const ch = source[i]!;
+    // Line comment
+    if (ch === "/" && source[i + 1] === "/") {
+      const eol = source.indexOf("\n", i);
+      i = eol === -1 ? source.length : eol;
+      continue;
+    }
+    // Block comment
+    if (ch === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    // Strings (basic — doesn't handle template-literal `${}` nesting)
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      i++;
+      while (i < source.length && source[i] !== quote) {
+        if (source[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+    i++;
+  }
+  return depth === 0 ? i : -1;
+}
+
+function lowerEffectBlocks(source: string): string {
+  // `effect { body }` → `$effect(() => { body })`. Brace-aware so nested
+  // braces inside the body don't terminate early.
+  let out = "";
+  let i = 0;
+  const re = /(^|[^\w$.])effect\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const kwStart = m.index + (m[1] ? m[1].length : 0);
+    const braceStart = re.lastIndex - 1; // position of `{`
+    const braceEnd = findMatchingBrace(source, braceStart);
+    if (braceEnd === -1) continue;
+    out += source.slice(i, kwStart);
+    const body = source.slice(braceStart + 1, braceEnd - 1);
+    out += `$effect(() => {${body}})`;
+    i = braceEnd;
+    re.lastIndex = braceEnd;
+  }
+  out += source.slice(i);
+  return out;
+}
+
+function lowerDerivedDecls(source: string): string {
+  // `derived NAME = EXPR` → `const NAME = $derived(EXPR)`. Simple
+  // single-line form only for v1; multi-line expression bodies need a
+  // smarter matcher (Phase 1 follow-up).
+  const declRe = /^(\s*)derived\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/gm;
+  return source.replace(declRe, (_full, indent, name, expr) => {
+    return `${indent}const ${name} = $derived(${expr});`;
+  });
+}
+
+function lowerPropDecls(source: string): string {
+  // `prop NAME: TYPE` / `prop NAME: TYPE = DEFAULT` declarations merge
+  // into a single `let { ... }: { ... } = $props()` destructure, emitted
+  // at the position of the first prop. Svelte 5 expects exactly one
+  // $props() call per component, so collecting + merging is the only
+  // shape the compiler accepts. Subsequent prop lines become blank to
+  // preserve overall line numbering.
+  const lines = source.split("\n");
+  const declRe = /^(\s*)prop\s+(\w+)(?:\s*:\s*([^=\n]+?))?\s*(?:=\s*(.+?))?\s*;?\s*$/;
+  const props: Array<{ lineIdx: number; indent: string; name: string; type: string; default?: string }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i]!.match(declRe);
+    if (!m) continue;
+    const [, indent, name, type, def] = m;
+    if (!name) continue;
+    props.push({
+      lineIdx: i,
+      indent: indent ?? "",
+      name,
+      type: (type ?? "any").trim(),
+      default: def?.trim(),
+    });
+  }
+  if (props.length === 0) return source;
+
+  const destructParts = props.map(p => (p.default !== undefined ? `${p.name} = ${p.default}` : p.name));
+  const typeParts = props.map(p => (p.default !== undefined ? `${p.name}?: ${p.type}` : `${p.name}: ${p.type}`));
+  const merged = `let { ${destructParts.join(", ")} }: { ${typeParts.join("; ")} } = $props();`;
+
+  lines[props[0]!.lineIdx] = `${props[0]!.indent}${merged}`;
+  for (let i = 1; i < props.length; i++) lines[props[i]!.lineIdx] = "";
+  return lines.join("\n");
+}
+
+function lowerProvideInject(source: string): { code: string; imports: Set<string> } {
+  // `provide NAME = EXPR` → `setContext("NAME", EXPR)`
+  // `inject NAME: TYPE` → `const NAME: TYPE = getContext("NAME")`
+  // String-keyed for v1; workspace-scoped typed-key registry is a follow-up
+  // (see LYK-848 description).
+  const imports = new Set<string>();
+  const provideRe = /^(\s*)provide\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/gm;
+  let code = source.replace(provideRe, (_full, indent, name, expr) => {
+    imports.add("setContext");
+    return `${indent}setContext(${JSON.stringify(name)}, ${expr});`;
+  });
+  const injectRe = /^(\s*)inject\s+(\w+)\s*:\s*(.+?)\s*;?\s*$/gm;
+  code = code.replace(injectRe, (_full, indent, name, type) => {
+    imports.add("getContext");
+    return `${indent}const ${name}: ${type.trim()} = getContext(${JSON.stringify(name)});`;
+  });
+  return { code, imports };
+}
+
+function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolean } {
+  // `using NAME = EXPR` → `const NAME = EXPR; onDestroy(() => NAME.dispose?.())`
+  // Auto-disposes the resource on component unmount. para resources
+  // expose `.dispose()` and Symbol.dispose; we call `.dispose()` (the
+  // friendlier name) with optional chaining so values that don't have
+  // it (handled non-disposable resources) don't crash unmount.
+  let needs = false;
+  const re = /^(\s*)using\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/gm;
+  const code = source.replace(re, (_full, indent, name, expr) => {
+    needs = true;
+    return `${indent}const ${name} = ${expr}; onDestroy(() => ${name}.dispose?.());`;
+  });
+  return { code, needsOnDestroy: needs };
+}
+
+function lowerPuiReactivity(source: string, runtime: "@para/ui" | "svelte"): string {
+  // Effect blocks first (brace-aware) so subsequent regex passes don't
+  // accidentally chew the rewritten `$effect(() => {...})` body.
+  source = lowerEffectBlocks(source);
+  source = lowerDerivedDecls(source);
+  source = lowerPropDecls(source);
+
+  const provideInject = lowerProvideInject(source);
+  source = provideInject.code;
+
+  const usingResult = lowerUsingDecls(source);
+  source = usingResult.code;
+
+  // Aggregate Svelte imports needed by the lowerings above. provide/inject
+  // contributes setContext/getContext; using contributes onDestroy.
+  const svelteImports = new Set<string>(provideInject.imports);
+  if (usingResult.needsOnDestroy) svelteImports.add("onDestroy");
+
+  const signalNames = new Set<string>();
+  const lines = source.split("\n");
+  // Match: optional indent, "signal", whitespace, identifier, optional
+  // type annotation, "=", expression, optional trailing semicolon. The
+  // expression is non-greedy up to end-of-line so we don't accidentally
+  // pull in subsequent statements separated by `;` on the same line.
+  const declRe = /^(\s*)signal\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const m = line.match(declRe);
+    if (!m) continue;
+    const [, indent, name, expr] = m;
+    if (!name || expr === undefined) continue;
+    signalNames.add(name);
+    lines[i] =
+      `${indent}const __sig_${name} = signal(${expr}); ` +
+      `let ${name} = $state(__sig_${name}.peek()); ` +
+      `$effect.pre(() => { ${name} = __sig_${name}.get(); });`;
+  }
+
+  // Rewrite simple `NAME = EXPR;` assignment lines into `__sig_NAME.set(EXPR);`
+  // for each declared signal. Skip the declaration line (it now starts with
+  // `const __sig_NAME =`) and only match standalone-assignment lines.
+  for (const name of signalNames) {
+    const assignRe = new RegExp(`^(\\s*)${name}\\s*=\\s*(.+?)\\s*;?\\s*$`);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (line.includes(`const __sig_${name}`)) continue;
+      const m = line.match(assignRe);
+      if (!m) continue;
+      const [, indent, expr] = m;
+      if (expr === undefined) continue;
+      lines[i] = `${indent}__sig_${name}.set(${expr});`;
+    }
+  }
+
+  let result = lines.join("\n");
+
+  // Inject @para/signals import if any signals declared and not already
+  // imported. Prepended as its own line — adds 1 to all subsequent line
+  // numbers from the user's view, which is acceptable for v1; downstream
+  // Svelte compiler diagnostics will be offset by 1.
+  if (signalNames.size > 0 && !/from\s+['"]@para\/signals['"]/.test(result)) {
+    result = `import { signal } from "@para/signals";\n` + result;
+  }
+
+  // Inject extra runtime imports (setContext/getContext from provide/inject,
+  // onDestroy from `using`). Dedup against either runtime spelling so a hand-
+  // authored `import {...} from "@para/ui"` already in the script doesn't get
+  // shadowed by an emitted `from "svelte"` and vice versa.
+  if (svelteImports.size > 0) {
+    const existing = new Set<string>();
+    const importRe = /import\s*\{([^}]+)\}\s*from\s+['"](?:svelte|@para\/ui)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = importRe.exec(result)) !== null) {
+      for (const name of m[1]!.split(",")) existing.add(name.trim().split(/\s+as\s+/)[0]!);
+    }
+    const toAdd = [...svelteImports].filter(n => !existing.has(n));
+    if (toAdd.length > 0) {
+      result = `import { ${toAdd.join(", ")} } from "${runtime}";\n` + result;
+    }
+  }
+
+  return result;
+}
+
+export function parabunPreprocess(opts: ParabunPreprocessOptions = {}): PreprocessorGroup {
+  const langs = new Set(opts.langs ?? DEFAULT_LANGS);
+  const runtime: "@para/ui" | "svelte" = opts.runtime ?? "@para/ui";
+  const transpilerCache = new Map<string, Bun.Transpiler>();
+
+  const getTranspiler = (loader: "ts" | "tsx" | "jsx") => {
+    let t = transpilerCache.get(loader);
+    if (!t) {
+      t = new Bun.Transpiler({ loader });
+      transpilerCache.set(loader, t);
+    }
+    return t;
+  };
+
+  return {
+    name: "parabun",
+    script({ content, attributes, filename }): Processed | undefined {
+      const lang = typeof attributes.lang === "string" ? attributes.lang : undefined;
+      // `.pui` files are parabun-flavored by extension: every script
+      // block runs through the parabun pipeline regardless of `lang`, since
+      // the filename itself is the marker. For plain `.svelte`, the
+      // `langs`/`opts.all` filter governs as before.
+      const isPui = filename?.endsWith(".pui") ?? false;
+      const shouldRun = isPui
+        ? true
+        : opts.all
+          ? lang === undefined || lang === "ts" || lang === "tsx" || langs.has(lang)
+          : lang !== undefined && langs.has(lang);
+      if (!shouldRun) return;
+
+      // For `.pui` files, run the para-reactivity lowering first to bridge
+      // `signal`/`derived`/`effect` into Svelte runes ($state, $effect).
+      // After this pass the content is standard TS, so parabun's own
+      // transpile (when running under Bun) sees nothing parabun-specific
+      // to transform — it's effectively a passthrough for the bridge form.
+      const preprocessed = isPui ? lowerPuiReactivity(content, runtime) : content;
+      // Svelte's preprocess loop short-circuits with no_change() when
+      // `processed.code === content && !processed.map` (see
+      // svelte/compiler/preprocess/index.js process_single_tag) — which
+      // would silently drop our `lang: "ts"` rewrite. Append a trailing
+      // newline in the Node-fallback path so the code differs by one
+      // semantically-inert character and the attribute change is honored.
+      const code = HAS_BUN_TRANSPILER
+        ? getTranspiler(pickLoader(lang)).transformSync(preprocessed)
+        : preprocessed === content
+          ? preprocessed + "\n"
+          : preprocessed;
+      return {
+        code,
+        attributes: { ...attributes, lang: "ts" },
+        dependencies: filename ? [filename] : undefined,
+      };
+    },
+  };
+}
+
+export default parabunPreprocess;
