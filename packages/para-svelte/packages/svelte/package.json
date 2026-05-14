@@ -1,6 +1,6 @@
 {
-  "name": "@para/svelte",
-  "description": "Para's fork of Svelte. Reactive core swapped for @para/signals. Public name reserved; nothing ships from this tree until parity is proven.",
+  "name": "@para/ui",
+  "description": "Para's UI runtime — Svelte forked with @para/signals at the reactive core. Powers .pui component files. Public name reserved; nothing ships from this tree until parity is proven.",
   "private": true,
   "license": "MIT",
   "version": "0.0.0-dev",

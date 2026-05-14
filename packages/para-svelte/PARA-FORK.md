@@ -1,4 +1,10 @@
-# Para Svelte — Surgical Map
+# Para UI (`@para/ui`) — Surgical Map
+
+Package name is `@para/ui`. Source tree lives at `packages/para-svelte/` —
+descriptive of what it physically is (a Svelte fork). The two names are
+intentional: the directory says how it's built, the package name says what
+it's for (powering `.pui` files).
+
 
 This fork swaps Svelte's reactive primitives for `@para/signals` while preserving
 Svelte's compiler, template binding, and render scheduler. It is the F0 work
@@ -143,19 +149,35 @@ direct para code can use `@para/signals.proxySignal`.
 
 ## Implementation order
 
-1. **F0.1** ✅ Rename inner package to `@para/svelte`, private+dev version.
+1. **F0.1** ✅ Rename inner package to `@para/ui`, private+dev version.
 2. **F0.2** ✅ This document.
 3. **F0.3** Plant additive bridge — `Source.paraSignal` field + `signalOf()`
    export. Sources.js only. Svelte's test suite must still pass unmodified.
 4. **F0.4** Wire `@para/signals` as the resolved dep. Wire up an integration
    test harness that imports a compiled `.pui` from `@para/ui-preprocess`,
-   runs through `@para/svelte`, and asserts `signalOf(...)` works end-to-end.
+   runs through `@para/ui`, and asserts `signalOf(...)` works end-to-end.
 5. **F0.5** Audit derived recompute path — bump para signal post-recompute in
    `execute_derived`.
 6. **F0.6** Props bridge audit — confirm `signalOf(propSource)` returns the
    parent's underlying signal when prop is forwarded.
 7. **F0.7** Performance regression check vs. unmodified Svelte. Acceptance bar:
    < 5% degradation on the standard Svelte microbenchmarks.
+
+## Internal `'svelte'` import specifier — kept
+
+The inner `tsconfig.json` has path aliases mapping `'svelte'`, `'svelte/action'`,
+etc. to local source. ~55 internal files self-reference via these aliases
+(`import { LegacyComponentType } from 'svelte/legacy'`, etc.). We deliberately
+leave these as `'svelte'` rather than rewriting to `'@para/ui'`:
+
+- Less divergence from upstream Svelte → cheaper merges.
+- The aliases are TS-time only. The rollup build inlines self-references; the
+  published package is `@para/ui` regardless.
+- Consumers of the published package see `@para/ui` / `@para/ui/action` /
+  etc. — the inner `'svelte'` alias is invisible to them.
+
+Touching the internal specifier is something we can do later if we ever stop
+merging from upstream; until then, leave it.
 
 ## What this fork is NOT
 
@@ -177,8 +199,8 @@ flip happens when:
 
 1. All F0.3–F0.7 work lands.
 2. Svelte's full test suite passes against the forked tree.
-3. `signalOf` is documented at the `@para/svelte` public boundary.
-4. `@para/ui-preprocess` is retargeted to emit imports against `@para/svelte`.
+3. `signalOf` is documented at the `@para/ui` public boundary.
+4. `@para/ui-preprocess` is retargeted to emit imports against `@para/ui`.
 
 That last step is the user-facing flip. Until then, the fork is invisible to
 consumers.
