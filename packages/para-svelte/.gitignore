@@ -30,3 +30,4 @@ benchmarking/compare/.profiles
 # Para Svelte: generated docs from scripts/process-messages — pruned upstream
 # output target restored here as a scratch dir.
 packages/svelte/.generated-docs/
+tests/.para-e2e-*/
