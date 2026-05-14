@@ -1,16 +1,20 @@
 {
   "name": "@para/signals",
-  "version": "0.0.0-dev",
-  "private": true,
-  "description": "Reactive primitives — signal / derived / effect / batch / untrack. Pure JS, runs on any JS runtime. Foundation of the para:* library suite; other modules expose their state through this. NOT YET RELEASED — private:true / 0.0.0-dev pending the workspace split.",
+  "version": "0.0.1-pre.0",
+  "description": "Reactive primitives — signal / derived / effect / batch / untrack / proxySignal. Pure JS, runs on any JS runtime. Foundation of the para:* library suite; other modules expose their state through this. Pre-release: API may change before 0.1.0.",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "type": "module",
   "main": "./src/index.js",
   "module": "./src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./svelte": "./svelte.svelte.js"
   },
   "files": [
     "src/",
+    "svelte.svelte.js",
     "README.md"
   ],
   "license": "MIT",

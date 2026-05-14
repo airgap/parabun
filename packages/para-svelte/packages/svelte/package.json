@@ -1,9 +1,11 @@
 {
 	"name": "@para/ui",
-	"description": "Para's UI runtime — Svelte forked with @para/signals at the reactive core. Powers .pui component files. Public name reserved; nothing ships from this tree until parity is proven.",
-	"private": true,
+	"description": "Para's UI runtime — Svelte forked with @para/signals at the reactive core. Powers .pui component files. Pre-release: API parity with upstream Svelte verified (7301 tests pass) but devtools/HMR (F2) still pending — see PARA-FORK.md.",
 	"license": "MIT",
-	"version": "0.0.0-dev",
+	"version": "0.0.1-pre.0",
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
+	},
 	"type": "module",
 	"types": "./types/index.d.ts",
 	"engines": {
@@ -143,7 +145,7 @@
 		"generate": "node scripts/process-messages && node ./scripts/generate-types.js",
 		"generate:version": "node ./scripts/generate-version.js",
 		"generate:types": "node ./scripts/generate-types.js && tsc -p tsconfig.generated.json",
-		"prepublishOnly": "echo 'Para Svelte is private:true / 0.0.0-dev. See PARA-FORK.md.' && exit 1"
+		"prepublishOnly": "pnpm build"
 	},
 	"devDependencies": {
 		"@jridgewell/trace-mapping": "^0.3.25",
