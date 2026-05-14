@@ -18,12 +18,14 @@
     "bench:debug": "NODE_ENV=production node --allow-natives-syntax --inspect-brk ./benchmarking/run.js"
   },
   "devDependencies": {
+    "@para/ui": "workspace:^",
     "@types/node": "^20.11.5",
     "@types/picomatch": "^4.0.2",
     "@vitest/coverage-v8": "^2.1.9",
     "jsdom": "25.0.1",
     "playwright": "^1.58.0",
-    "@para/ui": "workspace:^",
+    "prettier": "^3.8.3",
+    "prettier-plugin-svelte": "^3.5.2",
     "svelte": "link:./packages/svelte",
     "typescript": "^5.5.4",
     "v8-natives": "^1.2.5",
