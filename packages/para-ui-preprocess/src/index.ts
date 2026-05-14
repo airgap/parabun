@@ -258,10 +258,17 @@ function lowerPuiReactivity(source: string, runtime: "@para/ui" | "svelte"): str
     const [, indent, name, expr] = m;
     if (!name || expr === undefined) continue;
     signalNames.add(name);
+    // Bridge form: a para signal lives alongside a $state cell. The
+    // $effect.pre subscribes ACROSS the systems — para's .subscribe()
+    // creates a para effect that synchronously runs the callback on
+    // every set(), and the callback writes into Svelte's $state
+    // (which then drives DOM updates the normal way). The cleanup
+    // returned by .subscribe() runs on effect teardown (component
+    // unmount) so the subscription doesn't leak.
     lines[i] =
       `${indent}const __sig_${name} = signal(${expr}); ` +
       `let ${name} = $state(__sig_${name}.peek()); ` +
-      `$effect.pre(() => { ${name} = __sig_${name}.get(); });`;
+      `$effect.pre(() => __sig_${name}.subscribe((__v) => { ${name} = __v; }));`;
   }
 
   // Rewrite simple `NAME = EXPR;` assignment lines into `__sig_NAME.set(EXPR);`
