@@ -161,15 +161,28 @@ direct para code can use `@para/signals.proxySignal`.
 6. **F0.6** ✅ Props bridge audit — writable props go through `derived()`,
    stores through `mutable_source()`, both reach `source()` shape and inherit
    the bridge.
-7. **F0.7** ✅ Parity + perf. **5879 Svelte tests pass** (runtime-runes +
-   runtime-legacy + runtime-production), zero regressions. Kairo bench
-   4657ms (with bridge) vs 4681ms (no bridge) — within noise, well under
-   the 5% bar. Cost amortized via lazy `paraSignal` allocation: created on
-   first `signalOf()` call, seeded from current `.v`.
+7. **F0.7** ✅ Parity + perf. **7301 Svelte tests pass** across _every_
+   test suite in the fork (runtime-runes 2566, runtime-legacy 3299,
+   runtime-production 14, signals 96, store 33, hydration 80,
+   server-side-rendering 217, css 181, validator 326, compiler-errors
+   145, parser-legacy 82, runtime-browser 89, runtime-xhtml 25,
+   migrate 76, snapshot 32, print 40, sourcemaps 26, parser-modern 25,
+   preprocess 19, css-parse 16, motion 8, para-bridge 6). 63 skipped
+   upstream — same count as unmodified Svelte. Zero failures.
+   Kairo bench 4657ms (with bridge) vs 4681ms (no bridge) — within
+   noise, well under the 5% bar. Cost amortized via lazy `paraSignal`
+   allocation: created on first `signalOf()` call, seeded from
+   current `.v`.
 
-**F0 is functionally complete.** What remains: retarget `@para/ui-preprocess`
-to emit `import {...} from '@para/ui'` (currently emits `'svelte'`), and
-publish-readiness checks (SSR parity, devtools, HMR — F1+).
+**F0 is functionally complete.** The user-facing flip shipped same day —
+`@para/ui-preprocess` now emits imports against `@para/ui` by default.
+SSR + hydration + signals + store all green out of the box (the bridge
+only touches client reactivity; the server runtime + hydration logic
+ride along untouched on Svelte's existing machinery).
+
+F1+ (devtools integration, HMR via vite-plugin-svelte against the
+forked package, scheduler replacement, multi-target backends) are real
+follow-up work but unlocked — nothing structural blocks them.
 
 ## Internal `'svelte'` import specifier — kept
 
