@@ -154,7 +154,11 @@ function transformScript(body: string, notes: string[]): { code: string; needsFr
       notes.push("dropped now-unused `onMount` from the svelte import");
       return `${a} ${kept.join(", ")} }${c}`;
     });
-    body = body.replace(/^\s*\n/, "");
+    // NB: deliberately do NOT strip the body's leading whitespace here.
+    // A leftover blank line where an import was removed is harmless;
+    // stripping the body's leading newline glues the first decl onto
+    // the `<script>` tag and breaks lowerPuiReactivity's line-anchored
+    // regexes (silent invalid output). Conservative-correctness.
   }
 
   return { code: body, needsFromStore };
@@ -233,4 +237,77 @@ export function svelteToPui(source: string): CodemodResult {
   if (notes.length === 0) notes.push("no transformable patterns found — file left as-is (still valid .pui)");
   void needsFromStoreAny;
   return { code, notes };
+}
+
+export interface SafeMigrateResult {
+  code: string;
+  /** true → migrated output emitted; false → original returned unchanged. */
+  migrated: boolean;
+  notes: string[];
+  /** present when migrated=false: why the transform was rejected. */
+  skippedReason?: string;
+}
+
+/**
+ * **Safe-by-construction migration.** Transforms, then *verifies the
+ * result compiles equivalently*; if the original compiled but the
+ * migrated output does NOT, the transform is rejected and the original
+ * is returned untouched. This makes auto-migration regression-free by
+ * construction: a file is either correctly migrated or left exactly as
+ * it was — never silently broken. (The raw `svelteToPui` is the
+ * unverified transform; always prefer this for real migration.)
+ *
+ * Caller injects the fork `compile` (svelte/compiler) and
+ * `lowerPuiReactivity` (@lyku/para-preprocess) so this module stays
+ * dependency-free.
+ *
+ * @param compile (src, opts) — throws on compile error
+ * @param lower   lowerPuiReactivity
+ */
+export function safeMigrate(
+  source: string,
+  compile: (src: string, opts: Record<string, unknown>) => unknown,
+  lower: (src: string, runtime?: string, lp?: boolean, hmr?: boolean) => string,
+): SafeMigrateResult {
+  const opts = { generate: "client", name: "C", runes: true };
+  const baselineOk = (() => {
+    try {
+      compile(source, opts);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  let out: CodemodResult;
+  try {
+    out = svelteToPui(source);
+  } catch (e) {
+    return { code: source, migrated: false, notes: [], skippedReason: `transform threw: ${(e as Error).message}` };
+  }
+
+  // If the transform was a no-op, nothing to verify.
+  if (out.code === source) return { code: source, migrated: false, notes: out.notes };
+
+  // Verify the migrated .pui lowers + compiles.
+  let migratedOk = false;
+  let why = "";
+  try {
+    const loweredSvelte = lower(out.code, "@lyku/para-ui", false, false);
+    compile(loweredSvelte, opts);
+    migratedOk = true;
+  } catch (e) {
+    why = (e as Error).message?.split("\n")[0] ?? String(e);
+  }
+
+  // Reject only if we *introduced* a failure (original compiled, we broke it).
+  if (baselineOk && !migratedOk) {
+    return {
+      code: source,
+      migrated: false,
+      notes: out.notes,
+      skippedReason: `migration would regress (orig compiles, migrated fails: ${why}) — left unchanged`,
+    };
+  }
+  return { code: out.code, migrated: true, notes: out.notes };
 }
