@@ -233,8 +233,20 @@ function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolea
  * full async PreprocessorGroup. The operator desugars (`..!`, `|>`, `pure`)
  * are NOT applied here (they're Bun.Transpiler's job and don't change the
  * component's type surface). Exported for `pui2tsx` / editor tooling.
+ *
+ * `linePreserving` (editor/LSP use): inject the @lyku/para-signals +
+ * runtime imports WITHOUT a trailing newline, so the lowered output has
+ * the exact same line count as the input. The build path leaves it off
+ * (own-line imports read cleaner in generated code; the Svelte compiler
+ * doesn't care about line parity). With it on, the only residual
+ * input→output divergence is intra-line column shift on rewritten lines,
+ * which keeps svelte2tsx-sourcemap composition line-accurate.
  */
-export function lowerPuiReactivity(source: string, runtime: "@lyku/para-ui" | "svelte" = "@lyku/para-ui"): string {
+export function lowerPuiReactivity(
+  source: string,
+  runtime: "@lyku/para-ui" | "svelte" = "@lyku/para-ui",
+  linePreserving = false,
+): string {
   // Effect blocks first (brace-aware) so subsequent regex passes don't
   // accidentally chew the rewritten `$effect(() => {...})` body.
   source = lowerEffectBlocks(source);
@@ -302,8 +314,9 @@ export function lowerPuiReactivity(source: string, runtime: "@lyku/para-ui" | "s
   // imported. Prepended as its own line — adds 1 to all subsequent line
   // numbers from the user's view, which is acceptable for v1; downstream
   // Svelte compiler diagnostics will be offset by 1.
+  const importSep = linePreserving ? " " : "\n";
   if (signalNames.size > 0 && !/from\s+['"]@para\/signals['"]/.test(result)) {
-    result = `import { signal } from "@lyku/para-signals";\n` + result;
+    result = `import { signal } from "@lyku/para-signals";${importSep}` + result;
   }
 
   // Inject extra runtime imports (setContext/getContext from provide/inject,
@@ -319,7 +332,7 @@ export function lowerPuiReactivity(source: string, runtime: "@lyku/para-ui" | "s
     }
     const toAdd = [...svelteImports].filter(n => !existing.has(n));
     if (toAdd.length > 0) {
-      result = `import { ${toAdd.join(", ")} } from "${runtime}";\n` + result;
+      result = `import { ${toAdd.join(", ")} } from "${runtime}";${importSep}` + result;
     }
   }
 
