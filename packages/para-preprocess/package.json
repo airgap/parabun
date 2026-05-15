@@ -28,6 +28,7 @@
     "build": "tsc"
   },
   "devDependencies": {
+    "bun-types": "workspace:*",
     "svelte": "^5.20.4",
     "typescript": "^5.0.0"
   },
