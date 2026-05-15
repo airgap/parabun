@@ -59,3 +59,28 @@ test("--write: would-regress file is SKIPPED and left as .svelte (unchanged)", (
   expect(readFileSync(f, "utf8")).toBe(before); // byte-identical
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("importer-rewrite: extensioned .svelte imports of migrated files → .pui (conservative)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "para-codemod-imp-"));
+  writeFileSync(join(dir, "Comp.svelte"), `<script lang="ts">\nlet n = $state(0);\n</script>\n<b>{n}</b>`);
+  writeFileSync(join(dir, "Plain.svelte"), `<script lang="ts">\nconst K = 1;\n</script>\n<i>{K}</i>`); // no-op, NOT migrated
+  writeFileSync(
+    join(dir, "Consumer.ts"),
+    `import Comp from './Comp.svelte';\nimport Plain from './Plain.svelte';\nexport { Comp, Plain };`,
+  );
+  const files = [join(dir, "Comp.svelte"), join(dir, "Plain.svelte")];
+
+  // dry-run: reports the rewrite, touches nothing
+  const dry = runMigration(files, { write: false, importRoots: [dir] }, deps);
+  expect(dry.importsRewritten).toEqual([{ file: join(dir, "Consumer.ts"), specifiers: 1 }]);
+  expect(readFileSync(join(dir, "Consumer.ts"), "utf8")).toContain("./Comp.svelte"); // untouched in dry-run
+
+  // --write: Comp import rewritten to .pui; Plain (not migrated) untouched
+  runMigration(files, { write: true, importRoots: [dir] }, deps);
+  const consumer = readFileSync(join(dir, "Consumer.ts"), "utf8");
+  expect(consumer).toContain(`import Comp from './Comp.pui';`);
+  expect(consumer).toContain(`import Plain from './Plain.svelte';`); // conservative: unrelated import left
+  expect(existsSync(join(dir, "Comp.pui"))).toBe(true);
+  expect(existsSync(join(dir, "Comp.svelte"))).toBe(false);
+  rmSync(dir, { recursive: true, force: true });
+});

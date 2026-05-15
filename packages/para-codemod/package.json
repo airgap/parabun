@@ -1,6 +1,6 @@
 {
   "name": "@lyku/para-codemod",
-  "version": "0.0.1-pre.4",
+  "version": "0.0.1-pre.5",
   "description": "Conservative .svelte → .pui codemod. Mechanically rewrites Svelte 5 runes/lifecycle to Para dialect where unambiguous; leaves anything uncertain as raw Svelte (still valid .pui, a superset). Pre-release.",
   "type": "module",
   "main": "./src/index.ts",
