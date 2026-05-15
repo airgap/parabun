@@ -2,7 +2,7 @@
   "name": "parabun",
   "displayName": "Parabun",
   "description": "Language support for Parabun (.pts/.pjs) — Bun fork with pure functions, error chaining, pipelines, models, pattern matching, and runtime validation",
-  "version": "0.11.20",
+  "version": "0.11.21",
   "publisher": "parabun",
   "license": "MIT",
   "repository": {
@@ -22,7 +22,9 @@
     "onLanguage:parabun-ts",
     "onLanguage:parabun-tsx",
     "onLanguage:parabun-js",
-    "onLanguage:parabun-jsx"
+    "onLanguage:parabun-jsx",
+    "onLanguage:parabun-ui",
+    "onLanguage:svelte"
   ],
   "contributes": {
     "languages": [
@@ -85,6 +87,21 @@
           "dark": "./icons/pjsx.svg"
         },
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "parabun-ui",
+        "aliases": [
+          "Parabun UI",
+          "pui"
+        ],
+        "extensions": [
+          ".pui"
+        ],
+        "icon": {
+          "light": "./icons/pui.svg",
+          "dark": "./icons/pui.svg"
+        },
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
@@ -109,6 +126,41 @@
         "path": "./syntaxes/parabun-jsx.tmLanguage.json"
       },
       {
+        "language": "parabun-ui",
+        "scopeName": "source.pui",
+        "path": "./syntaxes/parabun-ui.tmLanguage.json",
+        "embeddedLanguages": {
+          "text.html.basic": "html",
+          "text.html.markdown": "markdown",
+          "text.pug": "jade",
+          "source.css": "css",
+          "source.css.less": "less",
+          "source.css.scss": "scss",
+          "source.css.postcss": "postcss",
+          "source.sass": "sass",
+          "source.stylus": "stylus",
+          "source.js": "javascript",
+          "source.ts": "typescript",
+          "source.coffee": "coffeescript",
+          "source.pts": "parabun-ts",
+          "source.pjs": "parabun-js"
+        },
+        "unbalancedBracketScopes": [
+          "keyword.operator.relational",
+          "storage.type.function.arrow",
+          "keyword.operator.bitwise.shift",
+          "meta.brace.angle",
+          "punctuation.definition.tag"
+        ],
+        "tokenTypes": {
+          "punctuation.definition.template-expression": "other",
+          "entity.name.type.instance.jsdoc": "other",
+          "entity.name.function.tagged-template": "other",
+          "meta.import string.quoted": "other",
+          "variable.other.jsdoc": "other"
+        }
+      },
+      {
         "scopeName": "inject.parabun-keywords",
         "path": "./syntaxes/parabun-inject.tmLanguage.json",
         "injectTo": [
@@ -116,6 +168,22 @@
           "source.ptsx",
           "source.pjs",
           "source.pjsx"
+        ]
+      },
+      {
+        "scopeName": "inject.parabun.pui.pts",
+        "path": "./syntaxes/parabun-ui-inject.tmLanguage.json",
+        "injectTo": [
+          "source.svelte",
+          "source.pui"
+        ]
+      },
+      {
+        "scopeName": "inject.parabun.pui.pjs",
+        "path": "./syntaxes/parabun-ui-pjs-inject.tmLanguage.json",
+        "injectTo": [
+          "source.svelte",
+          "source.pui"
         ]
       }
     ],
@@ -163,6 +231,22 @@
             "markup.italic variable.other.signal.parabun"
           ]
         }
+      },
+      {
+        "language": "parabun-ui",
+        "scopes": {
+          "class": [
+            "entity.name.tag",
+            "entity.name.type.class",
+            "support.class.component.svelte"
+          ],
+          "function.pure": [
+            "keyword.other.pure.parabun"
+          ],
+          "variable.signal": [
+            "markup.italic variable.other.signal.parabun"
+          ]
+        }
       }
     ],
     "snippets": [
@@ -198,11 +282,31 @@
           "description": "Path to the parabun binary (used to run the LSP server)"
         }
       }
+    },
+    "configurationDefaults": {
+      "[parabun-ui]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[parabun-ts]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[parabun-tsx]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[parabun-js]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[parabun-jsx]": {
+        "editor.semanticHighlighting.enabled": true
+      }
     }
   },
   "dependencies": {
+    "sass": "^1.99.0",
     "typescript": "^5.0.0",
-    "vscode-languageclient": "^9.0.1"
+    "vscode-css-languageservice": "^6.3.0",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.11"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

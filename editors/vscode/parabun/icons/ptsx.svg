@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="4" fill="#1a1a2e"/>
-  <text x="16" y="13" text-anchor="middle" font-family="monospace" font-weight="bold" font-size="7" fill="#e94560">pure</text>
-  <text x="16" y="25" text-anchor="middle" font-family="monospace" font-weight="bold" font-size="9" fill="#3282b8">.ptsx</text>
+  <rect width="32" height="32" rx="4" fill="#3178c6"/>
+  <text x="16" y="22" text-anchor="middle" font-family="ui-monospace,Menlo,Monaco,Consolas,monospace" font-weight="900" font-size="11" fill="#ffffff" letter-spacing="-0.5">TSX</text>
+  <circle cx="6.5" cy="6.5" r="4" fill="#e94560"/>
+  <text x="6.5" y="8.7" text-anchor="middle" font-family="ui-monospace,Menlo,Monaco,Consolas,monospace" font-weight="900" font-size="5.5" fill="#ffffff">p</text>
 </svg>
