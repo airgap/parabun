@@ -62,3 +62,31 @@ using r = makeResource();
   expect(out).toContain(`$effect(() => { console.log(n); })`);
   expect(out).toContain(`onDestroy(() => r.dispose?.());`);
 });
+
+test("mount with top-level await → onMount(async () => {…})", () => {
+  const out = lowerPuiReactivity(
+    `<script lang="ts">\nmount {\n  const r = await fetch(u);\n  data = await r.json();\n}\n</script>`,
+    "@lyku/para-ui", false, false,
+  );
+  expect(out).toContain("onMount(async () => {");
+  expect(out).toContain("const r = await fetch(u);");
+});
+
+test("mount with await only inside a nested handler stays sync (preserves cleanup)", () => {
+  const out = lowerPuiReactivity(
+    `<script lang="ts">\nmount {\n  el.addEventListener("x", async () => { await y(); });\n  return () => el.removeEventListener("x");\n}\n</script>`,
+    "@lyku/para-ui", false, false,
+  );
+  expect(out).toContain("onMount(() => {");
+  expect(out).not.toContain("onMount(async");
+  expect(out).toContain("return () => el.removeEventListener");
+});
+
+test("plain sync mount unchanged", () => {
+  const out = lowerPuiReactivity(
+    `<script lang="ts">\nmount { console.log("up"); }\n</script>`,
+    "@lyku/para-ui", false, false,
+  );
+  expect(out).toContain("onMount(() => {");
+  expect(out).not.toContain("async");
+});

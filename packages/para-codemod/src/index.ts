@@ -41,9 +41,10 @@ function findMatch(s: string, open: number, oc: string, cc: string): number {
 function transformScript(body: string, notes: string[]): { code: string; needsFromStore: boolean } {
   let needsFromStore = false;
 
-  // ── Rule 5: onMount(() => { … }) → mount { … } ; $effect → effect ──
-  // Sync zero-arg arrow only. async / $effect.pre / non-arrow → left raw.
-  body = rewriteCallArrowBlock(body, "onMount", "mount", notes);
+  // ── Rule 5: onMount → mount (sync OR async — `mount{}` now emits an
+  // async arrow on top-level await); $effect → effect (sync only —
+  // async effects are a footgun, leave `$effect(async…)` raw).
+  body = rewriteCallArrowBlock(body, "onMount", "mount", notes, /*allowAsync*/ true);
   body = rewriteCallArrowBlock(body, "$effect", "effect", notes);
 
   // ── Per-line passes (state/derived decls) ──
@@ -55,7 +56,8 @@ function transformScript(body: string, notes: string[]): { code: string; needsFr
     // ── Rules 3 + 4: unified `const NAME = $derived…` scan ──
     // Paren/brace-matched so single-line, multi-line, object-literal and
     // `.by` forms are all handled; bare `$store` arg → rule 4.
-    let m = line.match(/^(\s*)const\s+(\w+)\s*=\s*\$derived(\.by)?\s*\(/);
+    // `let` accepted too — `$derived` is read-only, both → `derived x`.
+    let m = line.match(/^(\s*)(?:const|let)\s+(\w+)\s*=\s*\$derived(\.by)?\s*\(/);
     if (m) {
       const indent = m[1]!;
       const name = m[2]!;
@@ -104,37 +106,35 @@ function transformScript(body: string, notes: string[]): { code: string; needsFr
       }
     }
 
-    // Rule 1/2: let x = $state(…)
-    // typed via generic: let x = $state<T>(v)  → signal x: T = v
-    m = line.match(/^(\s*)let\s+(\w+)\s*=\s*\$state<([^>]+)>\((.*)\)\s*;?\s*$/);
-    if (m && balancedParens(m[4] ?? "")) {
-      const v = (m[4] ?? "").trim();
-      out.push(
-        v ? `${m[1]}signal ${m[2]}: ${m[3]} = ${v};` : `${m[1]}signal ${m[2]}: ${m[3]} | undefined = undefined;`,
-      );
-      notes.push(`rule1/2: let ${m[2]} = $state<${m[3]}>(…) → signal`);
-      continue;
-    }
-    // explicit annotation: let x: T = $state(v)
-    m = line.match(/^(\s*)let\s+(\w+)\s*:\s*([^=]+?)\s*=\s*\$state\((.*)\)\s*;?\s*$/);
-    if (m && balancedParens(m[4] ?? "")) {
-      const v = (m[4] ?? "").trim();
-      const t = m[3]!.trim();
-      out.push(
-        v
-          ? `${m[1]}signal ${m[2]}: ${t} = ${v};`
-          : `${m[1]}signal ${m[2]}: ${/\bundefined\b/.test(t) ? t : `${t} | undefined`} = undefined;`,
-      );
-      notes.push(`rule1/2: let ${m[2]}: ${t} = $state(…) → signal`);
-      continue;
-    }
-    // bare: let x = $state(v)  /  let x = $state()
-    m = line.match(/^(\s*)let\s+(\w+)\s*=\s*\$state\((.*)\)\s*;?\s*$/);
-    if (m && balancedParens(m[3] ?? "")) {
-      const v = (m[3] ?? "").trim();
-      out.push(v ? `${m[1]}signal ${m[2]} = ${v};` : `${m[1]}signal ${m[2]} = undefined;`);
-      notes.push(`rule1/2: let ${m[2]} = $state(…) → signal`);
-      continue;
+    // ── Rule 1/2: unified `let NAME[: T] = $state[<G>](…)` scan ──
+    // Paren-matched so single-line, multi-line and object/array inits
+    // all convert; optional `<Generic>` and `: Annotation` preserved;
+    // empty $state() → `= undefined` (annotated as `T | undefined`).
+    m = line.match(/^(\s*)let\s+(\w+)\s*(?::\s*([^=]+?)\s*)?=\s*\$state\s*(<[^>]+>)?\s*\(/);
+    if (m) {
+      const indent = m[1]!;
+      const name = m[2]!;
+      const annot = m[3]?.trim();
+      const generic = m[4] ? m[4].slice(1, -1).trim() : undefined;
+      const joined = lines.slice(i).join("\n");
+      const openParen = joined.indexOf("(", joined.indexOf("$state"));
+      const closeParen = findMatch(joined, openParen, "(", ")");
+      if (closeParen !== -1) {
+        const v = joined.slice(openParen + 1, closeParen).trim();
+        const consumed = joined.slice(0, closeParen).split("\n").length;
+        const T = annot ?? generic;
+        let outLine: string;
+        if (v) {
+          outLine = `${indent}signal ${name}${T ? `: ${T}` : ""} = ${v};`;
+        } else {
+          const ut = T ? (/\bundefined\b/.test(T) ? T : `${T} | undefined`) : undefined;
+          outLine = `${indent}signal ${name}${ut ? `: ${ut}` : ""} = undefined;`;
+        }
+        out.push(outLine);
+        i += consumed - 1;
+        notes.push(`rule1/2: let ${name} = $state(…) → signal ${name}`);
+        continue;
+      }
     }
 
     out.push(line);
@@ -160,12 +160,24 @@ function transformScript(body: string, notes: string[]): { code: string; needsFr
   return { code: body, needsFromStore };
 }
 
-function rewriteCallArrowBlock(src: string, callName: string, keyword: string, notes: string[]): string {
-  // callName(() => { BODY })  → keyword { BODY }   (sync, zero-arg arrow only)
+function rewriteCallArrowBlock(
+  src: string,
+  callName: string,
+  keyword: string,
+  notes: string[],
+  allowAsync = false,
+): string {
+  // callName(() => { BODY }) → keyword { BODY }. Zero-arg arrow only.
+  // `allowAsync`: also match `callName(async () => {…})` — safe ONLY for
+  // onMount (the `mount` keyword now emits an async arrow when its body
+  // has a top-level await; Svelte async-onMount can't return a cleanup
+  // anyway). NOT enabled for $effect (async effects are a footgun and
+  // `effect{}` is sync — leave `$effect(async …)` raw).
   let out = "";
   let i = 0;
   const esc = callName.replace(/[$]/g, "\\$");
-  const re = new RegExp(`(^|[^\\w$.])${esc}\\s*\\(\\s*\\(\\s*\\)\\s*=>\\s*\\{`, "g");
+  const asyncPart = allowAsync ? "(?:async\\s+)?" : "";
+  const re = new RegExp(`(^|[^\\w$.])${esc}\\s*\\(\\s*${asyncPart}\\(\\s*\\)\\s*=>\\s*\\{`, "g");
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const pre = m[1] ?? "";

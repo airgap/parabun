@@ -101,6 +101,52 @@ const HAS_BUN_TRANSPILER = typeof (globalThis as { Bun?: { Transpiler?: unknown 
 // Brace-aware scan: given the offset of an opening `{`, return the offset
 // just AFTER its matching `}`. Skips braces inside strings, templates, and
 // line/block comments. Returns -1 if unmatched.
+// True iff `body` contains an `await` keyword at bracket-depth 0 (i.e.
+// the mount block's own top level, not inside a nested fn/arrow/call).
+// Skips strings, template literals, and comments so an `await` inside
+// one of those doesn't force an async arrow. Conservative-correct: a
+// false negative just keeps a sync arrow (and a genuine top-level await
+// would then be a compile error the author sees immediately); a false
+// positive (async when sync would do) only matters if the body returns
+// a cleanup — and a body with a real top-level await can't, by JS +
+// Svelte semantics.
+export function hasTopLevelAwait(body: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === "/" && body[i + 1] === "/") {
+      i = body.indexOf("\n", i);
+      if (i === -1) break;
+      continue;
+    }
+    if (c === "/" && body[i + 1] === "*") {
+      const e = body.indexOf("*/", i + 2);
+      i = e === -1 ? body.length : e + 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      i++;
+      while (i < body.length && body[i] !== c) {
+        if (body[i] === "\\") i++;
+        i++;
+      }
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (
+      depth === 0 &&
+      c === "a" &&
+      body.slice(i, i + 5) === "await" &&
+      !/[\w$]/.test(body[i - 1] ?? "") &&
+      !/[\w$]/.test(body[i + 5] ?? "")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function findMatchingBrace(source: string, openOffset: number): number {
   let depth = 1;
   let i = openOffset + 1;
@@ -179,7 +225,14 @@ function lowerMountBlocks(source: string): { code: string; needsOnMount: boolean
     if (braceEnd === -1) continue;
     out += source.slice(i, kwStart);
     const body = source.slice(braceStart + 1, braceEnd - 1);
-    out += `onMount(() => {${body}})`;
+    // Emit an async arrow iff the body has a TOP-LEVEL `await` (depth-0,
+    // outside any nested fn/arrow). `await` in a nested handler does NOT
+    // force async — that would silently drop a top-level cleanup return.
+    // A body with a real top-level await can't have had a sync cleanup
+    // anyway (sync+await is a syntax error; async onMount can't return
+    // cleanup — Svelte semantics), so this is conservative-correct.
+    const asyncKw = hasTopLevelAwait(body) ? "async " : "";
+    out += `onMount(${asyncKw}() => {${body}})`;
     needs = true;
     i = braceEnd;
     re.lastIndex = braceEnd;

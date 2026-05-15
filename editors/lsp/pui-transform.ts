@@ -29,7 +29,7 @@ import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell
 // editor's inline/bridge decision is structurally identical to the build
 // path's. Resolves to para-preprocess src via the `bun` export condition
 // (esbuild-pui-transform bundles it; direct bun runs honor it too).
-import { buildEscapeChecker } from "@lyku/para-preprocess";
+import { buildEscapeChecker, hasTopLevelAwait } from "@lyku/para-preprocess";
 
 const MagicString: typeof import("magic-string").default = (MagicStringNS as any).default ?? (MagicStringNS as any);
 
@@ -138,7 +138,10 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         const braceStart = bodyStart + re.lastIndex - 1;
         const braceEnd = findMatchingBrace(raw, braceStart);
         if (braceEnd === -1) continue;
-        repl(kwStart, braceStart + 1, "onMount(() => {");
+        // Async iff top-level await — shared predicate w/ the build path
+        // (structural parity, like buildEscapeChecker; no byte-mirror).
+        const asyncKw = hasTopLevelAwait(raw.slice(braceStart + 1, braceEnd - 1)) ? "async " : "";
+        repl(kwStart, braceStart + 1, `onMount(${asyncKw}() => {`);
         repl(braceEnd - 1, braceEnd, "})");
         svelteImports.add("onMount");
         re.lastIndex = braceEnd - bodyStart;
