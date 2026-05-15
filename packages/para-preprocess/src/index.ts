@@ -28,6 +28,17 @@ export type ParabunPreprocessOptions = {
    *   import specifier.
    */
   runtime?: "@lyku/para-ui" | "svelte";
+  /**
+   * Emit the dev/HMR `signal` bridge form: each `signal x = …` becomes
+   * `import.meta.hot ? hmrSignal("<module>::x", () => signal(…)) :
+   * signal(…)`. On a vite HMR module re-eval the registry returns the
+   * SAME signal instance, so its current value + subscribers survive the
+   * reload (component state doesn't reset on save). No-op in prod
+   * (import.meta.hot is undefined → plain signal()). Off by default; the
+   * editor/LSP path leaves it off so the type-relevant lowering stays
+   * byte-identical (pui-transform parity).
+   */
+  hmr?: boolean;
 };
 
 const DEFAULT_LANGS = ["parabun", "pts", "pjs"];
@@ -246,6 +257,7 @@ export function lowerPuiReactivity(
   source: string,
   runtime: "@lyku/para-ui" | "svelte" = "@lyku/para-ui",
   linePreserving = false,
+  hmr = false,
 ): string {
   // Effect blocks first (brace-aware) so subsequent regex passes don't
   // accidentally chew the rewritten `$effect(() => {...})` body.
@@ -286,8 +298,17 @@ export function lowerPuiReactivity(
     // (which then drives DOM updates the normal way). The cleanup
     // returned by .subscribe() runs on effect teardown (component
     // unmount) so the subscription doesn't leak.
+    // In `hmr` mode the signal is allocated through the globalThis
+    // registry keyed by module-url + name, so a vite HMR re-eval of
+    // this module returns the SAME instance — current value + existing
+    // subscribers survive the reload instead of resetting to `expr`.
+    // Gated on `import.meta.hot` so a prod build (no hot) takes the
+    // plain `signal(expr)` arm and never touches the registry.
+    const make = hmr
+      ? `(import.meta.hot ? hmrSignal(import.meta.url + "::${name}", () => signal(${expr})) : signal(${expr}))`
+      : `signal(${expr})`;
     lines[i] =
-      `${indent}const __sig_${name} = signal(${expr}); ` +
+      `${indent}const __sig_${name} = ${make}; ` +
       `let ${name} = $state(__sig_${name}.peek()); ` +
       `$effect.pre(() => __sig_${name}.subscribe((__v: typeof ${name}) => { ${name} = __v; }));`;
   }
@@ -316,7 +337,8 @@ export function lowerPuiReactivity(
   // Svelte compiler diagnostics will be offset by 1.
   const importSep = linePreserving ? " " : "\n";
   if (signalNames.size > 0 && !/from\s+['"]@para\/signals['"]/.test(result)) {
-    result = `import { signal } from "@lyku/para-signals";${importSep}` + result;
+    const names = hmr ? "signal, hmrSignal" : "signal";
+    result = `import { ${names} } from "@lyku/para-signals";${importSep}` + result;
   }
 
   // Inject extra runtime imports (setContext/getContext from provide/inject,
@@ -342,6 +364,11 @@ export function lowerPuiReactivity(
 export function parabunPreprocess(opts: ParabunPreprocessOptions = {}): PreprocessorGroup {
   const langs = new Set(opts.langs ?? DEFAULT_LANGS);
   const runtime: "@lyku/para-ui" | "svelte" = opts.runtime ?? "@lyku/para-ui";
+  // Default the HMR bridge form on in dev, off in prod. vite sets
+  // NODE_ENV=development for the dev server and production for `build`,
+  // so signal identity survives save-reload in dev without bloating the
+  // prod bundle. Still double-guarded at runtime by `import.meta.hot`.
+  const hmr = opts.hmr ?? process.env.NODE_ENV !== "production";
   const transpilerCache = new Map<string, Bun.Transpiler>();
 
   const getTranspiler = (loader: "ts" | "tsx" | "jsx") => {
@@ -374,7 +401,7 @@ export function parabunPreprocess(opts: ParabunPreprocessOptions = {}): Preproce
       // After this pass the content is standard TS, so parabun's own
       // transpile (when running under Bun) sees nothing parabun-specific
       // to transform — it's effectively a passthrough for the bridge form.
-      const preprocessed = isPui ? lowerPuiReactivity(content, runtime) : content;
+      const preprocessed = isPui ? lowerPuiReactivity(content, runtime, false, hmr) : content;
       // Svelte's preprocess loop short-circuits with no_change() when
       // `processed.code === content && !processed.map` (see
       // svelte/compiler/preprocess/index.js process_single_tag) — which

@@ -171,6 +171,25 @@ export function signal(value) {
   return new WritableSignal(value);
 }
 
+/**
+ * HMR-stable signal. Keyed by a module-stable string (e.g.
+ * `import.meta.url + "::name"`), the FIRST call creates the signal via
+ * `make()`; subsequent calls — after a vite/HMR module re-evaluation —
+ * return the SAME instance, preserving its current value and existing
+ * subscribers. The registry lives on globalThis so it survives the
+ * module reload. Emitted by the .pui lowering's dev/HMR bridge form
+ * (gated on `import.meta.hot`); prod uses plain `signal()`.
+ */
+export function hmrSignal(key, make) {
+  const reg = (globalThis.__PARA_HMR_SIGNALS ||= new Map());
+  let s = reg.get(key);
+  if (s === undefined) {
+    s = make();
+    reg.set(key, s);
+  }
+  return s;
+}
+
 export function derived(compute) {
   return new DerivedSignal(compute);
 }
