@@ -289,7 +289,7 @@ export function lowerPuiReactivity(
     lines[i] =
       `${indent}const __sig_${name} = signal(${expr}); ` +
       `let ${name} = $state(__sig_${name}.peek()); ` +
-      `$effect.pre(() => __sig_${name}.subscribe((__v) => { ${name} = __v; }));`;
+      `$effect.pre(() => __sig_${name}.subscribe((__v: typeof ${name}) => { ${name} = __v; }));`;
   }
 
   // Rewrite simple `NAME = EXPR;` assignment lines into `__sig_NAME.set(EXPR);`

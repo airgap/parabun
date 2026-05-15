@@ -1937,6 +1937,12 @@ function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
       const all = [...tsService.getSyntacticDiagnostics(fileName), ...tsService.getSemanticDiagnostics(fileName)];
       for (const diag of all) {
         if (diag.start === undefined || diag.length === undefined) continue;
+        // Drop diagnostics about bridge-lowering internals (__sig_*, __v):
+        // they're synthetic, not user code. The `__v` implicit-any is fixed
+        // at the source (typed param) but guard defensively for any other
+        // scaffolding symbol.
+        const dm = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
+        if (/\b__sig_[A-Za-z_$]|\b__v\b/.test(dm)) continue;
         const gs = offsetToPosition(t.code, diag.start);
         const ge = offsetToPosition(t.code, diag.start + diag.length);
         const os = t.toOriginal(gs.line, gs.character);
@@ -1948,7 +1954,7 @@ function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
           severity:
             diag.category === ts.DiagnosticCategory.Error ? 1 : diag.category === ts.DiagnosticCategory.Warning ? 2 : 3,
           source: "ts",
-          message: `TS${diag.code}: ${ts.flattenDiagnosticMessageText(diag.messageText, "\n")}`,
+          message: `TS${diag.code}: ${dm}`,
         });
       }
     } catch (e: any) {
@@ -2713,7 +2719,12 @@ function getHoverResult(
     try {
       const info = tsService.getQuickInfoAtPosition(fileName, offset);
       if (info) {
-        const display = ts.displayPartsToString(info.displayParts);
+        let display = ts.displayPartsToString(info.displayParts);
+        // .pui: `signal x = …` lowers to a backing `__sig_x`. Until the
+        // lowering is column-mapped (LYK-880 Inc 4a), a hover can land on
+        // `__sig_x`; present it under the user's name so it doesn't leak
+        // the bridge internal.
+        if (isPuiUri(uri)) display = display.replace(/\b__sig_([A-Za-z_$][\w$]*)/g, "$1");
         const docs = ts.displayPartsToString(info.documentation ?? []);
         const tags = (info.tags ?? [])
           .map(tag => {
