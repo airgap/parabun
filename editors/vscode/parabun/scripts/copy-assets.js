@@ -62,6 +62,27 @@ fs.rmSync(tsDest, { recursive: true, force: true });
 fs.mkdirSync(path.dirname(tsDest), { recursive: true });
 fs.cpSync(tsSrc, tsDest, { recursive: true, dereference: true });
 
+// Bundle vscode-css-languageservice + dart-sass + their transitive deps so
+// parabun-LSP can validate `<style lang="...">` blocks in `.pui` files.
+// vscode-css-languageservice handles css/scss/less; dart-sass handles
+// indented sass (which the css service can't parse).
+const styleDeps = [
+  "vscode-css-languageservice",
+  "vscode-languageserver-textdocument",
+  "vscode-languageserver-types",
+  "vscode-uri",
+  "sass",
+  "immutable",
+  "source-map-js",
+];
+for (const dep of styleDeps) {
+  const src = path.resolve(root, "node_modules", dep);
+  const dest = path.join(root, "server/node_modules", dep);
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.cpSync(src, dest, { recursive: true, dereference: true });
+}
+
 // Copy TS plugin (built output only — no symlink, no npm dep)
 const pluginSrc = path.resolve(root, "../../ts-plugin");
 const pluginDest = path.join(root, "node_modules/parabun-ts-plugin");

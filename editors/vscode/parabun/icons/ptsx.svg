@@ -1,9 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="4" fill="#3178c6"/>
-  <g font-family="ui-monospace,Menlo,Monaco,Consolas,monospace" font-weight="900" font-size="13" fill="#ffffff" text-anchor="middle">
-    <text x="11" y="15">P</text>
-    <text x="22" y="15">T</text>
-    <text x="11" y="28">S</text>
-    <text x="22" y="28">X</text>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-weight="800" fill="#3178c6">
+    <text x="14" y="23" text-anchor="middle" font-size="18" letter-spacing="-0.5">PT</text>
+    <text x="28" y="11" text-anchor="middle" font-size="9">x</text>
   </g>
 </svg>

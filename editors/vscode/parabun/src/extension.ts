@@ -355,7 +355,13 @@ function findFunctionBodyStart(text: string, from: number): number {
 
 function isParabunEditor(editor: vscode.TextEditor): boolean {
   const lang = editor.document.languageId;
-  return lang === "parabun-ts" || lang === "parabun-tsx" || lang === "parabun-js" || lang === "parabun-jsx";
+  return (
+    lang === "parabun-ts" ||
+    lang === "parabun-tsx" ||
+    lang === "parabun-js" ||
+    lang === "parabun-jsx" ||
+    lang === "parabun-ui"
+  );
 }
 
 function updatePureDecorations(editor: vscode.TextEditor) {
@@ -560,9 +566,20 @@ export function activate(context: vscode.ExtensionContext) {
       { scheme: "file", language: "parabun-tsx" },
       { scheme: "file", language: "parabun-js" },
       { scheme: "file", language: "parabun-jsx" },
+      // .svelte files with `<script lang="pts|parabun|pjs">` blocks get
+      // parabun-LSP diagnostics on the script regions; the rest of the file
+      // (template/CSS) is left for the Svelte LSP (if installed) to handle.
+      // Both LSPs co-exist on the same document; each only publishes
+      // diagnostics for the parts it understands.
+      { scheme: "file", language: "svelte" },
+      // .pui files are claimed exclusively by parabun-LSP. The file
+      // extension is the marker; bare `<script>` and `<script lang="ts">` are
+      // also treated as parabun-flavored. svelte-LSP does NOT claim .pui
+      // (different language ID), so there's no diagnostic duplication.
+      { scheme: "file", language: "parabun-ui" },
     ],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{pts,ptsx,pjs,pjsx}"),
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{pts,ptsx,pjs,pjsx,svelte,pui}"),
     },
   };
 
