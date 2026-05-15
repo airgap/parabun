@@ -4,7 +4,7 @@
 	"license": "MIT",
 	"version": "0.0.1-pre.0",
 	"publishConfig": {
-		"registry": "https://npm.pkg.github.com"
+		"access": "public"
 	},
 	"type": "module",
 	"types": "./types/index.d.ts",

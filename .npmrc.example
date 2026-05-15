@@ -1,5 +1,0 @@
-; Para Packages publish to GitHub Packages on the `para` GH user/org.
-; Authentication: a Personal Access Token (classic) with `write:packages`
-; scope; expose it as the env var ${GITHUB_TOKEN} when running `npm publish`.
-@para:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
