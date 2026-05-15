@@ -158,6 +158,36 @@ function lowerEffectBlocks(source: string): string {
   return out;
 }
 
+function lowerMountBlocks(source: string): { code: string; needsOnMount: boolean } {
+  // `mount { body }` → `onMount(() => { body })`. Brace-aware (same
+  // matcher shape as lowerEffectBlocks) so nested braces / object
+  // literals / a returned cleanup arrow don't terminate early. The
+  // `[^\w$.]` lead guard means `onMount {` (preceding char `n` is
+  // `\w`) never re-matches, so this is safe to run alongside a
+  // hand-authored `onMount(...)`. Unlike `effect {}` (a rune, no
+  // import) this needs `onMount` from the runtime — reported via
+  // needsOnMount so the import-injection pass can add it.
+  let out = "";
+  let i = 0;
+  let needs = false;
+  const re = /(^|[^\w$.])mount\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const kwStart = m.index + (m[1] ? m[1].length : 0);
+    const braceStart = re.lastIndex - 1; // position of `{`
+    const braceEnd = findMatchingBrace(source, braceStart);
+    if (braceEnd === -1) continue;
+    out += source.slice(i, kwStart);
+    const body = source.slice(braceStart + 1, braceEnd - 1);
+    out += `onMount(() => {${body}})`;
+    needs = true;
+    i = braceEnd;
+    re.lastIndex = braceEnd;
+  }
+  out += source.slice(i);
+  return { code: out, needsOnMount: needs };
+}
+
 function lowerDerivedDecls(source: string): string {
   // `derived NAME = EXPR` → `const NAME = $derived(EXPR)`. Simple
   // single-line form only for v1; multi-line expression bodies need a
@@ -238,7 +268,7 @@ function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolea
 
 /**
  * Lower a `.pui` `<script>` body's Para reactive keywords (signal / derived /
- * effect / prop / provide / inject / using) to standard Svelte 5 runes.
+ * effect / mount / prop / provide / inject / using) to standard Svelte 5 runes.
  * Synchronous and side-effect-free — safe to call from a TS language-service
  * plugin or any tooling that needs the type-relevant transform without the
  * full async PreprocessorGroup. The operator desugars (`..!`, `|>`, `pure`)
@@ -262,6 +292,8 @@ export function lowerPuiReactivity(
   // Effect blocks first (brace-aware) so subsequent regex passes don't
   // accidentally chew the rewritten `$effect(() => {...})` body.
   source = lowerEffectBlocks(source);
+  const mountResult = lowerMountBlocks(source);
+  source = mountResult.code;
   source = lowerDerivedDecls(source);
   source = lowerPropDecls(source);
 
@@ -275,6 +307,7 @@ export function lowerPuiReactivity(
   // contributes setContext/getContext; using contributes onDestroy.
   const svelteImports = new Set<string>(provideInject.imports);
   if (usingResult.needsOnDestroy) svelteImports.add("onDestroy");
+  if (mountResult.needsOnMount) svelteImports.add("onMount");
 
   const signalNames = new Set<string>();
   const lines = source.split("\n");

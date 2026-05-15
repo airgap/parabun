@@ -115,6 +115,25 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
       }
     }
 
+    // ── mount { body } → onMount(() => { body }) ────────────────────────
+    // Same opener/closer-only rewrite as effect; body stays mapped. Needs
+    // the `onMount` runtime import (added below). `[^\w$.]` lead guard
+    // means a hand-authored `onMount {` never re-matches.
+    {
+      const re = /(^|[^\w$.])mount\s*\{/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        const kwStart = bodyStart + m.index + (m[1] ? m[1].length : 0);
+        const braceStart = bodyStart + re.lastIndex - 1;
+        const braceEnd = findMatchingBrace(raw, braceStart);
+        if (braceEnd === -1) continue;
+        repl(kwStart, braceStart + 1, "onMount(() => {");
+        repl(braceEnd - 1, braceEnd, "})");
+        svelteImports.add("onMount");
+        re.lastIndex = braceEnd - bodyStart;
+      }
+    }
+
     // Per-line passes. Recompute line offsets against raw (effect overwrite
     // doesn't move line starts: opener/closer lines keep their newline).
     const lineStarts: number[] = [bodyStart];

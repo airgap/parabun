@@ -197,6 +197,14 @@ export const LANGUAGE_SURFACE: LanguageEntry[] = [
     scopes: { "1": "keyword.control.effect.parabun" },
     lspAllowlist: true,
   },
+  {
+    id: "mount-block",
+    doc: "mount { ... } — once-after-mount lifecycle block (lowers to onMount())",
+    kind: "keyword",
+    pattern: String.raw`\b(mount)\b(?=\s*\{)`,
+    scopes: { "1": "keyword.control.mount.parabun" },
+    lspAllowlist: true,
+  },
 
   // ─── `when` edge-triggered handlers ────────────────────────────────
   {
@@ -556,6 +564,7 @@ export const SPLASH_PARA_KEYWORDS: string[] = [
   "signal",
   "derived",
   "effect",
+  "mount",
   "when",
   "arena",
   "memo",
@@ -622,6 +631,7 @@ export const LSP_ALLOWLIST_TOKENS: string[] = [
   "signal",
   "derived",
   "effect",
+  "mount",
   "when",
   "arena",
   "memo",

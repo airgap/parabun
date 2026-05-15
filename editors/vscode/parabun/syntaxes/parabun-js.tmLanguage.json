@@ -16,6 +16,9 @@
       "include": "#parabun-effect"
     },
     {
+      "include": "#parabun-mount"
+    },
+    {
       "include": "#parabun-when"
     },
     {
@@ -159,6 +162,19 @@
           "captures": {
             "1": {
               "name": "keyword.control.effect.parabun"
+            }
+          }
+        }
+      ]
+    },
+    "parabun-mount": {
+      "patterns": [
+        {
+          "comment": "mount { ... } — once-after-mount lifecycle block",
+          "match": "\\b(mount)\\b(?=\\s*\\{)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.mount.parabun"
             }
           }
         }

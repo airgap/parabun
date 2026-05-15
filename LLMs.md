@@ -6,7 +6,8 @@
 
 - `.pts` — **Para** (superset of `.ts`). The canonical surface — what the docs and editor tooling lead with.
 - `.pjs` — same extensions over plain JavaScript (superset of `.js`). Supported, un-branded; the marketing focuses on `.pts`.
-- Standard `.ts`/`.js` files are unaffected.
+- `.pui` — **Para UI component**. A `.svelte` superset that parabun-LSP claims exclusively (the Svelte LSP is *not* used). The file extension is the parabun marker, so every `<script>` block — bare, `lang="ts"`, or `lang="pts"` — engages the parabun pipeline. Roadmap: umbrella [LYK-829](https://linear.app/lyku/issue/LYK-829) with phases 0-6. See "Para UI components (`.pui`)" section below.
+- Standard `.ts`/`.js`/`.svelte` files are unaffected.
 
 ## Para Language Extensions
 
@@ -522,6 +523,70 @@ const result = await fetch('/api') ..! console.error ..& cleanup;
 const output = data |> transform ..! handler;
 // → transform(data).catch(handler);
 ```
+
+## Para UI components (`.pui`)
+
+Para UI component format. A `.svelte` superset that parabun-LSP owns exclusively — the Svelte VSCode extension's language server is *not* used for `.pui` files. The file extension is the parabun marker; every `<script>` block engages the parabun pipeline regardless of `lang`.
+
+### File model
+
+```svelte
+<!-- foo.pui -->
+<script lang="pts">
+    const out: number[] = users |> map(u => u.id) |> sort
+</script>
+
+<p>{out}</p>
+```
+
+All three of these forms inside a `.pui` engage parabun:
+- `<script lang="pts">` (canonical)
+- `<script lang="ts">` (engages because the file extension is the marker)
+- `<script>` (bare — same reason)
+
+Inside `.svelte` files, only explicit `lang="pts"`/`lang="parabun"`/`lang="pjs"` engages parabun. The Svelte LSP handles everything else in `.svelte`.
+
+### Why a new extension
+
+`svelte-language-server` hardcodes `ts|typescript|text/ts|text/typescript` as the only recognized TS langs (see `getScriptKindFromAttributes` in svelte-language-tools). Reading the lang attribute from raw source before any preprocessor runs means `lang="pts"` is always projected as JS unless we patch the installed extension. Rather than fight that, parabun-LSP owns `.pui` as its own language ID (`parabun-ui`) — svelte-LSP doesn't claim it, no diagnostic duplication, no patching.
+
+### Enabling `.pui` in a SvelteKit project
+
+```js
+// svelte.config.js
+const config = {
+    kit: {
+        // ...other config
+        extensions: ['.svelte', '.pui'],
+    },
+    preprocess: [parabunPreprocess(), vitePreprocess()],
+};
+```
+
+`parabunPreprocess()` detects `.pui` filenames automatically and engages on every script block. Existing `.svelte` files continue to use `lang="pts"`/etc. opt-in as before.
+
+### Migration from `.svelte` + `lang="pts"`
+
+```text
+old:  src/lib/Foo.svelte   with <script lang="pts">
+new:  src/lib/Foo.pui  with <script lang="pts"> (or lang="ts", or bare)
+```
+
+Once renamed, the build works the same. The editor experience differs:
+- Old (`.svelte` + `lang="pts"`): Svelte LSP doesn't recognize `pts` and falls back to JS-mode diagnostics on the script (TS8010 noise on type annotations); parabun-LSP also produces real diagnostics.
+- New (`.pui`): parabun-LSP is the only LSP. No svelte-LSP noise on the file. Trade-off: until the .pui roadmap completes its Phase 2+, parabun-LSP doesn't yet provide deep template-expression type-checking that svelte-LSP does for `.svelte`.
+
+### Editor support
+
+The parabun VSCode extension contributes:
+- Language ID `parabun-ui` for `.pui`
+- TextMate grammar that inherits `source.svelte` (requires the Svelte VSCode extension for syntax highlighting; falls back to plain text without it)
+- Existing parabun-script injections (pts/parabun/pjs) automatically fire inside `.pui` `<script>` blocks via the inherited `source.svelte` scope
+- parabun-LSP claims `.pui` URIs exclusively via documentSelector
+
+### Roadmap
+
+`.pui` is a multi-year buildout tracked under [LYK-829](https://linear.app/lyku/issue/LYK-829). Phase 0 (file format + minimum LSP) is what's currently usable. Later phases add script-keyword sugar (`store`/`derived`/`effect`/`mount`/`prop`/`emit`/`using`), parabun operators in template `{}` expressions, `{#match}`/`{#try}`, `pure component`, server/client split, and more — see umbrella for details.
 
 ## Architecture
 

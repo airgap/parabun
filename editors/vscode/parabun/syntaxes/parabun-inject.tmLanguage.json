@@ -131,6 +131,15 @@
       }
     },
     {
+      "comment": "mount { ... } — once-after-mount lifecycle block (lowers to onMount())",
+      "match": "\\b(mount)\\b(?=\\s*\\{)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.mount.parabun"
+        }
+      }
+    },
+    {
       "comment": "when not EXPR { ... } — fires on the negated edge",
       "match": "\\b(when)\\s+(not)\\b",
       "captures": {
