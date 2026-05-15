@@ -84,6 +84,19 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     if (start === end) ms.appendLeft(start, str);
     else ms.overwrite(start, end, str);
   };
+  // LYK-886: mirrors lowerPuiReactivity's `escapes` byte-for-byte. MUST
+  // reach an identical verdict or the editor's type-lowering diverges from
+  // the runtime lowering and byte-parity breaks. Matches both keyword
+  // (`provide`/`inject` — seen raw here) and desugared (`setContext`/
+  // `getContext` — what the build path sees) forms so the verdict is the
+  // same whichever a path observes. `body` is the current <script> slice.
+  const puiEscapes = (name: string, body: string): boolean => {
+    if (/\bsignalOf\b/.test(body)) return true;
+    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b(?:setContext|getContext|provide|inject)\\b[^\\n]*\\b${n}\\b`).test(body)) return true;
+    if (new RegExp(`\\bexport\\b[^\\n]*\\b${n}\\b`).test(body)) return true;
+    return false;
+  };
   const signalNames = new Set<string>();
   const svelteImports = new Set<string>();
   let needsSignalImport = false;
@@ -196,6 +209,14 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         const indent = sg[1]!;
         const name = sg[2]!;
         const expr = sg[3]!;
+        // LYK-886: provably component-local → plain `$state`, no bridge.
+        // NOT added to signalNames (so the __sig_ assignment-rewrite +
+        // signal import are skipped for this name), matching the build
+        // path with linePreserving=true.
+        if (!puiEscapes(name, body)) {
+          repl(ls, le, `${indent}let ${name} = $state(${expr});`);
+          continue;
+        }
         signalNames.add(name);
         needsSignalImport = true;
         repl(

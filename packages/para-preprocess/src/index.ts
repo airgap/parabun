@@ -309,6 +309,43 @@ export function lowerPuiReactivity(
   if (usingResult.needsOnDestroy) svelteImports.add("onDestroy");
   if (mountResult.needsOnMount) svelteImports.add("onMount");
 
+  // LYK-886 escape analysis. A `signal x` only needs the para bridge
+  // (extra para signal + cross-system subscribe effect) if external para
+  // code can observe it via `signalOf`. When `x` provably never escapes
+  // the component we lower it to a plain `$state` cell instead — measured
+  // ~1.84× faster + ~2.3× less heap at whole-component scale because it
+  // deletes a whole signal + a whole effect per local cell (it removes
+  // work, unlike the rejected LYK-884 backend-swap which washed out).
+  //
+  // CONSERVATIVE BY DESIGN: the fallback is the proven-correct bridge, so
+  // an over-eager inline would be a correctness bug (external para
+  // observers would silently stop seeing updates). We only inline when
+  // certain. v1 escape vectors (keep the bridge if ANY hold):
+  //   - `signalOf` appears anywhere in the script. Coarse file-level gate
+  //     — signalOf in a .pui is the rare escape hatch; when present the
+  //     whole file keeps today's behavior (zero regression). Per-name
+  //     precision is a documented later refinement.
+  //   - the name flows into component context (`setContext(`/`getContext(`
+  //     — provide/inject already desugared to these by this point).
+  //   - the name appears in an `export` (belt-and-suspenders: exporting a
+  //     value isn't a para-observe, but cheap to be extra safe).
+  // NB: this predicate is mirrored byte-for-byte in editors/lsp
+  // pui-transform.ts (puiEscapes). It must reach an IDENTICAL verdict in
+  // both paths or the editor's type-lowering diverges from the runtime
+  // lowering and the byte-parity test fails. It therefore matches BOTH
+  // the keyword forms (`provide`/`inject`, which the editor path still
+  // sees raw) AND their desugared forms (`setContext`/`getContext`, which
+  // this build path has already lowered by now) — whichever a given path
+  // observes, the verdict is the same.
+  const escapeHatchPresent = /\bsignalOf\b/.test(source);
+  const escapes = (name: string): boolean => {
+    if (escapeHatchPresent) return true;
+    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b(?:setContext|getContext|provide|inject)\\b[^\\n]*\\b${n}\\b`).test(source)) return true;
+    if (new RegExp(`\\bexport\\b[^\\n]*\\b${n}\\b`).test(source)) return true;
+    return false;
+  };
+
   const signalNames = new Set<string>();
   const lines = source.split("\n");
   // Match: optional indent, "signal", whitespace, identifier, optional
@@ -323,6 +360,16 @@ export function lowerPuiReactivity(
     if (!m) continue;
     const [, indent, name, expr] = m;
     if (!name || expr === undefined) continue;
+
+    // LYK-886: provably component-local → plain `$state`, no para bridge.
+    // Assignments stay as-is (`$state` is natively reactive), so this name
+    // is deliberately NOT added to signalNames (which drives the
+    // `__sig_NAME.set()` rewrite + the @lyku/para-signals import).
+    if (!escapes(name)) {
+      lines[i] = `${indent}let ${name} = $state(${expr});`;
+      continue;
+    }
+
     signalNames.add(name);
     // Bridge form: a para signal lives alongside a $state cell. The
     // $effect.pre subscribes ACROSS the systems — para's .subscribe()

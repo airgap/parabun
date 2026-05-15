@@ -2,9 +2,14 @@ import { test, expect } from "bun:test";
 import { lowerPuiReactivity } from "../src/index.ts";
 import { signal, hmrSignal } from "../../para-signals/src/index.js";
 
+// `count` is exported → it escapes the component, so it keeps the para
+// bridge (and thus the HMR registry form). LYK-886 only inlines provably
+// component-local signals to plain `$state`; HMR identity-preservation is
+// meaningless for those (a local cell resetting on reload is normal
+// component-state behavior, exactly like Svelte's own `$state`).
 const SRC = `<script lang="ts">
 signal count = 0;
-count = 5;
+export { count };
 </script>
 <button>{count}</button>`;
 
@@ -14,7 +19,7 @@ test("hmr=false is byte-identical to the pre-F2.2 bridge form", () => {
       `<script lang="ts">\n` +
       `const __sig_count = signal(0); let count = $state(__sig_count.peek()); ` +
       `$effect.pre(() => __sig_count.subscribe((__v: typeof count) => { count = __v; }));\n` +
-      `__sig_count.set(5);\n` +
+      `export { count };\n` +
       `</script>\n` +
       `<button>{count}</button>`,
   );
