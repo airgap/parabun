@@ -1189,6 +1189,31 @@ function getPuiTransform(uri: string, raw: string): any | undefined {
   }
 }
 
+// LYK-880 Slice B Inc 3: resolve an LSP (line,character) in a source doc to
+// the TS-service { fileName, offset } to query, abstracting the .pui
+// (svelte2tsx + sourcemap) vs .pts/.svelte (line-heuristic) split. `pui`
+// is set when the doc is a .pui so callers can map result spans back via
+// pui.toOriginal.
+function resolveTsQuery(
+  uri: string,
+  content: string,
+  line: number,
+  character: number,
+): { fileName: string; offset: number; pui?: any } {
+  const fileName = toTsPath(uriToPath(uri));
+  if (isPuiUri(uri)) {
+    const raw = svelteRawTexts.get(uri);
+    const t = raw !== undefined ? getPuiTransform(uri, raw) : undefined;
+    if (t) {
+      const g = t.toGenerated(line, character) ?? { line, character: 0 };
+      return { fileName, offset: positionToOffset(t.code, g.line, g.character), pui: t };
+    }
+  }
+  const transformed = transformParabunToTS(content);
+  const mp = mapPositionToTransformed(content, transformed, line, character);
+  return { fileName, offset: positionToOffset(transformed, mp.line, mp.character) };
+}
+
 function getCssService(lang: "css" | "scss" | "less"): any | undefined {
   if (cssLsp === undefined) {
     try {
@@ -2683,10 +2708,7 @@ function getHoverResult(
 
   // TypeScript hover
   if (tsService && ts) {
-    const fileName = toTsPath(uriToPath(uri));
-    const transformed = transformParabunToTS(content);
-    const mappedPos = mapPositionToTransformed(content, transformed, line, character);
-    const offset = positionToOffset(transformed, mappedPos.line, mappedPos.character);
+    const { fileName, offset } = resolveTsQuery(uri, content, line, character);
 
     try {
       const info = tsService.getQuickInfoAtPosition(fileName, offset);
@@ -3214,10 +3236,7 @@ function findWordBounds(line: string, col: number): { start: number; end: number
 function getDefinition(uri: string, content: string, line: number, character: number): any[] | null {
   if (!tsService || !ts) return null;
 
-  const fileName = toTsPath(uriToPath(uri));
-  const transformed = transformParabunToTS(content);
-  const mappedPos = mapPositionToTransformed(content, transformed, line, character);
-  const offset = positionToOffset(transformed, mappedPos.line, mappedPos.character);
+  const { fileName, offset } = resolveTsQuery(uri, content, line, character);
 
   try {
     const defs = tsService.getDefinitionAtPosition(fileName, offset);
@@ -3242,7 +3261,20 @@ function getDefinition(uri: string, content: string, line: number, character: nu
         })();
       const isParabun = /\.p(?:ts|tsx|js|jsx)$/.test(realTargetPath);
 
-      if (isParabun && origContent) {
+      if (realTargetPath.endsWith(".pui") && origContent) {
+        // Target is a .pui: def.textSpan is in svelte2tsx output; map
+        // back through that file's puiTransform sourcemap.
+        const tt = getPuiTransform(targetUri, origContent);
+        if (tt) {
+          const s = offsetToPosition(tt.code, def.textSpan.start);
+          const e = offsetToPosition(tt.code, def.textSpan.start + def.textSpan.length);
+          startPos = tt.toOriginal(s.line, s.character) ?? { line: 0, character: 0 };
+          endPos = tt.toOriginal(e.line, e.character) ?? startPos;
+        } else {
+          startPos = offsetToPosition(origContent, def.textSpan.start);
+          endPos = offsetToPosition(origContent, def.textSpan.start + def.textSpan.length);
+        }
+      } else if (isParabun && origContent) {
         const targetTransformed = transformParabunToTS(origContent);
         const tStart = offsetToPosition(targetTransformed, def.textSpan.start);
         const tEnd = offsetToPosition(targetTransformed, def.textSpan.start + def.textSpan.length);
@@ -4439,10 +4471,7 @@ function getCompletions(
   }
 
   if (tsService && ts) {
-    const fileName = toTsPath(uriToPath(uri));
-    const transformed = transformParabunToTS(content);
-    const mappedPos = mapPositionToTransformed(content, transformed, line, character);
-    const offset = positionToOffset(transformed, mappedPos.line, mappedPos.character);
+    const { fileName, offset } = resolveTsQuery(uri, content, line, character);
 
     try {
       const completions = tsService.getCompletionsAtPosition(fileName, offset, undefined);
