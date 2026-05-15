@@ -1,5 +1,5 @@
 {
-	"name": "@para/ui-workspace",
+	"name": "@lyku/para-ui-workspace",
 	"version": "0.0.0-dev",
 	"description": "Workspace root for Para's fork of Svelte. See PARA-FORK.md.",
 	"private": true,
@@ -18,7 +18,7 @@
 		"bench:debug": "NODE_ENV=production node --allow-natives-syntax --inspect-brk ./benchmarking/run.js"
 	},
 	"devDependencies": {
-		"@para/ui": "workspace:^",
+		"@lyku/para-ui": "workspace:^",
 		"@types/node": "^20.11.5",
 		"@types/picomatch": "^4.0.2",
 		"@vitest/coverage-v8": "^2.1.9",

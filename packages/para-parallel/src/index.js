@@ -14,7 +14,7 @@
 // chunks rather than N copies. Callers can supply additional
 // `Transferable`s via the `transfer` option for non-typed-array data.
 
-import { signal as makeSignal, effect as makeEffect } from "@para/signals";
+import { signal as makeSignal, effect as makeEffect } from "@lyku/para-signals";
 
 // ── Worker script, inlined as a blob URL ────────────────────────────────
 

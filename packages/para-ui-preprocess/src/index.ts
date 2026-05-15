@@ -17,17 +17,17 @@ export type ParabunPreprocessOptions = {
    * `getContext`, `onDestroy`, etc. — used by `provide`/`inject`/`using`
    * keyword lowering).
    *
-   * - `"@para/ui"` (default): targets the Para UI fork
+   * - `"@lyku/para-ui"` (default): targets the Para UI fork
    *   (packages/para-svelte/packages/svelte). Para signals run at the
    *   reactive core; `signalOf()` is available. Consumers must have
-   *   `@para/ui` resolvable (currently workspace-only — see
+   *   `@lyku/para-ui` resolvable (currently workspace-only — see
    *   PARA-FORK.md).
    * - `"svelte"`: targets unmodified Svelte from npm. The escape hatch
    *   for projects that haven't wired the fork yet. The lowering still
    *   uses `$state`/`$derived`/`$effect`; the only difference is the
    *   import specifier.
    */
-  runtime?: "@para/ui" | "svelte";
+  runtime?: "@lyku/para-ui" | "svelte";
 };
 
 const DEFAULT_LANGS = ["parabun", "pts", "pjs"];
@@ -225,7 +225,7 @@ function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolea
   return { code, needsOnDestroy: needs };
 }
 
-function lowerPuiReactivity(source: string, runtime: "@para/ui" | "svelte"): string {
+function lowerPuiReactivity(source: string, runtime: "@lyku/para-ui" | "svelte"): string {
   // Effect blocks first (brace-aware) so subsequent regex passes don't
   // accidentally chew the rewritten `$effect(() => {...})` body.
   source = lowerEffectBlocks(source);
@@ -289,21 +289,21 @@ function lowerPuiReactivity(source: string, runtime: "@para/ui" | "svelte"): str
 
   let result = lines.join("\n");
 
-  // Inject @para/signals import if any signals declared and not already
+  // Inject @lyku/para-signals import if any signals declared and not already
   // imported. Prepended as its own line — adds 1 to all subsequent line
   // numbers from the user's view, which is acceptable for v1; downstream
   // Svelte compiler diagnostics will be offset by 1.
   if (signalNames.size > 0 && !/from\s+['"]@para\/signals['"]/.test(result)) {
-    result = `import { signal } from "@para/signals";\n` + result;
+    result = `import { signal } from "@lyku/para-signals";\n` + result;
   }
 
   // Inject extra runtime imports (setContext/getContext from provide/inject,
   // onDestroy from `using`). Dedup against either runtime spelling so a hand-
-  // authored `import {...} from "@para/ui"` already in the script doesn't get
+  // authored `import {...} from "@lyku/para-ui"` already in the script doesn't get
   // shadowed by an emitted `from "svelte"` and vice versa.
   if (svelteImports.size > 0) {
     const existing = new Set<string>();
-    const importRe = /import\s*\{([^}]+)\}\s*from\s+['"](?:svelte|@para\/ui)['"]/g;
+    const importRe = /import\s*\{([^}]+)\}\s*from\s+['"](?:svelte|@lyku\/para-ui)['"]/g;
     let m: RegExpExecArray | null;
     while ((m = importRe.exec(result)) !== null) {
       for (const name of m[1]!.split(",")) existing.add(name.trim().split(/\s+as\s+/)[0]!);
@@ -319,7 +319,7 @@ function lowerPuiReactivity(source: string, runtime: "@para/ui" | "svelte"): str
 
 export function parabunPreprocess(opts: ParabunPreprocessOptions = {}): PreprocessorGroup {
   const langs = new Set(opts.langs ?? DEFAULT_LANGS);
-  const runtime: "@para/ui" | "svelte" = opts.runtime ?? "@para/ui";
+  const runtime: "@lyku/para-ui" | "svelte" = opts.runtime ?? "@lyku/para-ui";
   const transpilerCache = new Map<string, Bun.Transpiler>();
 
   const getTranspiler = (loader: "ts" | "tsx" | "jsx") => {

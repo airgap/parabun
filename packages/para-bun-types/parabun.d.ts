@@ -11,7 +11,7 @@
 // per-module agent if a module's public API drifts.
 
 declare module "parabun:assistant" {
-  // ─── Reactive primitive (matches @para/signals' Signal<T>) ────────────────
+  // ─── Reactive primitive (matches @lyku/para-signals' Signal<T>) ────────────────
   interface Signal<T> {
     get(): T;
     peek(): T;

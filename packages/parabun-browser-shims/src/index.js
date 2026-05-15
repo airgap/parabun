@@ -16,7 +16,7 @@ export * as llm from "./llm.js";
 export * as quant from "./quant.js";
 
 // Bundler-agnostic alias map for the specifiers that still resolve
-// here. Cross-runtime Lib modules (@para/signals / @para/parallel /
+// here. Cross-runtime Lib modules (@lyku/para-signals / @para/parallel /
 // @para/simd / @para/arena / etc.) should be aliased to their @para/*
 // packages instead — typically via a single regex rule:
 //

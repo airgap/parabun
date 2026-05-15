@@ -5,8 +5,8 @@
 //   effect { console.log(count); }
 //   count++;
 // has been turned into:
-//   const count = require("@para/signals").signal(0);
-//   require("@para/signals").effect(() => { console.log(count); });
+//   const count = require("@lyku/para-signals").signal(0);
+//   require("@lyku/para-signals").effect(() => { console.log(count); });
 //   count++;
 // — but the `count` references are still bare. The canonical Zig parser
 // rewrites EVERY reference of a signal binding (not just inside tracked
@@ -39,7 +39,7 @@ const SIGNAL_FLAG = Symbol("paraSignalBinding");
 
 export function transformBareRead(src: string): string {
   // Pre-flight gate: if no signal bindings appear, nothing to do.
-  if (!src.includes('require("@para/signals").signal(') && !src.includes('require("@para/signals").derived(')) {
+  if (!src.includes('require("@lyku/para-signals").signal(') && !src.includes('require("@lyku/para-signals").derived(')) {
     return src;
   }
 
@@ -191,7 +191,7 @@ function isSignalsRequireMember(node: t.Node, methodName: string): boolean {
   if (!t.isIdentifier(obj.callee) || obj.callee.name !== "require") return false;
   if (obj.arguments.length !== 1) return false;
   const arg = obj.arguments[0];
-  if (!t.isStringLiteral(arg) || arg.value !== "@para/signals") return false;
+  if (!t.isStringLiteral(arg) || arg.value !== "@lyku/para-signals") return false;
   return true;
 }
 

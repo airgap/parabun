@@ -43,7 +43,7 @@ pass from the host bundler.
 ```bash
 npm install @para/transpile
 # Plus the @para/* runtime packages your code uses, e.g.:
-npm install @para/signals @para/parallel @para/pipeline
+npm install @lyku/para-signals @para/parallel @para/pipeline
 ```
 
 ## Use

@@ -1,11 +1,11 @@
-# Para UI (`@para/ui`) — Surgical Map
+# Para UI (`@lyku/para-ui`) — Surgical Map
 
-Package name is `@para/ui`. Source tree lives at `packages/para-svelte/` —
+Package name is `@lyku/para-ui`. Source tree lives at `packages/para-svelte/` —
 descriptive of what it physically is (a Svelte fork). The two names are
 intentional: the directory says how it's built, the package name says what
 it's for (powering `.pui` files).
 
-This fork swaps Svelte's reactive primitives for `@para/signals` while preserving
+This fork swaps Svelte's reactive primitives for `@lyku/para-signals` while preserving
 Svelte's compiler, template binding, and render scheduler. It is the F0 work
 item ([LYK-872](https://linear.app/lyku/issue/LYK-872)) for the `.pui`
 ([LYK-829](https://linear.app/lyku/issue/LYK-829)) component format.
@@ -13,7 +13,7 @@ item ([LYK-872](https://linear.app/lyku/issue/LYK-872)) for the `.pui`
 ## Why fork instead of preprocess
 
 A preprocess pass that lowers `.pui` keywords to Svelte 5 runes works today
-(`@para/ui-preprocess` ships in parabun), but it leaves a value-store
+(`@lyku/para-ui-preprocess` ships in parabun), but it leaves a value-store
 seam: state lives in Svelte's `Source` struct, not in para signals. Code outside
 the component can't observe it without re-deriving. Forking lets us:
 
@@ -53,7 +53,7 @@ The `Source` struct (lines 76–95) becomes:
   equals,
   rv: 0,
   wv: 0,
-  paraSignal,          // NEW — @para/signals signal mirroring .v
+  paraSignal,          // NEW — @lyku/para-signals signal mirroring .v
 }
 ```
 
@@ -99,7 +99,7 @@ desugar to context-stored effects. The lowering target is unchanged.
 
 ### `internal/client/reactivity/batch.js` (1425 lines — heaviest file)
 
-**Keep entirely.** Svelte's batch semantics are not what `@para/signals.batch`
+**Keep entirely.** Svelte's batch semantics are not what `@lyku/para-signals.batch`
 does. Svelte batches all writes within a synchronous task; para batches a
 single explicit `batch(() => ...)` call. Cross-coordination — para writes inside
 a Svelte batch, or vice versa — is F2 work.
@@ -124,7 +124,7 @@ when the underlying Source updates, which is the right semantics.
 
 Component props are backed by Sources (one per prop). The bridge applies:
 `signalOf(propsSource)` lets a parent observe a child's prop state, and lets
-the `prop`/`emit` keyword layer in `@para/ui-preprocess` thread props as
+the `prop`/`emit` keyword layer in `@lyku/para-ui-preprocess` thread props as
 real para signals.
 
 Risk: legacy mode (`legacy_mode_flag`) does a lot of magic around prop
@@ -137,7 +137,7 @@ The proxy holds a `Map<key, Source>`. Each property's source already has a
 para signal once the sources.js bridge lands. So `proxySignal(svelteProxy)` is
 trivially derivable.
 
-But there's a subtlety: para's `proxySignal()` (added to `@para/signals` in the
+But there's a subtlety: para's `proxySignal()` (added to `@lyku/para-signals` in the
 prior session) and Svelte's `proxy()` are TWO different proxy implementations.
 For `.pui`, we use Svelte's because the compiler's `$state` lowering targets
 it. The bridge in sources.js means a Svelte proxy's per-property signals are
@@ -145,15 +145,15 @@ para-observable — same outcome, different internal proxy.
 
 Don't try to unify the two implementations in F0. They coexist. `.pui` writes
 through Svelte's proxy (because the compiler emits `proxy(value)`), and any
-direct para code can use `@para/signals.proxySignal`.
+direct para code can use `@lyku/para-signals.proxySignal`.
 
 ## Implementation order
 
-1. **F0.1** ✅ Rename inner package to `@para/ui`, private+dev version.
+1. **F0.1** ✅ Rename inner package to `@lyku/para-ui`, private+dev version.
 2. **F0.2** ✅ This document.
 3. **F0.3** ✅ Plant additive bridge — `Source.paraSignal` field +
    `signalOf()` export.
-4. **F0.4** ✅ Wire `@para/signals` as the resolved dep + integration smoke
+4. **F0.4** ✅ Wire `@lyku/para-signals` as the resolved dep + integration smoke
    test (`tests/para-bridge.test.ts`).
 5. **F0.5** ✅ Derived recompute path — single `mirror_to_para()` chokepoint
    called from Batch.capture (covers `set()` + batched `update_derived`),
@@ -175,7 +175,7 @@ direct para code can use `@para/signals.proxySignal`.
    current `.v`.
 
 **F0 is functionally complete.** The user-facing flip shipped same day —
-`@para/ui-preprocess` now emits imports against `@para/ui` by default.
+`@lyku/para-ui-preprocess` now emits imports against `@lyku/para-ui` by default.
 SSR + hydration + signals + store all green out of the box (the bridge
 only touches client reactivity; the server runtime + hydration logic
 ride along untouched on Svelte's existing machinery).
@@ -189,12 +189,12 @@ follow-up work but unlocked — nothing structural blocks them.
 The inner `tsconfig.json` has path aliases mapping `'svelte'`, `'svelte/action'`,
 etc. to local source. ~55 internal files self-reference via these aliases
 (`import { LegacyComponentType } from 'svelte/legacy'`, etc.). We deliberately
-leave these as `'svelte'` rather than rewriting to `'@para/ui'`:
+leave these as `'svelte'` rather than rewriting to `'@lyku/para-ui'`:
 
 - Less divergence from upstream Svelte → cheaper merges.
 - The aliases are TS-time only. The rollup build inlines self-references; the
-  published package is `@para/ui` regardless.
-- Consumers of the published package see `@para/ui` / `@para/ui/action` /
+  published package is `@lyku/para-ui` regardless.
+- Consumers of the published package see `@lyku/para-ui` / `@lyku/para-ui/action` /
   etc. — the inner `'svelte'` alias is invisible to them.
 
 Touching the internal specifier is something we can do later if we ever stop
@@ -208,20 +208,20 @@ merging from upstream; until then, leave it.
 - **Not a scheduler replacement.** Batch.js stays. The render pipeline is
   Svelte's. Para code observes; Svelte renders.
 - **Not a proxy replacement.** Svelte's `$state` proxy continues to be the
-  proxy `.pui` files use for deep-reactive state. `@para/signals.proxySignal`
+  proxy `.pui` files use for deep-reactive state. `@lyku/para-signals.proxySignal`
   is for non-component code.
 
 ## What we publish
 
 Nothing from this tree publishes until parity is proven. Package stays
-`"private": true`, version `0.0.0-dev`. `.pui` files using `@para/ui-preprocess`
+`"private": true`, version `0.0.0-dev`. `.pui` files using `@lyku/para-ui-preprocess`
 continue to lower to Svelte runes targeting unmodified `svelte` from npm. The
 flip happens when:
 
 1. All F0.3–F0.7 work lands.
 2. Svelte's full test suite passes against the forked tree.
-3. `signalOf` is documented at the `@para/ui` public boundary.
-4. `@para/ui-preprocess` is retargeted to emit imports against `@para/ui`.
+3. `signalOf` is documented at the `@lyku/para-ui` public boundary.
+4. `@lyku/para-ui-preprocess` is retargeted to emit imports against `@lyku/para-ui`.
 
 That last step is the user-facing flip. Until then, the fork is invisible to
 consumers.

@@ -1,11 +1,11 @@
-# @para/signals
+# @lyku/para-signals
 
 Reactive primitives — `signal`, `derived`, `effect`, `batch`, `untrack` — plus resource-tied signals, async-source adapters, and rate-limit operators that the rest of the Para ecosystem relies on. Pure JS, no runtime deps, runs on any JS host (Node, Bun, Deno, browsers, Cloudflare Workers).
 
 This is the runtime side of Para's reactive system. The `.pts` syntax sugar (`signal x = 0`, `effect { … }`, `~>`, `->`) compiles to imports from this package. Other modules in the `para:*` suite (`para:audio`, `para:gpio`, `parabun:llm`, etc.) expose their state through this package's primitives so reactive composition is uniform across the suite.
 
 ```js
-import { signal, derived, effect } from "@para/signals";
+import { signal, derived, effect } from "@lyku/para-signals";
 
 const count = signal(0);
 const doubled = derived(() => count.get() * 2);
@@ -33,7 +33,7 @@ Effects are drained synchronously via a re-entrant guard, so `signal.set()` insi
 Hardware modules emit signals whose lifecycle is bound to a real underlying resource (mic, camera, file watcher, websocket). When the resource closes, those signals should become inert and observers should unwind cleanly. `resource()` is the primitive that makes that explicit:
 
 ```js
-import { resource } from "@para/signals";
+import { resource } from "@lyku/para-signals";
 
 const mic = resource(({ signal: sig, onDispose }) => {
   const peak = sig(0);

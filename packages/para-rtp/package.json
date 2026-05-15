@@ -2,7 +2,7 @@
   "name": "@para/rtp",
   "version": "0.0.0-dev",
   "private": true,
-  "description": "RFC 3550 RTP packet pack/parse + sequence-aware jitter buffer. Pure JS, no native deps. Built to sit under @para/audio's Opus encoder for a WebRTC-style send/receive path. Depends on @para/signals for the buffer's reactive state. NOT YET RELEASED — private:true / 0.0.0-dev pending the workspace split.",
+  "description": "RFC 3550 RTP packet pack/parse + sequence-aware jitter buffer. Pure JS, no native deps. Built to sit under @para/audio's Opus encoder for a WebRTC-style send/receive path. Depends on @lyku/para-signals for the buffer's reactive state. NOT YET RELEASED — private:true / 0.0.0-dev pending the workspace split.",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -14,7 +14,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@para/signals": "workspace:*"
+    "@lyku/para-signals": "workspace:*"
   },
   "license": "MIT",
   "repository": {

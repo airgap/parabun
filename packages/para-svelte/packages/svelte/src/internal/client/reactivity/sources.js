@@ -1,6 +1,6 @@
 /** @import { Derived, Effect, Source, Value } from '#client' */
 import { DEV } from 'esm-env';
-import { signal as para_signal } from '@para/signals';
+import { signal as para_signal } from '@lyku/para-signals';
 import {
 	active_reaction,
 	active_effect,

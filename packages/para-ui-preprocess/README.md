@@ -1,4 +1,4 @@
-# @para/ui-preprocess
+# @lyku/para-ui-preprocess
 
 A Svelte preprocessor that lets `.svelte` files use Parabun syntax (`pure`, `..!`, `..&`, `..=`, `|>`) inside `<script>` blocks, and lets them import `.pts` / `.pjs` modules.
 
@@ -7,7 +7,7 @@ Parabun's parser handles its extensions unconditionally, so this preprocessor is
 ## Install
 
 ```sh
-bun add -d @para/ui-preprocess
+bun add -d @lyku/para-ui-preprocess
 ```
 
 Requires Parabun (`bun` in this fork) at runtime — it uses `Bun.Transpiler`.
@@ -17,7 +17,7 @@ Requires Parabun (`bun` in this fork) at runtime — it uses `Bun.Transpiler`.
 ```js
 // svelte.config.js
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
-import { parabunPreprocess } from "@para/ui-preprocess";
+import { parabunPreprocess } from "@lyku/para-ui-preprocess";
 
 export default {
   preprocess: [parabunPreprocess(), vitePreprocess()],
@@ -49,13 +49,13 @@ Then in a component:
 parabunPreprocess({
   langs: ["parabun", "pts", "pjs"], // lang attribute values to transform
   all: false, // also transform plain/ts scripts
-  runtime: "@para/ui", // target runtime for injected imports
+  runtime: "@lyku/para-ui", // target runtime for injected imports
 });
 ```
 
 - **`langs`** — which `<script lang="...">` values trigger Parabun transpilation. Defaults to `["parabun", "pts", "pjs"]`.
 - **`all`** — when `true`, every `<script>` block (including bare `<script>` and `<script lang="ts">`) is run through the Parabun transpiler. Handy if you want Parabun operators everywhere without annotating each block.
-- **`runtime`** — which package the preprocess emits injected imports against (`setContext`/`getContext`/`onDestroy` from `provide`/`inject`/`using` lowering). Defaults to `"@para/ui"` — the Para UI fork of Svelte with `@para/signals` at the reactive core. Pass `"svelte"` to target unmodified Svelte from npm if your project hasn't wired the fork yet. `@para/ui` is currently workspace-only — see `packages/para-svelte/PARA-FORK.md` for how to link it.
+- **`runtime`** — which package the preprocess emits injected imports against (`setContext`/`getContext`/`onDestroy` from `provide`/`inject`/`using` lowering). Defaults to `"@lyku/para-ui"` — the Para UI fork of Svelte with `@lyku/para-signals` at the reactive core. Pass `"svelte"` to target unmodified Svelte from npm if your project hasn't wired the fork yet. `@lyku/para-ui` is currently workspace-only — see `packages/para-svelte/PARA-FORK.md` for how to link it.
 
 ## `.pui` files
 

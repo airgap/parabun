@@ -1,4 +1,4 @@
-// End-to-end: a .pui-flavored component goes through @para/ui-preprocess's
+// End-to-end: a .pui-flavored component goes through @lyku/para-ui-preprocess's
 // keyword lowering, then through the fork's compiler, mounts in jsdom, and
 // the para signal that backs `signal count = 0` is observable from outside
 // the component while the DOM updates in lockstep.
@@ -17,11 +17,11 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // @ts-expect-error — workspace link, JSDoc-only types
-import { effect } from '@para/signals';
+import { effect } from '@lyku/para-signals';
 import { parabunPreprocess } from '../../../../para-ui-preprocess/src/index';
 
 /**
- * Run the preprocess against a script source the way @para/ui-preprocess
+ * Run the preprocess against a script source the way @lyku/para-ui-preprocess
  * would for a real .pui file. Returns the lowered script body.
  */
 async function lowerPuiScript(scriptBody: string): Promise<string> {
@@ -43,23 +43,23 @@ describe('para .pui end-to-end', () => {
 		const lowered = await lowerPuiScript(puiScript);
 
 		// The lowering emits:
-		//   import { signal } from "@para/signals";
+		//   import { signal } from "@lyku/para-signals";
 		//   const __sig_count = signal(0);
 		//   let count = $state(__sig_count.peek());
 		//   $effect.pre(() => { count = __sig_count.get(); });
-		expect(lowered).toMatch(/from\s+["']@para\/signals["']/);
+		expect(lowered).toMatch(/from\s+["']@lyku\/para-signals["']/);
 		expect(lowered).toContain('__sig_count');
 
 		// Wrap into a full component. Export the para signal so the test can
 		// mutate it from outside (mirrors how a real consumer would expose it).
 		const componentSource = `
 <script module>
-  import { signal } from "@para/signals";
+  import { signal } from "@lyku/para-signals";
   export const externalCount = signal(0);
 </script>
 
 <script>
-${lowered.replace(/import { signal } from "@para\/signals";\n?/, '').replace(
+${lowered.replace(/import { signal } from "@lyku\/para-signals";\n?/, '').replace(
 	'signal(0)',
 	'externalCount' // alias the in-component signal to the module-level one
 )}

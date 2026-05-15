@@ -14,7 +14,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@para/signals": "workspace:*"
+    "@lyku/para-signals": "workspace:*"
   },
   "license": "MIT",
   "repository": {

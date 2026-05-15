@@ -1,4 +1,4 @@
-// F0.3 smoke test — verifies the additive @para/signals bridge planted in
+// F0.3 smoke test — verifies the additive @lyku/para-signals bridge planted in
 // internal/client/reactivity/sources.js works end-to-end.
 //
 // Note: the public export is `state`, the internal function is `source`.
@@ -19,7 +19,7 @@
 import { describe, expect, it } from 'vitest';
 import { state, set, signalOf, derived, get, mutable_source } from 'svelte/internal/client';
 // @ts-expect-error — link: dep, types are .js JSDoc-only
-import { effect } from '@para/signals';
+import { effect } from '@lyku/para-signals';
 
 describe('para bridge — sources.js', () => {
 	it('state(v) attaches a para signal mirroring .v', () => {

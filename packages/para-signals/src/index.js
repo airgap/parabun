@@ -1,4 +1,4 @@
-// Browser shim for `@para/signals` — a minimal synchronous reactive core
+// Browser shim for `@lyku/para-signals` — a minimal synchronous reactive core
 // matching the upstream surface (signal / derived / effect / batch /
 // untrack).
 //
@@ -485,6 +485,126 @@ export function debounced(source, ms) {
   });
 }
 
+// ─── proxySignal — deep-reactive object/array state ───────────────────
+//
+// Wraps an object or array in a Proxy where every property read tracks
+// the active effect and every write notifies subscribers. Nested objects
+// and arrays auto-proxy on first access, so `state.user.name = "x"`
+// triggers a re-run of any effect that read `state.user.name`.
+//
+// The implementation pattern mirrors Svelte 5's $state proxy: a lazy
+// `Map<key, signal>` populated on first read, plus a `version` signal
+// that effects subscribe to via `for...of` / `Object.keys()` / `in`
+// checks. Each leaf write only notifies the specific key's signal;
+// structural changes (new key, delete, length change) bump version.
+//
+// Non-plain values pass through unwrapped: primitives, `Date`/`Map`/
+// `Set`/class instances stay as-is because their internal methods
+// rely on `this`-binding that proxies break. If reactivity matters
+// for those, wrap each accessor in a regular `signal()`.
+//
+//   const state = proxySignal({ count: 0, items: ["a"] });
+//   effect(() => console.log(state.count));     // logs 0
+//   state.count = 5;                            // logs 5
+//   effect(() => console.log(state.items[0]));  // logs "a"
+//   state.items[0] = "b";                       // logs "b"
+//   state.items.push("c");                      // length signal fires
+
+const PROXY_MARKER = Symbol("para.proxySignal");
+
+function isProxyable(value) {
+  if (value === null || typeof value !== "object") return false;
+  if (value[PROXY_MARKER]) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === Array.prototype || proto === null;
+}
+
+export function proxySignal(initial) {
+  if (!isProxyable(initial)) return initial;
+
+  const sources = new Map();
+  const version = new WritableSignal(0);
+  const isArr = Array.isArray(initial);
+
+  // Eager length signal for arrays — array mutators (push/pop/splice/etc.)
+  // run through the proxy's set trap on individual indices, but they also
+  // change `length`. Effects that read .length need their own signal.
+  if (isArr) sources.set("length", new WritableSignal(initial.length));
+
+  const bumpVersion = () => version.set(version.peek() + 1);
+
+  return new Proxy(initial, {
+    get(target, prop, receiver) {
+      if (prop === PROXY_MARKER) return true;
+
+      // Methods/symbols on the prototype chain bypass tracking — they
+      // operate on `this` (the proxy) so any mutations they cause flow
+      // through the set trap anyway.
+      const desc = Object.getOwnPropertyDescriptor(target, prop);
+      const isOwn = desc !== undefined;
+      const isData = isOwn && "value" in desc;
+
+      let s = sources.get(prop);
+      if (s === undefined && isOwn && isData) {
+        const raw = target[prop];
+        const wrapped = isProxyable(raw) ? proxySignal(raw) : raw;
+        s = new WritableSignal(wrapped);
+        sources.set(prop, s);
+      }
+      if (s !== undefined) return s.get();
+
+      // Non-own / accessor / inherited — pass through.
+      return Reflect.get(target, prop, receiver);
+    },
+
+    set(target, prop, value, receiver) {
+      const had = prop in target;
+      const result = Reflect.set(target, prop, value, receiver);
+      if (!result) return false;
+
+      const wrapped = isProxyable(value) ? proxySignal(value) : value;
+      const s = sources.get(prop);
+      if (s !== undefined) {
+        s.set(wrapped);
+      } else {
+        sources.set(prop, new WritableSignal(wrapped));
+      }
+
+      // Arrays: keep the length signal in sync. Setting `arr[5]` extends
+      // length to 6; the set trap fires on `5`, the length signal needs
+      // to reflect the new array length.
+      if (isArr && prop !== "length") {
+        const lenSig = sources.get("length");
+        if (lenSig && lenSig.peek() !== target.length) lenSig.set(target.length);
+      }
+
+      if (!had) bumpVersion();
+      return true;
+    },
+
+    deleteProperty(target, prop) {
+      const had = prop in target;
+      const result = Reflect.deleteProperty(target, prop);
+      if (!result) return false;
+
+      const s = sources.get(prop);
+      if (s !== undefined) s.set(undefined);
+      if (had) bumpVersion();
+      return true;
+    },
+
+    has(target, prop) {
+      version.get();
+      return Reflect.has(target, prop);
+    },
+
+    ownKeys(target) {
+      version.get();
+      return Reflect.ownKeys(target);
+    },
+  });
+}
+
 export default {
   signal,
   derived,
@@ -498,4 +618,5 @@ export default {
   fromEventTarget,
   throttled,
   debounced,
+  proxySignal,
 };

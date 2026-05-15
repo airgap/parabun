@@ -19,7 +19,7 @@
 //   - Resources / prompts surfaces (only tools/* covered).
 
 const childProcess = require("node:child_process");
-import { signal as makeSignal, effect as makeEffect } from "@para/signals";
+import { signal as makeSignal, effect as makeEffect } from "@lyku/para-signals";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 

@@ -14,7 +14,7 @@ What's still in here:
 For everything else, use the per-module packages:
 
 ```sh
-npm install @para/signals @para/parallel @para/simd @para/arena @para/arrow @para/csv @para/mcp @para/pipeline @para/rtp
+npm install @lyku/para-signals @para/parallel @para/simd @para/arena @para/arrow @para/csv @para/mcp @para/pipeline @para/rtp
 ```
 
 And alias the `para:*` specifiers in your bundler to those packages directly:

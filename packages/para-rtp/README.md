@@ -25,7 +25,7 @@ jb.push(packet);
 const ready = jb.drainReady();
 ```
 
-Three reactive `@para/signals` Signals on the buffer instance — wire them into a UI without polling.
+Three reactive `@lyku/para-signals` Signals on the buffer instance — wire them into a UI without polling.
 
 ## Out of scope (v1)
 

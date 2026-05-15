@@ -243,9 +243,9 @@ type JitterBufferOptions = {
   maxLag?: number;
 };
 
-const signalsMod = require("@para/signals");
+const signalsMod = require("@lyku/para-signals");
 
-// Structural Signal types — keep this module agnostic of @para/signals's
+// Structural Signal types — keep this module agnostic of @lyku/para-signals's
 // class hierarchy. Same shape as audio.ts / camera.ts / vision.ts.
 type Signal<T> = {
   get(): T;
