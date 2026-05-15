@@ -57,7 +57,7 @@ pipeline {
         booleanParam(name: 'PUBLISH_DOCKER', defaultValue: true,
                      description: 'Build & push Docker image to registry.digitalocean.com/parabun/parabun (:latest, :<short-sha>)')
         booleanParam(name: 'PUBLISH_NPM',    defaultValue: false,
-                     description: 'Publish @lyku/para-signals + @lyku/para-ui to npm (--tag pre). Off by default — typical builds skip it; set true for explicit publish runs (you can also disable BUILD_* params for a publish-only fast path).')
+                     description: 'Publish @lyku/para-signals + @lyku/para-ui + @lyku/para-preprocess to npm (--tag pre). Off by default — typical builds skip it; set true for explicit publish runs (you can also disable BUILD_* params for a publish-only fast path).')
     }
 
     stages {
@@ -523,6 +523,20 @@ pipeline {
                     sed -i 's|"@lyku/para-signals": "file:[^"]*"|"@lyku/para-signals": "'"$SIGNALS_VERSION"'"|' package.json
                     pnpm install --frozen-lockfile=false
                     pnpm run build
+                    npm publish --tag pre
+                '''
+                // @lyku/para-preprocess — tsc build then publish. Same idempotence.
+                sh '''
+                    set -eu
+                    export HOME="${WORKSPACE}"
+                    cd packages/para-preprocess
+                    PKG_VERSION=$(node -p "require('./package.json').version")
+                    if npm view "@lyku/para-preprocess@$PKG_VERSION" version >/dev/null 2>&1; then
+                        echo "@lyku/para-preprocess@$PKG_VERSION already published, skipping"
+                        exit 0
+                    fi
+                    bun install --ignore-scripts --no-audit --no-fund
+                    bun run build
                     npm publish --tag pre
                 '''
             }
