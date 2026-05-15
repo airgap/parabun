@@ -1,0 +1,164 @@
+// Parabun npm publish — publishes @para/signals, @para/ui, and
+// @para/ui-preprocess to public npm under the pre-release tag.
+//
+// Modelled on /raid/lyku/jenkins/Jenkinsfile.npm-publish — same Doppler
+// secret (NPM_ACCESS_TOKEN from ci-deploy/prd), same Doppler-via-Jenkins-
+// host pattern.
+//
+// Trigger:
+//   - Manually from Jenkins UI (Build with Parameters).
+//   - VERSION_BUMP=keep                    → publish package.json as-is
+//   - VERSION_BUMP=auto-pre-sha            → bump to 0.0.1-pre.<short-sha>
+//
+// Publishes are all tagged --tag pre so the npm `latest` tag isn't touched
+// (consumers opt in with `bun add @para/ui@pre`). Once a package goes GA,
+// drop --tag pre.
+//
+// @para/ui has a file: dep on @para/signals that gets sed-swapped to a
+// real semver before the publish, then reverted via git checkout.
+
+pipeline {
+    agent {
+        dockerfile {
+            filename 'jenkins/Dockerfile.ci-linux'
+            label 'linux'
+            customWorkspace '/raid/jenkins-workspaces/parabun-npm-publish'
+            args '-v /etc/default/jenkins-doppler:/etc/default/jenkins-doppler:ro'
+        }
+    }
+
+    environment {
+        CI = 'true'
+    }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        choice(name: 'VERSION_BUMP', choices: ['keep', 'auto-pre-sha'],
+               description: 'keep = publish current package.json versions verbatim. auto-pre-sha = bump to 0.0.1-pre.<short-sha> so re-runs produce distinct versions.')
+        booleanParam(name: 'PUBLISH_SIGNALS',     defaultValue: true,
+                     description: 'Publish @para/signals')
+        booleanParam(name: 'PUBLISH_UI',          defaultValue: true,
+                     description: 'Publish @para/ui (depends on @para/signals — must already exist on npm if PUBLISH_SIGNALS is unchecked)')
+        booleanParam(name: 'PUBLISH_UI_PREPROCESS', defaultValue: false,
+                     description: 'Publish @para/ui-preprocess')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.VERSION   = (params.VERSION_BUMP == 'auto-pre-sha')
+                        ? "0.0.1-pre.${env.SHORT_SHA}"
+                        : ''
+                }
+            }
+        }
+
+        stage('Fetch npm token') {
+            steps {
+                sh '''
+                    set -eu
+                    set +x
+                    export DOPPLER_TOKEN=$(grep DOPPLER_TOKEN_CI_DEPLOY /etc/default/jenkins-doppler | cut -d= -f2)
+                    TEMP_HOME=$(mktemp -d)
+                    NPM_TOKEN=$(HOME=$TEMP_HOME doppler secrets get NPM_ACCESS_TOKEN --plain --project ci-deploy --config prd)
+                    rm -rf "$TEMP_HOME"
+
+                    # The .npmrc lands in $HOME so every package's `npm publish`
+                    # picks it up. The token line is the only auth needed.
+                    echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > "$HOME/.npmrc"
+                    echo "auth configured for $(NPM_CONFIG_USERCONFIG=$HOME/.npmrc npm whoami)"
+                '''
+            }
+        }
+
+        stage('Publish @para/signals') {
+            when { expression { params.PUBLISH_SIGNALS } }
+            steps {
+                sh '''
+                    set -eu
+                    cd packages/para-signals
+                    if [ -n "${VERSION:-}" ]; then
+                        npm version "$VERSION" --no-git-tag-version
+                    fi
+                    npm publish --tag pre
+                '''
+            }
+        }
+
+        stage('Publish @para/ui-preprocess') {
+            when { expression { params.PUBLISH_UI_PREPROCESS } }
+            steps {
+                sh '''
+                    set -eu
+                    cd packages/para-ui-preprocess
+                    if [ -n "${VERSION:-}" ]; then
+                        npm version "$VERSION" --no-git-tag-version
+                    fi
+                    bun install --ignore-scripts --no-audit --no-fund
+                    bun run build
+                    npm publish --tag pre
+                '''
+            }
+        }
+
+        stage('Publish @para/ui') {
+            when { expression { params.PUBLISH_UI } }
+            steps {
+                sh '''
+                    set -eu
+                    cd packages/para-svelte/packages/svelte
+
+                    if [ -n "${VERSION:-}" ]; then
+                        npm version "$VERSION" --no-git-tag-version
+                    fi
+
+                    # The local-dev file: dep won't resolve from npm. Swap to
+                    # a real semver pointing at the just-published @para/signals.
+                    # The exact version is the one we just bumped, so reuse it;
+                    # if VERSION is empty (keep mode), read from para-signals.
+                    if [ -n "${VERSION:-}" ]; then
+                        SIGNALS_VERSION="^$VERSION"
+                    else
+                        SIGNALS_VERSION="^$(node -p "require('../../../para-signals/package.json').version")"
+                    fi
+                    sed -i 's|"@para/signals": "file:[^"]*"|"@para/signals": "'"$SIGNALS_VERSION"'"|' package.json
+
+                    # Build then publish; revert in `post` so the file: dep
+                    # stays intact for local dev regardless of publish outcome.
+                    pnpm install --frozen-lockfile=false
+                    pnpm run build
+                    npm publish --tag pre
+                '''
+            }
+            post {
+                always {
+                    sh '''
+                        cd packages/para-svelte/packages/svelte
+                        git checkout package.json || true
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'npm publish complete.'
+        }
+        always {
+            // Don't leak the token into Jenkins logs or persist it on disk.
+            sh 'rm -f "$HOME/.npmrc" || true'
+            cleanWs()
+        }
+    }
+}

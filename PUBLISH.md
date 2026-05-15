@@ -72,57 +72,41 @@ When the API is stable enough to drop `-pre`, bump to `0.0.1` then `0.1.0`. The
 desugaring works) applies to GA versions only; pre-releases are explicit
 "not GA" and the API surface may change.
 
-## Wiring CI (Jenkins) — TODO
+## CI publish — `jenkins/Jenkinsfile.npm-publish`
 
-Parabun's `jenkins/Jenkinsfile` already authenticates to
-`registry.digitalocean.com/parabun` for Docker pushes. An npm-publish stage:
+The canonical publish path is the Jenkins pipeline at
+`jenkins/Jenkinsfile.npm-publish` (modelled on lyku's, same Doppler secret
+`NPM_ACCESS_TOKEN` from `ci-deploy/prd`).
 
-1. Add `NPM_TOKEN` as a Jenkins secret (Automation token, write access to
-   the `@para` scope only — least privilege).
-2. New stage after the build, gated on `main`:
+Trigger from the Jenkins UI ("Build with Parameters"):
 
-   ```groovy
-   stage('publish-npm-pre') {
-       when { branch 'main' }
-       environment {
-           NPM_TOKEN = credentials('para-npm-token')
-       }
-       steps {
-           sh '''
-               SHORT_SHA=$(git rev-parse --short HEAD)
+| Parameter               | Default | Notes                                                                                                                     |
+| ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `VERSION_BUMP`          | `keep`  | `keep` publishes versions verbatim. `auto-pre-sha` bumps to `0.0.1-pre.<short-sha>` so re-runs produce distinct versions. |
+| `PUBLISH_SIGNALS`       | `true`  | Required before `@para/ui` (transitive dep).                                                                              |
+| `PUBLISH_UI`            | `true`  | sed-swaps the `file:` dep on `@para/signals` to the just-published semver, builds, publishes, reverts.                    |
+| `PUBLISH_UI_PREPROCESS` | `false` | Off by default — lyku has its own local copy at `libs/para-ui-preprocess` until the sync gap is closed (LYK-874).         |
 
-               echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+All packages publish `--tag pre` — npm's `latest` tag isn't touched.
+Consumers opt in with `bun add @para/ui@pre`. When a package goes GA, drop
+`--tag pre` from its stage.
 
-               # @para/signals
-               cd packages/para-signals
-               npm version "0.0.1-pre.${SHORT_SHA}" --no-git-tag-version
-               npm publish --tag pre
-               cd -
+Local publishes (only if Jenkins is unavailable):
 
-               # @para/ui-preprocess
-               cd packages/para-ui-preprocess
-               pnpm run build
-               npm version "0.0.1-pre.${SHORT_SHA}" --no-git-tag-version
-               npm publish --tag pre
-               cd -
+```sh
+# @para/signals first
+cd packages/para-signals && npm publish --tag pre
 
-               # @para/ui — swap file: dep, publish, revert
-               cd packages/para-svelte/packages/svelte
-               sed -i 's|"@para/signals": "file:.*"|"@para/signals": "^0.0.1-pre.'"${SHORT_SHA}"'"|' package.json
-               pnpm run build
-               npm version "0.0.1-pre.${SHORT_SHA}" --no-git-tag-version
-               npm publish --tag pre
-               git checkout package.json
-               cd -
-           '''
-       }
-   }
-   ```
+# Then @para/ui, with file:-dep swap
+cd packages/para-svelte/packages/svelte
+sed -i 's|"@para/signals": "file:[^"]*"|"@para/signals": "^0.0.1-pre.0"|' package.json
+pnpm run build && npm publish --tag pre
+git checkout package.json
+```
 
-3. Lyku CI just installs `@para/ui-preprocess@pre` etc. — no auth needed for
-   read of public packages.
-
-Not blocking F2 work; can wire whenever.
+Requires Automation-type npm token (granular tokens hit a 2FA OTP prompt
+that local CLI can't satisfy unattended). Personal tokens with publish
+scope work for manual one-shots.
 
 ## Migration plan for lyku
 
