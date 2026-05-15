@@ -169,6 +169,13 @@ direct para code can use `@lyku/para-signals.proxySignal`.
    migrate 76, snapshot 32, print 40, sourcemaps 26, parser-modern 25,
    preprocess 19, css-parse 16, motion 8, para-bridge 6). 63 skipped
    upstream — same count as unmodified Svelte. Zero failures.
+   **⚠ Point-in-time snapshot.** As of 2026-05-15 `runtime-browser >
+   custom-elements` (~12 tests) fails on the current Playwright/Chromium
+   + bundler toolchain — proven NOT a fork-source regression (no
+   custom-element runtime code changed since this commit; see LYK-885).
+   Environment/browser drift only. Don't gate fork work on
+   `custom-elements` — it's a separate compiler target, not the
+   `.pui`/runes product surface.
    Kairo bench 4657ms (with bridge) vs 4681ms (no bridge) — within
    noise, well under the 5% bar. Cost amortized via lazy `paraSignal`
    allocation: created on first `signalOf()` call, seeded from
