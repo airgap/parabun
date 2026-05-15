@@ -321,6 +321,11 @@ pipeline {
                             cd editors/ts-plugin
                             npm install --ignore-scripts --no-audit --no-fund
                             npm run build
+                            # LSP pui-transform deps — copy-assets.js execs
+                            # editors/lsp/esbuild-pui-transform.mjs, which
+                            # needs svelte2tsx/svelte/trace-mapping/preprocess.
+                            cd ../lsp
+                            npm install --ignore-scripts --no-audit --no-fund
                             cd ../vscode/parabun
                             # package-lock.json is gitignored — any lockfile
                             # in the workspace is a leftover from a previous
