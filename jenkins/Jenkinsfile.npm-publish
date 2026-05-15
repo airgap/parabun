@@ -1,5 +1,5 @@
-// Parabun npm publish — publishes @para/signals, @para/ui, and
-// @para/ui-preprocess to public npm under the pre-release tag.
+// Parabun npm publish — publishes @lyku/para-signals, @lyku/para-ui, and
+// @lyku/para-ui-preprocess to public npm under the pre-release tag.
 //
 // Modelled on /raid/lyku/jenkins/Jenkinsfile.npm-publish — same Doppler
 // secret (NPM_ACCESS_TOKEN from ci-deploy/prd), same Doppler-via-Jenkins-
@@ -11,10 +11,10 @@
 //   - VERSION_BUMP=auto-pre-sha            → bump to 0.0.1-pre.<short-sha>
 //
 // Publishes are all tagged --tag pre so the npm `latest` tag isn't touched
-// (consumers opt in with `bun add @para/ui@pre`). Once a package goes GA,
+// (consumers opt in with `bun add @lyku/para-ui@pre`). Once a package goes GA,
 // drop --tag pre.
 //
-// @para/ui has a file: dep on @para/signals that gets sed-swapped to a
+// @lyku/para-ui has a file: dep on @lyku/para-signals that gets sed-swapped to a
 // real semver before the publish, then reverted via git checkout.
 
 pipeline {
@@ -43,11 +43,11 @@ pipeline {
         choice(name: 'VERSION_BUMP', choices: ['keep', 'auto-pre-sha'],
                description: 'keep = publish current package.json versions verbatim. auto-pre-sha = bump to 0.0.1-pre.<short-sha> so re-runs produce distinct versions.')
         booleanParam(name: 'PUBLISH_SIGNALS',     defaultValue: true,
-                     description: 'Publish @para/signals')
+                     description: 'Publish @lyku/para-signals')
         booleanParam(name: 'PUBLISH_UI',          defaultValue: true,
-                     description: 'Publish @para/ui (depends on @para/signals — must already exist on npm if PUBLISH_SIGNALS is unchecked)')
+                     description: 'Publish @lyku/para-ui (depends on @lyku/para-signals — must already exist on npm if PUBLISH_SIGNALS is unchecked)')
         booleanParam(name: 'PUBLISH_UI_PREPROCESS', defaultValue: false,
-                     description: 'Publish @para/ui-preprocess')
+                     description: 'Publish @lyku/para-ui-preprocess')
     }
 
     stages {
@@ -81,7 +81,7 @@ pipeline {
             }
         }
 
-        stage('Publish @para/signals') {
+        stage('Publish @lyku/para-signals') {
             when { expression { params.PUBLISH_SIGNALS } }
             steps {
                 sh '''
@@ -95,7 +95,7 @@ pipeline {
             }
         }
 
-        stage('Publish @para/ui-preprocess') {
+        stage('Publish @lyku/para-ui-preprocess') {
             when { expression { params.PUBLISH_UI_PREPROCESS } }
             steps {
                 sh '''
@@ -111,7 +111,7 @@ pipeline {
             }
         }
 
-        stage('Publish @para/ui') {
+        stage('Publish @lyku/para-ui') {
             when { expression { params.PUBLISH_UI } }
             steps {
                 sh '''
@@ -123,7 +123,7 @@ pipeline {
                     fi
 
                     # The local-dev file: dep won't resolve from npm. Swap to
-                    # a real semver pointing at the just-published @para/signals.
+                    # a real semver pointing at the just-published @lyku/para-signals.
                     # The exact version is the one we just bumped, so reuse it;
                     # if VERSION is empty (keep mode), read from para-signals.
                     if [ -n "${VERSION:-}" ]; then
@@ -131,7 +131,7 @@ pipeline {
                     else
                         SIGNALS_VERSION="^$(node -p "require('../../../para-signals/package.json').version")"
                     fi
-                    sed -i 's|"@para/signals": "file:[^"]*"|"@para/signals": "'"$SIGNALS_VERSION"'"|' package.json
+                    sed -i 's|"@lyku/para-signals": "file:[^"]*"|"@lyku/para-signals": "'"$SIGNALS_VERSION"'"|' package.json
 
                     # Build then publish; revert in `post` so the file: dep
                     # stays intact for local dev regardless of publish outcome.
