@@ -8,7 +8,7 @@ there directly — no registry setup, no scope shuffling.
 | Package                    | Path                                   | Version       |
 | -------------------------- | -------------------------------------- | ------------- |
 | `@lyku/para-signals`       | `packages/para-signals`                | `0.0.1-pre.0` |
-| `@lyku/para-ui-preprocess` | `packages/para-ui-preprocess`          | `0.0.1-pre.0` |
+| `@lyku/para-preprocess` | `packages/para-preprocess`          | `0.0.1-pre.0` |
 | `@lyku/para-ui`            | `packages/para-svelte/packages/svelte` | `0.0.1-pre.0` |
 
 All three have `"publishConfig": { "access": "public" }` so npm doesn't refuse
@@ -26,8 +26,8 @@ token's expired — refresh from https://www.npmjs.com/settings/<you>/tokens
 # @lyku/para-signals — pure source, no build
 cd packages/para-signals && npm publish
 
-# @lyku/para-ui-preprocess — tsc build first
-cd packages/para-ui-preprocess && pnpm run build && npm publish
+# @lyku/para-preprocess — tsc build first
+cd packages/para-preprocess && pnpm run build && npm publish
 
 # @lyku/para-ui — rollup build (slow) first
 cd packages/para-svelte/packages/svelte && pnpm run build && npm publish
@@ -56,7 +56,7 @@ Tag the pre-release explicitly so it doesn't become npm's `latest`:
 npm publish --tag pre
 ```
 
-Consumers then install with `bun add @lyku/para-ui-preprocess@pre` (or whatever tag
+Consumers then install with `bun add @lyku/para-preprocess@pre` (or whatever tag
 is current) until a `latest`-tagged GA ships.
 
 ## Version bumps
@@ -97,8 +97,8 @@ untouched. The @lyku/para-ui stage sed-swaps the local-dev `file:` dep on
 `@lyku/para-signals` to a real semver before publish, reverts in
 `post.always` even on failure.
 
-`@lyku/para-ui-preprocess` is NOT published from this stage — lyku has
-its own copy at `libs/para-ui-preprocess` (LYK-874). Add a publish step
+`@lyku/para-preprocess` is NOT published from this stage — lyku has
+its own copy at `libs/para-preprocess` (LYK-874). Add a publish step
 in a follow-up commit once the sync gap is closed.
 
 Authentication: Doppler secret `NPM_ACCESS_TOKEN` in `ci-deploy/prd`,
@@ -126,9 +126,9 @@ scope work for manual one-shots.
 Once a publish has landed:
 
 1. `/raid/lyku/apps/desktop-electron/package.json` — swap
-   `"@lyku/para-ui": "file:..."` etc. for `"@lyku/para-ui-preprocess": "^0.0.1-pre.0"`,
+   `"@lyku/para-ui": "file:..."` etc. for `"@lyku/para-preprocess": "^0.0.1-pre.0"`,
    `"@lyku/para-ui": "^0.0.1-pre.0"`, `"@lyku/para-signals": "^0.0.1-pre.0"`.
-2. Delete `/raid/lyku/libs/para-ui-preprocess/` — no longer needed; everything
+2. Delete `/raid/lyku/libs/para-preprocess/` — no longer needed; everything
    resolves from npm. The lyku/parabun drift problem goes away.
 3. `bun install` — pulls from npm.
 

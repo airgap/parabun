@@ -1,4 +1,4 @@
-# @lyku/para-ui-preprocess
+# @lyku/para-preprocess
 
 A Svelte preprocessor that lets `.svelte` files use Parabun syntax (`pure`, `..!`, `..&`, `..=`, `|>`) inside `<script>` blocks, and lets them import `.pts` / `.pjs` modules.
 
@@ -7,7 +7,7 @@ Parabun's parser handles its extensions unconditionally, so this preprocessor is
 ## Install
 
 ```sh
-bun add -d @lyku/para-ui-preprocess
+bun add -d @lyku/para-preprocess
 ```
 
 Requires Parabun (`bun` in this fork) at runtime — it uses `Bun.Transpiler`.
@@ -17,7 +17,7 @@ Requires Parabun (`bun` in this fork) at runtime — it uses `Bun.Transpiler`.
 ```js
 // svelte.config.js
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
-import { parabunPreprocess } from "@lyku/para-ui-preprocess";
+import { parabunPreprocess } from "@lyku/para-preprocess";
 
 export default {
   preprocess: [parabunPreprocess(), vitePreprocess()],

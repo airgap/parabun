@@ -13,7 +13,7 @@ item ([LYK-872](https://linear.app/lyku/issue/LYK-872)) for the `.pui`
 ## Why fork instead of preprocess
 
 A preprocess pass that lowers `.pui` keywords to Svelte 5 runes works today
-(`@lyku/para-ui-preprocess` ships in parabun), but it leaves a value-store
+(`@lyku/para-preprocess` ships in parabun), but it leaves a value-store
 seam: state lives in Svelte's `Source` struct, not in para signals. Code outside
 the component can't observe it without re-deriving. Forking lets us:
 
@@ -124,7 +124,7 @@ when the underlying Source updates, which is the right semantics.
 
 Component props are backed by Sources (one per prop). The bridge applies:
 `signalOf(propsSource)` lets a parent observe a child's prop state, and lets
-the `prop`/`emit` keyword layer in `@lyku/para-ui-preprocess` thread props as
+the `prop`/`emit` keyword layer in `@lyku/para-preprocess` thread props as
 real para signals.
 
 Risk: legacy mode (`legacy_mode_flag`) does a lot of magic around prop
@@ -175,7 +175,7 @@ direct para code can use `@lyku/para-signals.proxySignal`.
    current `.v`.
 
 **F0 is functionally complete.** The user-facing flip shipped same day —
-`@lyku/para-ui-preprocess` now emits imports against `@lyku/para-ui` by default.
+`@lyku/para-preprocess` now emits imports against `@lyku/para-ui` by default.
 SSR + hydration + signals + store all green out of the box (the bridge
 only touches client reactivity; the server runtime + hydration logic
 ride along untouched on Svelte's existing machinery).
@@ -214,14 +214,14 @@ merging from upstream; until then, leave it.
 ## What we publish
 
 Nothing from this tree publishes until parity is proven. Package stays
-`"private": true`, version `0.0.0-dev`. `.pui` files using `@lyku/para-ui-preprocess`
+`"private": true`, version `0.0.0-dev`. `.pui` files using `@lyku/para-preprocess`
 continue to lower to Svelte runes targeting unmodified `svelte` from npm. The
 flip happens when:
 
 1. All F0.3–F0.7 work lands.
 2. Svelte's full test suite passes against the forked tree.
 3. `signalOf` is documented at the `@lyku/para-ui` public boundary.
-4. `@lyku/para-ui-preprocess` is retargeted to emit imports against `@lyku/para-ui`.
+4. `@lyku/para-preprocess` is retargeted to emit imports against `@lyku/para-ui`.
 
 That last step is the user-facing flip. Until then, the fork is invisible to
 consumers.

@@ -1,4 +1,4 @@
-// End-to-end: a .pui-flavored component goes through @lyku/para-ui-preprocess's
+// End-to-end: a .pui-flavored component goes through @lyku/para-preprocess's
 // keyword lowering, then through the fork's compiler, mounts in jsdom, and
 // the para signal that backs `signal count = 0` is observable from outside
 // the component while the DOM updates in lockstep.
@@ -18,10 +18,10 @@ import * as os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // @ts-expect-error — workspace link, JSDoc-only types
 import { effect } from '@lyku/para-signals';
-import { parabunPreprocess } from '../../../../para-ui-preprocess/src/index';
+import { parabunPreprocess } from '../../../../para-preprocess/src/index';
 
 /**
- * Run the preprocess against a script source the way @lyku/para-ui-preprocess
+ * Run the preprocess against a script source the way @lyku/para-preprocess
  * would for a real .pui file. Returns the lowered script body.
  */
 async function lowerPuiScript(scriptBody: string): Promise<string> {
