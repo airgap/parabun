@@ -103,4 +103,16 @@ for (const f of fs.readdirSync(path.join(pluginSrc, "out"))) {
   fs.copyFileSync(path.join(pluginSrc, "out", f), path.join(pluginDest, "out", f));
 }
 
-console.log("copied: server/parabun-lsp.ts, node_modules/parabun-ts-plugin/");
+// The esbuild-bundled plugin inlines svelte2tsx, which does a bare
+// `require("typescript")` at runtime. tsserver *usually* injects its own
+// typescript for global plugins, but that's not guaranteed across VS Code
+// / tsserver versions. Colocate a typescript copy in the plugin's own
+// node_modules so the require resolves deterministically regardless. This
+// copy is svelte2tsx's parser only — the plugin's tsserver-proxy logic
+// uses the injected `modules.typescript`, unaffected.
+const pluginTsDest = path.join(pluginDest, "node_modules/typescript");
+fs.rmSync(pluginTsDest, { recursive: true, force: true });
+fs.mkdirSync(path.dirname(pluginTsDest), { recursive: true });
+fs.cpSync(tsSrc, pluginTsDest, { recursive: true, dereference: true });
+
+console.log("copied: server/parabun-lsp.ts, node_modules/parabun-ts-plugin/ (+ bundled typescript)");
