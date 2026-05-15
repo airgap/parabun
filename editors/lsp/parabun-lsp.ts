@@ -751,7 +751,7 @@ function transformParallel(line: string): string {
 // embedded TypeScript checker doesn't choke on the surface syntax. The paired
 // `when not { … }` lands as `else { … }` so it attaches to the preceding
 // transformed `if` — readers still get sensible hover / TS diagnostics. The
-// actual desugar is owned by the parser (→ require("@para/signals").when(...)
+// actual desugar is owned by the parser (→ require("@lyku/para-signals").when(...)
 // with the predicate negated for the `not` form); this transform is a TS-side
 // shim only.
 function transformWhenBlock(line: string): string {
@@ -879,6 +879,11 @@ const transpilers = {
 };
 
 function loaderForUri(uri: string): "ts" | "tsx" | "js" {
+  if (isComponentUri(uri)) {
+    const lang = svelteLangs.get(uri);
+    if (lang === "pjs") return "js";
+    return "ts";
+  }
   if (uri.endsWith(".pts") || uri.endsWith(".ts")) return "ts";
   if (uri.endsWith(".ptsx") || uri.endsWith(".tsx")) return "tsx";
   return "js";
@@ -890,6 +895,429 @@ function loaderForUri(uri: string): "ts" | "tsx" | "js" {
 
 const documents = new Map<string, string>();
 const docVersions = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
+// Svelte embedded-script translation
+// ---------------------------------------------------------------------------
+//
+// When a .svelte file is opened we extract `<script lang="pts|parabun|pjs|
+// ptsx|pjsx">` regions and replace everything else (HTML/template/CSS) with
+// blank-but-line-preserving padding — characters become spaces, newlines stay.
+// The resulting synthetic source has the same line/column shape as the
+// original .svelte, so diagnostics generated against it land on the correct
+// file positions with zero coordinate math.
+//
+// `svelteLangs` tracks the dominant flavor so loaderForUri / toTsPath can
+// pick TS vs TSX. The TS service sees the synthetic source under a virtual
+// `<file>.svelte.ts` (or .tsx) path.
+
+// JSX flavors (ptsx/pjsx) are intentionally omitted — Svelte's template
+// language IS its JSX-equivalent; the `<script>` block holds logic, not
+// markup, so a JSX-flavored script in a .svelte file would be confusing
+// even if technically parseable. React-flavored parabun goes in .ptsx/.pjsx
+// files, not embedded in .svelte.
+type SvelteScriptLang = "pts" | "pjs";
+const svelteLangs = new Map<string, SvelteScriptLang>();
+// Original .svelte/.pui source text, kept alongside the synthetic version
+// in `documents` so template-level diagnostics (unclosed tags, malformed
+// attributes) can scan the as-authored markup rather than the blank-padded
+// synthetic that the parabun parser sees.
+const svelteRawTexts = new Map<string, string>();
+
+// `.svelte` and `.pui` are both claimed. The difference is the script-lang
+// filter inside: `.svelte` requires an explicit parabun-flavored lang
+// attribute (pts/parabun/pjs); `.pui` treats the file extension itself as
+// the parabun marker, so bare `<script>` and `<script lang="ts">` blocks also
+// engage. See `extractParabunScripts`.
+function isComponentUri(uri: string): boolean {
+  return uri.endsWith(".svelte") || uri.endsWith(".pui");
+}
+
+function isPuiUri(uri: string): boolean {
+  return uri.endsWith(".pui");
+}
+
+const PARABUN_SCRIPT_LANGS = new Set<string>(["pts", "parabun", "pjs"]);
+// Plain-language attributes that engage the parabun pipeline only inside
+// `.pui` files. `<script>` with no lang or `<script lang="ts">` in a
+// `.pui` is parabun by virtue of the file extension.
+const PUI_IMPLICIT_LANGS = new Set<string>(["", "ts", "typescript", "js", "javascript"]);
+
+function normalizeSvelteLang(raw: string): SvelteScriptLang {
+  const l = raw.toLowerCase();
+  if (l === "pjs" || l === "js" || l === "javascript") return "pjs";
+  return "pts";
+}
+
+interface SvelteScriptBlock {
+  start: number;
+  end: number;
+  lang: SvelteScriptLang;
+}
+
+/**
+ * Build a quick lookup of `<!-- ... -->` comment ranges so we can skip
+ * `<script>` tags that appear inside markup comments (template documentation,
+ * commented-out blocks, etc.).
+ */
+function htmlCommentRanges(svelteText: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let i = 0;
+  while (i < svelteText.length) {
+    const start = svelteText.indexOf("<!--", i);
+    if (start === -1) break;
+    const end = svelteText.indexOf("-->", start + 4);
+    if (end === -1) {
+      out.push([start, svelteText.length]);
+      break;
+    }
+    out.push([start, end + 3]);
+    i = end + 3;
+  }
+  return out;
+}
+
+function isInsideRanges(pos: number, ranges: Array<[number, number]>): boolean {
+  for (const [s, e] of ranges) if (pos >= s && pos < e) return true;
+  return false;
+}
+
+function extractParabunScripts(svelteText: string, isPui: boolean): SvelteScriptBlock[] {
+  const blocks: SvelteScriptBlock[] = [];
+  const comments = htmlCommentRanges(svelteText);
+  const re = /<script\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(svelteText)) !== null) {
+    if (isInsideRanges(m.index, comments)) continue;
+    const attrs = m[1] ?? "";
+    const langMatch = attrs.match(/\blang\s*=\s*(?:"([^"]*)"|'([^']*)'|([\w-]+))/);
+    const langAttr = (langMatch?.[1] ?? langMatch?.[2] ?? langMatch?.[3] ?? "").toLowerCase();
+    const accepted = PARABUN_SCRIPT_LANGS.has(langAttr) || (isPui && PUI_IMPLICIT_LANGS.has(langAttr));
+    if (!accepted) continue;
+    const contentStart = m.index + m[0].length;
+    // Svelte disallows `</script>` inside script content, so the simple
+    // terminator scan is safe.
+    const closeIdx = svelteText.indexOf("</script>", contentStart);
+    if (closeIdx === -1) continue;
+    blocks.push({
+      start: contentStart,
+      end: closeIdx,
+      lang: normalizeSvelteLang(langAttr),
+    });
+  }
+  return blocks;
+}
+
+function synthesizeFromSvelte(
+  svelteText: string,
+  isPui: boolean,
+): { source: string; lang: SvelteScriptLang } | undefined {
+  const blocks = extractParabunScripts(svelteText, isPui);
+  if (blocks.length === 0) return undefined;
+  const lang = blocks[0]!.lang;
+
+  const out: string[] = new Array(svelteText.length);
+  let bIdx = 0;
+  for (let i = 0; i < svelteText.length; i++) {
+    while (bIdx < blocks.length && i >= blocks[bIdx]!.end) bIdx++;
+    const b = blocks[bIdx];
+    const inside = b !== undefined && i >= b.start && i < b.end;
+    const ch = svelteText[i]!;
+    if (inside) out[i] = ch;
+    else out[i] = ch === "\n" || ch === "\r" ? ch : " ";
+  }
+  return { source: out.join(""), lang };
+}
+
+/**
+ * Store an opened/changed document. For .svelte and .pui URIs, extracts
+ * parabun script blocks into a line-preserving synthetic source; for other
+ * URIs the text is stored verbatim. Returns the stored content, or
+ * `undefined` if the file is a .svelte/.pui without any parabun script
+ * blocks (and therefore not analyzed).
+ */
+function ingestDocumentText(uri: string, text: string): string | undefined {
+  if (isComponentUri(uri)) {
+    const isPui = isPuiUri(uri);
+    // Keep raw markup so template-well-formedness checks have something to
+    // scan, even when no parabun script blocks engage.
+    svelteRawTexts.set(uri, text);
+    const syn = synthesizeFromSvelte(text, isPui);
+    if (syn) {
+      documents.set(uri, syn.source);
+      svelteLangs.set(uri, syn.lang);
+      return syn.source;
+    }
+    // No closed parabun-flavored blocks. We still claim the URI if:
+    //   - It's `.pui` (extension is the marker; emit template-level
+    //     diagnostics even when there's no script content).
+    //   - It's `.svelte` with an *unclosed* parabun-flavored `<script>` —
+    //     so the user sees a "missing </script>" diagnostic from the
+    //     fast pass rather than silent failure.
+    const wellFormednessIssues = findTemplateWellFormednessIssues(text, isPui);
+    if (isPui || wellFormednessIssues.length > 0) {
+      documents.set(uri, "");
+      svelteLangs.delete(uri);
+      return "";
+    }
+    documents.delete(uri);
+    svelteLangs.delete(uri);
+    svelteRawTexts.delete(uri);
+    return undefined;
+  }
+  documents.set(uri, text);
+  return text;
+}
+
+/**
+ * Detect unclosed parabun-flavored `<script>` tags in the raw .svelte /
+ * .pui source. v1 only catches missing `</script>`; balanced attribute
+ * quotes, matched `{expression}` braces, and unknown `{#weird}` directives
+ * are explicit follow-up scope (see LYK-840 DoD).
+ */
+function findTemplateWellFormednessIssues(rawText: string, isPui: boolean): LspDiagnostic[] {
+  const diagnostics: LspDiagnostic[] = [];
+  const comments = htmlCommentRanges(rawText);
+  const re = /<script\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(rawText)) !== null) {
+    if (isInsideRanges(m.index, comments)) continue;
+    const attrs = m[1] ?? "";
+    const langMatch = attrs.match(/\blang\s*=\s*(?:"([^"]*)"|'([^']*)'|([\w-]+))/);
+    const langAttr = (langMatch?.[1] ?? langMatch?.[2] ?? langMatch?.[3] ?? "").toLowerCase();
+    const isParabunFlavored = PARABUN_SCRIPT_LANGS.has(langAttr) || (isPui && PUI_IMPLICIT_LANGS.has(langAttr));
+    if (!isParabunFlavored) continue;
+    const closeIdx = rawText.indexOf("</script>", m.index + m[0].length);
+    if (closeIdx === -1) {
+      const startPos = offsetToPosition(rawText, m.index);
+      const endPos = offsetToPosition(rawText, m.index + m[0].length);
+      diagnostics.push({
+        range: { start: startPos, end: endPos },
+        severity: 1,
+        source: "parabun",
+        message: "Unclosed <script> tag: missing </script>",
+      });
+    }
+  }
+  return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// Style block extraction + CSS validation
+// ---------------------------------------------------------------------------
+//
+// `<style lang="...">` blocks inside `.svelte` and `.pui` files get
+// dispatched to vscode-css-languageservice (the same library Svelte's LSP
+// and VSCode's HTML extension use). Each block's content is run through
+// the matching service (CSS/SCSS/Less) and diagnostics are offset from the
+// block-local coordinates back to file-global ones.
+
+type StyleLang = "css" | "scss" | "less" | "sass";
+
+interface StyleBlock {
+  start: number;
+  end: number;
+  lang: StyleLang;
+}
+
+function extractStyleBlocks(svelteText: string): StyleBlock[] {
+  const blocks: StyleBlock[] = [];
+  const comments = htmlCommentRanges(svelteText);
+  const re = /<style\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(svelteText)) !== null) {
+    if (isInsideRanges(m.index, comments)) continue;
+    const attrs = m[1] ?? "";
+    const langMatch = attrs.match(/\blang\s*=\s*(?:"([^"]*)"|'([^']*)'|([\w-]+))/);
+    const langRaw = (langMatch?.[1] ?? langMatch?.[2] ?? langMatch?.[3] ?? "css").toLowerCase();
+    // css/scss/less validated by vscode-css-languageservice; sass (indented)
+    // routed through dart-sass since the css service can't parse indented
+    // syntax. postcss and stylus would need separate parsers — skip them
+    // rather than misclassify as CSS and emit spurious diagnostics.
+    let lang: StyleLang;
+    if (langRaw === "scss") lang = "scss";
+    else if (langRaw === "less") lang = "less";
+    else if (langRaw === "sass") lang = "sass";
+    else if (langRaw === "css" || langRaw === "" || langRaw === "postcss") lang = "css";
+    else continue;
+    const contentStart = m.index + m[0].length;
+    const closeIdx = svelteText.indexOf("</style>", contentStart);
+    if (closeIdx === -1) continue;
+    blocks.push({ start: contentStart, end: closeIdx, lang });
+  }
+  return blocks;
+}
+
+// Lazy-cached singleton services. `vscode-css-languageservice` services
+// are stateless across documents — same instance can validate any number
+// of style blocks.
+let cssLsp: any | undefined;
+let cssService: any | undefined;
+let scssService: any | undefined;
+let lessService: any | undefined;
+let textDocumentCtor: any | undefined;
+
+let sassModule: any | undefined;
+
+// LYK-880 Slice B: `.pui` → typed-TSX + sourcemap mapper, bundled to a
+// single self-contained module (svelte2tsx + svelte + @lyku/para-preprocess
+// + trace-mapping inlined) and required like cssLsp. Per-uri+version cached
+// since svelte2tsx is not cheap.
+let puiTransformMod: { puiTransform: (raw: string, filename: string) => any } | null | undefined;
+const puiCache = new Map<string, { version: string; t: any }>();
+
+function getPuiTransform(uri: string, raw: string): any | undefined {
+  if (puiTransformMod === undefined) {
+    try {
+      puiTransformMod = require("parabun-pui-transform");
+    } catch (e: any) {
+      logMessage(2, `[parabun-lsp] parabun-pui-transform unavailable: ${e?.message ?? e}`);
+      puiTransformMod = null;
+    }
+  }
+  if (!puiTransformMod) return undefined;
+  const version = String(docVersions.get(uri) ?? 0);
+  const hit = puiCache.get(uri);
+  if (hit && hit.version === version) return hit.t;
+  try {
+    const t = puiTransformMod.puiTransform(raw, uriToPath(uri));
+    puiCache.set(uri, { version, t });
+    return t;
+  } catch (e: any) {
+    logMessage(2, `[parabun-lsp] puiTransform failed for ${uri}: ${e?.message ?? e}`);
+    return undefined;
+  }
+}
+
+function getCssService(lang: "css" | "scss" | "less"): any | undefined {
+  if (cssLsp === undefined) {
+    try {
+      cssLsp = require("vscode-css-languageservice");
+      textDocumentCtor = require("vscode-languageserver-textdocument").TextDocument;
+    } catch (e: any) {
+      logMessage(2, `[parabun-lsp] vscode-css-languageservice not available: ${e?.message ?? e}`);
+      cssLsp = null;
+      return undefined;
+    }
+  }
+  if (!cssLsp) return undefined;
+  if (lang === "scss") return (scssService ??= cssLsp.getSCSSLanguageService());
+  if (lang === "less") return (lessService ??= cssLsp.getLESSLanguageService());
+  return (cssService ??= cssLsp.getCSSLanguageService());
+}
+
+function getSassModule(): any | undefined {
+  if (sassModule === undefined) {
+    try {
+      sassModule = require("sass");
+    } catch (e: any) {
+      logMessage(2, `[parabun-lsp] sass (dart-sass) not available: ${e?.message ?? e}`);
+      sassModule = null;
+    }
+  }
+  return sassModule || undefined;
+}
+
+/**
+ * Validate an indented-sass block via dart-sass. Strip `@use` / `@import` /
+ * `@forward` first (replace with spaces, line-preserving) so isolated style
+ * blocks don't blow up trying to resolve workspace stylesheets. Sass throws
+ * on the first error rather than collecting all, so we emit one diagnostic
+ * per parse attempt — acceptable v1.
+ */
+function validateSass(
+  content: string,
+): Array<{ line: number; col: number; endLine: number; endCol: number; message: string }> {
+  const sass = getSassModule();
+  if (!sass) return [];
+  const stripped = content.replace(
+    /^(\s*)(@(?:use|import|forward)\b[^\n]*)$/gm,
+    (_full, ws, stmt) => ws + " ".repeat(stmt.length),
+  );
+  try {
+    sass.compileString(stripped, { syntax: "indented", quietDeps: true });
+    return [];
+  } catch (e: any) {
+    if (e?.span) {
+      return [
+        {
+          line: e.span.start?.line ?? 0,
+          col: e.span.start?.column ?? 0,
+          endLine: e.span.end?.line ?? e.span.start?.line ?? 0,
+          endCol: e.span.end?.column ?? (e.span.start?.column ?? 0) + 1,
+          message: e.sassMessage ?? e.message ?? String(e),
+        },
+      ];
+    }
+    return [];
+  }
+}
+
+function computeStyleDiagnostics(uri: string): LspDiagnostic[] {
+  if (!isComponentUri(uri)) return [];
+  const raw = svelteRawTexts.get(uri);
+  if (!raw) return [];
+  const blocks = extractStyleBlocks(raw);
+  if (blocks.length === 0) return [];
+
+  const diagnostics: LspDiagnostic[] = [];
+  for (const block of blocks) {
+    const content = raw.slice(block.start, block.end);
+    const blockStartPos = offsetToPosition(raw, block.start);
+
+    // dart-sass for indented syntax.
+    if (block.lang === "sass") {
+      for (const d of validateSass(content)) {
+        const startLine = blockStartPos.line + d.line;
+        const startChar = d.line === 0 ? blockStartPos.character + d.col : d.col;
+        const endLine = blockStartPos.line + d.endLine;
+        const endChar = d.endLine === 0 ? blockStartPos.character + d.endCol : d.endCol;
+        diagnostics.push({
+          range: {
+            start: { line: startLine, character: startChar },
+            end: { line: endLine, character: endChar },
+          },
+          severity: 1,
+          source: "css(sass)",
+          message: d.message,
+        });
+      }
+      continue;
+    }
+
+    // css/scss/less via vscode-css-languageservice.
+    const service = getCssService(block.lang);
+    if (!service || !textDocumentCtor) continue;
+
+    const doc = textDocumentCtor.create(`memory://${block.lang}.${block.lang}`, block.lang, 1, content);
+    let stylesheet: any;
+    try {
+      stylesheet = service.parseStylesheet(doc);
+    } catch (e: any) {
+      logMessage(2, `[parabun-lsp] css parse failed: ${e?.message ?? e}`);
+      continue;
+    }
+    const cssDiags: any[] = service.doValidation(doc, stylesheet) ?? [];
+
+    for (const d of cssDiags) {
+      const startLine = blockStartPos.line + d.range.start.line;
+      const startChar =
+        d.range.start.line === 0 ? blockStartPos.character + d.range.start.character : d.range.start.character;
+      const endLine = blockStartPos.line + d.range.end.line;
+      const endChar = d.range.end.line === 0 ? blockStartPos.character + d.range.end.character : d.range.end.character;
+      diagnostics.push({
+        range: {
+          start: { line: startLine, character: startChar },
+          end: { line: endLine, character: endChar },
+        },
+        severity: d.severity ?? 1,
+        source: `css(${block.lang})`,
+        message: d.message,
+      });
+    }
+  }
+  return diagnostics;
+}
 
 // ---------------------------------------------------------------------------
 // TypeScript language service
@@ -927,8 +1355,22 @@ function getDocContent(uri: string): string | undefined {
 }
 
 // TypeScript rejects files with unknown extensions. Present .pts/.ptsx
-// files as .ts/.tsx so the language service will process them.
+// files as .ts/.tsx so the language service will process them. .svelte and
+// .pui files with parabun script blocks become `<file>.svelte.ts` (or
+// .pui.ts) so the TS service treats them as a normal source file while
+// we keep the original URI for client communication.
 function toTsPath(filePath: string): string {
+  if (filePath.endsWith(".pui")) {
+    // .pui goes through puiTransform → svelte2tsx, which emits TSX
+    // (svelteHTML.createElement(...)); present it as .tsx so the TS
+    // service parses JSX. (.svelte keeps its existing .ts/.js path.)
+    return filePath + ".tsx";
+  }
+  if (filePath.endsWith(".svelte")) {
+    const lang = svelteLangs.get(pathToUri(filePath));
+    if (lang === "pjs") return filePath + ".js";
+    return filePath + ".ts";
+  }
   if (filePath.endsWith(".pts")) return filePath.slice(0, -4) + ".ts";
   if (filePath.endsWith(".ptsx")) return filePath.slice(0, -5) + ".tsx";
   if (filePath.endsWith(".pjs")) return filePath.slice(0, -4) + ".js";
@@ -937,6 +1379,14 @@ function toTsPath(filePath: string): string {
 }
 
 function fromTsPath(tsPath: string): string {
+  // Svelte/pui virtual paths: `<file>.svelte.<ext>` / `<file>.pui.<ext>`
+  // → original. Match before generic .ts/.tsx rules so foo.svelte.ts /
+  // foo.pui.ts are recognized as component files rather than stand-alones.
+  const componentMatch = tsPath.match(/^(.*\.(?:svelte|pui))\.(tsx|ts|js)$/);
+  if (componentMatch) {
+    const componentPath = componentMatch[1]!;
+    if (documents.has(pathToUri(componentPath))) return componentPath;
+  }
   const fs = require("fs");
   // Check if the original .pts/.ptsx/.pjs/.pjsx exists for this virtual path
   const extMap: [string, string][] = [
@@ -1031,6 +1481,16 @@ function initTypeScriptService() {
       // Check if this is a virtual .ts path for an open .pts document
       const realPath = fromTsPath(fileName);
       const uri = pathToUri(realPath);
+      // `.pui` (Slice B): serve full svelte2tsx output so the TS service
+      // sees real component/prop/template types — not the blank-padded
+      // script-only synthetic. Raw markup lives in svelteRawTexts.
+      if (isPuiUri(uri)) {
+        const raw = svelteRawTexts.get(uri);
+        if (raw !== undefined) {
+          const t = getPuiTransform(uri, raw);
+          if (t) return ts!.ScriptSnapshot.fromString(t.code);
+        }
+      }
       const content = documents.get(uri);
       if (content !== undefined) {
         return ts!.ScriptSnapshot.fromString(transformParabunToTS(content));
@@ -1331,7 +1791,7 @@ function ensureTscHelper(): void {
   // spawn / after a respawn.
   for (const [uri, content] of documents) {
     const version = docVersions.get(uri) ?? 1;
-    sendToHelper({ type: "open", uri, content, version });
+    sendToHelper({ type: "open", uri, content, version, lang: svelteLangs.get(uri) });
     helperOpenDocs.add(uri);
   }
 }
@@ -1369,11 +1829,12 @@ function handleHelperReply(msg: any): void {
 
 function requestTscDiagnostics(uri: string, content: string, version: number): void {
   ensureTscHelper();
+  const lang = svelteLangs.get(uri);
   if (!helperOpenDocs.has(uri)) {
-    sendToHelper({ type: "open", uri, content, version });
+    sendToHelper({ type: "open", uri, content, version, lang });
     helperOpenDocs.add(uri);
   } else {
-    sendToHelper({ type: "update", uri, content, version });
+    sendToHelper({ type: "update", uri, content, version, lang });
   }
   sendToHelper({ type: "validate", uri, version });
 }
@@ -1418,6 +1879,18 @@ function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
   diagnostics.push(...findModelBodyDiagnostics(content));
   diagnostics.push(...findUnknownIdentifierDiagnostics(content, uri));
 
+  // Template-level well-formedness — scan the original .svelte/.pui
+  // markup (kept in svelteRawTexts) rather than the blank-padded synthetic
+  // the parabun parser sees.
+  if (isComponentUri(uri)) {
+    const raw = svelteRawTexts.get(uri);
+    if (raw !== undefined) {
+      diagnostics.push(...findTemplateWellFormednessIssues(raw, isPuiUri(uri)));
+    }
+    // CSS/SCSS/Less diagnostics for `<style>` blocks via vscode-css-languageservice.
+    diagnostics.push(...computeStyleDiagnostics(uri));
+  }
+
   return diagnostics;
 }
 
@@ -1426,6 +1899,39 @@ function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
   if (!(tsService && ts)) return diagnostics;
 
   const fileName = toTsPath(uriToPath(uri));
+
+  // `.pui` (Slice B): diagnostics are over svelte2tsx output; map each
+  // back to the raw .pui via the sourcemap. Generated positions with no
+  // original mapping are svelte2tsx scaffolding (not user code) — drop
+  // them rather than squiggle at (0,0).
+  if (isPuiUri(uri)) {
+    const raw = svelteRawTexts.get(uri);
+    const t = raw !== undefined ? getPuiTransform(uri, raw) : undefined;
+    if (!t) return diagnostics;
+    try {
+      const all = [...tsService.getSyntacticDiagnostics(fileName), ...tsService.getSemanticDiagnostics(fileName)];
+      for (const diag of all) {
+        if (diag.start === undefined || diag.length === undefined) continue;
+        const gs = offsetToPosition(t.code, diag.start);
+        const ge = offsetToPosition(t.code, diag.start + diag.length);
+        const os = t.toOriginal(gs.line, gs.character);
+        const oe = t.toOriginal(ge.line, ge.character);
+        if (!os) continue; // generated-only scaffolding
+        const end = oe ?? { line: os.line, character: os.character + 1 };
+        diagnostics.push({
+          range: { start: os, end },
+          severity:
+            diag.category === ts.DiagnosticCategory.Error ? 1 : diag.category === ts.DiagnosticCategory.Warning ? 2 : 3,
+          source: "ts",
+          message: `TS${diag.code}: ${ts.flattenDiagnosticMessageText(diag.messageText, "\n")}`,
+        });
+      }
+    } catch (e: any) {
+      logMessage(2, `[parabun-lsp] .pui TS diagnostics error: ${e?.message ?? e}`);
+    }
+    return diagnostics;
+  }
+
   const transformed = transformParabunToTS(content);
 
   try {
@@ -1703,6 +2209,9 @@ function extractFunctionSignatureAndBody(lines: string[], fnLine: number): { par
 function bodyHasSideEffects(params: string[], rawBody: string): boolean {
   const body = maskCommentsAndStrings(rawBody);
   if (/\bthis\b/.test(body) || /\barguments\b/.test(body)) return true;
+  // `await` is async I/O — the awaited callee is doing the side effect, but
+  // the awaiting function is observably impure regardless.
+  if (/\bawait\b/.test(body)) return true;
 
   const locals = collectLocals(params, body);
   const paramSet = new Set<string>(params);
@@ -1724,11 +2233,49 @@ function bodyHasSideEffects(params: string[], rawBody: string): boolean {
     if (paramSet.has(m[1])) return true;
   }
 
-  // Mutating method calls on parameters
+  // Mutating method calls on parameters OR free variables. A `.set(...)` /
+  // `.push(...)` etc. on anything that isn't a local declaration is
+  // observably side-effectful even when the root identifier is captured
+  // from an outer scope (`stores.users.set(...)`, `cache.delete(...)`).
   const mutMethodRe =
     /\b(\w+)(?:\.[a-zA-Z_$]\w*)*\.(push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|set|delete|clear|add)\s*\(/g;
   while ((m = mutMethodRe.exec(body)) !== null) {
-    if (paramSet.has(m[1])) return true;
+    const root = m[1];
+    if (locals.has(root)) continue; // local container — its scope is the function
+    return true;
+  }
+
+  // Calls on free variables not in the curated pure-safe-call set. Any
+  // `console.error(...)`, `api.foo()`, etc. count as observable side effects
+  // from the caller's perspective even if the callee is internally pure —
+  // the suggestion-side hint is for *confidently* pure functions only, so we
+  // err strict.
+  const freeCallRe = /\b(\w+)\s*\(/g;
+  while ((m = freeCallRe.exec(body)) !== null) {
+    const name = m[1];
+    if (locals.has(name)) continue;
+    if (paramSet.has(name)) continue;
+    if (JS_KEYWORDS.test(name)) continue;
+    if (PURE_SAFE_CALLS.has(name)) continue;
+    // A free identifier being called — be conservative and treat as a side
+    // effect. False negatives (missing a hint where the function IS pure)
+    // are vastly preferable to false positives like the one that prompted
+    // this fix.
+    return true;
+  }
+
+  // Member-call where the ROOT is a free non-safe identifier:
+  // `api.listGroupsImIn()`, `console.error(...)`, `stores.users.get(...)`.
+  // Reads and method invocations on captured/imported state are not safe to
+  // assume pure.
+  const memberCallRe = /\b(\w+)\.\w+(?:\.\w+)*\s*\(/g;
+  while ((m = memberCallRe.exec(body)) !== null) {
+    const root = m[1];
+    if (locals.has(root)) continue;
+    if (paramSet.has(root)) continue;
+    if (JS_KEYWORDS.test(root)) continue;
+    if (PURE_SAFE_CALLS.has(root)) continue;
+    return true;
   }
 
   return false;
@@ -2546,7 +3093,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "change, `B` gets re-assigned with `A`'s new value. `B` must be",
       "assignable — an identifier or property access.",
       "",
-      "Desugars to `require('@para/signals').effect(() => { B = A; })` —",
+      "Desugars to `require('@lyku/para-signals').effect(() => { B = A; })` —",
       "evaluating `A` in a tracked context and returning the disposer, so",
       "you can capture it: `const stop = src ~> dst;`.",
       "",
@@ -2567,7 +3114,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "a callable target — an identifier, property access, or indexed",
       "function.",
       "",
-      "Desugars to `require('@para/signals').effect(() => { fn(A); })` — the",
+      "Desugars to `require('@lyku/para-signals').effect(() => { fn(A); })` — the",
       "call-sink complement to `~>`. Same precedence, same disposer return,",
       "same optional `when COND` guard.",
       "",
@@ -2607,7 +3154,7 @@ function getParabunHover(content: string, line: number, character: number): stri
       "disambiguates. Suffix `when` is an every-truthy guard; the block form",
       "is edge-triggered.",
       "",
-      "Desugars to `require('@para/signals').when(() => EXPR, () => { BODY })`",
+      "Desugars to `require('@lyku/para-signals').when(() => EXPR, () => { BODY })`",
       "— the `not` form negates the predicate (`() => !(EXPR)`), and the paired",
       "form emits two such calls.",
       "",
@@ -2636,7 +3183,7 @@ function getWordAt(line: string, col: number): string {
 
 // True when the cursor is sitting on the `signal` keyword of a `signal NAME =`
 // declaration (as opposed to a plain identifier named `signal` imported from
-// `@para/signals`). Gates the hover so `const x = signal(0)` — which is also
+// `@lyku/para-signals`). Gates the hover so `const x = signal(0)` — which is also
 // valid — doesn't trigger the keyword tooltip.
 function isSignalDeclarationAt(line: string, col: number): boolean {
   const word = findWordBounds(line, col);
@@ -4286,8 +4833,41 @@ function getCodeActions(uri: string, content: string, range: LspRange, params?: 
 // Semantic Tokens — pure keyword highlighting
 // ---------------------------------------------------------------------------
 
-const SEMANTIC_TOKEN_TYPES = ["function", "variable"];
+const SEMANTIC_TOKEN_TYPES = ["function", "variable", "class"];
 const SEMANTIC_TOKEN_MODIFIERS = ["declaration", "pure", "signal"];
+
+// Component-tag pass for .svelte / .pui templates. Scans the raw markup for
+// `<ComponentName>` and `</ComponentName>` occurrences (uppercase-leading tag
+// names, the Svelte/React convention for component invocations) and emits
+// `class` semantic tokens so themes render them as classes/types rather
+// than the muted `support.class.component.svelte` TextMate fallback. Uses
+// the line-preserving raw text from svelteRawTexts so coordinates match
+// the client's view of the document.
+function collectComponentTagTokens(
+  uri: string,
+): Array<{ line: number; col: number; len: number; type: number; modifiers: number }> {
+  const tokens: Array<{ line: number; col: number; len: number; type: number; modifiers: number }> = [];
+  if (!isComponentUri(uri)) return tokens;
+  const raw = svelteRawTexts.get(uri);
+  if (raw === undefined) return tokens;
+
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    // Opening: <Component  (skip the `<`, take the identifier)
+    const openRe = /<([A-Z]\w*)\b/g;
+    let m: RegExpExecArray | null;
+    while ((m = openRe.exec(line)) !== null) {
+      tokens.push({ line: i, col: m.index + 1, len: m[1]!.length, type: 2, modifiers: 0 });
+    }
+    // Closing: </Component>  (skip the `</`)
+    const closeRe = /<\/([A-Z]\w*)\b/g;
+    while ((m = closeRe.exec(line)) !== null) {
+      tokens.push({ line: i, col: m.index + 2, len: m[1]!.length, type: 2, modifiers: 0 });
+    }
+  }
+  return tokens;
+}
 
 // Collect names declared with `signal NAME = ...` (including multi-declarator
 // forms like `signal a = 1, b = 2`). Used to semantic-highlight signal-bound
@@ -4366,6 +4946,9 @@ function computeSemanticTokens(uri: string, content: string): number[] {
     }
   }
 
+  // Component-tag tokens for .svelte / .pui templates.
+  tokens.push(...collectComponentTagTokens(uri));
+
   tokens.sort((a, b) => a.line - b.line || a.col - b.col);
 
   // Dedup exact-overlap tokens (same line+col+len) — keep the first, OR-
@@ -4438,8 +5021,13 @@ function handleMessage(msg: any) {
     case "textDocument/didOpen": {
       const { uri, text, version, languageId } = params.textDocument;
       logMessage(3, `[parabun-lsp] didOpen: uri=${uri} lang=${languageId} len=${text?.length ?? 0}`);
-      documents.set(uri, text);
+      const stored = ingestDocumentText(uri, text);
       docVersions.set(uri, version ?? 1);
+      if (stored === undefined) {
+        // .svelte file with no parabun script blocks — nothing to analyze.
+        publishDiagnostics(uri, []);
+        break;
+      }
       // Fast pass debounced as usual; ALSO dispatch a slow tsc request
       // immediately (no 1.5 s debounce) so the helper subprocess can
       // begin its cold load in parallel with the user reading the
@@ -4449,7 +5037,7 @@ function handleMessage(msg: any) {
       scheduleValidate(uri);
       const initialVersion = docVersions.get(uri);
       if (initialVersion !== undefined) {
-        requestTscDiagnostics(uri, text, initialVersion);
+        requestTscDiagnostics(uri, stored, initialVersion);
       }
       break;
     }
@@ -4458,8 +5046,12 @@ function handleMessage(msg: any) {
       const uri = params.textDocument.uri;
       const content = params.contentChanges[0]?.text;
       if (content !== undefined) {
-        documents.set(uri, content);
+        const stored = ingestDocumentText(uri, content);
         docVersions.set(uri, (docVersions.get(uri) ?? 0) + 1);
+        if (stored === undefined) {
+          publishDiagnostics(uri, []);
+          break;
+        }
         scheduleValidate(uri);
       }
       break;
@@ -4479,6 +5071,8 @@ function handleMessage(msg: any) {
       }
       documents.delete(uri);
       docVersions.delete(uri);
+      svelteLangs.delete(uri);
+      svelteRawTexts.delete(uri);
       lastFastDiagnostics.delete(uri);
       if (tscHelper && helperOpenDocs.has(uri)) {
         sendToHelper({ type: "close", uri });
@@ -4537,16 +5131,14 @@ function handleMessage(msg: any) {
       break;
     }
 
-    case "textDocument/semanticTokens/full": {
+    case "textDocument/semanticTokens/full":
+    case "textDocument/semanticTokens/full/delta":
+    case "textDocument/semanticTokens/range": {
       const uri = params.textDocument.uri;
       const content = getDocContent(uri);
-      if (content) {
-        sendResponse(id, {
-          data: computeSemanticTokens(uri, content),
-        });
-      } else {
-        sendResponse(id, { data: [] });
-      }
+      const data = content ? computeSemanticTokens(uri, content) : [];
+      logMessage(3, `[parabun-lsp] ${method}: uri=${uri} tokens=${data.length / 5}`);
+      sendResponse(id, { data });
       break;
     }
 
@@ -4665,10 +5257,13 @@ function handleHelperMessage(msg: any): void {
     case "update":
       documents.set(msg.uri, msg.content);
       docVersions.set(msg.uri, msg.version);
+      if (msg.lang) svelteLangs.set(msg.uri, msg.lang);
+      else if (isComponentUri(msg.uri)) svelteLangs.delete(msg.uri);
       return;
     case "close":
       documents.delete(msg.uri);
       docVersions.delete(msg.uri);
+      svelteLangs.delete(msg.uri);
       return;
     case "validate": {
       const content = documents.get(msg.uri);

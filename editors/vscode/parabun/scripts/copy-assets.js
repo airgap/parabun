@@ -83,6 +83,24 @@ for (const dep of styleDeps) {
   fs.cpSync(src, dest, { recursive: true, dereference: true });
 }
 
+// LYK-880 Slice B: bundle + ship parabun-pui-transform so the LSP can
+// `require("parabun-pui-transform")` for in-.pui type intelligence. One
+// self-contained file (svelte2tsx + svelte + @lyku/para-preprocess +
+// trace-mapping inlined) — no recursive svelte node_modules ship.
+const lspDir = path.resolve(root, "../../lsp");
+require("node:child_process").execFileSync(process.execPath, ["esbuild-pui-transform.mjs"], {
+  cwd: lspDir,
+  stdio: "inherit",
+});
+const puiTxDest = path.join(root, "server/node_modules/parabun-pui-transform");
+fs.rmSync(puiTxDest, { recursive: true, force: true });
+fs.mkdirSync(puiTxDest, { recursive: true });
+fs.copyFileSync(path.join(lspDir, "dist-pui-transform/pui-transform.js"), path.join(puiTxDest, "index.js"));
+fs.writeFileSync(
+  path.join(puiTxDest, "package.json"),
+  JSON.stringify({ name: "parabun-pui-transform", version: "0.1.0", main: "index.js" }, null, 2),
+);
+
 // Copy TS plugin (built output only — no symlink, no npm dep)
 const pluginSrc = path.resolve(root, "../../ts-plugin");
 const pluginDest = path.join(root, "node_modules/parabun-ts-plugin");
