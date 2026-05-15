@@ -225,7 +225,16 @@ function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolea
   return { code, needsOnDestroy: needs };
 }
 
-function lowerPuiReactivity(source: string, runtime: "@lyku/para-ui" | "svelte"): string {
+/**
+ * Lower a `.pui` `<script>` body's Para reactive keywords (signal / derived /
+ * effect / prop / provide / inject / using) to standard Svelte 5 runes.
+ * Synchronous and side-effect-free — safe to call from a TS language-service
+ * plugin or any tooling that needs the type-relevant transform without the
+ * full async PreprocessorGroup. The operator desugars (`..!`, `|>`, `pure`)
+ * are NOT applied here (they're Bun.Transpiler's job and don't change the
+ * component's type surface). Exported for `pui2tsx` / editor tooling.
+ */
+export function lowerPuiReactivity(source: string, runtime: "@lyku/para-ui" | "svelte" = "@lyku/para-ui"): string {
   // Effect blocks first (brace-aware) so subsequent regex passes don't
   // accidentally chew the rewritten `$effect(() => {...})` body.
   source = lowerEffectBlocks(source);

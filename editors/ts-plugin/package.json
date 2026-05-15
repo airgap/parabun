@@ -11,5 +11,10 @@
   },
   "files": [
     "out"
-  ]
+  ],
+  "dependencies": {
+    "@lyku/para-preprocess": "file:../../packages/para-preprocess",
+    "svelte": "^5.55.7",
+    "svelte2tsx": "^0.7.55"
+  }
 }
