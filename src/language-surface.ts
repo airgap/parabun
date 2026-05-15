@@ -191,9 +191,9 @@ export const LANGUAGE_SURFACE: LanguageEntry[] = [
   },
   {
     id: "derived-decl",
-    doc: "derived NAME = EXPR — read-only signal computed from reads inside EXPR",
+    doc: "derived NAME = EXPR or derived NAME { … } — read-only computed cell ($derived / $derived.by)",
     kind: "keyword",
-    pattern: String.raw`\b(derived)\b(?=\s+[A-Za-z_$][\w$]*\s*[=,;:!])`,
+    pattern: String.raw`\b(derived)\b(?=\s+[A-Za-z_$][\w$]*\s*[=,;:!{])`,
     scopes: { "1": "storage.type.derived.parabun" },
     lspAllowlist: true,
   },

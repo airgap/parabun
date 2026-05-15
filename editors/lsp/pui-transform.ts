@@ -145,6 +145,24 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
       }
     }
 
+    // ── derived NAME { body } → const NAME = $derived.by(() => { body })
+    // (LYK-892). Multi-statement derivation block; opener/closer-only
+    // rewrite keeps the body mapped. Byte-identical to the build path.
+    {
+      const re = /(^|[^\w$.])derived\s+(\w+)\s*\{/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(body)) !== null) {
+        const kwStart = bodyStart + m.index + (m[1] ? m[1].length : 0);
+        const name = m[2]!;
+        const braceStart = bodyStart + re.lastIndex - 1;
+        const braceEnd = findMatchingBrace(raw, braceStart);
+        if (braceEnd === -1) continue;
+        repl(kwStart, braceStart + 1, `const ${name} = $derived.by(() => {`);
+        repl(braceEnd - 1, braceEnd, "})");
+        re.lastIndex = braceEnd - bodyStart;
+      }
+    }
+
     // Per-line passes. Recompute line offsets against raw (effect overwrite
     // doesn't move line starts: opener/closer lines keep their newline).
     const lineStarts: number[] = [bodyStart];

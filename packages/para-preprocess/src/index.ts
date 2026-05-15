@@ -188,10 +188,38 @@ function lowerMountBlocks(source: string): { code: string; needsOnMount: boolean
   return { code: out, needsOnMount: needs };
 }
 
+function lowerDerivedBlocks(source: string): string {
+  // LYK-892 (Phase C): `derived NAME { … }` → `const NAME =
+  // $derived.by(() => { … })`. The block form for multi-statement
+  // derivations (the chained filter/sort/group pattern that previously
+  // forced a raw `$derived.by` fallback — the #1 mixed-dialect culprit
+  // in real .pui per the migration research). Brace-aware, same shape as
+  // lowerEffectBlocks/lowerMountBlocks; runs before the single-line
+  // `derived NAME = EXPR` pass so each form is consumed by exactly one.
+  let out = "";
+  let i = 0;
+  const re = /(^|[^\w$.])derived\s+(\w+)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    const kwStart = m.index + (m[1] ? m[1].length : 0);
+    const name = m[2]!;
+    const braceStart = re.lastIndex - 1; // position of `{`
+    const braceEnd = findMatchingBrace(source, braceStart);
+    if (braceEnd === -1) continue;
+    out += source.slice(i, kwStart);
+    const body = source.slice(braceStart + 1, braceEnd - 1);
+    out += `const ${name} = $derived.by(() => {${body}})`;
+    i = braceEnd;
+    re.lastIndex = braceEnd;
+  }
+  out += source.slice(i);
+  return out;
+}
+
 function lowerDerivedDecls(source: string): string {
-  // `derived NAME = EXPR` → `const NAME = $derived(EXPR)`. Simple
-  // single-line form only for v1; multi-line expression bodies need a
-  // smarter matcher (Phase 1 follow-up).
+  // `derived NAME = EXPR` → `const NAME = $derived(EXPR)`. Single-line
+  // expression form; the multi-statement block form `derived NAME { … }`
+  // is handled by lowerDerivedBlocks (run first).
   const declRe = /^(\s*)derived\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/gm;
   return source.replace(declRe, (_full, indent, name, expr) => {
     return `${indent}const ${name} = $derived(${expr});`;
@@ -424,6 +452,7 @@ export function lowerPuiReactivity(
   source = lowerEffectBlocks(source);
   const mountResult = lowerMountBlocks(source);
   source = mountResult.code;
+  source = lowerDerivedBlocks(source);
   source = lowerDerivedDecls(source);
   source = lowerPropDecls(source);
 

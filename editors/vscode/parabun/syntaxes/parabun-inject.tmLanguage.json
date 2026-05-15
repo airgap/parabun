@@ -122,8 +122,8 @@
       }
     },
     {
-      "comment": "derived NAME = EXPR — read-only signal computed from reads inside EXPR",
-      "match": "\\b(derived)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=,;:!])",
+      "comment": "derived NAME = EXPR or derived NAME { … } — read-only computed cell ($derived / $derived.by)",
+      "match": "\\b(derived)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=,;:!{])",
       "captures": {
         "1": {
           "name": "storage.type.derived.parabun"
