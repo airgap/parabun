@@ -586,7 +586,7 @@ The parabun VSCode extension contributes:
 
 ### Roadmap
 
-`.pui` is a multi-year buildout tracked under [LYK-829](https://linear.app/lyku/issue/LYK-829). Phase 0 (file format + minimum LSP) is what's currently usable. Later phases add script-keyword sugar (`store`/`derived`/`effect`/`mount`/`prop`/`emit`/`using`), parabun operators in template `{}` expressions, `{#match}`/`{#try}`, `pure component`, server/client split, and more — see umbrella for details.
+`.pui` is a multi-year buildout tracked under [LYK-829](https://linear.app/lyku/issue/LYK-829). Phase 0 (file format + minimum LSP) is what's currently usable. Later phases add script-keyword sugar (`store`/`derived`/`effect`/`mount`/`source`/`prop`/`emit`/`using`), parabun operators in template `{}` expressions, `{#match}`/`{#try}`, `pure component`, server/client split, and more — see umbrella for details.
 
 ## Architecture
 

@@ -266,6 +266,36 @@ function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolea
   return { code, needsOnDestroy: needs };
 }
 
+function lowerSourceDecls(source: string): { code: string; needsOnDestroy: boolean } {
+  // LYK-895 (Phase A): `source NAME = EXPR` binds a native handle's
+  // reactive surface into a component-reactive, read-only cell that
+  // auto-disposes on unmount. Composes two already-proven patterns —
+  // the escaping-`signal` para→Svelte bridge and the `using` disposal —
+  // so it's preprocess-only (no para-signals/Svelte-fork change).
+  //
+  // The handle satisfies an all-optional, optional-chained convention
+  // (conservative — a plain value works too): `.peek()` current
+  // snapshot (fallback: the handle itself), `.subscribe(cb)` fire on
+  // change returning an unsubscribe (its return is the $effect.pre
+  // teardown), `.dispose()`/Symbol.dispose unmount cleanup.
+  //
+  // `NAME` is a read-only reactive VIEW of a native source, so unlike
+  // `signal` there is deliberately no assignment-rewrite. Independent of
+  // buildEscapeChecker (not a `signal` cell).
+  let needs = false;
+  const re = /^(\s*)source\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/gm;
+  const code = source.replace(re, (_full, indent, name, expr) => {
+    needs = true;
+    return (
+      `${indent}const __src_${name} = ${expr}; ` +
+      `let ${name} = $state(__src_${name}.peek?.() ?? __src_${name}); ` +
+      `$effect.pre(() => __src_${name}.subscribe?.((__v: typeof ${name}) => { ${name} = __v; })); ` +
+      `onDestroy(() => __src_${name}.dispose?.());`
+    );
+  });
+  return { code, needsOnDestroy: needs };
+}
+
 /**
  * LYK-886 escape analysis (hardened: per-name `signalOf` precision).
  *
@@ -364,10 +394,13 @@ export function lowerPuiReactivity(
   const usingResult = lowerUsingDecls(source);
   source = usingResult.code;
 
+  const sourceResult = lowerSourceDecls(source);
+  source = sourceResult.code;
+
   // Aggregate Svelte imports needed by the lowerings above. provide/inject
-  // contributes setContext/getContext; using contributes onDestroy.
+  // contributes setContext/getContext; using + source contribute onDestroy.
   const svelteImports = new Set<string>(provideInject.imports);
-  if (usingResult.needsOnDestroy) svelteImports.add("onDestroy");
+  if (usingResult.needsOnDestroy || sourceResult.needsOnDestroy) svelteImports.add("onDestroy");
   if (mountResult.needsOnMount) svelteImports.add("onMount");
 
   // LYK-886 escape analysis. A `signal x` only needs the para bridge

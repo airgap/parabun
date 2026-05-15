@@ -104,6 +104,15 @@
       }
     },
     {
+      "comment": "source NAME = ... — native-handle reactive view, auto-disposed on unmount (.pui)",
+      "match": "\\b(source)\\b(?=\\s+[A-Za-z_$][\\w$]*\\s*[=:])",
+      "captures": {
+        "1": {
+          "name": "storage.type.source.parabun"
+        }
+      }
+    },
+    {
       "comment": "`every MS_EXPR` postfix on a signal declaration — drives the cell from an interval",
       "match": "(?<=[\\)\\d\\w$])\\s+(every)\\s+(?=\\d|[A-Za-z_$\\(])",
       "captures": {

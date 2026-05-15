@@ -3648,6 +3648,7 @@ const KNOWN_GLOBAL_IDENTIFIERS = new Set<string>([
   "derived",
   "effect",
   "mount",
+  "source",
   "when",
   "arena",
   "memo",

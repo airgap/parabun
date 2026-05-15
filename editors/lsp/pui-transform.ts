@@ -200,6 +200,26 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         continue;
       }
 
+      // source NAME = EXPR → native-handle reactive view + auto-dispose
+      // (LYK-895). Two-repl keeps EXPR mapped; byte-identical to the build
+      // path's whole-line form. Needs onDestroy.
+      let sc = lineText.match(/^(\s*)source\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/);
+      if (sc) {
+        svelteImports.add("onDestroy");
+        const indent = sc[1]!;
+        const name = sc[2]!;
+        const exprRel = lineText.lastIndexOf(sc[3]!);
+        repl(ls, ls + exprRel, `${indent}const __src_${name} = `);
+        repl(
+          ls + exprRel + sc[3]!.length,
+          le,
+          `; let ${name} = $state(__src_${name}.peek?.() ?? __src_${name}); ` +
+            `$effect.pre(() => __src_${name}.subscribe?.((__v: typeof ${name}) => { ${name} = __v; })); ` +
+            `onDestroy(() => __src_${name}.dispose?.());`,
+        );
+        continue;
+      }
+
       // signal NAME = EXPR → bridge (source↔output reordered → whole-line).
       let sg = lineText.match(/^(\s*)signal\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/);
       if (sg) {
