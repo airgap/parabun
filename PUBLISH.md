@@ -5,8 +5,8 @@ there directly — no registry setup, no scope shuffling.
 
 ## Packages in the pre-release lane
 
-| Package               | Path                                   | Version       |
-| --------------------- | -------------------------------------- | ------------- |
+| Package                    | Path                                   | Version       |
+| -------------------------- | -------------------------------------- | ------------- |
 | `@lyku/para-signals`       | `packages/para-signals`                | `0.0.1-pre.0` |
 | `@lyku/para-ui-preprocess` | `packages/para-ui-preprocess`          | `0.0.1-pre.0` |
 | `@lyku/para-ui`            | `packages/para-svelte/packages/svelte` | `0.0.1-pre.0` |
@@ -72,24 +72,37 @@ When the API is stable enough to drop `-pre`, bump to `0.0.1` then `0.1.0`. The
 desugaring works) applies to GA versions only; pre-releases are explicit
 "not GA" and the API surface may change.
 
-## CI publish — `jenkins/Jenkinsfile.npm-publish`
+## CI publish — `Publish npm` stage in `jenkins/Jenkinsfile`
 
-The canonical publish path is the Jenkins pipeline at
-`jenkins/Jenkinsfile.npm-publish` (modelled on lyku's, same Doppler secret
-`NPM_ACCESS_TOKEN` from `ci-deploy/prd`).
+The npm publish runs as a stage inside the existing `parabun` Jenkins job
+(no separate job to wire up). Trigger from the Jenkins UI ("Build with
+Parameters") on the `parabun` job:
 
-Trigger from the Jenkins UI ("Build with Parameters"):
+**Publish-only fast path** (skip the 30+min build matrix):
 
-| Parameter               | Default | Notes                                                                                                                     |
-| ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `VERSION_BUMP`          | `keep`  | `keep` publishes versions verbatim. `auto-pre-sha` bumps to `0.0.1-pre.<short-sha>` so re-runs produce distinct versions. |
-| `PUBLISH_SIGNALS`       | `true`  | Required before `@lyku/para-ui` (transitive dep).                                                                              |
-| `PUBLISH_UI`            | `true`  | sed-swaps the `file:` dep on `@lyku/para-signals` to the just-published semver, builds, publishes, reverts.                    |
-| `PUBLISH_UI_PREPROCESS` | `false` | Off by default — lyku has its own local copy at `libs/para-ui-preprocess` until the sync gap is closed (LYK-874).         |
+| Parameter                                                                            | Set to     | Notes                         |
+| ------------------------------------------------------------------------------------ | ---------- | ----------------------------- |
+| `BUILD_LINUX` / `BUILD_LINUX_ARM64` / `BUILD_MACOS` / `BUILD_WINDOWS` / `BUILD_VSIX` | `false`    | Skip platform builds entirely |
+| `RUN_TESTS`                                                                          | `false`    | No build artifacts to test    |
+| `PUBLISH_RELEASE`                                                                    | `false`    | No artifacts to upload to GH  |
+| `PUBLISH_DOCKER`                                                                     | `false`    | No Linux binary to image      |
+| `PUBLISH_NPM`                                                                        | **`true`** | Run the npm publish stage     |
 
-All packages publish `--tag pre` — npm's `latest` tag isn't touched.
-Consumers opt in with `bun add @lyku/para-ui@pre`. When a package goes GA, drop
-`--tag pre` from its stage.
+**Full release run**: leave all build params on as usual, set
+`PUBLISH_NPM=true`. npm publish runs after the release/Docker stages.
+
+The stage publishes `@lyku/para-signals` first then `@lyku/para-ui` (the
+latter depends on the former). Both `--tag pre` — npm's `latest` tag is
+untouched. The @lyku/para-ui stage sed-swaps the local-dev `file:` dep on
+`@lyku/para-signals` to a real semver before publish, reverts in
+`post.always` even on failure.
+
+`@lyku/para-ui-preprocess` is NOT published from this stage — lyku has
+its own copy at `libs/para-ui-preprocess` (LYK-874). Add a publish step
+in a follow-up commit once the sync gap is closed.
+
+Authentication: Doppler secret `NPM_ACCESS_TOKEN` in `ci-deploy/prd`,
+same secret lyku's CI uses.
 
 Local publishes (only if Jenkins is unavailable):
 
