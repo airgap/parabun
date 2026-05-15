@@ -92,6 +92,7 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
   const signalNames = new Set<string>();
   const svelteImports = new Set<string>();
   let needsSignalImport = false;
+  let needsPromiseSignal = false;
   let firstBodyStart = -1;
   const bodyRanges: Array<[number, number]> = [];
 
@@ -197,6 +198,28 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         const exprRel = lineText.lastIndexOf(us[3]!);
         repl(ls, ls + exprRel, `${indent}const ${name} = `);
         repl(ls + exprRel + us[3]!.length, le, `; onDestroy(() => ${name}.dispose?.());`);
+        continue;
+      }
+
+      // async signal NAME = EXPR → promiseSignal-backed {data,error,
+      // pending} reactive view + auto-dispose (LYK-891). Two-repl keeps
+      // EXPR mapped; byte-identical to the build path. Must precede the
+      // `signal` block. Needs onDestroy + promiseSignal.
+      let as = lineText.match(/^(\s*)async\s+signal\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/);
+      if (as) {
+        svelteImports.add("onDestroy");
+        needsPromiseSignal = true;
+        const indent = as[1]!;
+        const name = as[2]!;
+        const exprRel = lineText.lastIndexOf(as[3]!);
+        repl(ls, ls + exprRel, `${indent}const __as_${name} = promiseSignal(() => (`);
+        repl(
+          ls + exprRel + as[3]!.length,
+          le,
+          `)); let ${name} = $state(__as_${name}.peek?.() ?? __as_${name}); ` +
+            `$effect.pre(() => __as_${name}.subscribe?.((__v: typeof ${name}) => { ${name} = __v; })); ` +
+            `onDestroy(() => __as_${name}.dispose?.());`,
+        );
         continue;
       }
 
@@ -306,8 +329,11 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
   if (svelteImports.size) {
     prefix += `import { ${[...svelteImports].join(", ")} } from "@lyku/para-ui"; `;
   }
-  if (needsSignalImport && !/from\s+['"]@para\/signals['"]/.test(raw)) {
-    prefix += `import { signal } from "@lyku/para-signals"; `;
+  const paraImports: string[] = [];
+  if (needsSignalImport) paraImports.push("signal");
+  if (needsPromiseSignal) paraImports.push("promiseSignal");
+  if (paraImports.length && !/from\s+['"]@para\/signals['"]/.test(raw)) {
+    prefix += `import { ${paraImports.join(", ")} } from "@lyku/para-signals"; `;
   }
   // Insert imports at the start of the first <script> body (inside the
   // tag), inline — matches lowerPuiReactivity, keeps line count == raw.

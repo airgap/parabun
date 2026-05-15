@@ -172,6 +172,55 @@ export function signal(value) {
 }
 
 /**
+ * Async/suspense primitive (LYK-891). Wraps a thunk into a reactive
+ * `{ data, error, pending }` cell that satisfies the `.pui` `source`
+ * convention (`.peek`/`.subscribe`/`.dispose`), so `async signal x = …`
+ * reuses the proven source bridge with no new lowering machinery.
+ *
+ * Lifecycle: `pending: true` until the promise settles, then exactly one
+ * of `data` / `error` is populated and `pending: false`. `dispose()`
+ * (component unmount) aborts the AbortController AND drops any late
+ * settle — no stale state, no setState-after-unmount leak. The thunk
+ * receives that AbortSignal: `promiseSignal(s => fetch(u, { signal: s }))`
+ * gets true network cancellation. The `.pui` keyword form
+ * `async signal x = EXPR` lowers to `promiseSignal(() => (EXPR))` (the
+ * common case — component-side cancel; opt into network abort by calling
+ * promiseSignal directly).
+ *
+ * @template T
+ * @param {(abort: AbortSignal) => T | Promise<T>} thunk
+ */
+export function promiseSignal(thunk) {
+  const state = new WritableSignal({ data: undefined, error: undefined, pending: true });
+  const ac = new AbortController();
+  let disposed = false;
+  // Invoke the thunk SYNCHRONOUSLY so the request fires immediately (no
+  // wasted microtask before a fetch starts); tolerate a sync throw.
+  let p;
+  try {
+    p = Promise.resolve(thunk(ac.signal));
+  } catch (error) {
+    p = Promise.reject(error);
+  }
+  p.then(
+    data => {
+      if (!disposed) state.set({ data, error: undefined, pending: false });
+    },
+    error => {
+      if (!disposed) state.set({ data: undefined, error, pending: false });
+    },
+  );
+  return {
+    peek: () => state.peek(),
+    subscribe: cb => state.subscribe(cb),
+    dispose: () => {
+      disposed = true;
+      ac.abort();
+    },
+  };
+}
+
+/**
  * HMR-stable signal. Keyed by a module-stable string (e.g.
  * `import.meta.url + "::name"`), the FIRST call creates the signal via
  * `make()`; subsequent calls — after a vite/HMR module re-evaluation —
@@ -632,6 +681,7 @@ export default {
   untrack,
   Signal,
   resource,
+  promiseSignal,
   fromAsyncIter,
   fromStream,
   fromEventTarget,

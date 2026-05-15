@@ -303,6 +303,38 @@ function lowerSourceDecls(source: string): { code: string; needsOnDestroy: boole
   return { code, needsOnDestroy: needs };
 }
 
+function lowerAsyncSignalDecls(source: string): {
+  code: string;
+  needsOnDestroy: boolean;
+  needsPromiseSignal: boolean;
+} {
+  // LYK-891 (Phase B): `async signal NAME = EXPR` → a reactive
+  // `{ data, error, pending }` cell, the in-flight request dropped on
+  // unmount (no stale state / setState-after-unmount). Fixes a real
+  // Svelte 5 pain (its await-in-markup + async $derived story is rough)
+  // and is cheap: `promiseSignal(() => (EXPR))` returns a value that
+  // satisfies the `source` convention, so this reuses the exact source
+  // bridge — no new lowering machinery, no Svelte-fork change.
+  //
+  // `NAME` is a read-only reactive view (like `source`): no
+  // assignment-rewrite, independent of buildEscapeChecker. The thunk is
+  // `() => (EXPR)` (component-side cancel covers the common case); call
+  // promiseSignal directly with `(abort) => fetch(u,{signal:abort})` for
+  // true network abort.
+  let needs = false;
+  const re = /^(\s*)async\s+signal\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/gm;
+  const code = source.replace(re, (_full, indent, name, expr) => {
+    needs = true;
+    return (
+      `${indent}const __as_${name} = promiseSignal(() => (${expr})); ` +
+      `let ${name} = $state(__as_${name}.peek?.() ?? __as_${name}); ` +
+      `$effect.pre(() => __as_${name}.subscribe?.((__v: typeof ${name}) => { ${name} = __v; })); ` +
+      `onDestroy(() => __as_${name}.dispose?.());`
+    );
+  });
+  return { code, needsOnDestroy: needs, needsPromiseSignal: needs };
+}
+
 /**
  * LYK-886 escape analysis (hardened: per-name `signalOf` precision).
  *
@@ -404,10 +436,15 @@ export function lowerPuiReactivity(
   const sourceResult = lowerSourceDecls(source);
   source = sourceResult.code;
 
+  const asyncSignalResult = lowerAsyncSignalDecls(source);
+  source = asyncSignalResult.code;
+
   // Aggregate Svelte imports needed by the lowerings above. provide/inject
-  // contributes setContext/getContext; using + source contribute onDestroy.
+  // contributes setContext/getContext; using + source + async signal
+  // contribute onDestroy.
   const svelteImports = new Set<string>(provideInject.imports);
-  if (usingResult.needsOnDestroy || sourceResult.needsOnDestroy) svelteImports.add("onDestroy");
+  if (usingResult.needsOnDestroy || sourceResult.needsOnDestroy || asyncSignalResult.needsOnDestroy)
+    svelteImports.add("onDestroy");
   if (mountResult.needsOnMount) svelteImports.add("onMount");
 
   // LYK-886 escape analysis. A `signal x` only needs the para bridge
@@ -512,9 +549,14 @@ export function lowerPuiReactivity(
   // numbers from the user's view, which is acceptable for v1; downstream
   // Svelte compiler diagnostics will be offset by 1.
   const importSep = linePreserving ? " " : "\n";
-  if (signalNames.size > 0 && !/from\s+['"]@para\/signals['"]/.test(result)) {
-    const names = hmr ? "signal, hmrSignal" : "signal";
-    result = `import { ${names} } from "@lyku/para-signals";${importSep}` + result;
+  const paraImports: string[] = [];
+  if (signalNames.size > 0) {
+    paraImports.push("signal");
+    if (hmr) paraImports.push("hmrSignal");
+  }
+  if (asyncSignalResult.needsPromiseSignal) paraImports.push("promiseSignal");
+  if (paraImports.length > 0 && !/from\s+['"]@para\/signals['"]/.test(result)) {
+    result = `import { ${paraImports.join(", ")} } from "@lyku/para-signals";${importSep}` + result;
   }
 
   // Inject extra runtime imports (setContext/getContext from provide/inject,
