@@ -21,6 +21,9 @@
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./pui": {
+      "types": "./pui.d.ts"
     }
   },
   "scripts": {
@@ -37,6 +40,7 @@
   },
   "files": [
     "README.md",
+    "pui.d.ts",
     "src",
     "dist"
   ]
