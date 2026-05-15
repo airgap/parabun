@@ -26,14 +26,38 @@ const s = signalOf(shared);
   expect(out).toContain(`$state(__sig_shared.peek())`);
 });
 
-test("signalOf anywhere is a coarse file-level gate (all signals bridged)", () => {
+test("per-name signalOf precision: only the signalOf'd name bridges", () => {
   const out = lower(`<script lang="ts">
 signal a = 1;
 signal b = 2;
 const x = signalOf(a);
 </script>`);
-  // `b` doesn't escape itself, but signalOf-in-file keeps the whole file
-  // on today's behavior (zero-regression conservatism).
+  // a is signalOf'd → bridge; b is purely local → inlined (hardening:
+  // the old coarse file-level gate would have bridged both).
+  expect(out).toContain(`const __sig_a = signal(1);`);
+  expect(out).toContain(`let b = $state(2);`);
+  expect(out).not.toContain(`__sig_b`);
+});
+
+test("alias chain into signalOf still forces the bridge (correctness)", () => {
+  const out = lower(`<script lang="ts">
+signal x = 0;
+const y = x;
+const h = signalOf(y);
+</script>`);
+  // y is signalOf'd and y aliases x → x must keep the bridge.
+  expect(out).toContain(`const __sig_x = signal(0);`);
+  expect(out).not.toContain(`let x = $state(0);`);
+});
+
+test("untraceable signalOf arg → conservative coarse fallback (all bridge)", () => {
+  const out = lower(`<script lang="ts">
+signal a = 1;
+signal b = 2;
+const h = signalOf(getCell());
+</script>`);
+  // signalOf(<expr>) can't be resolved to a name → keep the proven
+  // bridge for every signal (no false inline).
   expect(out).toContain(`const __sig_a = signal(1);`);
   expect(out).toContain(`const __sig_b = signal(2);`);
 });
@@ -61,8 +85,9 @@ signal local = 0;
 signal exposed = 1;
 const h = signalOf(exposed);
 </script>`);
-  // signalOf present → coarse gate bridges both (documented v1 behavior).
-  expect(out).toContain(`const __sig_local = signal(0);`);
+  // Hardened: only `exposed` (signalOf'd) bridges; `local` inlines.
+  expect(out).toContain(`let local = $state(0);`);
+  expect(out).not.toContain(`__sig_local`);
   expect(out).toContain(`const __sig_exposed = signal(1);`);
 });
 

@@ -25,6 +25,11 @@
 import { svelte2tsx } from "svelte2tsx";
 import MagicStringNS from "magic-string";
 import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell/trace-mapping";
+// LYK-886: the escape predicate is shared (not byte-mirrored) so the
+// editor's inline/bridge decision is structurally identical to the build
+// path's. Resolves to para-preprocess src via the `bun` export condition
+// (esbuild-pui-transform bundles it; direct bun runs honor it too).
+import { buildEscapeChecker } from "@lyku/para-preprocess";
 
 const MagicString: typeof import("magic-string").default = (MagicStringNS as any).default ?? (MagicStringNS as any);
 
@@ -84,19 +89,6 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     if (start === end) ms.appendLeft(start, str);
     else ms.overwrite(start, end, str);
   };
-  // LYK-886: mirrors lowerPuiReactivity's `escapes` byte-for-byte. MUST
-  // reach an identical verdict or the editor's type-lowering diverges from
-  // the runtime lowering and byte-parity breaks. Matches both keyword
-  // (`provide`/`inject` — seen raw here) and desugared (`setContext`/
-  // `getContext` — what the build path sees) forms so the verdict is the
-  // same whichever a path observes. `body` is the current <script> slice.
-  const puiEscapes = (name: string, body: string): boolean => {
-    if (/\bsignalOf\b/.test(body)) return true;
-    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`\\b(?:setContext|getContext|provide|inject)\\b[^\\n]*\\b${n}\\b`).test(body)) return true;
-    if (new RegExp(`\\bexport\\b[^\\n]*\\b${n}\\b`).test(body)) return true;
-    return false;
-  };
   const signalNames = new Set<string>();
   const svelteImports = new Set<string>();
   let needsSignalImport = false;
@@ -109,6 +101,11 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     const bodyStart = sm.index + sm[0].indexOf(">", 1) + 1;
     const bodyEnd = sm.index + sm[0].length - "</script>".length;
     const body = raw.slice(bodyStart, bodyEnd);
+    // LYK-886: same escape predicate as the build path — imported, not
+    // copied, so editor↔build parity is structural. Built per <script>
+    // body; `body` is raw here (provide/inject still keywords) which the
+    // shared checker handles identically to the desugared build input.
+    const escapesName = buildEscapeChecker(body);
     if (firstBodyStart === -1) firstBodyStart = bodyStart;
     bodyRanges.push([bodyStart, bodyEnd]);
 
@@ -213,7 +210,7 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         // NOT added to signalNames (so the __sig_ assignment-rewrite +
         // signal import are skipped for this name), matching the build
         // path with linePreserving=true.
-        if (!puiEscapes(name, body)) {
+        if (!escapesName(name)) {
           repl(ls, le, `${indent}let ${name} = $state(${expr});`);
           continue;
         }

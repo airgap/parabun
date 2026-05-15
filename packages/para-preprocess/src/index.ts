@@ -267,6 +267,67 @@ function lowerUsingDecls(source: string): { code: string; needsOnDestroy: boolea
 }
 
 /**
+ * LYK-886 escape analysis (hardened: per-name `signalOf` precision).
+ *
+ * Builds the "does this signal name escape the component?" predicate for a
+ * `.pui` `<script>` body. A `signal x` only needs the para bridge (extra
+ * para signal + cross-system subscribe effect) when external para code can
+ * observe it via `signalOf`, or it leaves via component context / `export`.
+ * Otherwise it lowers to a plain `$state` cell (~1.84× faster, ~2.3× less
+ * heap at whole-component scale — it deletes a whole signal + effect per
+ * local cell; survives render cost where LYK-884's backend-swap washed out).
+ *
+ * Single shared implementation: imported by both this build path and the
+ * editor's pui-transform.ts, so editor↔build parity is structural (one
+ * function), not byte-mirrored copies. The build path passes `source` after
+ * provide/inject have desugared to setContext/getContext; the editor passes
+ * the raw `<script>` body where they're still keywords — the context regex
+ * matches BOTH forms so the verdict is identical regardless of caller.
+ *
+ * CONSERVATIVE BY DESIGN: the fallback is the proven-correct bridge, so an
+ * over-eager inline is a correctness bug (external para observers silently
+ * go stale). Precise for the traceable forms; falls back to the coarse
+ * "all names escape" gate only when `signalOf` is called with an argument
+ * we cannot statically resolve to a name.
+ */
+export function buildEscapeChecker(source: string): (name: string) => boolean {
+  // Identifiers passed directly to signalOf(...). signalOf is THE
+  // para-handle API — calling it on a cell is the explicit "keep this
+  // para-observable" intent that forces the bridge.
+  const signalOfd = new Set<string>();
+  let untraceable = false; // signalOf(<non-identifier>) → can't trace
+  for (const m of source.matchAll(/\bsignalOf\s*\(\s*([^)]*?)\s*\)/g)) {
+    const arg = (m[1] ?? "").trim();
+    if (/^[A-Za-z_$][\w$]*$/.test(arg)) signalOfd.add(arg);
+    else untraceable = true;
+  }
+  // Simple identifier aliases `const|let|var L = R;`. Fixpoint so a name
+  // aliased into a signalOf'd binding (including chains) also escapes —
+  // closes the `const y = x; signalOf(y)` hole without full AST analysis.
+  const aliases: Array<[string, string]> = [];
+  for (const m of source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*;?/g)) {
+    aliases.push([m[1]!, m[2]!]);
+  }
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [l, r] of aliases) {
+      if (signalOfd.has(l) && !signalOfd.has(r)) {
+        signalOfd.add(r);
+        grew = true;
+      }
+    }
+  }
+  return (name: string): boolean => {
+    if (untraceable) return true; // unresolvable signalOf arg → keep bridge for all (safe)
+    if (signalOfd.has(name)) return true;
+    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b(?:setContext|getContext|provide|inject)\\b[^\\n]*\\b${n}\\b`).test(source)) return true;
+    if (new RegExp(`\\bexport\\b[^\\n]*\\b${n}\\b`).test(source)) return true;
+    return false;
+  };
+}
+
+/**
  * Lower a `.pui` `<script>` body's Para reactive keywords (signal / derived /
  * effect / mount / prop / provide / inject / using) to standard Svelte 5 runes.
  * Synchronous and side-effect-free — safe to call from a TS language-service
@@ -336,15 +397,10 @@ export function lowerPuiReactivity(
   // the keyword forms (`provide`/`inject`, which the editor path still
   // sees raw) AND their desugared forms (`setContext`/`getContext`, which
   // this build path has already lowered by now) — whichever a given path
-  // observes, the verdict is the same.
-  const escapeHatchPresent = /\bsignalOf\b/.test(source);
-  const escapes = (name: string): boolean => {
-    if (escapeHatchPresent) return true;
-    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`\\b(?:setContext|getContext|provide|inject)\\b[^\\n]*\\b${n}\\b`).test(source)) return true;
-    if (new RegExp(`\\bexport\\b[^\\n]*\\b${n}\\b`).test(source)) return true;
-    return false;
-  };
+  // observes, the verdict is the same. The checker is the single shared
+  // implementation imported by pui-transform.ts too, so editor↔build
+  // parity is structural (one function), not hand-maintained copies.
+  const escapes = buildEscapeChecker(source);
 
   const signalNames = new Set<string>();
   const lines = source.split("\n");
