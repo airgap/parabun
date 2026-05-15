@@ -279,6 +279,13 @@ function lowerSourceDecls(source: string): { code: string; needsOnDestroy: boole
   // change returning an unsubscribe (its return is the $effect.pre
   // teardown), `.dispose()`/Symbol.dispose unmount cleanup.
   //
+  // A bare para `Signal<T>` already satisfies this (it has `.peek`/
+  // `.subscribe`; `.dispose?.()` no-ops), so `source busy = m.busy`
+  // binds a native module's status signal (llm `.busy`, camera `.fps`,
+  // audio `.active`, gpio `.value`, …) into component reactivity with
+  // no extra keyword — `source` is the single primitive for "bind any
+  // native reactive thing, handle OR bare signal" (LYK-897/A3).
+  //
   // `NAME` is a read-only reactive VIEW of a native source, so unlike
   // `signal` there is deliberately no assignment-rewrite. Independent of
   // buildEscapeChecker (not a `signal` cell).
