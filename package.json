@@ -16,7 +16,8 @@
     "./packages/para-pipeline",
     "./packages/para-rtp",
     "./packages/para-mcp",
-    "./packages/parabun-browser-shims"
+    "./packages/parabun-browser-shims",
+    "./packages/para-preprocess"
   ],
   "devDependencies": {
     "@lezer/common": "^1.2.3",
