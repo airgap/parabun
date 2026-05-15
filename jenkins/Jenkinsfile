@@ -496,17 +496,29 @@ pipeline {
                     echo "auth ok: $(npm whoami)"
                 '''
                 // @lyku/para-signals first — @lyku/para-ui depends on it.
+                // Idempotent: if the version is already on npm, skip the publish
+                // rather than failing (lets re-runs proceed to @lyku/para-ui).
                 sh '''
                     set -eu
                     export HOME="${WORKSPACE}"
                     cd packages/para-signals
-                    npm publish --tag pre
+                    PKG_VERSION=$(node -p "require('./package.json').version")
+                    if npm view "@lyku/para-signals@$PKG_VERSION" version >/dev/null 2>&1; then
+                        echo "@lyku/para-signals@$PKG_VERSION already published, skipping"
+                    else
+                        npm publish --tag pre
+                    fi
                 '''
                 // @lyku/para-ui — needs a build + the file:-dep swap dance.
                 sh '''
                     set -eu
                     export HOME="${WORKSPACE}"
                     cd packages/para-svelte/packages/svelte
+                    PKG_VERSION=$(node -p "require('./package.json').version")
+                    if npm view "@lyku/para-ui@$PKG_VERSION" version >/dev/null 2>&1; then
+                        echo "@lyku/para-ui@$PKG_VERSION already published, skipping"
+                        exit 0
+                    fi
                     SIGNALS_VERSION="^$(node -p "require('../../../para-signals/package.json').version")"
                     sed -i 's|"@lyku/para-signals": "file:[^"]*"|"@lyku/para-signals": "'"$SIGNALS_VERSION"'"|' package.json
                     pnpm install --frozen-lockfile=false
