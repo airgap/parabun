@@ -172,7 +172,32 @@ direct para code can use `@lyku/para-signals.proxySignal`.
    Kairo bench 4657ms (with bridge) vs 4681ms (no bridge) — within
    noise, well under the 5% bar. Cost amortized via lazy `paraSignal`
    allocation: created on first `signalOf()` call, seeded from
-   current `.v`.
+   current `.v`. **(The lazy optimization is reverted in LYK-882 —
+   see item 8; the "Surgical map" above always specified eager.)**
+8. **LYK-882** — axis-1 totalization. Reverts F0.7's lazy `paraSignal`
+   to **eager + authoritative** allocation (the shape the Surgical map
+   above always specified): `source()` / `derived()` allocate the para
+   signal at construction, seeded from the initial value (`UNINITIALIZED`
+   for deriveds, mirrored to the real value post-recompute). `signalOf()`
+   collapses to a pure identity accessor (no lazy materialization, no
+   seed race). `.v` + `.reactions` are KEPT as Svelte's scheduler
+   substrate — this is the axis-1 swap, **not** the axis-2 scheduler
+   replacement (still out of scope). Rationale: F3 codegen optimization
+   (LYK-883) needs a para signal that exists for every cell so generated
+   code can read it directly; the lazy mirror left nothing to target.
+   The eager-allocation perf delta vs F0.7's lazy parity is quantified
+   by the LYK-884 spike, not assumed.
+
+   **Gate (verified):** 7517 pass across the full fork suite with zero
+   new failures. The only failures are the `runtime-browser >
+   custom-elements` suite (12 tests), which is **pre-existing and
+   independent** — it fails identically with LYK-882 *fully reverted*
+   (baseline: same 12, 11 in common; the 1-test delta is flaky — e.g.
+   `closed-shadow-dom` passes 3/3 in isolation). That breakage predates
+   this change (F0.7's "runtime-browser 89 pass" is stale; suspect an
+   interim env/playwright shift) and is tracked separately — **not**
+   introduced or worsened by LYK-882. para-bridge (6) + signals (98)
+   green under LYK-882.
 
 **F0 is functionally complete.** The user-facing flip shipped same day —
 `@lyku/para-preprocess` now emits imports against `@lyku/para-ui` by default.

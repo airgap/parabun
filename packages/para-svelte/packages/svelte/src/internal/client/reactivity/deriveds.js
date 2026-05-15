@@ -42,6 +42,7 @@ import {
 	eager_effects,
 	internal_set,
 	mirror_to_para,
+	new_para_signal,
 	set_eager_effects,
 	source
 } from './sources.js';
@@ -97,9 +98,12 @@ export function derived(fn) {
 		wv: 0,
 		parent: active_effect,
 		ac: null,
-		// Para Svelte bridge: lazy — first signalOf() seeds from current .v at
-		// that moment, all subsequent updates mirror. See sources.js + PARA-FORK.md.
-		paraSignal: undefined
+		// Para Svelte (LYK-882): eager para signal, seeded with UNINITIALIZED to
+		// match .v's pre-first-compute state. execute_derived mirrors the real
+		// value post-recompute (Batch.capture / no-batch mirror_to_para path), so
+		// a para consumer reading before first compute sees the same sentinel it
+		// would have under the old lazy seed. Authoritative thereafter.
+		paraSignal: new_para_signal(/** @type {V} */ (UNINITIALIZED))
 	};
 
 	if (DEV && tracing_mode_flag) {

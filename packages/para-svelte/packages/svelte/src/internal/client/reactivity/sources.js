@@ -83,10 +83,15 @@ export function source(v, stack) {
 		equals,
 		rv: 0,
 		wv: 0,
-		// Para Svelte bridge: paraSignal is allocated lazily on the first
-		// signalOf() call (seeded from the current .v at that moment) so sources
-		// nothing ever observes pay zero allocation/mirror cost. See PARA-FORK.md.
-		paraSignal: undefined
+		// Para Svelte (LYK-882): the backing para signal is allocated EAGERLY
+		// and is authoritative. Every reactive cell carries its para signal
+		// from birth, seeded with the initial value; internal_set mirrors every
+		// write into it. This makes para the canonical observable so codegen /
+		// external para code can read it directly without a lazy signalOf()
+		// materialization step. .v + .reactions are KEPT untouched as Svelte's
+		// scheduler substrate (axis-2) — this is the axis-1 totalization, not a
+		// scheduler replacement. See PARA-FORK.md.
+		paraSignal: para_signal(v)
 	};
 
 	if (DEV && tracing_mode_flag) {
@@ -113,15 +118,9 @@ export function source(v, stack) {
  */
 export function signalOf(source) {
 	if (!source) return undefined;
-	var s = /** @type {any} */ (source);
-	if (s.paraSignal === undefined) {
-		// Lazy allocation: seed at the source's current value. After this point,
-		// every mirror_to_para call updates the signal. Para observers added now
-		// see the initial value; observers added before this seed point would
-		// have nothing to observe (paraSignal didn't exist) — by design.
-		s.paraSignal = para_signal(s.v);
-	}
-	return s.paraSignal;
+	// LYK-882: paraSignal is allocated eagerly in source()/derived(), so this
+	// is now a pure identity accessor — no lazy materialization, no seed race.
+	return /** @type {any} */ (source).paraSignal;
 }
 
 /**
@@ -136,11 +135,23 @@ export function signalOf(source) {
  */
 export function mirror_to_para(source, value) {
 	var p = /** @type {any} */ (source).paraSignal;
-	// If signalOf has never been called on this Source, paraSignal is undefined
-	// and we skip entirely — no allocation, no function call, no Set iteration.
-	// For Svelte-only apps with no para observers, the bridge cost is one
-	// .paraSignal undefined-check per write.
+	// LYK-882: paraSignal is eagerly allocated so it is normally always
+	// present. The undefined guard is kept purely defensively for any object
+	// that didn't come through this fork's source()/derived().
 	if (p !== undefined) p.set(value);
+}
+
+/**
+ * Para Svelte (LYK-882): factory for the eager backing para signal. Confines
+ * the `@lyku/para-signals` import to this module — deriveds.js allocates its
+ * paraSignal through here rather than importing para directly, matching the
+ * existing seam (deriveds.js only ever imports bridge fns from sources.js).
+ *
+ * @template V
+ * @param {V} v
+ */
+export function new_para_signal(v) {
+	return para_signal(v);
 }
 
 /**
