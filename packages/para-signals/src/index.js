@@ -469,6 +469,45 @@ export function fromEventTarget(target, eventName, opts = {}) {
   });
 }
 
+/**
+ * LYK-899 (Phase C / migration). Adapt a Svelte store
+ * (`{ subscribe(cb): () => void }`) into the `.pui` `source`
+ * convention so it is consumed by the EXISTING `source` keyword with
+ * no new `.pui` surface: `source phrasebook = fromStore(phrasebookStore)`.
+ *
+ * This is the chosen migration path (option b): a `svelte/store` is
+ * *converted to a signal-backed reactive cell at migration time* (the
+ * C4 codemod rewrites `$store` reads → `source x = fromStore(store)`),
+ * rather than blessing `$store` auto-subscription as a first-class Para
+ * idiom. Stores stay a Svelte implementation detail, never a Para
+ * concept.
+ *
+ * Lifecycle is owned by the `source` bridge: its `$effect.pre`
+ * subscribes (Svelte `subscribe` fires the current value synchronously,
+ * then on change) and the unsubscribe it returns is the effect
+ * teardown — auto-unsubscribed on unmount. `dispose` is therefore a
+ * no-op; `peek` is a transient subscribe/read for the initial seed.
+ *
+ * @template T
+ * @param {{ subscribe(run: (v: T) => void): () => void }} store
+ */
+export function fromStore(store) {
+  return {
+    peek() {
+      let v;
+      const u = store.subscribe(x => {
+        v = x;
+      });
+      u();
+      return v;
+    },
+    subscribe(cb) {
+      return store.subscribe(cb);
+    },
+    dispose() {},
+  };
+}
+
 // ─── Rate-limit operators ───────────────────────────────────────────
 //
 // Hardware emits faster than UI / consumers want. `throttled` keeps
@@ -685,6 +724,7 @@ export default {
   fromAsyncIter,
   fromStream,
   fromEventTarget,
+  fromStore,
   throttled,
   debounced,
   proxySignal,
