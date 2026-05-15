@@ -29,7 +29,7 @@ import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell
 // editor's inline/bridge decision is structurally identical to the build
 // path's. Resolves to para-preprocess src via the `bun` export condition
 // (esbuild-pui-transform bundles it; direct bun runs honor it too).
-import { buildEscapeChecker, hasTopLevelAwait } from "@lyku/para-preprocess";
+import { buildEscapeChecker, hasTopLevelAwait, splitDeclarators, parseDeclarator } from "@lyku/para-preprocess";
 
 const MagicString: typeof import("magic-string").default = (MagicStringNS as any).default ?? (MagicStringNS as any);
 
@@ -264,29 +264,32 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         continue;
       }
 
-      // signal NAME = EXPR → bridge (source↔output reordered → whole-line).
-      let sg = lineText.match(/^(\s*)signal\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/);
+      // signal a = 1, b = 2 → per-declarator bridge, fragments re-joined
+      // on the one line (source↔output reordered → whole-line).
+      let sg = lineText.match(/^(\s*)signal\s+(.+?)\s*;?\s*$/);
       if (sg) {
         const indent = sg[1]!;
-        const name = sg[2]!;
-        const expr = sg[3]!;
-        // LYK-886: provably component-local → plain `$state`, no bridge.
-        // NOT added to signalNames (so the __sig_ assignment-rewrite +
-        // signal import are skipped for this name), matching the build
-        // path with linePreserving=true.
-        if (!escapesName(name)) {
-          repl(ls, le, `${indent}let ${name} = $state(${expr});`);
-          continue;
+        const decls = splitDeclarators(sg[2]!).map(parseDeclarator);
+        if (decls.length === 0 || decls.some(d => d === null || d.default === undefined || d.default === "")) {
+          continue; // not a valid signal statement — leave untouched
         }
-        signalNames.add(name);
-        needsSignalImport = true;
-        repl(
-          ls,
-          le,
-          `${indent}const __sig_${name} = signal(${expr}); ` +
+        const frags = decls.map(d => {
+          const name = d!.name;
+          const expr = d!.default!;
+          // LYK-886: provably component-local → plain `$state`, no bridge.
+          // NOT added to signalNames (so the __sig_ assignment-rewrite +
+          // signal import are skipped for this name), matching the build
+          // path with linePreserving=true.
+          if (!escapesName(name)) return `let ${name} = $state(${expr});`;
+          signalNames.add(name);
+          needsSignalImport = true;
+          return (
+            `const __sig_${name} = signal(${expr}); ` +
             `let ${name} = $state(__sig_${name}.peek()); ` +
-            `$effect.pre(() => __sig_${name}.subscribe((__v: typeof ${name}) => { ${name} = __v; }));`,
-        );
+            `$effect.pre(() => __sig_${name}.subscribe((__v: typeof ${name}) => { ${name} = __v; }));`
+          );
+        });
+        repl(ls, le, `${indent}${frags.join(" ")}`);
         continue;
       }
     }
@@ -295,20 +298,28 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     // first prop line; later prop lines blanked. Reordered/merged → not
     // token-faithful; line-accurate.
     {
-      const propLines: Array<{ ls: number; le: number; indent: string; name: string; type: string; def?: string }> = [];
+      type P = { ls: number; le: number; indent: string; name: string; type: string; def?: string };
+      const propDecls: P[] = [];
+      const propLineSpans: Array<{ ls: number; le: number }> = [];
       for (const ls of lineStarts) {
         let le = raw.indexOf("\n", ls);
         if (le === -1 || le > bodyEnd) le = bodyEnd;
-        const m = raw.slice(ls, le).match(/^(\s*)prop\s+(\w+)(?:\s*:\s*([^=\n]+?))?\s*(?:=\s*(.+?))?\s*;?\s*$/);
-        if (!m || !m[2]) continue;
-        propLines.push({ ls, le, indent: m[1] ?? "", name: m[2], type: (m[3] ?? "any").trim(), def: m[4]?.trim() });
+        const m = raw.slice(ls, le).match(/^(\s*)prop\s+(.+?)\s*;?\s*$/);
+        if (!m) continue;
+        const before = propDecls.length;
+        for (const decl of splitDeclarators(m[2]!)) {
+          const d = parseDeclarator(decl);
+          if (!d) continue;
+          propDecls.push({ ls, le, indent: m[1] ?? "", name: d.name, type: (d.type ?? "any").trim(), def: d.default });
+        }
+        if (propDecls.length > before) propLineSpans.push({ ls, le });
       }
-      if (propLines.length) {
-        const dParts = propLines.map(p => (p.def !== undefined ? `${p.name} = ${p.def}` : p.name));
-        const tParts = propLines.map(p => (p.def !== undefined ? `${p.name}?: ${p.type}` : `${p.name}: ${p.type}`));
-        const merged = `${propLines[0]!.indent}let { ${dParts.join(", ")} }: { ${tParts.join("; ")} } = $props();`;
-        repl(propLines[0]!.ls, propLines[0]!.le, merged);
-        for (let k = 1; k < propLines.length; k++) repl(propLines[k]!.ls, propLines[k]!.le, "");
+      if (propDecls.length) {
+        const dParts = propDecls.map(p => (p.def !== undefined ? `${p.name} = ${p.def}` : p.name));
+        const tParts = propDecls.map(p => (p.def !== undefined ? `${p.name}?: ${p.type}` : `${p.name}: ${p.type}`));
+        const merged = `${propDecls[0]!.indent}let { ${dParts.join(", ")} }: { ${tParts.join("; ")} } = $props();`;
+        repl(propLineSpans[0]!.ls, propLineSpans[0]!.le, merged);
+        for (let k = 1; k < propLineSpans.length; k++) repl(propLineSpans[k]!.ls, propLineSpans[k]!.le, "");
       }
     }
   }

@@ -147,6 +147,105 @@ export function hasTopLevelAwait(body: string): boolean {
   return false;
 }
 
+// LYK-909 — depth-aware declarator-list utilities, shared with
+// editors/lsp pui-transform.ts (imported, not re-implemented — same
+// structural-parity discipline as buildEscapeChecker/hasTopLevelAwait).
+//
+// Tracks `()[]{}` + strings + line-comments, plus generic `<…>` (so a
+// comma inside `Record<string, number>` isn't a declarator separator).
+// `()[]{}` already protect fn-type params / object / array defaults, so
+// `<>` is only needed for generic type args. `=>` and the compound ops
+// (`<=`/`>=`/`<<`/`>>`) are guarded. Documented residual: a *bare,
+// unparenthesized* comparison (`a<b`) in a multi-declarator default is
+// unsupported — parenthesize it. Realistic declarator syntax is covered.
+function declScan(s: string, isHit: (i: number, prev: string, next: string) => boolean): number[] {
+  const hits: number[] = [];
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      i++;
+      while (i < s.length && s[i] !== c) {
+        if (s[i] === "\\") i++;
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && s[i + 1] === "/") {
+      const nl = s.indexOf("\n", i);
+      i = nl === -1 ? s.length : nl;
+      continue;
+    }
+    const prev = s[i - 1] ?? "";
+    const next = s[i + 1] ?? "";
+    if (c === "(" || c === "[" || c === "{") {
+      depth++;
+      continue;
+    }
+    if (c === ")" || c === "]" || c === "}") {
+      depth--;
+      continue;
+    }
+    if (c === "<" && /[\w$>\]]/.test(prev) && next !== "=" && prev !== "<") {
+      depth++;
+      continue;
+    }
+    // Close a generic whenever one is open. We only ever entered `<>`
+    // depth via the ident-prefixed `<` rule, so a `>` at depth>0 is a
+    // generic close — including each `>` of `Array<Map<…>>`. Guard only
+    // `=>` (prev `=`) and `>=` (next `=`). Right-shift at generic depth
+    // is unreachable in real type annotations (operands sit in `()`).
+    if (c === ">" && prev !== "=" && next !== "=" && depth > 0) {
+      depth--;
+      continue;
+    }
+    if (depth === 0 && isHit(i, prev, next)) hits.push(i);
+  }
+  return hits;
+}
+
+/** Split a `prop`/`signal` declarator list on top-level commas. */
+export function splitDeclarators(list: string): string[] {
+  const cuts = declScan(list, i => list[i] === ",");
+  const parts: string[] = [];
+  let last = 0;
+  for (const i of cuts) {
+    parts.push(list.slice(last, i));
+    last = i + 1;
+  }
+  parts.push(list.slice(last));
+  return parts.map(p => p.trim()).filter(Boolean);
+}
+
+/**
+ * Parse one declarator `NAME (: TYPE)? (= DEFAULT)?`. The type/default
+ * boundary is the first *top-level* `=` that is a real assignment (not
+ * `=>`, `==`, `===`, `<=`, `>=`, `!=`, `!==`, `+=` …).
+ */
+export function parseDeclarator(decl: string): { name: string; type?: string; default?: string } | null {
+  const nm = decl.match(/^([A-Za-z_$][\w$]*)/);
+  if (!nm) return null;
+  const name = nm[1]!;
+  let rest = decl.slice(name.length).trim();
+  let type: string | undefined;
+  let def: string | undefined;
+  const eqs = declScan(rest, (i, prev, next) => {
+    if (rest[i] !== "=") return false;
+    if ("=<>!+-*/%&|^~".includes(prev)) return false; // compound op / != / <= …
+    if (next === "=" || next === ">") return false; // ==, =>
+    return true;
+  });
+  const eq = eqs.length ? eqs[0]! : -1;
+  if (rest.startsWith(":")) {
+    const typeRaw = (eq === -1 ? rest.slice(1) : rest.slice(1, eq)).trim();
+    type = typeRaw || undefined;
+    if (eq !== -1) def = rest.slice(eq + 1).trim();
+  } else if (rest.startsWith("=") || eq !== -1) {
+    def = (eq === -1 ? rest.replace(/^=/, "") : rest.slice(eq + 1)).trim();
+  }
+  return { name, type, default: def };
+}
+
 function findMatchingBrace(source: string, openOffset: number): number {
   let depth = 1;
   let i = openOffset + 1;
@@ -286,21 +385,27 @@ function lowerPropDecls(source: string): string {
   // $props() call per component, so collecting + merging is the only
   // shape the compiler accepts. Subsequent prop lines become blank to
   // preserve overall line numbering.
+  // One `prop` statement may declare several comma-separated declarators
+  // (`prop foo: string = '', bar = 3;`). The whole list still folds into
+  // the single merged `$props()` destructure.
   const lines = source.split("\n");
-  const declRe = /^(\s*)prop\s+(\w+)(?:\s*:\s*([^=\n]+?))?\s*(?:=\s*(.+?))?\s*;?\s*$/;
+  const declRe = /^(\s*)prop\s+(.+?)\s*;?\s*$/;
   const props: Array<{ lineIdx: number; indent: string; name: string; type: string; default?: string }> = [];
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i]!.match(declRe);
     if (!m) continue;
-    const [, indent, name, type, def] = m;
-    if (!name) continue;
-    props.push({
-      lineIdx: i,
-      indent: indent ?? "",
-      name,
-      type: (type ?? "any").trim(),
-      default: def?.trim(),
-    });
+    const [, indent, list] = m;
+    for (const decl of splitDeclarators(list!)) {
+      const d = parseDeclarator(decl);
+      if (!d) continue;
+      props.push({
+        lineIdx: i,
+        indent: indent ?? "",
+        name: d.name,
+        type: (d.type ?? "any").trim(),
+        default: d.default,
+      });
+    }
   }
   if (props.length === 0) return source;
 
@@ -308,8 +413,10 @@ function lowerPropDecls(source: string): string {
   const typeParts = props.map(p => (p.default !== undefined ? `${p.name}?: ${p.type}` : `${p.name}: ${p.type}`));
   const merged = `let { ${destructParts.join(", ")} }: { ${typeParts.join("; ")} } = $props();`;
 
-  lines[props[0]!.lineIdx] = `${props[0]!.indent}${merged}`;
-  for (let i = 1; i < props.length; i++) lines[props[i]!.lineIdx] = "";
+  const declLines = [...new Set(props.map(p => p.lineIdx))].sort((a, b) => a - b);
+  const first = declLines[0]!;
+  lines[first] = `${props[0]!.indent}${merged}`;
+  for (const li of declLines) if (li !== first) lines[li] = "";
   return lines.join("\n");
 }
 
@@ -567,24 +674,23 @@ export function lowerPuiReactivity(
   // type annotation, "=", expression, optional trailing semicolon. The
   // expression is non-greedy up to end-of-line so we don't accidentally
   // pull in subsequent statements separated by `;` on the same line.
-  const declRe = /^(\s*)signal\s+(\w+)(?:\s*:\s*[^=]+)?\s*=\s*(.+?)\s*;?\s*$/;
+  // One `signal` statement may declare several comma-separated
+  // declarators (`signal a = 1, b = 2;`). Each is lowered independently
+  // (escape-analysis is per name); the fragments are re-joined on the
+  // one source line so line numbering is preserved exactly as the
+  // single-declarator path did.
+  const declRe = /^(\s*)signal\s+(.+?)\s*;?\s*$/;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const m = line.match(declRe);
-    if (!m) continue;
-    const [, indent, name, expr] = m;
-    if (!name || expr === undefined) continue;
-
+  // Lower a single `name = expr` signal declarator to its emitted
+  // fragment. Returns null for the "leave line untouched" case (no
+  // initializer — not a valid signal decl, matched old non-match).
+  const lowerSig = (name: string, expr: string | undefined): string | null => {
+    if (expr === undefined || expr === "") return null;
     // LYK-886: provably component-local → plain `$state`, no para bridge.
-    // Assignments stay as-is (`$state` is natively reactive), so this name
-    // is deliberately NOT added to signalNames (which drives the
+    // Assignments stay as-is (`$state` is natively reactive), so this
+    // name is deliberately NOT added to signalNames (which drives the
     // `__sig_NAME.set()` rewrite + the @lyku/para-signals import).
-    if (!escapes(name)) {
-      lines[i] = `${indent}let ${name} = $state(${expr});`;
-      continue;
-    }
-
+    if (!escapes(name)) return `let ${name} = $state(${expr});`;
     signalNames.add(name);
     // Bridge form: a para signal lives alongside a $state cell. The
     // $effect.pre subscribes ACROSS the systems — para's .subscribe()
@@ -602,10 +708,25 @@ export function lowerPuiReactivity(
     const make = hmr
       ? `(import.meta.hot ? hmrSignal(import.meta.url + "::${name}", () => signal(${expr})) : signal(${expr}))`
       : `signal(${expr})`;
-    lines[i] =
-      `${indent}const __sig_${name} = ${make}; ` +
+    return (
+      `const __sig_${name} = ${make}; ` +
       `let ${name} = $state(__sig_${name}.peek()); ` +
-      `$effect.pre(() => __sig_${name}.subscribe((__v: typeof ${name}) => { ${name} = __v; }));`;
+      `$effect.pre(() => __sig_${name}.subscribe((__v: typeof ${name}) => { ${name} = __v; }));`
+    );
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const m = line.match(declRe);
+    if (!m) continue;
+    const [, indent, list] = m;
+    const decls = splitDeclarators(list!).map(parseDeclarator);
+    if (decls.length === 0 || decls.some(d => d === null)) continue;
+    const frags = decls.map(d => lowerSig(d!.name, d!.default));
+    // Any declarator without an initializer ⇒ not a valid signal
+    // statement; leave the whole line untouched (old non-match behavior).
+    if (frags.some(f => f === null)) continue;
+    lines[i] = `${indent}${frags.join(" ")}`;
   }
 
   // Rewrite simple `NAME = EXPR;` assignment lines into `__sig_NAME.set(EXPR);`
