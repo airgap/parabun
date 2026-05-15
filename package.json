@@ -18,7 +18,8 @@
     "./packages/para-mcp",
     "./packages/parabun-browser-shims",
     "./packages/para-preprocess",
-    "./packages/para-ui-native"
+    "./packages/para-ui-native",
+    "./packages/para-codemod"
   ],
   "devDependencies": {
     "@lezer/common": "^1.2.3",
