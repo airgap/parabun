@@ -118,4 +118,14 @@ RUN arch=$(dpkg --print-architecture) && \
     install -m 0755 "bun-linux-${bun_arch}/bun" /usr/local/bin/bun && \
     rm -rf bun.zip "bun-linux-${bun_arch}"
 
+# Doppler CLI — used by the Publish npm stage to fetch NPM_ACCESS_TOKEN
+# from the shared ci-deploy/prd project. Lyku's CI base has this; we
+# add it here so parabun can publish without a separate image.
+RUN curl -fsSL https://cli.doppler.com/install.sh | sh
+
+# pnpm — needed for the @lyku/para-ui build (the fork ships a pnpm
+# workspace inside packages/para-svelte/). Pinned to match the
+# packageManager field in packages/para-svelte/package.json.
+RUN npm install -g pnpm@10.4.0
+
 WORKDIR /workspace
