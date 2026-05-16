@@ -272,6 +272,42 @@ const cases: Case[] = [
 `,
     expect: "no-diag",
   },
+  // LYK-916: `match` lowers to a parse-safe, subject-typed `any` stub.
+  // `pick` returns `string` (declared), so `const bad: number = pick(2)`
+  // is a real TS error on line 2. Proves match no longer breaks the
+  // projection (no syntax error / no `any` cascade) AND that `fun` +
+  // signature typing flows around it.
+  {
+    uri: "file:///tmp/SmokeS.pui",
+    text: `<script lang="ts">
+  fun pick(n: number): string { return match n { 1 => "a", _ => "b" }; }
+  const bad: number = pick(2);
+  console.log(bad);
+</script>
+
+<p>match in fn body</p>
+`,
+    expect: "diag-on-line",
+    expectLine: 2,
+  },
+  // LYK-916: a clean multi-line `match` must parse with zero diagnostics
+  // (was a svelte2tsx/tsc syntax error → cascade before the stub).
+  {
+    uri: "file:///tmp/SmokeT.pui",
+    text: `<script lang="ts">
+  const status = 200;
+  const label = match status {
+    200 => "ok",
+    404 => "missing",
+    _ => "unknown"
+  };
+  console.log(label);
+</script>
+
+<p>{label}</p>
+`,
+    expect: "no-diag",
+  },
 ];
 
 const proc = spawn("parabun", ["run", LSP, "--stdio"], {

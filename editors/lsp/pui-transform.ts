@@ -38,7 +38,13 @@ import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell
 // editor's inline/bridge decision is structurally identical to the build
 // path's. Resolves to para-preprocess src via the `bun` export condition
 // (esbuild-pui-transform bundles it; direct bun runs honor it too).
-import { buildEscapeChecker, hasTopLevelAwait, splitDeclarators, parseDeclarator } from "@lyku/para-preprocess";
+import {
+  buildEscapeChecker,
+  hasTopLevelAwait,
+  matchTypeStubSpans,
+  parseDeclarator,
+  splitDeclarators,
+} from "@lyku/para-preprocess";
 
 const MagicString: typeof import("magic-string").default = (MagicStringNS as any).default ?? (MagicStringNS as any);
 
@@ -353,6 +359,33 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     // svelte2tsx's. `match` is the one still deferred (multi-line — needs
     // sourcemap threading, tracked separately). A line the reactivity
     // lowering already overwrote throws on overlap → skipped.
+    // ── match → parse-safe, subject-typed `any` stub (LYK-916) ──────────
+    // `match` is a multi-line, structure-changing desugar; full per-arm
+    // result narrowing would need a Zig-faithful sourcemap-threaded
+    // lowering (beyond what ANY current parabun tooling does — the LSP's
+    // non-`.pui` path stubs it too). We bring `.pui` to that same proven
+    // parity: replace the whole `match { … }` with
+    // `((__pm: any): any => null as any)(SUBJECT)` so it parses and the
+    // SUBJECT still type-checks (its errors surface); arm results are
+    // `any`. Single-sourced via matchTypeStubSpans (shared with the
+    // legacy path; a parity test guards drift). The stub is emitted on
+    // the match's first line + the original `\n` count, so line totals
+    // are preserved and the per-line pass below still aligns. Overlap
+    // with a reactivity rewrite → skipped.
+    for (const sp of matchTypeStubSpans(raw)) {
+      if (sp.start < bodyStart || sp.end > bodyEnd) continue;
+      const subj = transformRanges(
+        transformErrorChain(transformPipeline(transformIs(transformPure(transformFun(transformDecimal(sp.subject)))))),
+      );
+      let nl = 0;
+      for (let k = sp.start; k < sp.end; k++) if (raw[k] === "\n") nl++;
+      try {
+        repl(sp.start, sp.end, `((__pm: any): any => null as any)(${subj})` + "\n".repeat(nl));
+      } catch {
+        /* overlaps a reactivity rewrite — skip */
+      }
+    }
+
     {
       const lowered = transformRanges(
         transformErrorChain(transformPipeline(transformIs(transformPure(transformFun(transformDecimal(body)))))),

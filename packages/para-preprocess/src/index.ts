@@ -281,6 +281,88 @@ function findMatchingBrace(source: string, openOffset: number): number {
   return depth === 0 ? i : -1;
 }
 
+// Same-length copy with string / line- & block-comment spans blanked
+// (newlines kept). So a `match` inside a string/comment can't trigger a
+// spurious stub, and brace scanning ignores quoted braces.
+function maskStringsAndComments(source: string): string {
+  let masked = "";
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "/" && source[i + 1] === "/") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      masked += " ".repeat(stop - i);
+      i = stop;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      masked += source.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < source.length) {
+        const c = source[j];
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === quote) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      let blanked = quote;
+      for (let k = i + 1; k < j - 1; k++) blanked += source[k] === "\n" ? "\n" : " ";
+      blanked += source[j - 1] === quote ? quote : " ";
+      masked += blanked;
+      i = j;
+      continue;
+    }
+    masked += ch;
+    i++;
+  }
+  return masked;
+}
+
+/**
+ * Locate every `match SUBJECT { … }` expression and return the span plus
+ * the (verbatim) subject text. This is the SINGLE source for the `.pui`
+ * LSP projection (pui-transform) and the legacy `transformParabunToTS`
+ * non-`.pui` path — both lower `match` to a parse-safe, subject-typed
+ * `any` stub (`((__pm: any): any => null as any)(SUBJECT)`), which is
+ * the proven shape shipped for `.svelte`/`.pts` today. (Full per-arm
+ * result narrowing is a separate enhancement, tracked on LYK-916 — it
+ * would need a Zig-faithful, sourcemap-threaded lowering and is beyond
+ * what any current parabun tooling does.)
+ *
+ * `match` as an identifier (`const match = 42`, `match.foo`) is left
+ * alone: the regex requires `match` + whitespace + a non-`{` subject +
+ * `{`. `end` is the offset just past the closing `}`.
+ */
+export function matchTypeStubSpans(source: string): Array<{ start: number; end: number; subject: string }> {
+  const masked = maskStringsAndComments(source);
+  const spans: Array<{ start: number; end: number; subject: string }> = [];
+  const re = /\bmatch\s+([^{]+?)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(masked)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    const closeAfter = findMatchingBrace(masked, openIdx); // index past `}`
+    if (closeAfter < 0) continue;
+    const subjStart = m.index + "match".length;
+    const subjEnd = m.index + m[0].length - 1;
+    spans.push({ start: m.index, end: closeAfter, subject: source.slice(subjStart, subjEnd).trim() });
+    re.lastIndex = closeAfter;
+  }
+  return spans;
+}
+
 function lowerEffectBlocks(source: string): string {
   // `effect { body }` → `$effect(() => { body })`. Brace-aware so nested
   // braces inside the body don't terminate early.
