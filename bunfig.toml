@@ -17,4 +17,9 @@ linker = "isolated"
 # The feature is exercised by test/cli/install/isolated-install.test.ts.
 globalStore = false
 minimumReleaseAge = 259200 # three days
-minimumReleaseAgeExcludes = ["typescript"]
+# First-party @lyku/para-* are authored in this repo/org (sole-consumer);
+# the supply-chain threat the quarantine guards (auto-installing a
+# freshly-published *third-party* package) doesn't apply. Excluding them
+# (same rationale as `typescript`) lets a fresh first-party publish be
+# installed immediately while third-party deps stay quarantined.
+minimumReleaseAgeExcludes = ["typescript", "@lyku/para-ui", "@lyku/para-signals", "@lyku/para-preprocess"]
