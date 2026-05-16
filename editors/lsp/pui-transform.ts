@@ -30,7 +30,9 @@ import {
   transformPipeline,
   transformPure,
   transformRanges,
-} from "@para/transpile";
+} from "@para/transpile/syntactic"; // Babel-free entry — NOT the package
+// index (which drags bare-read/using-polyfill → @babel and breaks the
+// CI bundle build; was the cause of parabun build #235's failure).
 import { svelte2tsx } from "svelte2tsx";
 import MagicStringNS from "magic-string";
 import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell/trace-mapping";

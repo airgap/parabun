@@ -19,6 +19,12 @@
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./syntactic": {
+      "types": "./dist/syntactic.d.ts",
+      "bun": "./src/syntactic.ts",
+      "import": "./dist/syntactic.js",
+      "default": "./dist/syntactic.js"
     }
   },
   "bin": {
