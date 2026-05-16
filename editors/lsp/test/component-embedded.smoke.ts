@@ -189,6 +189,23 @@ const cases: Case[] = [
     expect: "diag-on-line",
     expectLine: 1,
   },
+  // LYK-913: a `fun`-declared function must resolve with REAL types via
+  // the projection (was `any` — `fun` reached svelte2tsx unlowered).
+  // Proof: a type error THROUGH a `fun` function is caught. If `fun`
+  // weren't lowered, `add` would be `any`, `add(1,2)` `any`, the
+  // string-assignment would be allowed, and there'd be NO diagnostic.
+  {
+    uri: "file:///tmp/SmokeN.pui",
+    text: `<script lang="ts">
+  fun add(a: number, b: number): number { return a + b; }
+  const wrong: string = add(1, 2);
+</script>
+
+<p>{wrong}</p>
+`,
+    expect: "diag-on-line",
+    expectLine: 2,
+  },
 ];
 
 const proc = spawn("parabun", ["run", LSP, "--stdio"], {

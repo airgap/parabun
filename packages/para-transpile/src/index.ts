@@ -14,6 +14,7 @@ import { transformBlocks } from "./transforms/blocks";
 import { transformDecimal } from "./transforms/decimal";
 import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
+import { transformFun } from "./transforms/fun";
 import { injectUsingHelpers } from "./transforms/inject-helpers";
 import { transformMemo } from "./transforms/memo";
 import { transformParallel } from "./transforms/parallel";
@@ -47,6 +48,7 @@ export function transpile(src: string, _options: TranspileOptions = {}): string 
   // confuse the range pass with a stray `d`. After this pass, decimals
   // are plain `__paraDec("…")` calls.
   out = transformDecimal(out);
+  out = transformFun(out);
   out = transformPure(out);
   out = transformMemo(out);
   // `parallel` runs BEFORE error-chain because the statement form's RHSes
@@ -95,6 +97,7 @@ export {
   transformDecimal,
   transformDefer,
   transformErrorChain,
+  transformFun,
   transformMemo,
   transformParallel,
   transformPipeline,

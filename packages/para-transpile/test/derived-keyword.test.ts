@@ -143,10 +143,10 @@ describe("arrow / function expression as RHS — parity with the Zig parser", ()
     // multi-decl shape end-to-end. Until the splitter is taught about
     // commas, parity here only holds for one decl per statement.
     const out = transpile(`signal a = () => 1;\nsignal b = () => 2;\nderived c = () => 3;\nderived d = () => 4;`);
-    expect(out).toMatch(/const a = require\("@lyku/para-signals"\)\.signal\(\(\)\s*=>\s*1\)/);
-    expect(out).toMatch(/const b = require\("@lyku/para-signals"\)\.signal\(\(\)\s*=>\s*2\)/);
-    expect(out).toMatch(/const c = require\("@lyku/para-signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*3\)/);
-    expect(out).toMatch(/const d = require\("@lyku/para-signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*4\)/);
+    expect(out).toMatch(/const a = require\("@lyku\/para-signals"\)\.signal\(\(\)\s*=>\s*1\)/);
+    expect(out).toMatch(/const b = require\("@lyku\/para-signals"\)\.signal\(\(\)\s*=>\s*2\)/);
+    expect(out).toMatch(/const c = require\("@lyku\/para-signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*3\)/);
+    expect(out).toMatch(/const d = require\("@lyku\/para-signals"\)\.derived\(\(\)\s*=>\s*\(\)\s*=>\s*4\)/);
   });
 
   test("arrow with parameters as RHS", () => {

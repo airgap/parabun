@@ -22,6 +22,7 @@
  * Bundled self-contained via esbuild-pui-transform.mjs.
  */
 
+import { transformFun, transformPure } from "@para/transpile";
 import { svelte2tsx } from "svelte2tsx";
 import MagicStringNS from "magic-string";
 import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell/trace-mapping";
@@ -320,6 +321,46 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
         const merged = `${propDecls[0]!.indent}let { ${dParts.join(", ")} }: { ${tParts.join("; ")} } = $props();`;
         repl(propLineSpans[0]!.ls, propLineSpans[0]!.le, merged);
         for (let k = 1; k < propLineSpans.length; k++) repl(propLineSpans[k]!.ls, propLineSpans[k]!.le, "");
+      }
+    }
+
+    // ── general parabun syntax → TS, single-sourced via @para/transpile ──
+    // LYK-913: the build path lowers general parabun syntax via
+    // Bun.Transpiler (type-stripping — fine for runtime). svelte2tsx
+    // needs *typed* TS, so the projection runs @para/transpile's
+    // type-preserving, position-preserving passes instead. Only the
+    // passes that are complete + line-preserving are wired here:
+    //   • transformFun  — `fun` → `function` (the reported bug)
+    //   • transformPure — `pure ` strip (column-preserving)
+    // Operator/match lowering (`|>`/`..!`/`..&`/`..>`/`is`/`match`) is
+    // intentionally NOT done here: @para/transpile currently no-ops `|>`
+    // inside `{ }` blocks, and hand-rolling it would re-create the exact
+    // LYK-911 drift class. Tracked on LYK-913 (blocked on @para/transpile
+    // gaining block-scope-aware lowering — the canonical fix).
+    //
+    // These passes are line-preserving, so applying the diff per line as
+    // exact MagicString edits keeps low.map line-accurate. A line the
+    // reactivity lowering already overwrote throws on overlap → skipped
+    // (reactivity wins; `fun`/`pure` on a reactivity-decl line is rare).
+    {
+      const lowered = transformPure(transformFun(body));
+      if (lowered !== body) {
+        const origLines = body.split("\n");
+        const newLines = lowered.split("\n");
+        if (origLines.length === newLines.length) {
+          let off = bodyStart;
+          for (let i = 0; i < origLines.length; i++) {
+            const ol = origLines[i]!;
+            if (ol !== newLines[i]!) {
+              try {
+                repl(off, off + ol.length, newLines[i]!);
+              } catch {
+                /* overlaps a reactivity rewrite on this line — skip */
+              }
+            }
+            off += ol.length + 1; // + "\n"
+          }
+        }
       }
     }
   }

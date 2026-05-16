@@ -14,6 +14,7 @@
   "devDependencies": {
     "@jridgewell/trace-mapping": "^0.3.31",
     "@lyku/para-preprocess": "file:../../packages/para-preprocess",
+    "@para/transpile": "file:../../packages/para-transpile",
     "esbuild": "^0.21.5",
     "svelte": "^5.55.7",
     "svelte2tsx": "^0.7.55"
