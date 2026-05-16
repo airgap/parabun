@@ -82,7 +82,7 @@ interface LspPosition {
 // ---------------------------------------------------------------------------
 
 const PARABUN_SYNTAX_RE =
-  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->|(?:\|\||&&|\?\??|=>|:)\s*throw\s/;
+  /\bmemo\s|\bpure\s|\bfun\b|\bsignal\s+[A-Za-z_$]|\beffect\s*\{|\bmount\s*\{|\bprop\s+[A-Za-z_$]|\bderived\s+[A-Za-z_$]|\barena\s*\{|\b(?:parallel|para)\s*\{|\b(?:parallel|para)\s+(?:let|const)\b|\bwhen(?:\s+not)?\s+[!A-Za-z_$]|\bschema\s+[A-Za-z_$]|\bschema\s*\{|\bmatch\s+[A-Za-z_$(]|::\s*[A-Z]|\bis\s+(?:not\s+)?[A-Z]|\.\.=|\.\.!|\.\.&|\|>|~>|(?<![\-=<])->|(?:\|\||&&|\?\??|=>|:)\s*throw\s/;
 
 function containsParabunSyntax(text: string): boolean {
   return PARABUN_SYNTAX_RE.test(text);
@@ -128,6 +128,9 @@ function transformLine(line: string): string {
   line = transformModelFromLine(line);
   line = transformSignal(line);
   line = transformEffect(line);
+  line = transformMount(line);
+  line = transformProp(line);
+  line = transformDerivedDecl(line);
   line = transformArena(line);
   line = transformParallel(line);
   line = transformWhenBlock(line);
@@ -723,6 +726,33 @@ function transformSignal(line: string): string {
 // `{` (same line) — other uses of `effect` as an identifier are untouched.
 function transformEffect(line: string): string {
   return line.replace(/\b(effect)\b(?=\s*\{)/g, "      ");
+}
+
+// `mount { body }` → `      { body }` — five spaces replace `mount`, same
+// column-preserving trick as transformEffect (the real `onMount(() => …)`
+// desugar is owned by para-preprocess / pui-transform; this is a TS-side
+// parse shim only, so the fast-pass parabun-parse doesn't choke on the
+// keyword). Only fires when `mount` is immediately before `{`.
+function transformMount(line: string): string {
+  return line.replace(/\b(mount)\b(?=\s*\{)/g, "     ");
+}
+
+// `prop NAME …` → `let  NAME …` — `prop` (4) ↔ `let ` (4), column-preserving.
+// One `prop` may declare several comma-separated declarators
+// (`prop a: T = '', b = 3`); `let` accepts that declarator list verbatim,
+// so the fast-pass parser is satisfied without re-implementing the merge
+// (the real `$props()` fold is owned by para-preprocess / pui-transform).
+function transformProp(line: string): string {
+  return line.replace(/\b(prop)\b(?=\s+[A-Za-z_$])/g, "let ");
+}
+
+// Single-line `derived NAME = EXPR` → `let     NAME = EXPR` — `derived` (7)
+// ↔ `let    ` (7), mirroring transformSignal. The lookahead's `[=,;:!]`
+// excludes the block form `derived NAME { … }` (brace, not in the class),
+// which the fast-pass parser still can't parse — tracked as drift debt
+// alongside the structural unification (see LYK ticket).
+function transformDerivedDecl(line: string): string {
+  return line.replace(/\b(derived)\b(?=\s+[A-Za-z_$][\w$]*\s*[=,;:!])/g, "let    ");
 }
 
 // `arena { body }` → `     { body }` — five spaces replace `arena`, same
