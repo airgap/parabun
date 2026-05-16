@@ -6,141 +6,225 @@
 //
 // Scanner-based, not regex — pipeline expressions span balanced parens
 // (`x |> f(_, y)`) and chain through other `|>` operators, both of which
-// regex with depth-blind lookaheads gets wrong. We walk the code region
-// with a brace-tracking pass to find the START and END of each pipeline
+// regex with depth-blind lookaheads gets wrong. We walk the code with a
+// brace-tracking pass to find the START and END of each pipeline
 // expression (delimited by `=` / `,` / `(` / `[` / `{` / `;` / `return`
 // / `=>` on the left and `;` / depth-0 `,` / `)` / `]` / `}` / EOL on
 // the right), then split on top-level `|>` and reduce.
+//
+// LYK-914: pipelines inside `{ }` STATEMENT blocks (function / arrow /
+// control / desugared effect|mount bodies) are real and must lower. We
+// recurse into statement-block braces. Object / expression braces are
+// left alone (their `:`-bound property values would mis-scan an LHS — a
+// separate, rarer concern), exactly as before — no regression there.
+//
+// String / comment / regex handling: we can't use `rewriteCodeRegions`
+// (it chunks the source AT non-code spans, so a block containing a
+// string is split and brace-matching breaks). Instead we mask non-code
+// spans to same-length blanks and scan over THAT, while emitting slices
+// from the real source — brace/`|>` tokens inside strings are
+// neutralised, positions stay aligned.
 
-import { rewriteCodeRegions } from "../lex";
+import { scanRegions } from "../lex";
 
-export function transformPipeline(src: string): string {
-  return rewriteCodeRegions(src, code => {
-    if (!code.includes("|>")) return code;
-    return collapsePipelinesInCode(code);
-  });
+/** Same-length copy of `src` with string/comment/regex spans blanked
+ *  (newlines kept, so length + line structure + offsets are preserved).
+ *  Brace / `|>` tokens inside literals become inert. */
+function maskNonCode(src: string): string {
+  const spans = scanRegions(src);
+  let out = "";
+  for (const s of spans) {
+    const chunk = src.slice(s.start, s.end);
+    if (s.region === "code") out += chunk;
+    else out += chunk.replace(/[^\n]/g, " ");
+  }
+  return out;
 }
 
-function collapsePipelinesInCode(code: string): string {
+export function transformPipeline(src: string): string {
+  if (!src.includes("|>")) return src;
+  const scan = maskNonCode(src);
+  return collapse(src, scan, 0, src.length);
+}
+
+/**
+ * Process `[lo, hi)` of the source. `real` is the original text (emitted
+ * verbatim / sliced for operands); `scan` is the masked copy (all
+ * structural decisions index this). Recurses into statement-block braces.
+ */
+function collapse(real: string, scan: string, lo: number, hi: number): string {
   let out = "";
-  let i = 0;
-  while (i < code.length) {
-    const pipe = findNextTopLevelPipe(code, i);
-    if (pipe === -1) {
-      out += code.slice(i);
+  let i = lo;
+  while (i < hi) {
+    const ev = nextEvent(scan, i, hi, lo);
+    if (ev === null) {
+      out += real.slice(i, hi);
       return out;
     }
-    const start = scanLhsStart(code, pipe);
-    const end = scanRhsEnd(code, pipe + 2);
-    // Emit everything before the pipeline expression unchanged.
-    out += code.slice(i, start);
-    // Reduce the full chain (from `start` through `end`).
-    const expr = code.slice(start, end);
-    const leadingWs = expr.match(/^\s*/)![0];
-    const trailingWs = expr.match(/\s*$/)![0];
-    out += leadingWs + collapsePipelineChain(expr.trim()) + trailingWs;
+    if (ev.kind === "block") {
+      const close = matchBrace(scan, ev.pos, hi);
+      // Emit up to and including `{`, recurse the body, emit `}`.
+      out += real.slice(i, ev.pos + 1);
+      out += collapse(real, scan, ev.pos + 1, close);
+      out += real.slice(close, close + 1); // the `}` (or hi sentinel)
+      i = close + 1;
+      continue;
+    }
+    // ev.kind === "pipe"
+    const start = scanLhsStart(scan, ev.pos, lo);
+    const end = scanRhsEnd(scan, ev.pos + 2, hi);
+    out += real.slice(i, start);
+    const realExpr = real.slice(start, end);
+    const scanExpr = scan.slice(start, end);
+    const leadingWs = scanExpr.match(/^\s*/)![0];
+    const trailingWs = scanExpr.match(/\s*$/)![0];
+    out +=
+      leadingWs +
+      collapsePipelineChain(realExpr.slice(leadingWs.length, realExpr.length - trailingWs.length), scanExpr.trim()) +
+      trailingWs;
     i = end;
   }
   return out;
 }
 
+type Event = { kind: "pipe" | "block"; pos: number };
+
 /**
- * Find the position of the next top-level `|>` token (depth 0, not inside
- * parens/brackets/braces). Returns -1 if none found.
+ * Next thing of interest at the current bracket level: a top-level `|>`,
+ * or the `{` of a statement block (to recurse). `(`/`[` raise depth and
+ * suppress pipes (operand grouping — unchanged behaviour). A `{` at
+ * paren/bracket depth 0 is either a statement block (→ recurse) or an
+ * object/expression literal (→ skip its whole extent, leaving any inner
+ * `|>` alone, as before). Braces nested inside `(`/`[` are skipped too.
  */
-function findNextTopLevelPipe(code: string, from: number): number {
-  let depth = 0;
-  for (let i = from; i < code.length; i++) {
-    const c = code[i]!;
-    if (c === "(" || c === "[" || c === "{") {
+function nextEvent(scan: string, from: number, hi: number, lo: number): Event | null {
+  let depth = 0; // ( and [ only
+  for (let i = from; i < hi; i++) {
+    const c = scan[i]!;
+    if (c === "(" || c === "[") {
       depth++;
       continue;
     }
-    if (c === ")" || c === "]" || c === "}") {
+    if (c === ")" || c === "]") {
       depth--;
       continue;
     }
-    if (depth === 0 && c === "|" && code[i + 1] === ">") {
-      return i;
+    if (c === "{") {
+      // A statement block (arrow/function/control body) must be recursed
+      // REGARDLESS of paren depth — `map(x => { … })`, `effect(() => { …
+      // })` (transformBlocks already lowered `effect { }` to that form)
+      // put the body brace inside call parens. Object/expression braces
+      // are skipped wholesale (their inner `|>` is left alone — separate
+      // concern, no regression).
+      if (isStatementBlock(scan, i, lo)) return { kind: "block", pos: i };
+      i = matchBrace(scan, i, hi);
+      continue;
+    }
+    if (c === "}") continue; // stray (shouldn't happen at this level)
+    if (depth === 0 && c === "|" && scan[i + 1] === ">") return { kind: "pipe", pos: i };
+  }
+  return null;
+}
+
+/** Index of the `}` matching the `{` at openPos (scan is brace-balanced
+ *  since literals are masked). Clamped to hi-1 if unbalanced. */
+function matchBrace(scan: string, openPos: number, hi: number): number {
+  let depth = 0;
+  for (let i = openPos; i < hi; i++) {
+    const c = scan[i]!;
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return i;
     }
   }
-  return -1;
+  return hi - 1;
 }
 
 /**
- * Walk backward from `pipePos` through balanced parens to find the start
- * of the pipeline expression. Stops at the first depth-0 delimiter.
+ * Is the `{` at `bracePos` a statement block (function / arrow / control
+ * body, bare block) rather than an object/expression literal? Decided by
+ * the preceding significant char in `scan`:
+ *   • `)` `}` `;` `{` or region start → block
+ *   • `=>` (arrow body)               → block
+ *   • `else` / `do` / `try` / `finally` keyword → block
+ *   • anything else (`=` `(` `,` `:` `[` `return` `?` operators …) → expr
  */
-function scanLhsStart(code: string, pipePos: number): number {
+function isStatementBlock(scan: string, bracePos: number, lo: number): boolean {
+  let i = bracePos - 1;
+  while (i >= lo && /\s/.test(scan[i]!)) i--;
+  if (i < lo) return true; // start of the (sub)region → statement position
+  const c = scan[i]!;
+  if (c === ")" || c === "}" || c === ";" || c === "{") return true;
+  if (c === ">" && scan[i - 1] === "=") return true; // `=>` arrow body
+  // keyword forms: …else { …do { …try { …finally {
+  const wordEnd = i + 1;
+  let j = i;
+  while (j >= lo && /[A-Za-z]/.test(scan[j]!)) j--;
+  const word = scan.slice(j + 1, wordEnd);
+  if (word === "else" || word === "do" || word === "try" || word === "finally") return true;
+  return false;
+}
+
+/**
+ * Walk backward from `pipePos` through balanced parens to the start of the
+ * pipeline expression. Stops at the first depth-0 delimiter, floored at
+ * `lo` (the start of the region we're allowed to touch).
+ */
+function scanLhsStart(scan: string, pipePos: number, lo: number): number {
   let depth = 0;
   let i = pipePos - 1;
-  // Skip whitespace immediately before `|>`.
-  while (i >= 0 && /\s/.test(code[i]!)) i--;
-  while (i >= 0) {
-    const c = code[i]!;
+  while (i >= lo && /\s/.test(scan[i]!)) i--;
+  while (i >= lo) {
+    const c = scan[i]!;
     if (c === ")" || c === "]" || c === "}") {
       depth++;
       i--;
       continue;
     }
     if (c === "(" || c === "[" || c === "{") {
-      if (depth === 0) {
-        // Hit an opening delimiter at depth 0 — pipeline starts after it.
-        return i + 1;
-      }
+      if (depth === 0) return i + 1;
       depth--;
       i--;
       continue;
     }
     if (depth === 0) {
-      if (c === "," || c === ";" || c === "\n") {
-        return i + 1;
-      }
+      if (c === "," || c === ";" || c === "\n") return i + 1;
+      const left = scan[i - 1] ?? "";
+      const right = scan[i + 1] ?? "";
       if (c === "=") {
-        // `=` is only a delimiter if it's a STANDALONE assignment, not
-        // part of a compound operator. Check both neighbors:
-        //   - left in [! < > + - * / % & | ^ ? . =] → compound (==, ===,
-        //     <=, >=, !=, !==, +=, -=, *=, /=, %=, &=, |=, ^=, ??=, ..=)
-        //   - right === '=' → first `=` of `==` / `===`
-        //   - right === '>' → `=>` arrow — boundary IS here (after the `>`)
-        const left = code[i - 1] ?? "";
-        const right = code[i + 1] ?? "";
         if (right === ">") {
-          // Arrow `=>` — pipeline starts after the `>` plus any whitespace.
-          let j = i + 2;
-          while (j < code.length && /\s/.test(code[j]!)) j++;
-          return j;
+          let k = i + 2;
+          while (k < scan.length && /\s/.test(scan[k]!)) k++;
+          return k;
         }
         if (/[!<>+\-*/%&|^?.=]/.test(left) || right === "=") {
-          // Compound — keep walking.
           i--;
           continue;
         }
-        // Plain assignment — pipeline starts after the `=`.
         return i + 1;
       }
-      // `return ` keyword check.
-      if (c === "n" && code.slice(Math.max(0, i - 5), i + 1) === "return") {
-        let j = i + 1;
-        while (j < code.length && /\s/.test(code[j]!)) j++;
-        return j;
+      if (c === "n" && scan.slice(Math.max(lo, i - 5), i + 1) === "return") {
+        let k = i + 1;
+        while (k < scan.length && /\s/.test(scan[k]!)) k++;
+        return k;
       }
     }
     i--;
   }
-  return 0;
+  return lo;
 }
 
 /**
- * Walk forward from `startPos` through balanced parens to find the end of
- * the pipeline expression. Skips OVER any chained `|>` at depth 0, so the
- * full chain is one expression.
+ * Walk forward from `startPos` through balanced parens to the end of the
+ * pipeline expression (capped at `hi`). Skips chained `|>` so the whole
+ * chain is one expression; ends before a looser-precedence `..!/..&/..>`.
  */
-function scanRhsEnd(code: string, startPos: number): number {
+function scanRhsEnd(scan: string, startPos: number, hi: number): number {
   let depth = 0;
   let i = startPos;
-  while (i < code.length) {
-    const c = code[i]!;
+  while (i < hi) {
+    const c = scan[i]!;
     if (c === "(" || c === "[" || c === "{") {
       depth++;
       i++;
@@ -153,52 +237,60 @@ function scanRhsEnd(code: string, startPos: number): number {
       continue;
     }
     if (depth === 0) {
-      if (c === ";" || c === "\n") return i;
-      if (c === ",") return i;
-      // `..!` / `..&` / `..>` are looser-precedence than `|>` per the Para
-      // operator table — pipeline ends BEFORE them so the chain operators
-      // see the pipeline result as their LHS.
-      if (c === "." && code[i + 1] === "." && (code[i + 2] === "!" || code[i + 2] === "&" || code[i + 2] === ">")) {
+      if (c === ";" || c === "\n" || c === ",") return i;
+      if (c === "." && scan[i + 1] === "." && (scan[i + 2] === "!" || scan[i + 2] === "&" || scan[i + 2] === ">")) {
         return i;
       }
     }
     i++;
   }
-  return code.length;
+  return hi;
 }
 
-function collapsePipelineChain(expr: string): string {
-  const parts = splitOnPipe(expr);
-  if (parts.length <= 1) return expr;
-  let result = parts[0]!.trim();
-  for (let i = 1; i < parts.length; i++) {
-    result = applyStage(parts[i]!.trim(), result);
+// ── chain reduction (operand text from `real`, splits from `scan`) ──────
+
+function collapsePipelineChain(realExpr: string, scanExpr: string): string {
+  const cuts = pipeCuts(scanExpr);
+  if (cuts.length === 0) return realExpr;
+  const parts: string[] = [];
+  let s = 0;
+  for (const c of cuts) {
+    parts.push(realExpr.slice(s, c));
+    s = c + 2;
   }
+  parts.push(realExpr.slice(s));
+  let result = parts[0]!.trim();
+  for (let k = 1; k < parts.length; k++) result = applyStage(parts[k]!.trim(), result);
   return result;
 }
 
-function applyStage(stage: string, lhs: string): string {
-  // Method shorthand: `.method(args)` or `.prop`
-  if (stage.startsWith(".")) {
-    return `${lhs}${stage}`;
+/** Offsets of top-level `|>` within the (masked) expr. */
+function pipeCuts(scanExpr: string): number[] {
+  const cuts: number[] = [];
+  let depth = 0;
+  for (let i = 0; i < scanExpr.length; i++) {
+    const c = scanExpr[i]!;
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (depth === 0 && c === "|" && scanExpr[i + 1] === ">") {
+      cuts.push(i);
+      i++;
+    }
   }
-  // Placeholder substitution: top-level `_` inside a call argument list
-  // becomes the LHS. Works only when stage is shaped like `f(...)`.
+  return cuts;
+}
+
+function applyStage(stage: string, lhs: string): string {
+  if (stage.startsWith(".")) return `${lhs}${stage}`;
   const callMatch = matchCall(stage);
   if (callMatch) {
     const { fn, args } = callMatch;
-    if (hasTopLevelPlaceholder(args)) {
-      const substituted = substitutePlaceholder(args, lhs);
-      return `${fn}(${substituted})`;
-    }
-    // No placeholder: function-target form — `x |> f(y)` ≡ `f(y)(x)`
+    if (hasTopLevelPlaceholder(args)) return `${fn}(${substitutePlaceholder(args, lhs)})`;
     return `${stage}(${lhs})`;
   }
-  // Plain ident or property chain: `x |> f` ≡ `f(x)`
   return `${stage}(${lhs})`;
 }
 
-/** Match `f(args)` where the matching `)` closes at the very end. */
 function matchCall(stage: string): { fn: string; args: string } | null {
   const open = stage.indexOf("(");
   if (open < 0) return null;
@@ -210,31 +302,12 @@ function matchCall(stage: string): { fn: string; args: string } | null {
     else if (c === ")") {
       depth--;
       if (depth === 0) {
-        // The closing must be the last char for this to be a clean call.
         if (i !== stage.length - 1) return null;
         return { fn: stage.slice(0, open), args: stage.slice(open + 1, i) };
       }
     }
   }
   return null;
-}
-
-function splitOnPipe(s: string): string[] {
-  const out: string[] = [];
-  let depth = 0;
-  let start = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]!;
-    if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (depth === 0 && c === "|" && s[i + 1] === ">") {
-      out.push(s.slice(start, i));
-      start = i + 2;
-      i++;
-    }
-  }
-  out.push(s.slice(start));
-  return out;
 }
 
 function hasTopLevelPlaceholder(args: string): boolean {

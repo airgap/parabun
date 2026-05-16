@@ -22,7 +22,7 @@
  * Bundled self-contained via esbuild-pui-transform.mjs.
  */
 
-import { transformFun, transformPure } from "@para/transpile";
+import { transformErrorChain, transformFun, transformPipeline, transformPure } from "@para/transpile";
 import { svelte2tsx } from "svelte2tsx";
 import MagicStringNS from "magic-string";
 import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell/trace-mapping";
@@ -325,25 +325,27 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     }
 
     // ── general parabun syntax → TS, single-sourced via @para/transpile ──
-    // LYK-913: the build path lowers general parabun syntax via
+    // LYK-913/914: the build path lowers general parabun syntax via
     // Bun.Transpiler (type-stripping — fine for runtime). svelte2tsx
     // needs *typed* TS, so the projection runs @para/transpile's
-    // type-preserving, position-preserving passes instead. Only the
-    // passes that are complete + line-preserving are wired here:
-    //   • transformFun  — `fun` → `function` (the reported bug)
-    //   • transformPure — `pure ` strip (column-preserving)
-    // Operator/match lowering (`|>`/`..!`/`..&`/`..>`/`is`/`match`) is
-    // intentionally NOT done here: @para/transpile currently no-ops `|>`
-    // inside `{ }` blocks, and hand-rolling it would re-create the exact
-    // LYK-911 drift class. Tracked on LYK-913 (blocked on @para/transpile
-    // gaining block-scope-aware lowering — the canonical fix).
+    // type-preserving, position-preserving passes instead:
+    //   • transformFun       — `fun` → `function`
+    //   • transformPure      — `pure ` strip
+    //   • transformPipeline  — `x |> f` → `f(x)`  (LYK-914: now
+    //                           block-scope-aware, so function/arrow/
+    //                           effect bodies lower correctly)
+    //   • transformErrorChain— `p ..! h`/`..&`/`..>` → .catch/.finally/
+    //                           .then (already block-correct)
+    // Order mirrors @para/transpile's own pipeline (fun, pure, …,
+    // pipeline before error-chain so `|>` binds tighter). `match`/`is`/
+    // ranges/decimal stay deferred (heavier; not block-complete yet).
     //
-    // These passes are line-preserving, so applying the diff per line as
+    // All four are line-preserving, so applying the diff per line as
     // exact MagicString edits keeps low.map line-accurate. A line the
     // reactivity lowering already overwrote throws on overlap → skipped
-    // (reactivity wins; `fun`/`pure` on a reactivity-decl line is rare).
+    // (reactivity wins; these on a reactivity-decl line is rare).
     {
-      const lowered = transformPure(transformFun(body));
+      const lowered = transformErrorChain(transformPipeline(transformPure(transformFun(body))));
       if (lowered !== body) {
         const origLines = body.split("\n");
         const newLines = lowered.split("\n");

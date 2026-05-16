@@ -206,6 +206,26 @@ const cases: Case[] = [
     expect: "diag-on-line",
     expectLine: 2,
   },
+  // LYK-914: a `|>` pipeline inside a function body must lower in the
+  // projection so types flow through it. `5 |> double` → `double(5)`
+  // (number); assigning to `string` is a real TS error on line 3. If the
+  // pipeline weren't lowered (the pre-LYK-914 block no-op), the body
+  // would be invalid TS and this exact type error wouldn't surface.
+  {
+    uri: "file:///tmp/SmokeO.pui",
+    text: `<script lang="ts">
+  fun double(n: number): number { return n * 2; }
+  fun run(): void {
+    const r: string = 5 |> double;
+    console.log(r);
+  }
+</script>
+
+<p>pipe in fn body</p>
+`,
+    expect: "diag-on-line",
+    expectLine: 3,
+  },
 ];
 
 const proc = spawn("parabun", ["run", LSP, "--stdio"], {
