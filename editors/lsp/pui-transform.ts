@@ -397,9 +397,27 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
           let off = bodyStart;
           for (let i = 0; i < origLines.length; i++) {
             const ol = origLines[i]!;
-            if (ol !== newLines[i]!) {
+            const nl = newLines[i]!;
+            if (ol !== nl) {
+              // Minimal edit: a whole-line overwrite would map EVERY
+              // token on the line back to the line start (MagicString
+              // treats an overwrite as one opaque chunk) — that broke
+              // hover/go-to/diagnostic precision on every line touched by
+              // a now-common transform (`|>`/`is`/decimal/…). Keep the
+              // common prefix & suffix untouched so they retain exact
+              // identity mapping; only the genuinely-rewritten middle
+              // span is coarse (that text legitimately moved).
+              let p = 0;
+              const maxP = Math.min(ol.length, nl.length);
+              while (p < maxP && ol[p] === nl[p]) p++;
+              let s = 0;
+              const maxS = Math.min(ol.length - p, nl.length - p);
+              while (s < maxS && ol[ol.length - 1 - s] === nl[nl.length - 1 - s]) s++;
+              const a = off + p;
+              const b = off + ol.length - s;
+              const mid = nl.slice(p, nl.length - s);
               try {
-                repl(off, off + ol.length, newLines[i]!);
+                repl(a, b, mid); // repl() does appendLeft when a === b
               } catch {
                 /* overlaps a reactivity rewrite on this line — skip */
               }

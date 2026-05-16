@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Parabun Keyword Injection",
   "scopeName": "inject.parabun-keywords",
-  "injectionSelector": "L:source.pts -string -comment, L:source.ptsx -string -comment, L:source.pjs -string -comment, L:source.pjsx -string -comment",
+  "injectionSelector": "L:source.pts -string -comment, L:source.ptsx -string -comment, L:source.pjs -string -comment, L:source.pjsx -string -comment, L:source.pui source.ts -string -comment, L:source.pui source.js -string -comment",
   "patterns": [
     {
       "comment": "fun NAME(...) — shorthand alias for function declarations / expressions",

@@ -167,7 +167,8 @@
           "source.pts",
           "source.ptsx",
           "source.pjs",
-          "source.pjsx"
+          "source.pjsx",
+          "source.pui"
         ]
       },
       {

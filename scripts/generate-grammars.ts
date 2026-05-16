@@ -92,8 +92,15 @@ const TARGETS: Record<Target, { injectPath: string; injectWrapper: (patterns: an
       $schema: "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
       name: "Parabun Keyword Injection",
       scopeName: "inject.parabun-keywords",
+      // `.pts/.ptsx/.pjs/.pjsx` files: the whole file is script, scope
+      // is `source.p*`. `.pui` files: the file is `source.pui` and the
+      // `<script>` body is embedded `source.ts`/`source.js` (set by
+      // parabun-ui.tmLanguage's contentName) regardless of `lang`, so we
+      // target that embedded scope *within* source.pui — keyword
+      // highlighting then works for bare `<script>` / `lang="ts"` /
+      // `lang="pts"` alike, without bleeding into the .pui markup.
       injectionSelector:
-        "L:source.pts -string -comment, L:source.ptsx -string -comment, L:source.pjs -string -comment, L:source.pjsx -string -comment",
+        "L:source.pts -string -comment, L:source.ptsx -string -comment, L:source.pjs -string -comment, L:source.pjsx -string -comment, L:source.pui source.ts -string -comment, L:source.pui source.js -string -comment",
       patterns,
     }),
     // Editor main grammars (parabun-ts.tmLanguage.json et al.) are
