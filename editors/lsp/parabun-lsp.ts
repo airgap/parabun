@@ -1846,7 +1846,7 @@ function ensureTscHelper(): void {
   // spawn / after a respawn.
   for (const [uri, content] of documents) {
     const version = docVersions.get(uri) ?? 1;
-    sendToHelper({ type: "open", uri, content, version, lang: svelteLangs.get(uri) });
+    sendToHelper({ type: "open", uri, content, version, lang: svelteLangs.get(uri), raw: svelteRawTexts.get(uri) });
     helperOpenDocs.add(uri);
   }
 }
@@ -1885,11 +1885,17 @@ function handleHelperReply(msg: any): void {
 function requestTscDiagnostics(uri: string, content: string, version: number): void {
   ensureTscHelper();
   const lang = svelteLangs.get(uri);
+  // The helper subprocess type-checks `.pui` via the svelte2tsx
+  // projection, which needs the RAW .pui text (svelteRawTexts) — the
+  // `content` we send is the blank-padded synthetic. Without `raw` the
+  // helper's computeTsDiagnostics short-circuits to [] for every .pui
+  // (LYK-912: all .pui type errors were invisible).
+  const raw = svelteRawTexts.get(uri);
   if (!helperOpenDocs.has(uri)) {
-    sendToHelper({ type: "open", uri, content, version, lang });
+    sendToHelper({ type: "open", uri, content, version, lang, raw });
     helperOpenDocs.add(uri);
   } else {
-    sendToHelper({ type: "update", uri, content, version, lang });
+    sendToHelper({ type: "update", uri, content, version, lang, raw });
   }
   sendToHelper({ type: "validate", uri, version });
 }
@@ -1902,19 +1908,49 @@ function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
   // — we iterate that and emit one diagnostic per error with the
   // attached `position` so squiggles land on the offending tokens
   // instead of all bunched at line 0.
+  // For `.pui`, parse the SINGLE-SOURCE projection (pui-transform /
+  // svelte2tsx — the exact lowering the slow tsc pass uses) instead of
+  // the legacy transformParabunToTS shim. That shim is a hand-maintained
+  // parallel keyword-lowerer that drifts (it lacked mount/prop/derived;
+  // block-`derived NAME { … }` still can't be column-shimmed) — LYK-911.
+  // Map parse-error positions back to the raw .pui via the sourcemap,
+  // mirroring computeTsDiagnostics' `.pui` block. Fall back to the legacy
+  // path only when the projection is unavailable (e.g. svelte2tsx throws
+  // mid-edit) so fast feedback is never lost entirely.
   const loader = loaderForUri(uri);
-  const transpiler = transpilers[loader];
+  let parseSource: string;
+  let parseTranspiler = transpilers[loader];
+  let toOrig: ((l: number, c: number) => { line: number; character: number } | null) | null = null;
+  if (isPuiUri(uri)) {
+    const raw = svelteRawTexts.get(uri);
+    const t = raw !== undefined ? getPuiTransform(uri, raw) : undefined;
+    if (t) {
+      parseSource = t.code;
+      parseTranspiler = transpilers.tsx; // svelte2tsx output is TSX
+      toOrig = (l, c) => t.toOriginal(l, c);
+    } else {
+      parseSource = transformParabunToTS(content);
+    }
+  } else {
+    parseSource = transformParabunToTS(content);
+  }
   try {
-    transpiler.transformSync(transformParabunToTS(content));
+    parseTranspiler.transformSync(parseSource);
   } catch (e: any) {
     const errs: any[] = Array.isArray(e?.errors) && e.errors.length > 0 ? e.errors : [e];
     for (const err of errs) {
       const pos = err?.position;
       const message: string = err?.message ?? String(err);
       const level: string = err?.level ?? "error";
-      const line = pos ? pos.line - 1 : 0;
-      const col = pos ? pos.column - 1 : 0;
+      let line = pos ? pos.line - 1 : 0;
+      let col = pos ? pos.column - 1 : 0;
       const len = pos?.length ?? 1;
+      if (toOrig && pos) {
+        const o = toOrig(line, col);
+        if (!o) continue; // generated-only svelte2tsx scaffolding — not user code
+        line = o.line;
+        col = o.character;
+      }
       diagnostics.push({
         range: {
           start: { line, character: col },
@@ -1949,6 +1985,15 @@ function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
   return diagnostics;
 }
 
+// svelte2tsx / pui-lowering projection scaffolding that must never reach
+// the user as a `.pui` diagnostic. These identifiers/modules are emitted
+// by the projection, not authored by the user, and are ambient in a
+// correctly-typed workspace. Matching by message is consistent with the
+// pre-existing `__sig_`/`__v` filter; it targets only unambiguous
+// projection symbols so genuine user errors still surface.
+const PUI_SCAFFOLD_DIAG =
+  /Cannot find name '(svelteHTML|__sveltets_[\w$]*|\$(?:props|state|derived|effect|bindable|inspect|host))'|Cannot find type definition file for 'svelte'|Cannot find module '@lyku\/para-(?:ui|signals|preprocess)'/;
+
 function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
   const diagnostics: LspDiagnostic[] = [];
   if (!(tsService && ts)) return diagnostics;
@@ -1967,12 +2012,17 @@ function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
       const all = [...tsService.getSyntacticDiagnostics(fileName), ...tsService.getSemanticDiagnostics(fileName)];
       for (const diag of all) {
         if (diag.start === undefined || diag.length === undefined) continue;
-        // Drop diagnostics about bridge-lowering internals (__sig_*, __v):
-        // they're synthetic, not user code. The `__v` implicit-any is fixed
-        // at the source (typed param) but guard defensively for any other
-        // scaffolding symbol.
         const dm = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
-        if (/\b__sig_[A-Za-z_$]|\b__v\b/.test(dm)) continue;
+        // Drop projection scaffolding — never user code. Three classes:
+        //  • bridge-lowering internals (`__sig_*`, `__v`);
+        //  • svelte2tsx machinery (`svelteHTML`, `__sveltets_*`, the
+        //    `///<reference types="svelte" />`);
+        //  • lowering-injected runtime imports / svelte rune globals
+        //    (`@lyku/para-*`, `$props`/`$state`/`$derived`/…), which are
+        //    ambient in a correctly-typed workspace and non-actionable in
+        //    a `.pui` regardless. Genuine user errors (wrong types, real
+        //    missing user identifiers/modules) are not in this set.
+        if (PUI_SCAFFOLD_DIAG.test(dm) || /\b__sig_[A-Za-z_$]|\b__v\b/.test(dm)) continue;
         const gs = offsetToPosition(t.code, diag.start);
         const ge = offsetToPosition(t.code, diag.start + diag.length);
         const os = t.toOriginal(gs.line, gs.character);
@@ -5331,11 +5381,17 @@ function handleHelperMessage(msg: any): void {
       docVersions.set(msg.uri, msg.version);
       if (msg.lang) svelteLangs.set(msg.uri, msg.lang);
       else if (isComponentUri(msg.uri)) svelteLangs.delete(msg.uri);
+      // Raw component source — required for the `.pui` svelte2tsx
+      // projection in computeTsDiagnostics / getScriptSnapshot. The
+      // main process holds it in svelteRawTexts; the helper only learns
+      // it via this message (LYK-912).
+      if (msg.raw !== undefined) svelteRawTexts.set(msg.uri, msg.raw);
       return;
     case "close":
       documents.delete(msg.uri);
       docVersions.delete(msg.uri);
       svelteLangs.delete(msg.uri);
+      svelteRawTexts.delete(msg.uri);
       return;
     case "validate": {
       const content = documents.get(msg.uri);

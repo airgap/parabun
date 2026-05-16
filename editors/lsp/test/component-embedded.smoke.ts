@@ -6,10 +6,30 @@
 // type-error diagnostics, clean-script silence, and well-formedness
 // (unclosed `<script>` tag).
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 const LSP = path.resolve(__dirname, "..", "parabun-lsp.ts");
+const lspDir = path.resolve(__dirname, "..");
+
+// parabun-lsp `require("parabun-pui-transform")`s the bundled .pui
+// projection. The packaged .vsix gets it via copy-assets; a source run
+// has no equivalent, so without this the `.pui` cases never actually
+// exercise the projection (silent: they'd just see zero diagnostics —
+// which is precisely how the LYK-911/912 .pui bugs went unnoticed).
+// Build + install it into node_modules so the smoke is faithful.
+function ensurePuiTransformModule(): void {
+  const dest = path.join(lspDir, "node_modules", "parabun-pui-transform");
+  execFileSync(process.execPath, ["esbuild-pui-transform.mjs"], { cwd: lspDir, stdio: "ignore" });
+  fs.mkdirSync(dest, { recursive: true });
+  fs.copyFileSync(path.join(lspDir, "dist-pui-transform", "pui-transform.js"), path.join(dest, "index.js"));
+  fs.writeFileSync(
+    path.join(dest, "package.json"),
+    JSON.stringify({ name: "parabun-pui-transform", version: "0.1.0", main: "index.js" }, null, 2) + "\n",
+  );
+}
+ensurePuiTransformModule();
 
 interface Case {
   uri: string;
@@ -137,6 +157,37 @@ const cases: Case[] = [
 <p>empty mount, no spaces</p>
 `,
     expect: "no-diag",
+  },
+  // LYK-911: block-form `derived NAME { … }` can't be column-shimmed by
+  // the legacy fast-pass transform; routing the .pui fast pass through
+  // the single-source pui-transform projection makes it clean.
+  {
+    uri: "file:///tmp/SmokeK.pui",
+    text: `<script lang="ts">
+  derived total {
+    let s = 0;
+    for (const n of [1, 2, 3]) s += n;
+    return s;
+  }
+</script>
+
+<p>{total}</p>
+`,
+    expect: "no-diag",
+  },
+  // The new single-source path must still surface genuine syntax errors
+  // (not just suppress everything). Malformed type annotation → parse
+  // error on line 1.
+  {
+    uri: "file:///tmp/SmokeM.pui",
+    text: `<script lang="ts">
+  const broken: = 5;
+</script>
+
+<p>x</p>
+`,
+    expect: "diag-on-line",
+    expectLine: 1,
   },
 ];
 
