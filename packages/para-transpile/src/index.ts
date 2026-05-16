@@ -16,6 +16,7 @@ import { transformDefer } from "./transforms/defer";
 import { transformErrorChain } from "./transforms/error-chain";
 import { transformFun } from "./transforms/fun";
 import { injectUsingHelpers } from "./transforms/inject-helpers";
+import { transformIs } from "./transforms/is";
 import { transformMemo } from "./transforms/memo";
 import { transformParallel } from "./transforms/parallel";
 import { transformPipeline } from "./transforms/pipeline";
@@ -50,6 +51,9 @@ export function transpile(src: string, _options: TranspileOptions = {}): string 
   out = transformDecimal(out);
   out = transformFun(out);
   out = transformPure(out);
+  // `is` → `Type.parse(expr).tag === "Ok"` before the operator passes so
+  // the parenthesised result threads correctly through `|>` / `..!`.
+  out = transformIs(out);
   out = transformMemo(out);
   // `parallel` runs BEFORE error-chain because the statement form's RHSes
   // can each carry their own `..!` / `..&` / `..>` operator — running
@@ -98,6 +102,7 @@ export {
   transformDefer,
   transformErrorChain,
   transformFun,
+  transformIs,
   transformMemo,
   transformParallel,
   transformPipeline,

@@ -22,7 +22,15 @@
  * Bundled self-contained via esbuild-pui-transform.mjs.
  */
 
-import { transformErrorChain, transformFun, transformPipeline, transformPure } from "@para/transpile";
+import {
+  transformDecimal,
+  transformErrorChain,
+  transformFun,
+  transformIs,
+  transformPipeline,
+  transformPure,
+  transformRanges,
+} from "@para/transpile";
 import { svelte2tsx } from "svelte2tsx";
 import MagicStringNS from "magic-string";
 import { TraceMap, originalPositionFor, generatedPositionFor } from "@jridgewell/trace-mapping";
@@ -325,27 +333,30 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     }
 
     // ── general parabun syntax → TS, single-sourced via @para/transpile ──
-    // LYK-913/914: the build path lowers general parabun syntax via
+    // LYK-913/914/915: the build path lowers general parabun syntax via
     // Bun.Transpiler (type-stripping — fine for runtime). svelte2tsx
     // needs *typed* TS, so the projection runs @para/transpile's
     // type-preserving, position-preserving passes instead:
+    //   • transformDecimal   — `1.5d` → `__paraDec("1.5")`
     //   • transformFun       — `fun` → `function`
     //   • transformPure      — `pure ` strip
-    //   • transformPipeline  — `x |> f` → `f(x)`  (LYK-914: now
-    //                           block-scope-aware, so function/arrow/
-    //                           effect bodies lower correctly)
-    //   • transformErrorChain— `p ..! h`/`..&`/`..>` → .catch/.finally/
-    //                           .then (already block-correct)
-    // Order mirrors @para/transpile's own pipeline (fun, pure, …,
-    // pipeline before error-chain so `|>` binds tighter). `match`/`is`/
-    // ranges/decimal stay deferred (heavier; not block-complete yet).
-    //
-    // All four are line-preserving, so applying the diff per line as
-    // exact MagicString edits keeps low.map line-accurate. A line the
-    // reactivity lowering already overwrote throws on overlap → skipped
-    // (reactivity wins; these on a reactivity-decl line is rare).
+    //   • transformIs        — `x is T` → `T.parse(x).tag === "Ok"`
+    //   • transformPipeline  — `x |> f` → `f(x)` (block-scope-aware)
+    //   • transformErrorChain— `p ..! h`/`..&`/`..>` → .catch/.finally/.then
+    //   • transformRanges    — `a..b` → `__parabunRange(a, b)`
+    // Order mirrors @para/transpile's own `transpile()` (decimal, fun,
+    // pure, is, …, pipeline before error-chain so `|>` binds tighter,
+    // ranges last). All are region-based / line-preserving, so the
+    // per-line MagicString diff keeps low.map line-accurate. The injected
+    // helper names (`__paraDec`, `__parabunRange*`) are projection
+    // scaffolding — filtered by PUI_SCAFFOLD_DIAG (parabun-lsp.ts), like
+    // svelte2tsx's. `match` is the one still deferred (multi-line — needs
+    // sourcemap threading, tracked separately). A line the reactivity
+    // lowering already overwrote throws on overlap → skipped.
     {
-      const lowered = transformErrorChain(transformPipeline(transformPure(transformFun(body))));
+      const lowered = transformRanges(
+        transformErrorChain(transformPipeline(transformIs(transformPure(transformFun(transformDecimal(body)))))),
+      );
       if (lowered !== body) {
         const origLines = body.split("\n");
         const newLines = lowered.split("\n");

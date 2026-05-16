@@ -226,6 +226,52 @@ const cases: Case[] = [
     expect: "diag-on-line",
     expectLine: 3,
   },
+  // LYK-915: `is` lowers to `Type.parse(x).tag === "Ok"`. Unlowered
+  // `x is User` is a TS syntax error → would diagnose. With a local
+  // `User` shim in scope it lowers + type-checks clean.
+  {
+    uri: "file:///tmp/SmokeP.pui",
+    text: `<script lang="ts">
+  const User = { parse: (v: unknown) => ({ tag: "Ok" as const }) };
+  const input: unknown = 1;
+  const ok: boolean = input is User;
+  console.log(ok);
+</script>
+
+<p>is guard</p>
+`,
+    expect: "no-diag",
+  },
+  // LYK-915: decimal `1.5d` lowers to `__paraDec("1.5")`. Unlowered,
+  // `1.5d` is a TS lex/parse error → would diagnose. The injected
+  // `__paraDec` name is projection scaffolding (PUI_SCAFFOLD_DIAG).
+  {
+    uri: "file:///tmp/SmokeQ.pui",
+    text: `<script lang="ts">
+  const price = 0.1d + 0.2d;
+  console.log(price);
+</script>
+
+<p>decimal literal</p>
+`,
+    expect: "no-diag",
+  },
+  // LYK-915: range `1..3` lowers to `__parabunRange(1, 3)`. Unlowered,
+  // `1..3` is a TS parse error → would diagnose. `__parabunRange` is
+  // filtered projection scaffolding.
+  {
+    uri: "file:///tmp/SmokeR.pui",
+    text: `<script lang="ts">
+  fun run(): void {
+    for (const i of 1..3) console.log(i);
+  }
+  run();
+</script>
+
+<p>range in fn body</p>
+`,
+    expect: "no-diag",
+  },
 ];
 
 const proc = spawn("parabun", ["run", LSP, "--stdio"], {

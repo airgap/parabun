@@ -1992,7 +1992,7 @@ function computeFastDiagnostics(uri: string, content: string): LspDiagnostic[] {
 // pre-existing `__sig_`/`__v` filter; it targets only unambiguous
 // projection symbols so genuine user errors still surface.
 const PUI_SCAFFOLD_DIAG =
-  /Cannot find name '(svelteHTML|__sveltets_[\w$]*|\$(?:props|state|derived|effect|bindable|inspect|host))'|Cannot find type definition file for 'svelte'|Cannot find module '@lyku\/para-(?:ui|signals|preprocess)'/;
+  /Cannot find name '(svelteHTML|__sveltets_[\w$]*|\$(?:props|state|derived|effect|bindable|inspect|host)|__parabunRange[\w$]*|__paraDec)'|Cannot find type definition file for 'svelte'|Cannot find module '@lyku\/para-(?:ui|signals|preprocess)'/;
 
 function computeTsDiagnostics(uri: string, content: string): LspDiagnostic[] {
   const diagnostics: LspDiagnostic[] = [];
