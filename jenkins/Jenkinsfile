@@ -48,7 +48,6 @@ pipeline {
         booleanParam(name: 'BUILD_LINUX_ARM64',   defaultValue: false, description: 'Build Linux aarch64 (requires parabun-jetson SSH alias)')
         booleanParam(name: 'BUILD_MACOS',         defaultValue: true,  description: 'Build macOS arm64 (requires mac-mini agent)')
         booleanParam(name: 'BUILD_WINDOWS',       defaultValue: false, description: 'Build Windows x64 (requires windows agent)')
-        booleanParam(name: 'BUILD_VSIX',    defaultValue: true,  description: 'Package the VS Code extension (.vsix)')
         booleanParam(name: 'RUN_TESTS',     defaultValue: true,  description: 'Run parabun test suite on macOS after build')
         string(name: 'TEST_FILTER', defaultValue: 'test/bundler/transpiler/parabun-*.test.js',
                description: 'Glob passed to `bun bd test`; default runs only parabun-* tests')
@@ -265,74 +264,9 @@ pipeline {
                         }
                     }
                 }
-
-                stage('VSIX') {
-                    when {
-                        beforeAgent true
-                        expression { params.BUILD_VSIX }
-                    }
-                    // Uses the same Linux CI image; node + npm are already
-                    // installed for Parabun's own build scripts, and @vscode/vsce
-                    // is fetched on-demand via npx.
-                    agent {
-                        dockerfile {
-                            filename 'jenkins/Dockerfile.ci-linux'
-                            label 'linux'
-                            additionalBuildArgs '--pull'
-                            customWorkspace '/raid/jenkins-workspaces/parabun-vsix'
-                        }
-                    }
-                    steps {
-                        checkout scm
-                        sh '''
-                            set -eu
-                            # Container runs as the host jenkins UID (132), which
-                            # has no $HOME. Point npm/npx caches at the workspace
-                            # so they don't try to mkdir /.npm.
-                            export HOME="${WORKSPACE}"
-                            export npm_config_cache="${WORKSPACE}/.npm"
-                            mkdir -p "${npm_config_cache}"
-                            # The CI image doesn't ship a parabun binary on PATH —
-                            # the matched binary is published as a separate
-                            # artifact by the build stages. copy-assets.js has a
-                            # PATH check meant to catch local devs packaging a
-                            # debug build; we bypass it explicitly here.
-                            export PARABUN_VSIX_SKIP_BINARY_CHECK=1
-                            # Build the TS plugin first — copy-assets.js
-                            # copies its output into the VSIX.
-                            cd editors/ts-plugin
-                            npm install --ignore-scripts --no-audit --no-fund
-                            npm run build
-                            # LSP pui-transform deps — copy-assets.js execs
-                            # editors/lsp/esbuild-pui-transform.mjs, which
-                            # needs svelte2tsx/svelte/trace-mapping/preprocess.
-                            cd ../lsp
-                            npm install --ignore-scripts --no-audit --no-fund
-                            cd ../vscode/parabun
-                            # package-lock.json is gitignored — any lockfile
-                            # in the workspace is a leftover from a previous
-                            # run, not a committed source of truth. `npm ci`
-                            # would refuse to reconcile a package.json dep
-                            # bump against it (npm error "missing from lock
-                            # file"), so always do `npm install` and let it
-                            # rewrite the lockfile in place.
-                            npm install --ignore-scripts --no-audit --no-fund
-                            npm run build
-                            # Extension imports vscode-languageclient at runtime,
-                            # so node_modules needs to ride along. .vscodeignore
-                            # allowlists only the runtime dep + its transitives.
-                            mkdir -p ../../../artifacts
-                            npx --yes @vscode/vsce@^3 package \
-                                --out ../../../artifacts/parabun.vsix
-                        '''
-                        stash name: 'vsix-bin', includes: 'artifacts/parabun.vsix'
-                    }
-                    post {
-                        success {
-                            archiveArtifacts artifacts: 'artifacts/parabun.vsix', allowEmptyArchive: true
-                        }
-                    }
-                }
+                // The VS Code extension (.vsix) — editors/{vscode,lsp,
+                // ts-plugin} — was extracted to airgap/para (2026-05-16).
+                // Its build + .vsix packaging now lives in para's CI.
             }
         }
 
@@ -358,7 +292,6 @@ pipeline {
                     if (params.BUILD_LINUX_ARM64) { unstash 'linux-arm64-bin' }
                     if (params.BUILD_MACOS)       { unstash 'macos-bin' }
                     if (params.BUILD_WINDOWS)     { unstash 'windows-bin' }
-                    if (params.BUILD_VSIX)        { unstash 'vsix-bin' }
                 }
                 // github-pat is a "Username with password" credential; gh
                 // honors GH_TOKEN from the environment.
