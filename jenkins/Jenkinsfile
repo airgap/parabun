@@ -61,28 +61,10 @@ pipeline {
     }
 
     stages {
-        // Catalog → derived-files drift check. Runs before all parallel
-        // platform builds so a forgotten `bun run codegen` is caught
-        // once, not four times. Fast (<1s) — no build cost. The check
-        // runs whichever output targets exist on this agent; the
-        // para-site target is skipped when its directory isn't checked
-        // out (typical for fresh CI nodes), still catches editor +
-        // LSP drift which is what matters here.
-        stage('Codegen check') {
-            agent {
-                dockerfile {
-                    filename 'jenkins/Dockerfile.ci-linux'
-                    label 'linux'
-                    additionalBuildArgs '--pull'
-                    customWorkspace '/raid/jenkins-workspaces/parabun-codegen'
-                }
-            }
-            steps {
-                checkout scm
-                sh 'bun run codegen:check'
-            }
-        }
-
+        // Codegen / catalog-drift check moved to airgap/para with the
+        // extraction (para owns `scripts/codegen.ts` + `codegen:check`
+        // now). parabun no longer runs it — the script was git-rm'd here,
+        // so calling it only red-failed CI on a check para already owns.
         stage('Build') {
             parallel {
                 stage('Linux x64') {
