@@ -7,6 +7,19 @@ pub fn ParseSuffix(
         const P = js_parser.NewParser_(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only);
         const is_typescript_enabled = P.is_typescript_enabled;
 
+        // Para `is <lit | ...>` membership only allows a side-effect-free,
+        // repeatable operand: the strict-equality chain references it
+        // directly (so TS narrows it just like a hand-written `||` chain)
+        // with no temp/IIFE. Mirrors `match`'s isSimpleSubject (parse.zig)
+        // for cross-feature consistency.
+        fn isSimpleMembershipSubject(expr: Expr) bool {
+            return switch (expr.data) {
+                .e_identifier => true,
+                .e_dot => |dot| isSimpleMembershipSubject(dot.target),
+                else => false,
+            };
+        }
+
         fn handleTypescriptAs(p: *P, level: Level) anyerror!Continuation {
             if (is_typescript_enabled and level.lt(.compare) and !p.lexer.has_newline_before and (p.lexer.isContextualKeyword("as") or p.lexer.isContextualKeyword("satisfies"))) {
                 try p.lexer.next();
@@ -1072,7 +1085,7 @@ pub fn ParseSuffix(
         }
 
         // Parabun: `A ~> B` reactive binding — desugars to
-        //   require("@para/signals").effect(() => { B = A; })
+        //   require("@lyku/para-signals").effect(() => { B = A; })
         //
         // The body is an arrow that evaluates A (tracking any signal reads) and
         // assigns to B. If B is a signal, the existing assignment-sugar pass
@@ -1087,7 +1100,7 @@ pub fn ParseSuffix(
         // `(a |> f) ~> sink`.
         //
         // Conditional bind (LYK-767): `A ~> B when C` adds a guard. The desugar
-        // becomes `require("@para/signals").effect(() => { if (C) B = A; })`.
+        // becomes `require("@lyku/para-signals").effect(() => { if (C) B = A; })`.
         // C is read inside the effect so signal reads in the predicate are
         // tracked too — flipping C re-fires the effect, the body re-evaluates
         // the guard, and only assigns when the guard passes.
@@ -1164,7 +1177,7 @@ pub fn ParseSuffix(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, op_loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, op_loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, op_loc),
                 .args = ExprNodeList.fromOwnedSlice(require_args),
@@ -1185,7 +1198,7 @@ pub fn ParseSuffix(
         }
 
         // Parabun: `A -> fn` reactive function-call binding — desugars to
-        //   require("@para/signals").effect(() => { fn(A); })
+        //   require("@lyku/para-signals").effect(() => { fn(A); })
         //
         // Complement to `~>`: where `~>` writes `A.get()` into an assignable
         // sink, `->` calls a function/method with `A.get()`. Reads naturally:
@@ -1267,7 +1280,7 @@ pub fn ParseSuffix(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, op_loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, op_loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, op_loc),
                 .args = ExprNodeList.fromOwnedSlice(require_args),
@@ -2287,7 +2300,7 @@ pub fn ParseSuffix(
                     .e_array,
                     => {},
                     // Call sources (other than range helpers) may yield
-                    // async iterables — `@para/pipeline` handles those at
+                    // async iterables — `@lyku/para-pipeline` handles those at
                     // runtime via its own combinators, so leave them alone.
                     else => return false,
                 },
@@ -3161,6 +3174,67 @@ pub fn ParseSuffix(
                             .right = p.newExpr(E.String{ .data = "Ok" }, type_loc),
                         }, type_loc);
                         continue;
+                    }
+                    // Para membership: `expr is [not] LIT { | LIT }` where
+                    // LIT is a string/number literal. Lowers to the strict-
+                    // equality OR-chain (or the De-Morgan !==/&& chain for
+                    // `is not`) — the exact form `match` emits for an all-
+                    // literal arm, so TS narrows `expr` just as if you had
+                    // hand-written the chain, with none of the per-call
+                    // array alloc/scan of `[...].includes(expr)`. v1: simple
+                    // operand only (identifier / property path) so it is
+                    // evaluated once and narrowing holds; string & numeric
+                    // literals only (Set/predicate large-N path is later).
+                    {
+                        var mem_negate = false;
+                        if (p.lexer.token == .t_identifier and
+                            bun.strings.eqlComptime(p.lexer.raw(), "not") and
+                            !p.lexer.has_newline_before)
+                        {
+                            try p.lexer.next();
+                            mem_negate = true;
+                        }
+                        if (p.lexer.token == .t_string_literal or p.lexer.token == .t_numeric_literal) {
+                            if (!isSimpleMembershipSubject(left.*)) {
+                                try p.log.addRangeError(p.source, p.lexer.range(), "Para: `is <lit | ...>` requires a simple operand (an identifier or property path) so it is evaluated once and type-narrowing is preserved \u{2014} assign the expression to a variable first.");
+                            }
+                            const lloc0 = p.lexer.loc();
+                            const rhs0 = if (p.lexer.token == .t_string_literal)
+                                p.newExpr(try p.lexer.toEString(), lloc0)
+                            else
+                                p.newExpr(E.Number{ .value = p.lexer.number }, lloc0);
+                            try p.lexer.next();
+                            var acc = p.newExpr(E.Binary{
+                                .op = if (mem_negate) .bin_strict_ne else .bin_strict_eq,
+                                .left = try left.*.deepClone(p.allocator),
+                                .right = rhs0,
+                            }, lloc0);
+                            while (p.lexer.token == .t_bar) {
+                                try p.lexer.next();
+                                const lloc = p.lexer.loc();
+                                if (p.lexer.token != .t_string_literal and p.lexer.token != .t_numeric_literal) {
+                                    try p.log.addRangeError(p.source, p.lexer.range(), "Para: expected a string or number literal after `|` in an `is` membership test.");
+                                    break;
+                                }
+                                const rhs = if (p.lexer.token == .t_string_literal)
+                                    p.newExpr(try p.lexer.toEString(), lloc)
+                                else
+                                    p.newExpr(E.Number{ .value = p.lexer.number }, lloc);
+                                try p.lexer.next();
+                                const cmp = p.newExpr(E.Binary{
+                                    .op = if (mem_negate) .bin_strict_ne else .bin_strict_eq,
+                                    .left = try left.*.deepClone(p.allocator),
+                                    .right = rhs,
+                                }, lloc);
+                                acc = p.newExpr(E.Binary{
+                                    .op = if (mem_negate) .bin_logical_and else .bin_logical_or,
+                                    .left = acc,
+                                    .right = cmp,
+                                }, lloc);
+                            }
+                            left.* = acc;
+                            continue;
+                        }
                     }
                     p.lexer.restore(&saved);
                 }
