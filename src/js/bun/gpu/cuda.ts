@@ -164,6 +164,7 @@ function tryLoadCublas(): boolean {
     try {
       const lib = dlopen(name, {
         cublasCreate_v2: { args: [FFIType.ptr], returns: FFIType.i32 },
+        cublasSetStream_v2: { args: [FFIType.u64, FFIType.u64], returns: FFIType.i32 },
         cublasDestroy_v2: { args: [FFIType.u64], returns: FFIType.i32 },
         cublasSgemm_v2: {
           args: [
@@ -247,6 +248,17 @@ function tryLoadCuda(): boolean {
       cuMemFreeHost: { args: [FFIType.u64], returns: FFIType.i32 },
       cuMemcpyHtoD_v2: { args: [FFIType.u64, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
       cuMemcpyDtoH_v2: { args: [FFIType.ptr, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+      // Stream + non-blocking completion poll. Used by the *Async launch
+      // paths to yield the JS event loop during the GPU compute wait
+      // instead of busy-blocking it on cuCtxSynchronize.
+      cuStreamCreate: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+      cuStreamDestroy_v2: { args: [FFIType.u64], returns: FFIType.i32 },
+      cuStreamQuery: { args: [FFIType.u64], returns: FFIType.i32 },
+      // Stream-ordered async DMA. With pinned (page-locked) host staging
+      // these run the H2D / D2H transfer on the stream, so the JS thread
+      // yields through the PCIe copy too — not just the compute.
+      cuMemcpyHtoDAsync_v2: { args: [FFIType.u64, FFIType.ptr, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
+      cuMemcpyDtoHAsync_v2: { args: [FFIType.ptr, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 },
       cuModuleLoadData: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
       cuModuleLoadDataEx: {
         args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
@@ -1193,6 +1205,395 @@ function launchMatmulF32(
     if (bOwned && dB !== 0n) s.cuMemFree_v2(dB);
     if (dC !== 0n) s.cuMemFree_v2(dC);
   }
+}
+
+// ─── Non-blocking completion + async-launch infrastructure ────────────────
+//
+// cuStreamQuery returns CUDA_SUCCESS (0) once every operation enqueued on
+// `stream` has finished, or CUDA_ERROR_NOT_READY (600) while work is still
+// in flight. Polling it and yielding via setTimeout(0) between polls lets
+// timers / I/O / other microtasks run while the GPU works, instead of
+// parking the JS thread on cuCtxSynchronize.
+//
+// The *Async launchers stage owned host inputs through pooled pinned
+// (page-locked) buffers and run H2D / compute / D2H all on a private
+// stream, so the whole chain — not just the kernel — is yielded.
+//
+// Pooled device + pinned buffers are reused across calls (keyed by
+// tag+size) to avoid the ~50 ms cuMemAlloc and the slow pageable-copy
+// path on every dispatch. Because they're shared mutable scratch, the
+// *Async family is serialized through `gateAsync`: a second async GPU op
+// waits for the first to finish its stage→enqueue→readback before reusing
+// the buffers. The event loop still yields during each op's GPU wait;
+// only the GPU ops themselves are ordered (the device is one queue
+// anyway). Pools are isolated from the sync image-path pools so a
+// synchronous op landing in an await gap can't clobber in-flight scratch.
+const CUDA_ERROR_NOT_READY = 600;
+
+async function streamSyncYielding(stream: bigint): Promise<void> {
+  const s = cudaLib!.symbols;
+  for (;;) {
+    const q = s.cuStreamQuery(stream);
+    if (q === 0) return;
+    if (q !== CUDA_ERROR_NOT_READY) {
+      throw new Error(`parabun:gpu cuda: cuStreamQuery failed (${q})`);
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
+}
+
+// Serialize the async GPU family so pooled scratch is single-owner. A
+// failing op doesn't break the chain (then(run, run) + swallow).
+let _asyncChain: Promise<unknown> = Promise.resolve();
+function gateAsync<T>(run: () => Promise<T>): Promise<T> {
+  const p = _asyncChain.then(run, run);
+  _asyncChain = p.then(
+    () => {},
+    () => {},
+  );
+  return p;
+}
+
+// Keyed by tag ONLY (mm:A, mv:M, dot:P, … — a fixed 9-slot set), not by
+// size, so the pool is bounded to one buffer per slot instead of leaking
+// page-locked memory per distinct shape. A slot grows on demand: if a
+// call needs more than the cached capacity, the old buffer is freed and
+// a larger one allocated; smaller calls reuse it and view only the bytes
+// they need. Worst case = the largest shape ever seen per slot.
+type PoolSlot = { ptr: bigint; cap: bigint };
+const asyncDevPool = new Map<string, PoolSlot>();
+const asyncPinPool = new Map<string, PoolSlot>();
+
+function asyncDevBuf(tag: string, bytes: bigint): bigint {
+  const s = cudaLib!.symbols;
+  const slot = asyncDevPool.get(tag);
+  if (slot !== undefined && slot.cap >= bytes) return slot.ptr;
+  if (slot !== undefined) s.cuMemFree_v2(slot.ptr);
+  const buf = new BigUint64Array(1);
+  if (s.cuMemAlloc_v2(ffiPtr!(buf), bytes) !== 0) {
+    asyncDevPool.delete(tag);
+    throw new Error(`parabun:gpu cuda: cuMemAlloc(${tag}, ${bytes}) failed`);
+  }
+  asyncDevPool.set(tag, { ptr: buf[0], cap: bytes });
+  return buf[0];
+}
+
+function asyncPinBuf(tag: string, bytes: bigint): bigint {
+  const s = cudaLib!.symbols;
+  const slot = asyncPinPool.get(tag);
+  if (slot !== undefined && slot.cap >= bytes) return slot.ptr;
+  if (slot !== undefined) s.cuMemFreeHost(slot.ptr);
+  const buf = new BigUint64Array(1);
+  if (s.cuMemAllocHost_v2(ffiPtr!(buf), bytes) !== 0) {
+    asyncPinPool.delete(tag);
+    throw new Error(`parabun:gpu cuda: cuMemAllocHost(${tag}, ${bytes}) failed`);
+  }
+  asyncPinPool.set(tag, { ptr: buf[0], cap: bytes });
+  return buf[0];
+}
+
+function freeAsyncPools(): void {
+  const s = cudaLib?.symbols;
+  if (s) {
+    for (const slot of asyncDevPool.values()) s.cuMemFree_v2(slot.ptr);
+    for (const slot of asyncPinPool.values()) s.cuMemFreeHost(slot.ptr);
+  }
+  asyncDevPool.clear();
+  asyncPinPool.clear();
+}
+
+// ─── Kernel launch: matmulF32 (async) ─────────────────────────────────────
+//
+// Byte-for-byte the same buffer/dispatch logic as launchMatmulF32, but the
+// kernel is enqueued on a private stream and the completion wait is the
+// yielding poll above rather than cuCtxSynchronize. The synchronous
+// launchMatmulF32 is intentionally left untouched so the validated sync
+// path carries zero regression risk.
+
+function launchMatmulF32Async(
+  a: Float32Array | GpuHandle,
+  b: Float32Array | GpuHandle,
+  m: number,
+  k: number,
+  n: number,
+  out?: Float32Array,
+): Promise<Float32Array> {
+  return gateAsync(async () => {
+    const s = cudaLib!.symbols;
+    const ptr = ffiPtr!;
+    const tab = ffiToArrayBuffer!;
+    const aBytes = BigInt(m * k * 4);
+    const bBytes = BigInt(k * n * 4);
+    const cBytes = BigInt(m * n * 4);
+
+    const aResident = isGpuHandle(a);
+    if (aResident) {
+      if (a.released) throw new Error("parabun:gpu: matmul called on released handle");
+      if (a.buffer === 0n) throw new Error("parabun:gpu cuda: handle has no device buffer (f64?)");
+    }
+    const bResident = isGpuHandle(b);
+    if (bResident) {
+      if (b.released) throw new Error("parabun:gpu: matmul called on released handle");
+      if (b.buffer === 0n) throw new Error("parabun:gpu cuda: handle has no device buffer (f64?)");
+    }
+    const dA = aResident ? (a as GpuHandle).buffer : asyncDevBuf("mm:A", aBytes);
+    const dB = bResident ? (b as GpuHandle).buffer : asyncDevBuf("mm:B", bBytes);
+    const dC = asyncDevBuf("mm:C", cBytes);
+
+    let stream: bigint = 0n;
+    let usedCublas = false;
+    try {
+      const streamBuf = new BigUint64Array(1);
+      if (s.cuStreamCreate(ptr(streamBuf), 0) !== 0) throw new Error("parabun:gpu cuda: cuStreamCreate failed");
+      stream = streamBuf[0];
+
+      // Owned host inputs: copy into a pooled pinned buffer (RAM copy,
+      // fast vs PCIe) then DMA on `stream` so the H2D transfer is yielded
+      // too. Resident handle inputs are already on-device — skip both.
+      if (!aResident) {
+        const pinnedA = asyncPinBuf("mm:A", aBytes);
+        new Float32Array(tab(Number(pinnedA), 0, Number(aBytes))).set(a as Float32Array);
+        if (s.cuMemcpyHtoDAsync_v2(dA, Number(pinnedA), aBytes, stream) !== 0) {
+          throw new Error("parabun:gpu cuda: cuMemcpyHtoDAsync(A) failed");
+        }
+      }
+      if (!bResident) {
+        const pinnedB = asyncPinBuf("mm:B", bBytes);
+        new Float32Array(tab(Number(pinnedB), 0, Number(bBytes))).set(b as Float32Array);
+        if (s.cuMemcpyHtoDAsync_v2(dB, Number(pinnedB), bBytes, stream) !== 0) {
+          throw new Error("parabun:gpu cuda: cuMemcpyHtoDAsync(B) failed");
+        }
+      }
+
+      if (cublasLib !== null) {
+        // Same column-major transpose trick as the sync path; sgemm runs
+        // on `stream` (cublasSetStream) and the handle is restored to the
+        // default stream afterward so the untouched sync path is unchanged.
+        if (cublasLib.symbols.cublasSetStream_v2(cublasHandle, stream) !== 0) {
+          throw new Error("parabun:gpu cuda: cublasSetStream failed");
+        }
+        const alphaBuf = new Float32Array([1.0]);
+        const betaBuf = new Float32Array([0.0]);
+        const r = cublasLib.symbols.cublasSgemm_v2(
+          cublasHandle,
+          CUBLAS_OP_N,
+          CUBLAS_OP_N,
+          n,
+          m,
+          k,
+          ptr(alphaBuf),
+          dB,
+          n,
+          dA,
+          k,
+          ptr(betaBuf),
+          dC,
+          n,
+        );
+        if (r !== 0) {
+          cublasLib.symbols.cublasSetStream_v2(cublasHandle, 0n);
+          throw new Error(`parabun:gpu cublasSgemm failed (${r})`);
+        }
+        usedCublas = true;
+      } else {
+        const pABuf = new BigUint64Array([dA]);
+        const pBBuf = new BigUint64Array([dB]);
+        const pCBuf = new BigUint64Array([dC]);
+        const pM = new Uint32Array([m]);
+        const pK = new Uint32Array([k]);
+        const pN = new Uint32Array([n]);
+        const paramPtrs = new BigUint64Array([
+          BigInt(ptr(pABuf)),
+          BigInt(ptr(pBBuf)),
+          BigInt(ptr(pCBuf)),
+          BigInt(ptr(pM)),
+          BigInt(ptr(pK)),
+          BigInt(ptr(pN)),
+        ]);
+
+        const OUT_TILE = 32;
+        const gridX = Math.floor((n + OUT_TILE - 1) / OUT_TILE);
+        const gridY = Math.floor((m + OUT_TILE - 1) / OUT_TILE);
+        const r = s.cuLaunchKernel(fnMatmulF32!, gridX, gridY, 1, 8, 8, 1, 0, stream, ptr(paramPtrs), null);
+        if (r !== 0) throw new Error(`parabun:gpu cuda: cuLaunchKernel(matmul) failed (${r})`);
+      }
+
+      // D2H on the stream into pooled pinned memory; one yielding wait
+      // covers the whole H2D → compute → D2H chain.
+      const pinnedC = asyncPinBuf("mm:C", cBytes);
+      if (s.cuMemcpyDtoHAsync_v2(Number(pinnedC), dC, cBytes, stream) !== 0) {
+        if (usedCublas) cublasLib!.symbols.cublasSetStream_v2(cublasHandle, 0n);
+        throw new Error("parabun:gpu cuda: cuMemcpyDtoHAsync(C) failed");
+      }
+      try {
+        await streamSyncYielding(stream);
+      } finally {
+        if (usedCublas) cublasLib!.symbols.cublasSetStream_v2(cublasHandle, 0n);
+      }
+
+      const dst = out ?? new Float32Array(m * n);
+      dst.set(new Float32Array(tab(Number(pinnedC), 0, Number(cBytes))));
+      return dst;
+    } finally {
+      if (stream !== 0n) s.cuStreamDestroy_v2(stream);
+    }
+  });
+}
+
+// ─── Kernel launch: matVecF32 (async) ─────────────────────────────────────
+// Mirrors launchMatVecF32: M×K · K → M, one warp per row. Stream + pooled
+// pinned staging + yielding poll; sync launchMatVecF32 left untouched.
+
+function launchMatVecF32Async(
+  mat: Float32Array | GpuHandle,
+  vec: Float32Array,
+  m: number,
+  k: number,
+): Promise<Float32Array> {
+  return gateAsync(async () => {
+    const s = cudaLib!.symbols;
+    const ptr = ffiPtr!;
+    const tab = ffiToArrayBuffer!;
+    const matBytes = BigInt(m * k * 4);
+    const vecBytes = BigInt(k * 4);
+    const outBytes = BigInt(m * 4);
+
+    const matResident = isGpuHandle(mat);
+    if (matResident) {
+      if (mat.released) throw new Error("parabun:gpu: matVec called on released handle");
+      if (mat.buffer === 0n) throw new Error("parabun:gpu cuda: handle has no device buffer (f64?)");
+    }
+    const dMat = matResident ? (mat as GpuHandle).buffer : asyncDevBuf("mv:M", matBytes);
+    const dVec = asyncDevBuf("mv:V", vecBytes);
+    const dOut = asyncDevBuf("mv:O", outBytes);
+
+    let stream: bigint = 0n;
+    try {
+      const streamBuf = new BigUint64Array(1);
+      if (s.cuStreamCreate(ptr(streamBuf), 0) !== 0) throw new Error("parabun:gpu cuda: cuStreamCreate failed");
+      stream = streamBuf[0];
+
+      if (!matResident) {
+        const pinnedMat = asyncPinBuf("mv:M", matBytes);
+        new Float32Array(tab(Number(pinnedMat), 0, Number(matBytes))).set(mat as Float32Array);
+        if (s.cuMemcpyHtoDAsync_v2(dMat, Number(pinnedMat), matBytes, stream) !== 0) {
+          throw new Error("parabun:gpu cuda: cuMemcpyHtoDAsync(mat) failed");
+        }
+      }
+      const pinnedVec = asyncPinBuf("mv:V", vecBytes);
+      new Float32Array(tab(Number(pinnedVec), 0, Number(vecBytes))).set(vec);
+      if (s.cuMemcpyHtoDAsync_v2(dVec, Number(pinnedVec), vecBytes, stream) !== 0) {
+        throw new Error("parabun:gpu cuda: cuMemcpyHtoDAsync(vec) failed");
+      }
+
+      const pMatBuf = new BigUint64Array([dMat]);
+      const pVecBuf = new BigUint64Array([dVec]);
+      const pOutBuf = new BigUint64Array([dOut]);
+      const pM = new Uint32Array([m]);
+      const pK = new Uint32Array([k]);
+      const paramPtrs = new BigUint64Array([
+        BigInt(ptr(pMatBuf)),
+        BigInt(ptr(pVecBuf)),
+        BigInt(ptr(pOutBuf)),
+        BigInt(ptr(pM)),
+        BigInt(ptr(pK)),
+      ]);
+
+      const r = s.cuLaunchKernel(fnMatVecF32!, m, 1, 1, 32, 1, 1, 0, stream, ptr(paramPtrs), null);
+      if (r !== 0) throw new Error(`parabun:gpu cuda: cuLaunchKernel(matVec) failed (${r})`);
+
+      const pinnedOut = asyncPinBuf("mv:O", outBytes);
+      if (s.cuMemcpyDtoHAsync_v2(Number(pinnedOut), dOut, outBytes, stream) !== 0) {
+        throw new Error("parabun:gpu cuda: cuMemcpyDtoHAsync(out) failed");
+      }
+      await streamSyncYielding(stream);
+
+      const outArr = new Float32Array(m);
+      outArr.set(new Float32Array(tab(Number(pinnedOut), 0, Number(outBytes))));
+      return outArr;
+    } finally {
+      if (stream !== 0n) s.cuStreamDestroy_v2(stream);
+    }
+  });
+}
+
+// ─── Kernel launch: dotF32 (async) ────────────────────────────────────────
+// Mirrors launchDotF32: DOT_GRID-block tree reduction, host-side final sum.
+// Stream + pooled pinned staging + yielding poll; sync path untouched.
+
+function launchDotF32Async(a: Float32Array | GpuHandle, b: Float32Array | GpuHandle): Promise<number> {
+  return gateAsync(async () => {
+    const s = cudaLib!.symbols;
+    const ptr = ffiPtr!;
+    const tab = ffiToArrayBuffer!;
+    const aView = isGpuHandle(a) ? (a.view as Float32Array) : a;
+    const n = aView.length;
+    const abBytes = BigInt(n * 4);
+    const partialsBytes = BigInt(DOT_GRID * 4);
+
+    const aResident = isGpuHandle(a);
+    if (aResident) {
+      if (a.released) throw new Error("parabun:gpu: dot called on released handle");
+      if (a.buffer === 0n) throw new Error("parabun:gpu cuda: handle has no device buffer (f64?)");
+    }
+    const bResident = isGpuHandle(b);
+    if (bResident) {
+      if (b.released) throw new Error("parabun:gpu: dot called on released handle");
+      if (b.buffer === 0n) throw new Error("parabun:gpu cuda: handle has no device buffer (f64?)");
+    }
+    const dA = aResident ? (a as GpuHandle).buffer : asyncDevBuf("dot:A", abBytes);
+    const dB = bResident ? (b as GpuHandle).buffer : asyncDevBuf("dot:B", abBytes);
+    const dPart = asyncDevBuf("dot:P", partialsBytes);
+
+    let stream: bigint = 0n;
+    try {
+      const streamBuf = new BigUint64Array(1);
+      if (s.cuStreamCreate(ptr(streamBuf), 0) !== 0) throw new Error("parabun:gpu cuda: cuStreamCreate failed");
+      stream = streamBuf[0];
+
+      if (!aResident) {
+        const pinnedA = asyncPinBuf("dot:A", abBytes);
+        new Float32Array(tab(Number(pinnedA), 0, Number(abBytes))).set(a as Float32Array);
+        if (s.cuMemcpyHtoDAsync_v2(dA, Number(pinnedA), abBytes, stream) !== 0) {
+          throw new Error("parabun:gpu cuda: cuMemcpyHtoDAsync(A) failed");
+        }
+      }
+      if (!bResident) {
+        const pinnedB = asyncPinBuf("dot:B", abBytes);
+        new Float32Array(tab(Number(pinnedB), 0, Number(abBytes))).set(b as Float32Array);
+        if (s.cuMemcpyHtoDAsync_v2(dB, Number(pinnedB), abBytes, stream) !== 0) {
+          throw new Error("parabun:gpu cuda: cuMemcpyHtoDAsync(B) failed");
+        }
+      }
+
+      const pABuf = new BigUint64Array([dA]);
+      const pBBuf = new BigUint64Array([dB]);
+      const pPartBuf = new BigUint64Array([dPart]);
+      const pN = new Uint32Array([n]);
+      const paramPtrs = new BigUint64Array([
+        BigInt(ptr(pABuf)),
+        BigInt(ptr(pBBuf)),
+        BigInt(ptr(pPartBuf)),
+        BigInt(ptr(pN)),
+      ]);
+
+      const r = s.cuLaunchKernel(fnDotF32!, DOT_GRID, 1, 1, 32, 1, 1, 0, stream, ptr(paramPtrs), null);
+      if (r !== 0) throw new Error(`parabun:gpu cuda: cuLaunchKernel(dot) failed (${r})`);
+
+      const pinnedPart = asyncPinBuf("dot:P", partialsBytes);
+      if (s.cuMemcpyDtoHAsync_v2(Number(pinnedPart), dPart, partialsBytes, stream) !== 0) {
+        throw new Error("parabun:gpu cuda: cuMemcpyDtoHAsync(partials) failed");
+      }
+      await streamSyncYielding(stream);
+
+      const partials = new Float32Array(tab(Number(pinnedPart), 0, Number(partialsBytes)));
+      let sum = 0;
+      for (let i = 0; i < DOT_GRID; i++) sum += partials[i];
+      return sum;
+    } finally {
+      if (stream !== 0n) s.cuStreamDestroy_v2(stream);
+    }
+  });
 }
 
 // ─── Kernel launch: conv2D ────────────────────────────────────────────────
@@ -2553,6 +2954,38 @@ function dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number {
   return simd.dot(av, bv);
 }
 
+// Non-blocking dot. Same dispatch decision as `dot`; the GPU path yields
+// the event loop through H2D/compute/D2H. Non-accelerated cases defer to
+// the synchronous path.
+async function dotAsync(a: FArray | GpuHandle, b: FArray | GpuHandle): Promise<number> {
+  const aIsHandle = isGpuHandle(a);
+  const bIsHandle = isGpuHandle(b);
+  if (aIsHandle && a.released) throw new Error("parabun:gpu: dot called on released handle");
+  if (bIsHandle && b.released) throw new Error("parabun:gpu: dot called on released handle");
+  const av = aIsHandle ? a.view : (a as FArray);
+  const bv = bIsHandle ? b.view : (b as FArray);
+  const residentA = aIsHandle && a.type === "f32" && a.buffer !== 0n;
+  const residentB = bIsHandle && b.type === "f32" && b.buffer !== 0n;
+  const anyResident = residentA || residentB;
+  if (
+    av instanceof Float32Array &&
+    bv instanceof Float32Array &&
+    av.length === bv.length &&
+    probe() &&
+    (anyResident || av.length >= MIN_DOT_DISPATCH_ELEMS)
+  ) {
+    try {
+      return await launchDotF32Async(
+        aIsHandle ? (a as GpuHandle) : (av as Float32Array),
+        bIsHandle ? (b as GpuHandle) : (bv as Float32Array),
+      );
+    } catch {
+      return dot(a, b);
+    }
+  }
+  return simd.dot(av, bv);
+}
+
 function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray {
   const matIsHandle = isGpuHandle(matrix);
   if (matIsHandle && matrix.released) {
@@ -2570,6 +3003,31 @@ function matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols
     (residentF32 || nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS)
   ) {
     return launchMatVecF32(matIsHandle ? matrix : matView, vector, nRows, nCols);
+  }
+  return simd.matVec(matView as any, vector as any, nRows, nCols);
+}
+
+// Non-blocking matVec. Same dispatch decision as `matVec`; the GPU path
+// yields the event loop through H2D/compute/D2H. Non-accelerated cases
+// defer to the synchronous path (correct, just not yielding).
+async function matVecAsync(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): Promise<FArray> {
+  const matIsHandle = isGpuHandle(matrix);
+  if (matIsHandle && matrix.released) {
+    throw new Error("parabun:gpu: matVec called on released handle");
+  }
+  const matView = matIsHandle ? matrix.view : (matrix as FArray);
+  const residentF32 = matIsHandle && matrix.type === "f32" && matrix.buffer !== 0n;
+  if (
+    matView instanceof Float32Array &&
+    vector instanceof Float32Array &&
+    probe() &&
+    (residentF32 || nRows * nCols >= MIN_MATVEC_DISPATCH_ELEMS)
+  ) {
+    try {
+      return await launchMatVecF32Async(matIsHandle ? matrix : matView, vector as Float32Array, nRows, nCols);
+    } catch {
+      return matVec(matrix, vector, nRows, nCols);
+    }
   }
   return simd.matVec(matView as any, vector as any, nRows, nCols);
 }
@@ -2628,6 +3086,56 @@ function matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: numb
     }
   }
   return dst;
+}
+
+// Non-blocking matmul. Same dispatch decision as `matmul`, but the GPU
+// path enqueues on a stream and yields the JS event loop during the
+// compute wait. Non-accelerated cases (f64, too small, no GPU) defer to
+// the synchronous `matmul` — correct, just not event-loop-yielding.
+async function matmulAsync(
+  a: FArray | GpuHandle,
+  b: FArray | GpuHandle,
+  m: number,
+  k: number,
+  n: number,
+  out?: FArray,
+): Promise<FArray> {
+  const aIsHandle = isGpuHandle(a);
+  const bIsHandle = isGpuHandle(b);
+  if (aIsHandle && a.released) throw new Error("parabun:gpu: matmul called on released handle");
+  if (bIsHandle && b.released) throw new Error("parabun:gpu: matmul called on released handle");
+  const av = aIsHandle ? a.view : (a as FArray);
+  const bv = bIsHandle ? b.view : (b as FArray);
+  if (av.constructor !== bv.constructor) {
+    throw new TypeError(
+      `a and b must both be Float32Array or both be Float64Array; got ${av.constructor.name} and ${bv.constructor.name}`,
+    );
+  }
+  const residentA = aIsHandle && a.type === "f32" && a.buffer !== 0n;
+  const residentB = bIsHandle && b.type === "f32" && b.buffer !== 0n;
+  const anyResident = residentA || residentB;
+  if (
+    av instanceof Float32Array &&
+    bv instanceof Float32Array &&
+    probe() &&
+    (anyResident || m * n * k >= MIN_MATMUL_DISPATCH_FLOPS)
+  ) {
+    try {
+      return await launchMatmulF32Async(
+        aIsHandle ? (a as GpuHandle) : (av as Float32Array),
+        bIsHandle ? (b as GpuHandle) : (bv as Float32Array),
+        m,
+        k,
+        n,
+        out instanceof Float32Array ? out : undefined,
+      );
+    } catch {
+      // Pinned-memory exhaustion or any async-path failure degrades to the
+      // proven synchronous kernel — correct result, just no event-loop yield.
+      return matmul(a, b, m, k, n, out);
+    }
+  }
+  return matmul(a, b, m, k, n, out);
 }
 
 // Batched matmul. Computes `batchCount` independent [m,k]·[k,n] = [m,n]
@@ -3467,6 +3975,7 @@ function simdMap(fn: (x: number, i: number) => number, a: FArray | GpuHandle): F
 
 function dispose(): void {
   freeCachedDevBufs();
+  freeAsyncPools();
   if (cudaLib) {
     for (const entry of kernelCache.values()) {
       if (entry) cudaLib.symbols.cuModuleUnload(entry.mod);
@@ -5927,8 +6436,11 @@ export default {
   probe,
   winsForSize,
   dot,
+  dotAsync,
   matVec,
+  matVecAsync,
   matmul,
+  matmulAsync,
   matmulBatched,
   sdpaSelf,
   sdpaSingleQuery,
