@@ -246,8 +246,18 @@ interface Backend {
   probe(): boolean;
   winsForSize(op: OpKind, n: number, elemBytes: number): boolean;
   dot(a: FArray | GpuHandle, b: FArray | GpuHandle): number;
+  dotAsync?(a: FArray | GpuHandle, b: FArray | GpuHandle): Promise<number>;
   matVec(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): FArray;
+  matVecAsync?(matrix: FArray | GpuHandle, vector: FArray, nRows: number, nCols: number): Promise<FArray>;
   matmul(a: FArray | GpuHandle, b: FArray | GpuHandle, m: number, k: number, n: number, out?: FArray): FArray;
+  matmulAsync?(
+    a: FArray | GpuHandle,
+    b: FArray | GpuHandle,
+    m: number,
+    k: number,
+    n: number,
+    out?: FArray,
+  ): Promise<FArray>;
   /**
    * Batched matmul: `batchCount` independent [m,k]·[k,n] = [m,n] products
    * in one call. Strides are in elements (not bytes). On CUDA with cuBLAS
@@ -984,6 +994,74 @@ function matmul(
   return resolveActive().matmul(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n, out);
 }
 
+// Non-blocking matmul. Identical contract and result to `matmul`, but on a
+// backend that supports it (CUDA today) the GPU compute wait yields the JS
+// event loop instead of blocking it. Backends without an async path
+// (Metal, CPU) resolve with the synchronous result — same value, no yield.
+function matmulAsync(a: Float32Array, b: Float32Array, m: number, k: number, n: number, out?: Float32Array): Promise<Float32Array>; // prettier-ignore
+function matmulAsync(a: Float64Array, b: Float64Array, m: number, k: number, n: number, out?: Float64Array): Promise<Float64Array>; // prettier-ignore
+function matmulAsync(
+  a: GpuHandle | GpuFloat32Array,
+  b: GpuHandle | GpuFloat32Array,
+  m: number,
+  k: number,
+  n: number,
+  out?: Float32Array,
+): Promise<FArray>;
+function matmulAsync(
+  a: FArray | GpuHandle | GpuFloat32Array,
+  b: FArray | GpuHandle | GpuFloat32Array,
+  m: number,
+  k: number,
+  n: number,
+  out?: FArray,
+): Promise<FArray> {
+  if (!Number.isInteger(m) || m < 0) throw new RangeError("m must be a non-negative integer");
+  if (!Number.isInteger(k) || k < 0) throw new RangeError("k must be a non-negative integer");
+  if (!Number.isInteger(n) || n < 0) throw new RangeError("n must be a non-negative integer");
+  if (a.length !== m * k) throw new RangeError(`a length ${a.length} != m * k (${m} * ${k} = ${m * k})`);
+  if (b.length !== k * n) throw new RangeError(`b length ${b.length} != k * n (${k} * ${n} = ${k * n})`);
+  if (out !== undefined) {
+    if (!(out instanceof Float32Array) && !(out instanceof Float64Array)) {
+      throw new TypeError(
+        `out must be Float32Array or Float64Array; got ${(out as any)?.constructor?.name ?? typeof out}`,
+      );
+    }
+    if (out.length < m * n) {
+      throw new RangeError(`out length ${out.length} < m * n (${m} * ${n} = ${m * n})`);
+    }
+  }
+  const backend = resolveActive();
+  if (backend.matmulAsync) {
+    return backend.matmulAsync(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n, out);
+  }
+  return Promise.resolve(backend.matmul(unwrapGpuArg(a), unwrapGpuArg(b), m, k, n, out));
+}
+
+// Non-blocking matVec / dot. Same contract and result as the sync calls;
+// on a backend that supports it (CUDA today) the GPU wait yields the JS
+// event loop. Backends without an async path resolve with the sync value.
+function matVecAsync(
+  matrix: FArray | GpuHandle | GpuFloat32Array,
+  vector: FArray,
+  nRows: number,
+  nCols: number,
+): Promise<FArray> {
+  const backend = resolveActive();
+  if (backend.matVecAsync) {
+    return backend.matVecAsync(unwrapGpuArg(matrix), vector, nRows, nCols);
+  }
+  return Promise.resolve(backend.matVec(unwrapGpuArg(matrix), vector, nRows, nCols));
+}
+
+function dotAsync(a: FArray | GpuHandle | GpuFloat32Array, b: FArray | GpuHandle | GpuFloat32Array): Promise<number> {
+  const backend = resolveActive();
+  if (backend.dotAsync) {
+    return backend.dotAsync(unwrapGpuArg(a), unwrapGpuArg(b));
+  }
+  return Promise.resolve(backend.dot(unwrapGpuArg(a), unwrapGpuArg(b)));
+}
+
 function matmulBatched(
   a: FArray | GpuHandle | GpuFloat32Array,
   b: FArray | GpuHandle | GpuFloat32Array,
@@ -1653,8 +1731,11 @@ function _getPartialDevOps(): any {
 
 export default {
   dot,
+  dotAsync,
   matVec,
+  matVecAsync,
   matmul,
+  matmulAsync,
   matmulBatched,
   sdpaSelf,
   sdpaSingleQuery,

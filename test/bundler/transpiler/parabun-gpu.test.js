@@ -1250,3 +1250,205 @@ describe("parabun:gpu per-host calibration (CUDA simdMap crossover)", () => {
     expect(exitCode).toBe(0);
   });
 });
+
+describe("parabun:gpu matmulAsync (non-blocking)", () => {
+  it("exposes matmulAsync on the default surface", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmulasync-surface",
+      `
+        import gpu from "parabun:gpu";
+        console.log(typeof gpu.matmulAsync);
+      `,
+    );
+    expect(stdout).toBe("function");
+    expect(exitCode).toBe(0);
+  });
+
+  it("returns a Promise and the same result as matmul", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmulasync-correct",
+      `
+        import gpu from "parabun:gpu";
+        // 2x2 · 2x2 = [[19,22],[43,50]]
+        const a = new Float32Array([1, 2, 3, 4]);
+        const b = new Float32Array([5, 6, 7, 8]);
+        const p = gpu.matmulAsync(a, b, 2, 2, 2);
+        const isPromise = p instanceof Promise;
+        const c = await p;
+        console.log(JSON.stringify({ isPromise, c: Array.from(c) }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ isPromise: true, c: [19, 22, 43, 50] });
+    expect(exitCode).toBe(0);
+  });
+
+  it("yields the event loop during the GPU compute wait on cuda", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-matmulasync-yield",
+      `
+        import gpu from "parabun:gpu";
+        const isCuda = gpu.activeBackend() === "cuda";
+        // Skip the heavy path entirely off-cuda: a 2048^3 matmul on the JS
+        // CPU fallback in a debug build is far too slow to run 6×.
+        if (!isCuda) {
+          console.log(JSON.stringify({ isCuda: false, ok: true, ticks: 0 }));
+          process.exit(0);
+        }
+        const N = 2048;
+        const a = new Float32Array(N * N).fill(1);
+        const b = new Float32Array(N * N).fill(1);
+        let ticks = 0;
+        const timer = setInterval(() => { ticks++; }, 0);
+        // Several large GPU launches in series. The blocking sync path would
+        // park the loop for the entire run (zero timer ticks); the
+        // stream-poll async path yields at least once per launch's compute
+        // wait. Repeating makes "at least one NOT_READY poll" deterministic
+        // rather than racing a single fast kernel.
+        let ok = true;
+        for (let iter = 0; iter < 6; iter++) {
+          const c = await gpu.matmulAsync(a, b, N, N, N);
+          if (!(c.length === N * N && c[0] === N && c[N * N - 1] === N)) ok = false;
+        }
+        clearInterval(timer);
+        console.log(JSON.stringify({ isCuda, ok, ticks }));
+      `,
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(true);
+    // Only assertable when cuda is actually active (asan-off build on an
+    // NVIDIA host). On asan-on debug builds / GPU-less CI, activeBackend is
+    // "cpu" and this is skipped — the correctness checks above still run.
+    if (parsed.isCuda) {
+      expect(parsed.ticks).toBeGreaterThan(0);
+    }
+    expect(exitCode).toBe(0);
+  });
+});
+
+describe("parabun:gpu matVecAsync / dotAsync (non-blocking)", () => {
+  it("exposes matVecAsync and dotAsync on the default surface", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-mvdot-async-surface",
+      `
+        import gpu from "parabun:gpu";
+        console.log(JSON.stringify({
+          matVecAsync: typeof gpu.matVecAsync,
+          dotAsync: typeof gpu.dotAsync,
+        }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ matVecAsync: "function", dotAsync: "function" });
+    expect(exitCode).toBe(0);
+  });
+
+  it("matVecAsync and dotAsync return Promises with correct results", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-mvdot-async-correct",
+      `
+        import gpu from "parabun:gpu";
+        // [[1,2,3],[4,5,6]] · [1,1,1] = [6,15]
+        const mat = new Float32Array([1, 2, 3, 4, 5, 6]);
+        const vec = new Float32Array([1, 1, 1]);
+        const mvP = gpu.matVecAsync(mat, vec, 2, 3);
+        const mvIsPromise = mvP instanceof Promise;
+        const mv = Array.from(await mvP);
+        // dot([1,2,3,4],[5,6,7,8]) = 70
+        const dP = gpu.dotAsync(new Float32Array([1, 2, 3, 4]), new Float32Array([5, 6, 7, 8]));
+        const dIsPromise = dP instanceof Promise;
+        const d = await dP;
+        console.log(JSON.stringify({ mvIsPromise, mv, dIsPromise, d }));
+      `,
+    );
+    expect(JSON.parse(stdout)).toEqual({ mvIsPromise: true, mv: [6, 15], dIsPromise: true, d: 70 });
+    expect(exitCode).toBe(0);
+  });
+
+  it("yields the event loop for matVecAsync/dotAsync on cuda", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-mvdot-async-yield",
+      `
+        import gpu from "parabun:gpu";
+        const isCuda = gpu.activeBackend() === "cuda";
+        if (!isCuda) {
+          console.log(JSON.stringify({ isCuda: false, ok: true, ticks: 1 }));
+          process.exit(0);
+        }
+        const N = 4096;
+        const mat = new Float32Array(N * N).fill(1);
+        const vec = new Float32Array(N).fill(1);
+        const u = new Float32Array(N * 256).fill(1);
+        const v = new Float32Array(N * 256).fill(1);
+        let ticks = 0;
+        const timer = setInterval(() => { ticks++; }, 0);
+        let ok = true;
+        for (let i = 0; i < 4; i++) {
+          const y = await gpu.matVecAsync(mat, vec, N, N);
+          if (!(y.length === N && y[0] === N)) ok = false;
+          const d = await gpu.dotAsync(u, v);
+          if (d !== u.length) ok = false;
+        }
+        clearInterval(timer);
+        console.log(JSON.stringify({ isCuda, ok, ticks }));
+      `,
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(true);
+    if (parsed.isCuda) {
+      expect(parsed.ticks).toBeGreaterThan(0);
+    }
+    expect(exitCode).toBe(0);
+  });
+
+  it("serializes concurrent async GPU ops without clobbering pooled buffers", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-async-concurrent",
+      `
+        import gpu from "parabun:gpu";
+        // Same shape, different fill values, launched concurrently. Pooled
+        // pinned/device scratch is shared by shape — if the gate didn't
+        // serialize, these would clobber each other. Each result must equal
+        // its own input fill × K.
+        const N = 512, K = N;
+        const mk = (fill) => {
+          const a = new Float32Array(N * K).fill(fill);
+          const b = new Float32Array(K * N).fill(1);
+          return gpu.matmulAsync(a, b, N, K, N).then(c => c[0] === fill * K && c[N * N - 1] === fill * K);
+        };
+        const results = await Promise.all([mk(2), mk(3), mk(5), mk(7)]);
+        console.log(JSON.stringify({ allCorrect: results.every(Boolean), results }));
+      `,
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.allCorrect).toBe(true);
+    expect(exitCode).toBe(0);
+  });
+
+  it("stays correct across shape churn (bounded grow/reuse pool)", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "parabun-gpu-async-shape-churn",
+      `
+        import gpu from "parabun:gpu";
+        const isCuda = gpu.activeBackend() === "cuda";
+        if (!isCuda) {
+          console.log(JSON.stringify({ isCuda: false, allCorrect: true }));
+          process.exit(0);
+        }
+        // Grow (↑), reuse-smaller (↓ into a larger slot), then repeat —
+        // every shape must still produce ones·ones = N regardless of the
+        // pooled buffer being resized or reused under it.
+        const shapes = [256, 512, 384, 256, 640, 256];
+        let allCorrect = true;
+        for (const N of shapes) {
+          const a = new Float32Array(N * N).fill(1);
+          const b = new Float32Array(N * N).fill(1);
+          const c = await gpu.matmulAsync(a, b, N, N, N);
+          if (!(c.length === N * N && c[0] === N && c[N * N - 1] === N)) allCorrect = false;
+        }
+        console.log(JSON.stringify({ isCuda, allCorrect }));
+      `,
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.allCorrect).toBe(true);
+    expect(exitCode).toBe(0);
+  });
+});

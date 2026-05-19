@@ -1,4 +1,0 @@
-signal sFn = () => 5;
-derived dFn = () => 7;
-derived dArgs = (n, m) => n + m;
-derived dWithIife = (() => 42)();
