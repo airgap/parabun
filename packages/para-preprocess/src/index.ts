@@ -864,6 +864,372 @@ export function lowerPuiReactivity(
   return result;
 }
 
+// ─── inline-markup attribute values (LYK-NEW / Parascape #35) ──────────
+//
+// `attr={<Tag …>…</Tag>}` becomes `attr={(__para_attr_N.__para_snippet
+// = true, __para_attr_N)}` + `{#snippet __para_attr_N()}<Tag …>…
+// </Tag>{/snippet}`. Three trigger forms:
+//   1. bare markup:     `attr={<Tag/>}`
+//   2. param form:      `attr={(r: Row) => <Tag>{r.x}</Tag>}`
+//   3. JSX in JS expr:  `attr={[{ content: <Box/> }]}` (recursive)
+// Snippets generated inside an `{#each items as item}` block emit just
+// before the matching `{/each}` so their closure over `item` resolves.
+//
+// The `__para_snippet = true` tag is set inline in the use site (via
+// comma expression) so it lands BEFORE the consumer receives the value,
+// surviving minification of the compiled snippet's `$$anchor` identifier.
+//
+// Promoted from the parascape spike at /raid/Parascape/demos/
+// para-inline-snippets.ts. Single recursive char-by-char scanner with
+// string/template-literal/comment/JSX skipping — no AST dependency.
+
+type InlineScope = { lifted: string[] };
+type InlineState = {
+  counter: number;
+  moduleScope: InlineScope;
+  eachStack: InlineScope[];
+};
+const ATTR_BOUNDARY_PREV = /^([=:,([?]|=>)$/;
+const innermostInlineScope = (s: InlineState): InlineScope => s.eachStack[s.eachStack.length - 1] ?? s.moduleScope;
+const mintInlineName = (s: InlineState): string => `__para_attr_${++s.counter}`;
+
+function inlineSkipString(src: string, at: number, quote: string): number {
+  let i = at + 1;
+  const len = src.length;
+  while (i < len && src[i] !== quote) {
+    if (src[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+  return i + 1;
+}
+
+function inlineSkipTemplate(src: string, at: number): number {
+  let i = at + 1;
+  const len = src.length;
+  while (i < len) {
+    if (src[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (src[i] === "`") return i + 1;
+    if (src[i] === "$" && src[i + 1] === "{") {
+      i = inlineSkipBalancedBrace(src, i + 2);
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+function inlineSkipBalancedBrace(src: string, at: number): number {
+  let i = at;
+  let depth = 1;
+  const len = src.length;
+  while (i < len && depth > 0) {
+    const c = src[i];
+    if (c === "'" || c === '"') {
+      i = inlineSkipString(src, i, c);
+      continue;
+    }
+    if (c === "`") {
+      i = inlineSkipTemplate(src, i);
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      while (i < len && src[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < len && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+    i++;
+  }
+  return i;
+}
+
+function inlineMatchExprEnd(src: string, start: number): number {
+  const end = inlineSkipBalancedBrace(src, start);
+  return end > 0 && src[end - 1] === "}" ? end - 1 : -1;
+}
+
+function inlineMatchParenEnd(src: string, start: number): number {
+  let i = start;
+  let depth = 1;
+  const len = src.length;
+  while (i < len) {
+    const c = src[i];
+    if (c === "'" || c === '"') {
+      i = inlineSkipString(src, i, c);
+      continue;
+    }
+    if (c === "`") {
+      i = inlineSkipTemplate(src, i);
+      continue;
+    }
+    if (c === "(" || c === "{" || c === "[") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === ")" || c === "}" || c === "]") {
+      depth--;
+      if (depth === 0 && c === ")") return i;
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
+
+function inlineSkipJsxElement(src: string, at: number): number {
+  const len = src.length;
+  const nameMatch = /^<\s*([A-Za-z][\w.-]*)/.exec(src.slice(at));
+  if (!nameMatch) return at + 1;
+  const tagName = nameMatch[1];
+  let i = at + nameMatch[0].length;
+  let selfClosed = false;
+  while (i < len) {
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      i = inlineSkipString(src, i, c);
+      continue;
+    }
+    if (c === "{") {
+      i = inlineSkipBalancedBrace(src, i + 1);
+      continue;
+    }
+    if (c === "/" && src[i + 1] === ">") {
+      selfClosed = true;
+      i += 2;
+      break;
+    }
+    if (c === ">") {
+      i++;
+      break;
+    }
+    i++;
+  }
+  if (selfClosed) return i;
+  const closeTag = `</${tagName}`;
+  while (i < len) {
+    if (src.startsWith(closeTag, i)) {
+      const end = src.indexOf(">", i);
+      return end === -1 ? len : end + 1;
+    }
+    if (src[i] === "<" && /[A-Za-z]/.test(src[i + 1] ?? "")) {
+      i = inlineSkipJsxElement(src, i);
+      continue;
+    }
+    if (src[i] === "{") {
+      i = inlineSkipBalancedBrace(src, i + 1);
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+function inlineReadArrowPrefix(src: string, at: number): { paramsRaw: string; bodyStart: number } | null {
+  const len = src.length;
+  let i = at;
+  while (i < len && /\s/.test(src[i])) i++;
+  if (src[i] !== "(") return null;
+  const parenEnd = inlineMatchParenEnd(src, i + 1);
+  if (parenEnd === -1) return null;
+  const paramsRaw = src.slice(i + 1, parenEnd);
+  let j = parenEnd + 1;
+  while (j < len && /\s/.test(src[j])) j++;
+  if (src[j] !== "=" || src[j + 1] !== ">") return null;
+  j += 2;
+  while (j < len && /\s/.test(src[j])) j++;
+  return { paramsRaw, bodyStart: j };
+}
+
+function inlineStartsJsxAt(src: string, at: number): boolean {
+  let i = at;
+  while (i < src.length && /\s/.test(src[i])) i++;
+  return src[i] === "<" && /[A-Za-z]/.test(src[i + 1] ?? "");
+}
+
+function processInlineJsExpression(src: string, state: InlineState): string {
+  const out: string[] = [];
+  const len = src.length;
+  let i = 0;
+  let lastSignificant = "";
+  while (i < len) {
+    const c = src[i];
+    if (c === "'" || c === '"') {
+      const end = inlineSkipString(src, i, c);
+      out.push(src.slice(i, end));
+      i = end;
+      lastSignificant = src[end - 1] ?? "";
+      continue;
+    }
+    if (c === "`") {
+      const end = inlineSkipTemplate(src, i);
+      out.push(src.slice(i, end));
+      i = end;
+      lastSignificant = "`";
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "/") {
+      const nl = src.indexOf("\n", i);
+      const end = nl === -1 ? len : nl;
+      out.push(src.slice(i, end));
+      i = end;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end === -1 ? len : end + 2;
+      out.push(src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    const atBoundary =
+      lastSignificant === "" ||
+      ATTR_BOUNDARY_PREV.test(lastSignificant) ||
+      lastSignificant === "(" ||
+      lastSignificant === "[" ||
+      lastSignificant === "{" ||
+      lastSignificant === ">";
+    if (c === "(" && atBoundary) {
+      const arrow = inlineReadArrowPrefix(src, i);
+      if (arrow && inlineStartsJsxAt(src, arrow.bodyStart)) {
+        let jsxStart = arrow.bodyStart;
+        while (jsxStart < len && /\s/.test(src[jsxStart])) jsxStart++;
+        const jsxEnd = inlineSkipJsxElement(src, jsxStart);
+        const body = src.slice(jsxStart, jsxEnd);
+        const id = mintInlineName(state);
+        const processedBody = processInlineMarkup(body, state);
+        innermostInlineScope(state).lifted.push(`{#snippet ${id}(${arrow.paramsRaw})}${processedBody}{/snippet}`);
+        out.push(`(${id}.__para_snippet = true, ${id})`);
+        i = jsxEnd;
+        lastSignificant = "d";
+        continue;
+      }
+    }
+    if (c === "<" && /[A-Za-z]/.test(src[i + 1] ?? "") && atBoundary) {
+      const end = inlineSkipJsxElement(src, i);
+      const body = src.slice(i, end);
+      const id = mintInlineName(state);
+      const processedBody = processInlineMarkup(body, state);
+      innermostInlineScope(state).lifted.push(`{#snippet ${id}()}${processedBody}{/snippet}`);
+      out.push(`(${id}.__para_snippet = true, ${id})`);
+      i = end;
+      lastSignificant = "d";
+      continue;
+    }
+    out.push(c);
+    i++;
+    if (!/\s/.test(c)) lastSignificant = c;
+  }
+  return out.join("");
+}
+
+function processInlineMarkup(source: string, state: InlineState): string {
+  const out: string[] = [];
+  const len = source.length;
+  let i = 0;
+  while (i < len) {
+    if (source.startsWith("<script", i)) {
+      const close = source.indexOf("</script>", i);
+      const end = close === -1 ? len : close + "</script>".length;
+      out.push(source.slice(i, end));
+      i = end;
+      continue;
+    }
+    if (source.startsWith("<style", i)) {
+      const close = source.indexOf("</style>", i);
+      const end = close === -1 ? len : close + "</style>".length;
+      out.push(source.slice(i, end));
+      i = end;
+      continue;
+    }
+    if (source.startsWith("<!--", i)) {
+      const close = source.indexOf("-->", i + 4);
+      const end = close === -1 ? len : close + 3;
+      out.push(source.slice(i, end));
+      i = end;
+      continue;
+    }
+    if (source.startsWith("{#each", i)) {
+      const end = source.indexOf("}", i);
+      if (end === -1) {
+        out.push(source[i]);
+        i++;
+        continue;
+      }
+      out.push(source.slice(i, end + 1));
+      state.eachStack.push({ lifted: [] });
+      i = end + 1;
+      continue;
+    }
+    if (source.startsWith("{/each}", i)) {
+      const scope = state.eachStack.pop();
+      if (scope && scope.lifted.length > 0) {
+        out.push("\n");
+        out.push(scope.lifted.join("\n"));
+        out.push("\n");
+      }
+      out.push("{/each}");
+      i += "{/each}".length;
+      continue;
+    }
+    const c = source[i];
+    if (/[\s\n]/.test(c) || c === "(" || c === ",") {
+      const tail = source.slice(i);
+      const m = /^[\s\n]+([A-Za-z_$][\w$]*)\s*=\s*\{/.exec(tail);
+      if (m) {
+        const nameStart = i + m[0].indexOf(m[1]);
+        const braceOpen = i + m[0].length;
+        const braceClose = inlineMatchExprEnd(source, braceOpen);
+        if (braceClose !== -1) {
+          const body = source.slice(braceOpen, braceClose);
+          const rewritten = processInlineJsExpression(body, state);
+          out.push(source.slice(i, nameStart));
+          out.push(`${m[1]}={${rewritten}}`);
+          i = braceClose + 1;
+          continue;
+        }
+      }
+    }
+    out.push(c);
+    i++;
+  }
+  return out.join("");
+}
+
+/**
+ * Lower inline-markup attribute values to `{#snippet}` declarations.
+ * See the section header above for the full behavior set. Only operates
+ * on the markup half of a Svelte file (`<script>` and `<style>` blocks
+ * pass through verbatim).
+ *
+ * Exported so tests can probe it without the Svelte preprocessor
+ * machinery; the `parabunPreprocess()` PreprocessorGroup wires it into
+ * the `markup` handler for `.pui` files only.
+ */
+export function lowerInlineSnippets(source: string): string {
+  const state: InlineState = {
+    counter: 0,
+    moduleScope: { lifted: [] },
+    eachStack: [],
+  };
+  const out = processInlineMarkup(source, state);
+  if (state.moduleScope.lifted.length === 0 && out === source) return source;
+  return out + "\n\n" + state.moduleScope.lifted.join("\n");
+}
+
 export function parabunPreprocess(opts: ParabunPreprocessOptions = {}): PreprocessorGroup {
   const langs = new Set(opts.langs ?? DEFAULT_LANGS);
   const runtime: "@lyku/para-ui" | "svelte" = opts.runtime ?? "@lyku/para-ui";
@@ -885,6 +1251,16 @@ export function parabunPreprocess(opts: ParabunPreprocessOptions = {}): Preproce
 
   return {
     name: "parabun",
+    markup({ content, filename }): Processed | undefined {
+      // Inline-markup attribute-value sugar — `.pui` only. Lifts
+      // `attr={<Tag/>}` / `attr={(args) => <Tag>…</Tag>}` to generated
+      // {#snippet} declarations. See the lowerInlineSnippets section
+      // above for the full behavior set. No-op for `.svelte`.
+      if (!(filename?.endsWith(".pui") ?? false)) return;
+      const out = lowerInlineSnippets(content);
+      if (out === content) return;
+      return { code: out };
+    },
     script({ content, attributes, filename }): Processed | undefined {
       const lang = typeof attributes.lang === "string" ? attributes.lang : undefined;
       // `.pui` files are parabun-flavored by extension: every script
