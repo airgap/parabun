@@ -1,0 +1,22 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 29,
+			"column": 15,
+			"character": 407
+		},
+		"end": {
+			"line": 29,
+			"column": 52,
+			"character": 444
+		},
+		"position": [
+			407,
+			444
+		],
+		"frame": "27:       {#each entries as entry}\n28:           <li>\n29:               <button on:click={() => onDeleteEntry(entry)}>Delete</button>\n                                                               ^\n30:               {entry.id}\n31:               {#each entry.subitems as subitem}"
+	}
+]

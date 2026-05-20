@@ -1,0 +1,11 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>\n\texport let foo;\n</script>\n\n<input bind:value={foo.bar.baz}>\n"
+	],
+	"mappings": ";;;;;;iDAAA,CAAC;;;KACW,GAAG;;;;KAGd,KAAK;;yBAAL,KAAK;cAAL,KAAK,QAAa,GAAG,GAAC,GAAG,CAAC,GAAG,eAAX,GAAG,CAAH,GAAG,GAAC,GAAG,CAAC,GAAG;oBAA7B,KAAK;;AAFE,CAAC"
+}

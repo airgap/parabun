@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_missing_content",
+		"message": "`<h1>` element should contain text\nhttps://svelte.dev/e/a11y_missing_content",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 0,
+			"character": 307
+		},
+		"end": {
+			"line": 19,
+			"column": 52,
+			"character": 359
+		},
+		"position": [
+			307,
+			359
+		],
+		"frame": "17: </script>\n18: \n19: <h1 use:insert={display ? `Hello ${target}` : ''} />\n                                                        ^\n20: "
+	},
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<h1 ...></h1>` rather than `<h1 ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 0,
+			"character": 307
+		},
+		"end": {
+			"line": 19,
+			"column": 52,
+			"character": 359
+		},
+		"position": [
+			307,
+			359
+		],
+		"frame": "17: </script>\n18: \n19: <h1 use:insert={display ? `Hello ${target}` : ''} />\n                                                        ^\n20: "
+	}
+]

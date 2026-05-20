@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>\n\t// This block is here to offset style block\n</script>\n\n<style>span { --external-var: 1px; }\n\n\tdiv { --component-var: 2px; }\n</style>\n\n<div><span>Text</span></div>"
+	],
+	"mappings": ";;0CAAA,CAAC;;;AAEO",
+	"ignoreList": []
+}

@@ -1,0 +1,4 @@
+
+	.root.svelte-xyz p:where(.svelte-xyz) {
+		color: red;
+	}

@@ -1,0 +1,142 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 20,
+			"column": 6,
+			"character": 232
+		},
+		"end": {
+			"line": 20,
+			"column": 13,
+			"character": 239
+		},
+		"position": [
+			232,
+			239
+		],
+		"frame": "18: \n19:     /* implicit & */\n20:     .b, .unused {\n                   ^\n21:       color: green;\n22: "
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 27,
+			"column": 3,
+			"character": 295
+		},
+		"end": {
+			"line": 27,
+			"column": 10,
+			"character": 302
+		},
+		"position": [
+			295,
+			302
+		],
+		"frame": "25:       }\n26: \n27:       .unused {\n                 ^\n28:         color: red;\n29: "
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".c\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 30,
+			"column": 4,
+			"character": 326
+		},
+		"end": {
+			"line": 30,
+			"column": 6,
+			"character": 328
+		},
+		"position": [
+			326,
+			328
+		],
+		"frame": "28:         color: red;\n29: \n30:         .c {\n              ^\n31:           color: red;\n32:         }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 37,
+			"column": 3,
+			"character": 374
+		},
+		"end": {
+			"line": 37,
+			"column": 10,
+			"character": 381
+		},
+		"position": [
+			374,
+			381
+		],
+		"frame": "35: \n36:     .d {\n37:       .unused {\n                 ^\n38:         color: red;\n39:       }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"& &\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 47,
+			"column": 4,
+			"character": 468
+		},
+		"end": {
+			"line": 47,
+			"column": 7,
+			"character": 471
+		},
+		"position": [
+			468,
+			471
+		],
+		"frame": "45: \n46:       .c {\n47:         & & {\n               ^\n48:           color: red;\n49:         }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"&.b\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 70,
+			"column": 2,
+			"character": 665
+		},
+		"end": {
+			"line": 70,
+			"column": 5,
+			"character": 668
+		},
+		"position": [
+			665,
+			668
+		],
+		"frame": "68:     }\n69: \n70:     &.b {\n           ^\n71:       color: red;\n72:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css/input.svelte",
+		"start": {
+			"line": 74,
+			"column": 2,
+			"character": 693
+		},
+		"end": {
+			"line": 74,
+			"column": 9,
+			"character": 700
+		},
+		"position": [
+			693,
+			700
+		],
+		"frame": "72:     }\n73: \n74:     .unused {\n               ^\n75:       color: red;\n76:     }"
+	}
+]

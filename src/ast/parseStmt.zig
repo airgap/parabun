@@ -1484,7 +1484,7 @@ pub fn ParseStmt(
 
         // Parabun: parse an `arena { ...body... }` block statement. Desugars to
         //   __parabunArena(() => { ...body... });
-        // which delegates to @para/arena's `scope` — running the body with JSC
+        // which delegates to @lyku/para-arena's `scope` — running the body with JSC
         // GC deferred, then requesting an Eden collection on scope exit.
         // Latency-smoothing, not a bump allocator.
         //
@@ -1530,7 +1530,7 @@ pub fn ParseStmt(
                 .is_async = false,
             }, arrow_loc);
 
-            // Build `require("@para/arena").scope(arrow)` via the user-typed
+            // Build `require("@lyku/para-arena").scope(arrow)` via the user-typed
             // require identifier shape. During the visit pass the parser's
             // transposeRequire path rewrites the literal require call into
             // an E.RequireString with correct part-level import-record
@@ -1542,7 +1542,7 @@ pub fn ParseStmt(
             // resolves via findSymbol to whatever `require` is bound to.
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "@para/arena" }, arena_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-arena" }, arena_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, arena_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -1565,9 +1565,9 @@ pub fn ParseStmt(
         // Parabun: parse a `signal NAME = RHS` declaration. `signal` implies
         // `const` — there's no `signal let`/`const`/`var` form. Each RHS is
         // wrapped in
-        //   require("@para/signals").signal(RHS)
+        //   require("@lyku/para-signals").signal(RHS)
         // by default, or
-        //   require("@para/signals").derived(() => RHS)
+        //   require("@lyku/para-signals").derived(() => RHS)
         // when the RHS references another in-scope signal name (auto-derive).
         // The file-level pragma `// @parabun-strict-signals` disables
         // auto-derive, making every decl a plain `signal(RHS)`.
@@ -1697,7 +1697,7 @@ pub fn ParseStmt(
 
                             const require_ref = p.storeNameInRef("require") catch unreachable;
                             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, signal_range.loc);
+                            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, signal_range.loc);
                             const require_call = p.newExpr(E.Call{
                                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, signal_range.loc),
                                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -2085,7 +2085,7 @@ pub fn ParseStmt(
         }
 
         // Parabun: parse an `effect { ...body... }` block statement. Desugars to
-        //   require("@para/signals").effect(() => { ...body... });
+        //   require("@lyku/para-signals").effect(() => { ...body... });
         // The runtime wraps the arrow in an EffectImpl which runs once eagerly,
         // tracks any signal `.get()` reads as deps, and re-runs on invalidation.
         // Return a function from the body for cleanup (React-style); it fires
@@ -3196,7 +3196,71 @@ pub fn ParseStmt(
 
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, effect_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, effect_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, effect_range.loc);
+            const effect_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "effect",
+                .name_loc = effect_range.loc,
+            }, effect_range.loc);
+            const effect_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            effect_args[0] = arrow;
+            const effect_call = p.newExpr(E.Call{
+                .target = effect_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(effect_args),
+            }, effect_range.loc);
+
+            return p.s(S.SExpr{ .value = effect_call }, effect_range.loc);
+        }
+
+        // Single-statement effect: `effect EXPR;` desugars to an
+        // EXPRESSION-bodied arrow —
+        //   require("@lyku/para-signals").effect(() => EXPR);
+        // NOT a block body. This preserves the arrow's implicit return so
+        // an effect whose expression returns a teardown
+        // (`effect useKeybind(...)`, `effect onResize(...)`, …) still
+        // registers that teardown as the effect's cleanup — exactly like
+        // `$effect(() => EXPR)`. Mirrors the `derived NAME = RHS` →
+        // `derived(() => RHS)` expression-form precedent (S.Return +
+        // prefer_expr). The block form `effect { …; return cleanup; }`
+        // remains for multi-statement / explicit teardown. At entry:
+        // `effect` consumed, lexer on the first token of the expression.
+        fn parseEffectSingleStmt(p: *P, effect_range: logger.Range) anyerror!Stmt {
+            const arrow_loc = effect_range.loc;
+            const body_loc = p.lexer.loc();
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            const body_expr = try p.parseExpr(.comma);
+            try p.lexer.expectOrInsertSemicolon();
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            body_stmts[0] = p.s(S.Return{ .value = body_expr }, body_loc);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, arrow_loc);
+
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, effect_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -3220,10 +3284,10 @@ pub fn ParseStmt(
         // `when EXPR start { body }` / `when not EXPR start { body }`
         // statements. All four lower to the same shape — the trailing
         // `start` modifier controls the helper name on the runtime call:
-        //   when     EXPR       { body } → require("@para/signals").when(() => EXPR, () => { body });
-        //   when not EXPR       { body } → require("@para/signals").when(() => !(EXPR), () => { body });
-        //   when     EXPR start { body } → require("@para/signals").whenStart(() => EXPR, () => { body });
-        //   when not EXPR start { body } → require("@para/signals").whenStart(() => !(EXPR), () => { body });
+        //   when     EXPR       { body } → require("@lyku/para-signals").when(() => EXPR, () => { body });
+        //   when not EXPR       { body } → require("@lyku/para-signals").when(() => !(EXPR), () => { body });
+        //   when     EXPR start { body } → require("@lyku/para-signals").whenStart(() => EXPR, () => { body });
+        //   when not EXPR start { body } → require("@lyku/para-signals").whenStart(() => !(EXPR), () => { body });
         //
         // Both helpers fire the body on each rising (false→true) transition
         // of the predicate. The `start` modifier ALSO fires once on
@@ -3327,10 +3391,10 @@ pub fn ParseStmt(
                 .is_async = false,
             }, body_arrow_loc);
 
-            // require("@para/signals").<helper_name>(pred_arrow, body_arrow)
+            // require("@lyku/para-signals").<helper_name>(pred_arrow, body_arrow)
             const require_ref = p.storeNameInRef("require") catch unreachable;
             const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-            require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, when_range.loc);
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, when_range.loc);
             const require_call = p.newExpr(E.Call{
                 .target = p.newExpr(E.Identifier{ .ref = require_ref }, when_range.loc),
                 .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
@@ -3442,7 +3506,7 @@ pub fn ParseStmt(
 
                         const second_require_ref = p.storeNameInRef("require") catch unreachable;
                         const second_require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
-                        second_require_args[0] = p.newExpr(E.String{ .data = "@para/signals" }, second_when_loc);
+                        second_require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, second_when_loc);
                         const second_require_call = p.newExpr(E.Call{
                             .target = p.newExpr(E.Identifier{ .ref = second_require_ref }, second_when_loc),
                             .args = js_ast.ExprNodeList.fromOwnedSlice(second_require_args),
@@ -3629,7 +3693,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "signal NAME = RHS" declaration — each RHS is wrapped
-            // in `require("@para/signals").signal(RHS)` and the declared ref is
+            // in `require("@lyku/para-signals").signal(RHS)` and the declared ref is
             // marked as signal-bound so the visit pass rewrites reads/assigns
             // accordingly. `signal` implies `const` — there's no `signal let`
             // or `signal var`.
@@ -3645,20 +3709,20 @@ pub fn ParseStmt(
                     return try parseSignalStmt(p, signal_range, opts, false);
                 }
                 // Not a signal declaration — rewind so `signal` works as a
-                // plain identifier (`import { signal } from "@para/signals"; signal(0);`).
+                // plain identifier (`import { signal } from "@lyku/para-signals"; signal(0);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "derived NAME = RHS" declaration — the explicit form
             // of what `signal NAME = EXPR` does automatically when EXPR reads
             // other signals. The RHS is ALWAYS wrapped as
-            //   require("@para/signals").derived(() => RHS)
+            //   require("@lyku/para-signals").derived(() => RHS)
             // ignoring the @parabun-strict-signals pragma. The declared ref
             // is signal-bound so reads of NAME elsewhere lower to NAME.get().
             //
             // Only triggers when `derived` is immediately followed (no
             // newline) by an identifier. Any other continuation leaves
             // `derived` as a plain identifier (`import { derived } from
-            // "@para/signals"; derived(() => …);`).
+            // "@lyku/para-signals"; derived(() => …);`).
             if (is_identifier and strings.eqlComptime(p.lexer.raw(), "derived")) {
                 const derived_range = p.lexer.range();
                 const saved = p.lexer;
@@ -3669,7 +3733,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising
-            // and falling edge handlers. Both desugar to require("@para/signals")
+            // and falling edge handlers. Both desugar to require("@lyku/para-signals")
             // .when(() => EXPR, () => { body }); the `not` form negates the
             // predicate inside the arrow.
             //
@@ -3710,7 +3774,7 @@ pub fn ParseStmt(
                 p.lexer.restore(&saved);
             }
             // Parabun: "effect { ...body... }" block statement — desugars to
-            //   require("@para/signals").effect(() => { ...body... });
+            //   require("@lyku/para-signals").effect(() => { ...body... });
             // Only triggers when `effect` is immediately followed (no newline)
             // by `{`. Any other token means `effect` is a plain identifier
             // (including `effect(fn)` — that's a regular call expression).
@@ -3721,8 +3785,18 @@ pub fn ParseStmt(
                 if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
                     return try parseEffectStmt(p, effect_range);
                 }
-                // Not an effect block — rewind so `effect` works as a plain
-                // identifier (`import { effect } from "@para/signals"; effect(fn);`).
+                // Single-statement form: `effect STMT;` ≡ `effect { STMT; }`.
+                // Triggers only when `effect` is followed (same line) by an
+                // identifier — i.e. the start of a statement that can't be
+                // `effect` used as an identifier-expression. `effect(` `effect.`
+                // `effect[` `effect=` `effect;` `effect:` all keep `effect` as a
+                // plain identifier (next token is not .t_identifier), so
+                // `effect(fn)` / `effect.x` / labels are unaffected.
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseEffectSingleStmt(p, effect_range);
+                }
+                // Not an effect block/statement — rewind so `effect` works as a
+                // plain identifier (`import { effect } from "@lyku/para-signals"; effect(fn);`).
                 p.lexer.restore(&saved);
             }
             // Parabun: "pure function" or "pure async function" statements

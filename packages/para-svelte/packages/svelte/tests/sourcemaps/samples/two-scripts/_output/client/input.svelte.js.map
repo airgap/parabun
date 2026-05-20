@@ -1,0 +1,11 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script module>\n\texport let first;\n</script>\n\n<script>\n\tfunction assertThisLine() {}\n</script>\n\n{foo.bar.baz}\n"
+	],
+	"mappings": ";;;;WACY,KAAK;;wCAGjB,CAAC;UACS,cAAc,GAAG,CAAC,AAAA,CAAC;;;;;;kBAG5B,GAAG,CAAC,GAAG,CAAC,GAAG;;AAFJ,CAAC"
+}

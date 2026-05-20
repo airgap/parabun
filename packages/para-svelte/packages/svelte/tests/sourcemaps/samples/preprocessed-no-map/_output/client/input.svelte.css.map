@@ -1,0 +1,13 @@
+{
+	"version": 3,
+	"file": "input.svelte.css",
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>\n\texport let name;\n\n\tconsole.log(name);\n</script>\n\n<main>\n\t<div>{name}</div>\n</main>\n\n<style>\n\tmain { font-weight: bold; }\n </style>\n"
+	],
+	"names": [],
+	"mappings": "",
+	"ignoreList": []
+}

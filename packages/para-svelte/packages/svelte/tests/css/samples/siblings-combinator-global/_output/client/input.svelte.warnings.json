@@ -1,0 +1,42 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":global(input) + span\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-global/input.svelte",
+		"start": {
+			"line": 9,
+			"column": 2,
+			"character": 239
+		},
+		"end": {
+			"line": 9,
+			"column": 23,
+			"character": 260
+		},
+		"position": [
+			239,
+			260
+		],
+		"frame": " 7:   :global(input) ~ p { color: red; }\n 8: \n 9:   :global(input) + span { color: red; }\n                           ^\n10:   :global(input) ~ span { color: red; }\n11: </style>"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":global(input) ~ span\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-global/input.svelte",
+		"start": {
+			"line": 10,
+			"column": 2,
+			"character": 279
+		},
+		"end": {
+			"line": 10,
+			"column": 23,
+			"character": 300
+		},
+		"position": [
+			279,
+			300
+		],
+		"frame": " 8: \n 9:   :global(input) + span { color: red; }\n10:   :global(input) ~ span { color: red; }\n                           ^\n11: </style>\n12: "
+	}
+]

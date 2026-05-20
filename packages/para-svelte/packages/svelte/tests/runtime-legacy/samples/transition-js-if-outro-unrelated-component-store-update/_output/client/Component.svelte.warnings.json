@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 15,
+			"column": 0,
+			"character": 180
+		},
+		"end": {
+			"line": 15,
+			"column": 49,
+			"character": 229
+		},
+		"position": [
+			180,
+			229
+		],
+		"frame": "13: </script>\n14: \n15: <button on:click={() => (bool = !bool)}></button>\n                                                     ^\n16: {#if bool}\n17:   <div out:foo></div>"
+	}
+]

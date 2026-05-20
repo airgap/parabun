@@ -1,0 +1,22 @@
+[
+	{
+		"code": "non_reactive_update",
+		"message": "`div` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates\nhttps://svelte.dev/e/non_reactive_update",
+		"filename": "main.svelte",
+		"start": {
+			"line": 7,
+			"column": 5,
+			"character": 102
+		},
+		"end": {
+			"line": 7,
+			"column": 8,
+			"character": 105
+		},
+		"position": [
+			102,
+			105
+		],
+		"frame": " 5:   let current = $state();\n 6: \n 7:   let div; // explicitly no $state\n             ^\n 8: </script>\n 9: "
+	}
+]

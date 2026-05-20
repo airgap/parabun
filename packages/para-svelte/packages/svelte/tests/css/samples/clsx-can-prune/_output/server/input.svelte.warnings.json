@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/clsx-can-prune/input.svelte",
+		"start": {
+			"line": 24,
+			"column": 1,
+			"character": 548
+		},
+		"end": {
+			"line": 24,
+			"column": 8,
+			"character": 555
+		},
+		"position": [
+			548,
+			555
+		],
+		"frame": "22:   .used9 { color: green; }\n23: \n24:   .unused { color: red; }\n             ^\n25: </style>\n26: "
+	}
+]

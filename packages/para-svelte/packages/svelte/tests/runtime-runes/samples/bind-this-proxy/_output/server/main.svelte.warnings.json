@@ -1,0 +1,22 @@
+[
+	{
+		"code": "svelte_component_deprecated",
+		"message": "`<svelte:component>` is deprecated in runes mode — components are dynamic by default\nhttps://svelte.dev/e/svelte_component_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 20,
+			"column": 0,
+			"character": 267
+		},
+		"end": {
+			"line": 22,
+			"column": 19,
+			"character": 343
+		},
+		"position": [
+			267,
+			343
+		],
+		"frame": "18: }}>Toggle</button>\n19: \n20: <svelte:component bind:this={elem} this={type}>\n                       ^\n21:   Content\n22: </svelte:component>"
+	}
+]

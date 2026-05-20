@@ -1,0 +1,14 @@
+{
+	"version": 3,
+	"names": [
+		"replace_me_script"
+	],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<style>\n\t\n               \n                 .done_replace_style_2 {\n\t\tcolor: red;\n\t}\n\n\n</style>\n<script>\n\tlet\n\t\t\n           \n             done_replace_script_2 = 'hello'\n\t;\n\n\n</script>\n<h1 class=\"done_replace_style_2\">{Math.random() < 1 && done_replace_script_2}</h1>\n"
+	],
+	"mappings": ";;0CAKA,CAAC;KAECA,qBAAiB,GAAG,OAAM;;6EAGM,IAAI,CAAC,MAAM,KAAK,CAAC,IAAI,qBAAqB;AADpE",
+	"ignoreList": []
+}

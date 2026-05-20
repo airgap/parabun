@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `value`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 29,
+			"column": 1,
+			"character": 562
+		},
+		"end": {
+			"line": 29,
+			"column": 6,
+			"character": 567
+		},
+		"position": [
+			562,
+			567
+		],
+		"frame": "27:   const value2 = $derived(get_async(1));\n28:   // both values are read before the set \n29:   value;\n           ^\n30:   value2;\n31: </script>"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `value2`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 30,
+			"column": 1,
+			"character": 570
+		},
+		"end": {
+			"line": 30,
+			"column": 7,
+			"character": 576
+		},
+		"position": [
+			570,
+			576
+		],
+		"frame": "28:   // both values are read before the set \n29:   value;\n30:   value2;\n            ^\n31: </script>\n32: "
+	}
+]

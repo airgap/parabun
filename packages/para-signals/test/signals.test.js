@@ -317,3 +317,139 @@ describe("debounced", () => {
     expect(d.value.peek()).not.toBe(99);
   });
 });
+
+import { proxySignal } from "../src/index.js";
+
+describe("proxySignal: deep-reactive object/array state", () => {
+  test("primitive / non-plain values pass through unchanged", () => {
+    expect(proxySignal(5)).toBe(5);
+    expect(proxySignal("hi")).toBe("hi");
+    expect(proxySignal(null)).toBe(null);
+    const d = new Date();
+    expect(proxySignal(d)).toBe(d);
+  });
+
+  test("top-level property: read tracks, write notifies", () => {
+    const state = proxySignal({ count: 0 });
+    let seen = -1;
+    const stop = effect(() => {
+      seen = state.count;
+    });
+    expect(seen).toBe(0);
+    state.count = 5;
+    expect(seen).toBe(5);
+    state.count = 7;
+    expect(seen).toBe(7);
+    stop();
+  });
+
+  test("nested object: deep mutation fires", () => {
+    const state = proxySignal({ user: { name: "a", age: 1 } });
+    let name = "";
+    const stop = effect(() => {
+      name = state.user.name;
+    });
+    expect(name).toBe("a");
+    state.user.name = "b";
+    expect(name).toBe("b");
+    stop();
+  });
+
+  test("nested object: replace whole subtree", () => {
+    const state = proxySignal({ user: { name: "a" } });
+    let name = "";
+    const stop = effect(() => {
+      name = state.user.name;
+    });
+    expect(name).toBe("a");
+    state.user = { name: "z" };
+    expect(name).toBe("z");
+    stop();
+  });
+
+  test("array: indexed read + write", () => {
+    const state = proxySignal(["a", "b", "c"]);
+    let v = "";
+    const stop = effect(() => {
+      v = state[0];
+    });
+    expect(v).toBe("a");
+    state[0] = "z";
+    expect(v).toBe("z");
+    stop();
+  });
+
+  test("array: length tracks push", () => {
+    const state = proxySignal([1, 2]);
+    let len = 0;
+    const stop = effect(() => {
+      len = state.length;
+    });
+    expect(len).toBe(2);
+    state.push(3);
+    expect(len).toBe(3);
+    state.push(4, 5);
+    expect(len).toBe(5);
+    stop();
+  });
+
+  test("array: iteration via for...of", () => {
+    const state = proxySignal([1, 2, 3]);
+    let sum = 0;
+    const stop = effect(() => {
+      sum = 0;
+      for (const x of state) sum += x;
+    });
+    expect(sum).toBe(6);
+    state.push(4);
+    expect(sum).toBe(10);
+    stop();
+  });
+
+  test("new key: `in` and Object.keys re-fire on add", () => {
+    const state = proxySignal({ a: 1 });
+    let hasB = false;
+    let keys = [];
+    const stop1 = effect(() => {
+      hasB = "b" in state;
+    });
+    const stop2 = effect(() => {
+      keys = Object.keys(state);
+    });
+    expect(hasB).toBe(false);
+    expect(keys).toEqual(["a"]);
+    state.b = 2;
+    expect(hasB).toBe(true);
+    expect(keys).toEqual(["a", "b"]);
+    stop1();
+    stop2();
+  });
+
+  test("delete property: clears + notifies", () => {
+    const state = proxySignal({ a: 1, b: 2 });
+    let v = -1;
+    const stop = effect(() => {
+      v = state.a ?? -1;
+    });
+    expect(v).toBe(1);
+    delete state.a;
+    expect(v).toBe(-1);
+    stop();
+  });
+
+  test("re-proxy is a no-op (no double-proxying)", () => {
+    const a = proxySignal({ x: 1 });
+    const b = proxySignal(a);
+    expect(b).toBe(a);
+  });
+
+  test("derived over proxy field tracks correctly", () => {
+    const state = proxySignal({ a: 2, b: 3 });
+    const d = derived(() => state.a * state.b);
+    expect(d.get()).toBe(6);
+    state.a = 5;
+    expect(d.get()).toBe(15);
+    state.b = 7;
+    expect(d.get()).toBe(35);
+  });
+});

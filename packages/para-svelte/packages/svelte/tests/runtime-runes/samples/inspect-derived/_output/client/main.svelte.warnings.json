@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `push`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 8,
+			"column": 18,
+			"character": 156
+		},
+		"end": {
+			"line": 8,
+			"column": 22,
+			"character": 160
+		},
+		"position": [
+			156,
+			160
+		],
+		"frame": " 6:   let y = $derived(x.toUpperCase());\n 7: \n 8:   $inspect(y).with(push);\n                           ^\n 9: </script>\n10: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 11,
+			"column": 8,
+			"character": 182
+		},
+		"end": {
+			"line": 11,
+			"column": 33,
+			"character": 207
+		},
+		"position": [
+			182,
+			207
+		],
+		"frame": " 9: </script>\n10: \n11: <button on:click={() => x += 'x'}>{x}</button>\n                                     ^\n12: "
+	}
+]

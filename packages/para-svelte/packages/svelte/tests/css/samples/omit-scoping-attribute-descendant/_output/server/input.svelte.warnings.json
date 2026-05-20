@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"div > p\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/omit-scoping-attribute-descendant/input.svelte",
+		"start": {
+			"line": 8,
+			"column": 1,
+			"character": 74
+		},
+		"end": {
+			"line": 8,
+			"column": 8,
+			"character": 81
+		},
+		"position": [
+			74,
+			81
+		],
+		"frame": " 6: \n 7: <style>\n 8:   div > p {\n             ^\n 9:     color: red;\n10:   }"
+	}
+]

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'value'. If it is for external reference only, please consider using `export const value`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "Two.svelte",
+		"start": {
+			"line": 3,
+			"column": 12,
+			"character": 39
+		},
+		"end": {
+			"line": 3,
+			"column": 17,
+			"character": 44
+		},
+		"position": [
+			39,
+			44
+		],
+		"frame": "1: <script>\n2:   export let i, j;\n3:   export let value = { i, j };\n                     ^\n4: </script>"
+	}
+]

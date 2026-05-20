@@ -1,0 +1,62 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 15,
+			"column": 8,
+			"character": 350
+		},
+		"end": {
+			"line": 15,
+			"column": 47,
+			"character": 389
+		},
+		"position": [
+			350,
+			389
+		],
+		"frame": "13: </script>\n14: \n15: <button on:click={saySomething('Tama').handler}>Tama</button>\n                                                   ^\n16: <button on:click={saySomething('Pochi').handler}>Pochi</button>\n17: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 16,
+			"column": 8,
+			"character": 412
+		},
+		"end": {
+			"line": 16,
+			"column": 48,
+			"character": 452
+		},
+		"position": [
+			412,
+			452
+		],
+		"frame": "14: \n15: <button on:click={saySomething('Tama').handler}>Tama</button>\n16: <button on:click={saySomething('Pochi').handler}>Pochi</button>\n                                                    ^\n17: \n18: <br>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 8,
+			"character": 482
+		},
+		"end": {
+			"line": 19,
+			"column": 25,
+			"character": 499
+		},
+		"position": [
+			482,
+			499
+		],
+		"frame": "17: \n18: <br>\n19: <button on:click={change}>Change Function</button>\n                             ^\n20: "
+	}
+]

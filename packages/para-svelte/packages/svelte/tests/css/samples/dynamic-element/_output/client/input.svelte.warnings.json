@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/dynamic-element/input.svelte",
+		"start": {
+			"line": 7,
+			"column": 1,
+			"character": 81
+		},
+		"end": {
+			"line": 7,
+			"column": 8,
+			"character": 88
+		},
+		"position": [
+			81,
+			88
+		],
+		"frame": " 5:     color: red;\n 6:   }\n 7:   .unused {\n             ^\n 8:     font-style: italic;\n 9:   }"
+	}
+]

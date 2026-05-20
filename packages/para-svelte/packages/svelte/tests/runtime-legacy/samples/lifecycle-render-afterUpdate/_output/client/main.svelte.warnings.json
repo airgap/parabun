@@ -1,0 +1,22 @@
+[
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<canvas ...></canvas>` rather than `<canvas ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 21,
+			"column": 0,
+			"character": 339
+		},
+		"end": {
+			"line": 21,
+			"column": 56,
+			"character": 395
+		},
+		"position": [
+			339,
+			395
+		],
+		"frame": "19: </script>\n20: \n21: <canvas bind:this={canvas} on:click={() => hue += 10} />\n                                                            ^\n22: <div class=\"info\">\n23:   <p>click the canvas</p>"
+	}
+]

@@ -1,0 +1,14 @@
+{
+	"version": 3,
+	"file": "input.svelte",
+	"sources": [
+		"input.svelte",
+		"input.css"
+	],
+	"sourcesContent": [
+		"<h1>sourcemap-basename-without-outputname</h1>\n<style src=\"input.css\">h1 {color: red;}\n/* Filename from preprocess: src/some/deep/path/input.svelte */ h1 {color: blue;}</style>\n"
+	],
+	"names": [],
+	"mappings": "AACuB,gBAAE,CAAC,CAAC,UAAU;ACDrC,gEAAgE,gBAAE,CAAC,CAAC,WAAW",
+	"ignoreList": []
+}

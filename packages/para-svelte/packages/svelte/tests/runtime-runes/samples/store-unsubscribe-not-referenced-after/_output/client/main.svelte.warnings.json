@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 21,
+			"column": 9,
+			"character": 347
+		},
+		"end": {
+			"line": 21,
+			"column": 41,
+			"character": 379
+		},
+		"position": [
+			347,
+			379
+		],
+		"frame": "19: {#if watcherA}\n20:   {$watcherA}\n21:   <button on:click={() => watcherA = null}>remove watcher</button>\n                                              ^\n22: {:else}\n23:   <button on:click={() => watcherA = watch(\"a\")}>add watcher</button>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 23,
+			"column": 9,
+			"character": 421
+		},
+		"end": {
+			"line": 23,
+			"column": 47,
+			"character": 459
+		},
+		"position": [
+			421,
+			459
+		],
+		"frame": "21:   <button on:click={() => watcherA = null}>remove watcher</button>\n22: {:else}\n23:   <button on:click={() => watcherA = watch(\"a\")}>add watcher</button>\n                                                    ^\n24: {/if}\n25: "
+	}
+]

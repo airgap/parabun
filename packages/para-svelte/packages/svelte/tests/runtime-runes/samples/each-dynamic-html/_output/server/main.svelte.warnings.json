@@ -1,0 +1,62 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 24,
+			"column": 8,
+			"character": 382
+		},
+		"end": {
+			"line": 24,
+			"column": 27,
+			"character": 401
+		},
+		"position": [
+			382,
+			401
+		],
+		"frame": "22: </script>\n23: \n24: <button on:click={add_item}>add item</button>\n                               ^\n25: <button on:click={make_span}>make span</button>\n26: <button on:click={reverse}>reverse</button>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 25,
+			"column": 8,
+			"character": 428
+		},
+		"end": {
+			"line": 25,
+			"column": 28,
+			"character": 448
+		},
+		"position": [
+			428,
+			448
+		],
+		"frame": "23: \n24: <button on:click={add_item}>add item</button>\n25: <button on:click={make_span}>make span</button>\n                                ^\n26: <button on:click={reverse}>reverse</button>\n27: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 26,
+			"column": 8,
+			"character": 476
+		},
+		"end": {
+			"line": 26,
+			"column": 26,
+			"character": 494
+		},
+		"position": [
+			476,
+			494
+		],
+		"frame": "24: <button on:click={add_item}>add item</button>\n25: <button on:click={make_span}>make span</button>\n26: <button on:click={reverse}>reverse</button>\n                              ^\n27: \n28: {#each items as item (item.id)}"
+	}
+]

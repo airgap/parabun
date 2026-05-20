@@ -1,0 +1,20 @@
+import * as $ from 'svelte/internal/server';
+
+export default function Main($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		let foo = $$props['foo'];
+		let items = $$props['items'];
+
+		$$renderer.select({ value: foo, multiple: true }, ($$renderer) => {
+			$$renderer.option({ value: items[0] }, ($$renderer) => {
+				$$renderer.push(`a`);
+			});
+
+			$$renderer.option({ value: items[1] }, ($$renderer) => {
+				$$renderer.push(`b`);
+			});
+		});
+
+		$.bind_props($$props, { foo, items });
+	});
+}

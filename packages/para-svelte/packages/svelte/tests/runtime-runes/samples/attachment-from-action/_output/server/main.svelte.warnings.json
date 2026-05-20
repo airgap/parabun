@@ -1,0 +1,62 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 33,
+			"column": 1,
+			"character": 590
+		},
+		"end": {
+			"line": 33,
+			"column": 54,
+			"character": 643
+		},
+		"position": [
+			590,
+			643
+		],
+		"frame": "31: \n32: {#if count < 2}\n33:   <button data-kind=\"action\" use:test={count}></button>\n                                                           ^\n34:   <button data-kind=\"attachment\" {@attach fromAction(test, ()=>count)}></button>\n35: {/if}"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 34,
+			"column": 1,
+			"character": 645
+		},
+		"end": {
+			"line": 34,
+			"column": 79,
+			"character": 723
+		},
+		"position": [
+			645,
+			723
+		],
+		"frame": "32: {#if count < 2}\n33:   <button data-kind=\"action\" use:test={count}></button>\n34:   <button data-kind=\"attachment\" {@attach fromAction(test, ()=>count)}></button>\n                                                                                    ^\n35: {/if}\n36: "
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 37,
+			"column": 0,
+			"character": 731
+		},
+		"end": {
+			"line": 37,
+			"column": 40,
+			"character": 771
+		},
+		"position": [
+			731,
+			771
+		],
+		"frame": "35: {/if}\n36: \n37: <button onclick={()=> count++}></button>\n                                            ^"
+	}
+]

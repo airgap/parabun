@@ -1,0 +1,22 @@
+[
+	{
+		"code": "non_reactive_update",
+		"message": "`open` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates\nhttps://svelte.dev/e/non_reactive_update",
+		"filename": "Binding.svelte",
+		"start": {
+			"line": 4,
+			"column": 5,
+			"character": 52
+		},
+		"end": {
+			"line": 4,
+			"column": 9,
+			"character": 56
+		},
+		"position": [
+			52,
+			56
+		],
+		"frame": "2:   import Bound from './Bound.svelte';\n3: \n4:   let open;\n             ^\n5: </script>\n6: "
+	}
+]

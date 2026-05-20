@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>\n\texport let name;\n\n\tconsole.log(name);\n</script>\n\n<main>\n\t<div>{name}</div>\n</main>\n\n<style>\n\tmain { font-weight: bold; }\n </style>\n"
+	],
+	"mappings": ";;mDAAA,CAAC;KACW,IAAI;;CAEf,OAAO,CAAC,GAAG,CAAC,IAAI;8DAIV,IAAI;;AAHH",
+	"ignoreList": []
+}

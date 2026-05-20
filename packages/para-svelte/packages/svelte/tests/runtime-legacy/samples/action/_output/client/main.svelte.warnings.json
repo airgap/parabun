@@ -1,0 +1,7 @@
+[
+	{
+		"code": "options_deprecated_accessors",
+		"message": "The `accessors` option has been deprecated. It will have no effect in runes mode\nhttps://svelte.dev/e/options_deprecated_accessors",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-legacy/samples/action/main.svelte"
+	}
+]

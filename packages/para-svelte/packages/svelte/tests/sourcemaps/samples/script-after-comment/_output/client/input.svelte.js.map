@@ -1,0 +1,11 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<!--\n\tMultiline\n\tcomment\n-->\n<script>\n\tfunction assertThisLine() {}\n</script>\n\n{foo.bar.baz}\n"
+	],
+	"mappings": ";;;;wCAIA,CAAC;UACS,cAAc,GAAG,CAAC,AAAA,CAAC;;;;;;kBAG5B,GAAG,CAAC,GAAG,CAAC,GAAG;;AAFJ,CAAC"
+}

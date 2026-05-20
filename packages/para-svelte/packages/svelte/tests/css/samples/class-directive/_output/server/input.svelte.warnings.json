@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".forth\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/class-directive/input.svelte",
+		"start": {
+			"line": 8,
+			"column": 2,
+			"character": 190
+		},
+		"end": {
+			"line": 8,
+			"column": 8,
+			"character": 196
+		},
+		"position": [
+			190,
+			196
+		],
+		"frame": " 6:   .second { color: green }\n 7:   .third { color: green }\n 8:   .forth { color: red }\n            ^\n 9: </style>"
+	}
+]

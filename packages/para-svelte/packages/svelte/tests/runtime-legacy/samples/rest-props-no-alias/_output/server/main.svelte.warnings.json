@@ -1,0 +1,22 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'x'. If it is for external reference only, please consider using `export const x`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 2,
+			"column": 5,
+			"character": 14
+		},
+		"end": {
+			"line": 2,
+			"column": 6,
+			"character": 15
+		},
+		"position": [
+			14,
+			15
+		],
+		"frame": "1: <script>\n2:   let x;\n          ^\n3:   export { x as y };\n4: </script>"
+	}
+]

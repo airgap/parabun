@@ -1,0 +1,22 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'object'. If it is for external reference only, please consider using `export const object`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 6,
+			"column": 12,
+			"character": 96
+		},
+		"end": {
+			"line": 6,
+			"column": 18,
+			"character": 102
+		},
+		"position": [
+			96,
+			102
+		],
+		"frame": "4:   import { beforeUpdate } from 'svelte';\n5: \n6:   export let object;\n                      ^\n7: \n8:   beforeUpdate(() => {"
+	}
+]

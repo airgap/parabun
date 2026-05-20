@@ -1,0 +1,142 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 9,
+			"column": 1,
+			"character": 99
+		},
+		"end": {
+			"line": 9,
+			"column": 8,
+			"character": 106
+		},
+		"position": [
+			99,
+			106
+		],
+		"frame": " 7:     color: green;\n 8:   }\n 9:   .unused {\n             ^\n10:     color: red;\n11:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 12,
+			"column": 1,
+			"character": 127
+		},
+		"end": {
+			"line": 12,
+			"column": 8,
+			"character": 134
+		},
+		"position": [
+			127,
+			134
+		],
+		"frame": "10:     color: red;\n11:   }\n12:   .unused {\n             ^\n13:     .nested-unused {\n14:       color: red;"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".nested-unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 13,
+			"column": 2,
+			"character": 139
+		},
+		"end": {
+			"line": 13,
+			"column": 16,
+			"character": 153
+		},
+		"position": [
+			139,
+			153
+		],
+		"frame": "11:   }\n12:   .unused {\n13:     .nested-unused {\n                      ^\n14:       color: red;\n15:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused:has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 17,
+			"column": 1,
+			"character": 179
+		},
+		"end": {
+			"line": 17,
+			"column": 21,
+			"character": 199
+		},
+		"position": [
+			179,
+			199
+		],
+		"frame": "15:     }\n16:   }\n17:   .unused:has(.unused) {\n                          ^\n18:     color: red;\n19:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 20,
+			"column": 7,
+			"character": 226
+		},
+		"end": {
+			"line": 20,
+			"column": 14,
+			"character": 233
+		},
+		"position": [
+			226,
+			233
+		],
+		"frame": "18:     color: red;\n19:   }\n20:   .foo, .unused {\n                   ^\n21:     color: green;\n22:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 23,
+			"column": 1,
+			"character": 256
+		},
+		"end": {
+			"line": 23,
+			"column": 8,
+			"character": 263
+		},
+		"position": [
+			256,
+			263
+		],
+		"frame": "21:     color: green;\n22:   }\n23:   .unused, .foo {\n             ^\n24:     color: green;\n25:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/css-injected-options-minify/main.svelte",
+		"start": {
+			"line": 26,
+			"column": 7,
+			"character": 298
+		},
+		"end": {
+			"line": 26,
+			"column": 14,
+			"character": 305
+		},
+		"position": [
+			298,
+			305
+		],
+		"frame": "24:     color: green;\n25:   }\n26:   .foo, .unused, .foo {\n                   ^\n27:     color: green;\n28:   }"
+	}
+]

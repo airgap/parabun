@@ -1,0 +1,42 @@
+[
+	{
+		"code": "block_empty",
+		"message": "Empty block\nhttps://svelte.dev/e/block_empty",
+		"filename": "main.svelte",
+		"start": {
+			"line": 15,
+			"column": 18,
+			"character": 231
+		},
+		"end": {
+			"line": 16,
+			"column": 0,
+			"character": 232
+		},
+		"position": [
+			231,
+			232
+		],
+		"frame": "13: </script>\n14: \n15: {#if track(count)}\n    ^\n16: {/if}\n17: "
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 18,
+			"column": 0,
+			"character": 239
+		},
+		"end": {
+			"line": 18,
+			"column": 40,
+			"character": 279
+		},
+		"position": [
+			239,
+			279
+		],
+		"frame": "16: {/if}\n17: \n18: <button onclick={()=> count++}></button>\n                                            ^\n19: "
+	}
+]

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<div>` with a keydown handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "main.svelte",
+		"start": {
+			"line": 20,
+			"column": 1,
+			"character": 430
+		},
+		"end": {
+			"line": 22,
+			"column": 7,
+			"character": 548
+		},
+		"position": [
+			430,
+			548
+		],
+		"frame": "18: \n19: <Wrapper>\n20:   <div onkeydown={handleParentKeyDown}>\n            ^\n21:     <button use:keydownOne use:keydownTwo use:keydownThree>button</button>\n22:   </div>"
+	}
+]

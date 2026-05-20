@@ -1,0 +1,22 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 8,
+			"character": 373
+		},
+		"end": {
+			"line": 19,
+			"column": 40,
+			"character": 405
+		},
+		"position": [
+			373,
+			405
+		],
+		"frame": "17: </script>\n18: \n19: <button on:click={toggle1.togglePending}>\n                                            ^\n20:   {toggle1.id} / {pending.includes(toggle1.id)}\n21: </button>"
+	}
+]

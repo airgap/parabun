@@ -1,0 +1,62 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 7,
+			"column": 8,
+			"character": 93
+		},
+		"end": {
+			"line": 7,
+			"column": 40,
+			"character": 125
+		},
+		"position": [
+			93,
+			125
+		],
+		"frame": " 5: \n 6: <Sub bind:this={sub} />\n 7: <button on:click={() => sub.increment()}>Increment</button>\n                                            ^\n 8: <button on:click={() => sub.decrement()}>Decrement</button>\n 9: <button on:click={() => sub.double()}>Double</button>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 8,
+			"column": 8,
+			"character": 153
+		},
+		"end": {
+			"line": 8,
+			"column": 40,
+			"character": 185
+		},
+		"position": [
+			153,
+			185
+		],
+		"frame": " 6: <Sub bind:this={sub} />\n 7: <button on:click={() => sub.increment()}>Increment</button>\n 8: <button on:click={() => sub.decrement()}>Decrement</button>\n                                            ^\n 9: <button on:click={() => sub.double()}>Double</button>\n10: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 8,
+			"character": 213
+		},
+		"end": {
+			"line": 9,
+			"column": 37,
+			"character": 242
+		},
+		"position": [
+			213,
+			242
+		],
+		"frame": " 7: <button on:click={() => sub.increment()}>Increment</button>\n 8: <button on:click={() => sub.decrement()}>Decrement</button>\n 9: <button on:click={() => sub.double()}>Double</button>\n                                         ^\n10: "
+	}
+]

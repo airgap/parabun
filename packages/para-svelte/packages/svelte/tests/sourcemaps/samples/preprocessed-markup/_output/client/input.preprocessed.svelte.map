@@ -1,0 +1,11 @@
+{
+	"version": 3,
+	"mappings": "AAAA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACP,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACf,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;AAER,CAAC,CAAC,CAAC,CAAC,CAACA,GAAQ,CAAC,CAAC,CAAC,CAAC",
+	"names": [
+		"baritone"
+	],
+	"ignoreList": [],
+	"sources": [
+		"input.svelte"
+	]
+}

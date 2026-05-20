@@ -1,0 +1,22 @@
+[
+	{
+		"code": "options_missing_custom_element",
+		"message": "The `customElement` option is used when generating a custom element. Did you forget the `customElement: true` compile option?\nhttps://svelte.dev/e/options_missing_custom_element",
+		"filename": "Inner.svelte",
+		"start": {
+			"line": 1,
+			"column": 16,
+			"character": 16
+		},
+		"end": {
+			"line": 4,
+			"column": 2,
+			"character": 89
+		},
+		"position": [
+			16,
+			89
+		],
+		"frame": "1: <svelte:options customElement={{\n     ^\n2:   tag: \"my-inner\",\n3:   props: { value: { reflect: true }}"
+	}
+]

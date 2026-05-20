@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 8,
+			"character": 294
+		},
+		"end": {
+			"line": 19,
+			"column": 33,
+			"character": 319
+		},
+		"position": [
+			294,
+			319
+		],
+		"frame": "17: </script>\n18: \n19: <button on:click={() => (d += 1)}>increase d ({d})</button>\n                                     ^\n20: \n21: <button on:click={create_handler()}>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 21,
+			"column": 8,
+			"character": 355
+		},
+		"end": {
+			"line": 21,
+			"column": 35,
+			"character": 382
+		},
+		"position": [
+			355,
+			382
+		],
+		"frame": "19: <button on:click={() => (d += 1)}>increase d ({d})</button>\n20: \n21: <button on:click={create_handler()}>\n                                       ^\n22:   clicks: {count}\n23: </button>"
+	}
+]

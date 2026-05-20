@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `counter`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 13,
+			"column": 1,
+			"character": 209
+		},
+		"end": {
+			"line": 13,
+			"column": 8,
+			"character": 216
+		},
+		"position": [
+			209,
+			216
+		],
+		"frame": "11:   const counter = $derived(new Counter(10));\n12: \n13:   counter;\n             ^\n14: </script>\n15: "
+	}
+]

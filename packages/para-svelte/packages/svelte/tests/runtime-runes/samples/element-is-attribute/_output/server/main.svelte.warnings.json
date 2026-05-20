@@ -1,0 +1,42 @@
+[
+	{
+		"code": "attribute_avoid_is",
+		"message": "The \"is\" attribute is not supported cross-browser and should be avoided\nhttps://svelte.dev/e/attribute_avoid_is",
+		"filename": "main.svelte",
+		"start": {
+			"line": 17,
+			"column": 8,
+			"character": 360
+		},
+		"end": {
+			"line": 17,
+			"column": 21,
+			"character": 373
+		},
+		"position": [
+			360,
+			373
+		],
+		"frame": "15: </script>\n16: \n17: <button is=\"x-button\">click me</button>\n                         ^\n18: <button {...props} is=\"x-button\">click me</button>\n19: "
+	},
+	{
+		"code": "attribute_avoid_is",
+		"message": "The \"is\" attribute is not supported cross-browser and should be avoided\nhttps://svelte.dev/e/attribute_avoid_is",
+		"filename": "main.svelte",
+		"start": {
+			"line": 18,
+			"column": 19,
+			"character": 411
+		},
+		"end": {
+			"line": 18,
+			"column": 32,
+			"character": 424
+		},
+		"position": [
+			411,
+			424
+		],
+		"frame": "16: \n17: <button is=\"x-button\">click me</button>\n18: <button {...props} is=\"x-button\">click me</button>\n                                    ^\n19: "
+	}
+]

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 17,
+			"column": 0,
+			"character": 235
+		},
+		"end": {
+			"line": 17,
+			"column": 28,
+			"character": 263
+		},
+		"position": [
+			235,
+			263
+		],
+		"frame": "15: </script>\n16: \n17: <button use:listen></button>\n                                ^\n18: \n19: {#await Promise.resolve() then}"
+	}
+]

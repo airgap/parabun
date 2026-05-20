@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/empty-elements-closed/main.svelte",
+		"start": {
+			"line": 1,
+			"column": 0,
+			"character": 0
+		},
+		"end": {
+			"line": 1,
+			"column": 7,
+			"character": 7
+		},
+		"position": [
+			0,
+			7
+		],
+		"frame": "1: <a></a>\n          ^\n2: <p></p>\n3: "
+	},
+	{
+		"code": "a11y_missing_attribute",
+		"message": "`<a>` element should have an href attribute\nhttps://svelte.dev/e/a11y_missing_attribute",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/empty-elements-closed/main.svelte",
+		"start": {
+			"line": 1,
+			"column": 0,
+			"character": 0
+		},
+		"end": {
+			"line": 1,
+			"column": 7,
+			"character": 7
+		},
+		"position": [
+			0,
+			7
+		],
+		"frame": "1: <a></a>\n          ^\n2: <p></p>\n3: "
+	}
+]

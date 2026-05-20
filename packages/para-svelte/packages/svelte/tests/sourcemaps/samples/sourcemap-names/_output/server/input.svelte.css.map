@@ -1,0 +1,13 @@
+{
+	"version": 3,
+	"file": "input.svelte.css",
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>\n\texport let new_name_1 = { bar: 5 };\n\tlet new_name_2 = 'value_2';\n</script>\n<style>\n\tdiv {\n\t\tbackground-color: var(--baz);\n\t}\n</style>\n<h1>use-names</h1>\n<div>{new_name_1.bar}</div>\n<pre style=\"color: var(--baz)\">{new_name_2}</pre>\n"
+	],
+	"names": [],
+	"mappings": ";AAKA,CAAC,iBAAG,CAAC;AACL,EAAE,4BAAiC;AACnC",
+	"ignoreList": []
+}

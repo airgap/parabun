@@ -1,0 +1,122 @@
+[
+	{
+		"code": "store_rune_conflict",
+		"message": "It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity\nhttps://svelte.dev/e/store_rune_conflict",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-runes/samples/not-actual-runes/main.svelte",
+		"start": {
+			"line": 4,
+			"column": 14,
+			"character": 72
+		},
+		"end": {
+			"line": 4,
+			"column": 20,
+			"character": 78
+		},
+		"position": [
+			72,
+			78
+		],
+		"frame": "2:     import { state, effect } from './store.js';\n3: \n4:     let foo = $state(0); // foo = 1\n                       ^\n5:     $effect(() => { throw new Error('Shouldnt be called')});\n6: "
+	},
+	{
+		"code": "store_rune_conflict",
+		"message": "It looks like you're using the `$state` rune, but there is a local binding called `state`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `state` to avoid the ambiguity\nhttps://svelte.dev/e/store_rune_conflict",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-runes/samples/not-actual-runes/main.svelte",
+		"start": {
+			"line": 16,
+			"column": 20,
+			"character": 517
+		},
+		"end": {
+			"line": 16,
+			"column": 26,
+			"character": 523
+		},
+		"position": [
+			517,
+			523
+		],
+		"frame": "14:     }\n15: \n16:     const baz = bar($state, $effect);\n                              ^\n17: </script>\n18: "
+	},
+	{
+		"code": "store_rune_conflict",
+		"message": "It looks like you're using the `$effect` rune, but there is a local binding called `effect`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `effect` to avoid the ambiguity\nhttps://svelte.dev/e/store_rune_conflict",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-runes/samples/not-actual-runes/main.svelte",
+		"start": {
+			"line": 5,
+			"column": 4,
+			"character": 98
+		},
+		"end": {
+			"line": 5,
+			"column": 11,
+			"character": 105
+		},
+		"position": [
+			98,
+			105
+		],
+		"frame": "3: \n4:     let foo = $state(0); // foo = 1\n5:     $effect(() => { throw new Error('Shouldnt be called')});\n              ^\n6: \n7:     function bar($derived, $effect) {"
+	},
+	{
+		"code": "store_rune_conflict",
+		"message": "It looks like you're using the `$effect` rune, but there is a local binding called `effect`. Referencing a local variable with a `$` prefix will create a store subscription. Please rename `effect` to avoid the ambiguity\nhttps://svelte.dev/e/store_rune_conflict",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-runes/samples/not-actual-runes/main.svelte",
+		"start": {
+			"line": 16,
+			"column": 28,
+			"character": 525
+		},
+		"end": {
+			"line": 16,
+			"column": 35,
+			"character": 532
+		},
+		"position": [
+			525,
+			532
+		],
+		"frame": "14:     }\n15: \n16:     const baz = bar($state, $effect);\n                                       ^\n17: </script>\n18: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 20,
+			"column": 8,
+			"character": 583
+		},
+		"end": {
+			"line": 20,
+			"column": 32,
+			"character": 607
+		},
+		"position": [
+			583,
+			607
+		],
+		"frame": "18: \n19: <p>{foo} {baz.x} {baz.y}</p>\n20: <button on:click={() => foo = 5}>Shouldnt be reactive</button>\n                                    ^\n21: "
+	},
+	{
+		"code": "non_reactive_update",
+		"message": "`foo` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates\nhttps://svelte.dev/e/non_reactive_update",
+		"filename": "main.svelte",
+		"start": {
+			"line": 4,
+			"column": 8,
+			"character": 66
+		},
+		"end": {
+			"line": 4,
+			"column": 11,
+			"character": 69
+		},
+		"position": [
+			66,
+			69
+		],
+		"frame": "2:     import { state, effect } from './store.js';\n3: \n4:     let foo = $state(0); // foo = 1\n              ^\n5:     $effect(() => { throw new Error('Shouldnt be called')});\n6: "
+	}
+]

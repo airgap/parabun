@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script lang=\"ts\">import { onMount } from 'svelte';\nlet count = 0;\nonMount(() => {\n    const id = setInterval(() => count++, 1000);\n    const clear = () => clearInterval(id);\n    return clear;\n});\n</script>\n\n<h1>Hello world!</h1>\n<div>Counter value: {count}</div>\n"
+	],
+	"mappings": ";;;SACU,OAAO,QAAQ,QAAQ;;;;iDADjC,CAAC;;;KAGI,KAAK,oBAAW,CAAC;;CAMrB,OAAO,OAAM;QACN,EAAE,GAAG,WAAW,gBAAO,KAAK,GAAI,IAAI;QACpC,KAAK,SAA4B,aAAa,CAAC,EAAE;;SAChD,KAAK;CACb,CAAC;;;;;KAID,GAAG;oBAAH,GAAG;;SAAH,GAAG;kEAAiB,KAAK;;;AAHlB",
+	"ignoreList": []
+}

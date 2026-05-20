@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_click_events_have_key_events",
+		"message": "Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type=\"button\">` or `<a>` might be more appropriate\nhttps://svelte.dev/e/a11y_click_events_have_key_events",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 2,
+			"character": 134
+		},
+		"end": {
+			"line": 14,
+			"column": 9,
+			"character": 224
+		},
+		"position": [
+			134,
+			224
+		],
+		"frame": " 7: <A {x}>\n 8:   <svelte:fragment slot=\"foo\" let:reflected>\n 9:     <span \n              ^\n10:       on:click={() => y = reflected}\n11:       class={reflected}"
+	},
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<span>` with a click handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 2,
+			"character": 134
+		},
+		"end": {
+			"line": 14,
+			"column": 9,
+			"character": 224
+		},
+		"position": [
+			134,
+			224
+		],
+		"frame": " 7: <A {x}>\n 8:   <svelte:fragment slot=\"foo\" let:reflected>\n 9:     <span \n              ^\n10:       on:click={() => y = reflected}\n11:       class={reflected}"
+	}
+]

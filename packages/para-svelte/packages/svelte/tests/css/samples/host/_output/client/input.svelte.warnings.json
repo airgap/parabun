@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":host > span\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/host/input.svelte",
+		"start": {
+			"line": 18,
+			"column": 1,
+			"character": 145
+		},
+		"end": {
+			"line": 18,
+			"column": 13,
+			"character": 157
+		},
+		"position": [
+			145,
+			157
+		],
+		"frame": "16:   }\n17: \n18:   :host > span {\n                  ^\n19:     color: red;\n20:   }"
+	}
+]

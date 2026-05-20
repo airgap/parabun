@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 6,
+			"column": 0,
+			"character": 69
+		},
+		"end": {
+			"line": 6,
+			"column": 45,
+			"character": 114
+		},
+		"position": [
+			69,
+			114
+		],
+		"frame": "4: </script>\n5: \n6: <button onclick={()=> show = false}></button>\n                                                ^\n7: {#if show}\n8:   <audio bind:currentTime={()=>time,(new_time)=>{"
+	}
+]

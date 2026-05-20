@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 14,
+			"column": 0,
+			"character": 167
+		},
+		"end": {
+			"line": 14,
+			"column": 54,
+			"character": 221
+		},
+		"position": [
+			167,
+			221
+		],
+		"frame": "12: </script>\n13: \n14: <button on:click={() => (condition = false)}></button>\n                                                          ^\n15: <button on:click={() => (bool = !bool)}></button>\n16: {#if bool}"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 15,
+			"column": 0,
+			"character": 222
+		},
+		"end": {
+			"line": 15,
+			"column": 49,
+			"character": 271
+		},
+		"position": [
+			222,
+			271
+		],
+		"frame": "13: \n14: <button on:click={() => (condition = false)}></button>\n15: <button on:click={() => (bool = !bool)}></button>\n                                                     ^\n16: {#if bool}\n17:   <div out:foo></div>"
+	}
+]

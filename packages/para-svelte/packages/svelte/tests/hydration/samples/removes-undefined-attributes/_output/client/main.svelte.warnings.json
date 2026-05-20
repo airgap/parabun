@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `browser`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "packages/svelte/tests/hydration/samples/removes-undefined-attributes/main.svelte",
+		"start": {
+			"line": 5,
+			"column": 15,
+			"character": 78
+		},
+		"end": {
+			"line": 5,
+			"column": 22,
+			"character": 85
+		},
+		"position": [
+			78,
+			85
+		],
+		"frame": "3: \n4:   const attributes = {\n5:     \"data-test\": browser ? undefined : \"\"\n                           ^\n6:   };\n7: </script>"
+	}
+]

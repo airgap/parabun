@@ -1,0 +1,102 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":root .unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/root/input.svelte",
+		"start": {
+			"line": 18,
+			"column": 2,
+			"character": 190
+		},
+		"end": {
+			"line": 18,
+			"column": 15,
+			"character": 203
+		},
+		"position": [
+			190,
+			203
+		],
+		"frame": "16:     color: green;\n17:   }\n18:   :root .unused {\n                   ^\n19:     color: red;\n20:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":root:has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/root/input.svelte",
+		"start": {
+			"line": 25,
+			"column": 2,
+			"character": 269
+		},
+		"end": {
+			"line": 25,
+			"column": 20,
+			"character": 287
+		},
+		"position": [
+			269,
+			287
+		],
+		"frame": "23:     color: green;\n24:   }\n25:   :root:has(.unused) {\n                        ^\n26:     color: red;\n27:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/root/input.svelte",
+		"start": {
+			"line": 37,
+			"column": 4,
+			"character": 401
+		},
+		"end": {
+			"line": 37,
+			"column": 11,
+			"character": 408
+		},
+		"position": [
+			401,
+			408
+		],
+		"frame": "35:       color: green;\n36:     }\n37:     .unused {\n               ^\n38:       color: red;\n39:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/root/input.svelte",
+		"start": {
+			"line": 43,
+			"column": 4,
+			"character": 480
+		},
+		"end": {
+			"line": 43,
+			"column": 17,
+			"character": 493
+		},
+		"position": [
+			480,
+			493
+		],
+		"frame": "41:       color: green;\n42:     }\n43:     :has(.unused) {\n                     ^\n44:       color: red;\n45:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"&:has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/root/input.svelte",
+		"start": {
+			"line": 49,
+			"column": 4,
+			"character": 566
+		},
+		"end": {
+			"line": 49,
+			"column": 18,
+			"character": 580
+		},
+		"position": [
+			566,
+			580
+		],
+		"frame": "47:       color: green;\n48:     }\n49:     &:has(.unused) {\n                      ^\n50:       color: red;\n51:     }"
+	}
+]

@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 58,
+			"column": 8,
+			"character": 1574
+		},
+		"end": {
+			"line": 69,
+			"column": 2,
+			"character": 1882
+		},
+		"position": [
+			1574,
+			1882
+		],
+		"frame": "56: </p>\n57: \n58: <button on:click={() => {\n      ^\n59:   readonly_undefined = 10;\n60:   readonlyWithDefault_undefined = 10;"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 71,
+			"column": 8,
+			"character": 1922
+		},
+		"end": {
+			"line": 82,
+			"column": 2,
+			"character": 2300
+		},
+		"position": [
+			1922,
+			2300
+		],
+		"frame": "69: }}>set everything to 10</button>\n70: \n71: <button on:click={() => {\n      ^\n72:   readonly_undefined = undefined;\n73:   readonlyWithDefault_undefined = undefined;"
+	}
+]

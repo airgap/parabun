@@ -1,0 +1,82 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `c`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 11,
+			"column": 14,
+			"character": 201
+		},
+		"end": {
+			"line": 11,
+			"column": 15,
+			"character": 202
+		},
+		"position": [
+			201,
+			202
+		],
+		"frame": " 9:     });\n10: \n11:     console.log(c);\n                     ^\n12:     b = \"bb\";\n13:     console.log(c)"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `c`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 13,
+			"column": 14,
+			"character": 231
+		},
+		"end": {
+			"line": 13,
+			"column": 15,
+			"character": 232
+		},
+		"position": [
+			231,
+			232
+		],
+		"frame": "11:     console.log(c);\n12:     b = \"bb\";\n13:     console.log(c)\n                     ^\n14:     cond = false;\n15:     console.log(c)"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `c`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 15,
+			"column": 14,
+			"character": 264
+		},
+		"end": {
+			"line": 15,
+			"column": 15,
+			"character": 265
+		},
+		"position": [
+			264,
+			265
+		],
+		"frame": "13:     console.log(c)\n14:     cond = false;\n15:     console.log(c)\n                     ^\n16:     a = \"aaa\";\n17:     console.log(c)"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `c`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 17,
+			"column": 14,
+			"character": 294
+		},
+		"end": {
+			"line": 17,
+			"column": 15,
+			"character": 295
+		},
+		"position": [
+			294,
+			295
+		],
+		"frame": "15:     console.log(c)\n16:     a = \"aaa\";\n17:     console.log(c)\n                     ^\n18:   }\n19: </script>"
+	}
+]

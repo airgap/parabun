@@ -1,0 +1,62 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "Counter.svelte",
+		"start": {
+			"line": 9,
+			"column": 8,
+			"character": 94
+		},
+		"end": {
+			"line": 9,
+			"column": 28,
+			"character": 114
+		},
+		"position": [
+			94,
+			114
+		],
+		"frame": " 7: </script>\n 8: \n 9: <button on:click={increment}>\n                                ^\n10:   <slot {count} />\n11: </button>"
+	},
+	{
+		"code": "slot_element_deprecated",
+		"message": "Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead\nhttps://svelte.dev/e/slot_element_deprecated",
+		"filename": "Counter.svelte",
+		"start": {
+			"line": 10,
+			"column": 1,
+			"character": 117
+		},
+		"end": {
+			"line": 10,
+			"column": 17,
+			"character": 133
+		},
+		"position": [
+			117,
+			133
+		],
+		"frame": " 8: \n 9: <button on:click={increment}>\n10:   <slot {count} />\n                      ^\n11: </button>\n12: "
+	},
+	{
+		"code": "slot_element_deprecated",
+		"message": "Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead\nhttps://svelte.dev/e/slot_element_deprecated",
+		"filename": "Counter.svelte",
+		"start": {
+			"line": 13,
+			"column": 0,
+			"character": 145
+		},
+		"end": {
+			"line": 13,
+			"column": 21,
+			"character": 166
+		},
+		"position": [
+			145,
+			166
+		],
+		"frame": "11: </button>\n12: \n13: <slot name=\"named\" />\n                         ^\n14: "
+	}
+]

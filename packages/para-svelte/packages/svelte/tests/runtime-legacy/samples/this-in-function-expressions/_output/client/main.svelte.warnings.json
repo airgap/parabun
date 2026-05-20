@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 1,
+			"column": 0,
+			"character": 0
+		},
+		"end": {
+			"line": 1,
+			"column": 52,
+			"character": 52
+		},
+		"position": [
+			0,
+			52
+		],
+		"frame": "1: <button on:click=\"{() => { this.x = 1; }}\"></button>\n                                                       ^\n2: <button on:click=\"{function () { this.x = 1; }}\"></button>\n3: "
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 2,
+			"column": 0,
+			"character": 53
+		},
+		"end": {
+			"line": 2,
+			"column": 58,
+			"character": 111
+		},
+		"position": [
+			53,
+			111
+		],
+		"frame": "1: <button on:click=\"{() => { this.x = 1; }}\"></button>\n2: <button on:click=\"{function () { this.x = 1; }}\"></button>\n                                                             ^\n3: "
+	}
+]

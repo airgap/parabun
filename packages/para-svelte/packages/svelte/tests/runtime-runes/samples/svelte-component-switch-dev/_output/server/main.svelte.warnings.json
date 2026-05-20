@@ -1,0 +1,22 @@
+[
+	{
+		"code": "svelte_component_deprecated",
+		"message": "`<svelte:component>` is deprecated in runes mode — components are dynamic by default\nhttps://svelte.dev/e/svelte_component_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 0,
+			"character": 163
+		},
+		"end": {
+			"line": 9,
+			"column": 37,
+			"character": 200
+		},
+		"position": [
+			163,
+			200
+		],
+		"frame": " 7: \n 8: <button onclick={() => (component = B)}>switch</button>\n 9: <svelte:component this={component} />\n                                         ^\n10: "
+	}
+]

@@ -1,0 +1,342 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused:has(y)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 41,
+			"column": 1,
+			"character": 378
+		},
+		"end": {
+			"line": 41,
+			"column": 15,
+			"character": 392
+		},
+		"position": [
+			378,
+			392
+		],
+		"frame": "39:   }\n40: \n41:   .unused:has(y) {\n                    ^\n42:     color: red;\n43:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused:has(:global(y))\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 44,
+			"column": 1,
+			"character": 413
+		},
+		"end": {
+			"line": 44,
+			"column": 24,
+			"character": 436
+		},
+		"position": [
+			413,
+			436
+		],
+		"frame": "42:     color: red;\n43:   }\n44:   .unused:has(:global(y)) {\n                             ^\n45:     color: red;\n46:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"x:has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 47,
+			"column": 1,
+			"character": 457
+		},
+		"end": {
+			"line": 47,
+			"column": 15,
+			"character": 471
+		},
+		"position": [
+			457,
+			471
+		],
+		"frame": "45:     color: red;\n46:   }\n47:   x:has(.unused) {\n                    ^\n48:     color: red;\n49:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":global(.foo):has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 50,
+			"column": 1,
+			"character": 492
+		},
+		"end": {
+			"line": 50,
+			"column": 27,
+			"character": 518
+		},
+		"position": [
+			492,
+			518
+		],
+		"frame": "48:     color: red;\n49:   }\n50:   :global(.foo):has(.unused) {\n                                ^\n51:     color: red;\n52:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"x:has(y):has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 60,
+			"column": 1,
+			"character": 626
+		},
+		"end": {
+			"line": 60,
+			"column": 22,
+			"character": 647
+		},
+		"position": [
+			626,
+			647
+		],
+		"frame": "58:     color: green;\n59:   }\n60:   x:has(y):has(.unused) {\n                           ^\n61:     color: red;\n62:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 79,
+			"column": 2,
+			"character": 852
+		},
+		"end": {
+			"line": 79,
+			"column": 9,
+			"character": 859
+		},
+		"position": [
+			852,
+			859
+		],
+		"frame": "77:   }\n78:   x:has(y) {\n79:     .unused {\n               ^\n80:       color: red;\n81:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused x:has(y)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 95,
+			"column": 1,
+			"character": 1006
+		},
+		"end": {
+			"line": 95,
+			"column": 17,
+			"character": 1022
+		},
+		"position": [
+			1006,
+			1022
+		],
+		"frame": "93:     color: green;\n94:   }\n95:   .unused x:has(y) {\n                      ^\n96:     color: red;\n97:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused:has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 98,
+			"column": 1,
+			"character": 1043
+		},
+		"end": {
+			"line": 98,
+			"column": 21,
+			"character": 1063
+		},
+		"position": [
+			1043,
+			1063
+		],
+		"frame": " 96:     color: red;\n 97:   }\n 98:   .unused:has(.unused), x:has(y) {\n                           ^\n 99:     color: green;\n100:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"x:has(> z)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 108,
+			"column": 1,
+			"character": 1163
+		},
+		"end": {
+			"line": 108,
+			"column": 11,
+			"character": 1173
+		},
+		"position": [
+			1163,
+			1173
+		],
+		"frame": "106:     color: green;\n107:   }\n108:   x:has(> z) {\n                 ^\n109:     color: red;\n110:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"x:has(> d)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 111,
+			"column": 1,
+			"character": 1194
+		},
+		"end": {
+			"line": 111,
+			"column": 11,
+			"character": 1204
+		},
+		"position": [
+			1194,
+			1204
+		],
+		"frame": "109:     color: red;\n110:   }\n111:   x:has(> d) {\n                 ^\n112:     color: red;\n113:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"x:has(~ y)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 131,
+			"column": 1,
+			"character": 1396
+		},
+		"end": {
+			"line": 131,
+			"column": 11,
+			"character": 1406
+		},
+		"position": [
+			1396,
+			1406
+		],
+		"frame": "129:     color: green;\n130:   }\n131:   x:has(~ y) {\n                 ^\n132:     color: red;\n133:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"d:has(+ f)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 141,
+			"column": 1,
+			"character": 1494
+		},
+		"end": {
+			"line": 141,
+			"column": 11,
+			"character": 1504
+		},
+		"position": [
+			1494,
+			1504
+		],
+		"frame": "139:     color: green;\n140:   }\n141:   d:has(+ f) {\n                 ^\n142:     color: red;\n143:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"f:has(~ d)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 144,
+			"column": 1,
+			"character": 1525
+		},
+		"end": {
+			"line": 144,
+			"column": 11,
+			"character": 1535
+		},
+		"position": [
+			1525,
+			1535
+		],
+		"frame": "142:     color: red;\n143:   }\n144:   f:has(~ d) {\n                 ^\n145:     color: red;\n146:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 152,
+			"column": 2,
+			"character": 1608
+		},
+		"end": {
+			"line": 152,
+			"column": 15,
+			"character": 1621
+		},
+		"position": [
+			1608,
+			1621
+		],
+		"frame": "150:       color: green;\n151:     }\n152:     :has(.unused) {\n                      ^\n153:       color: red;\n154:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"&:has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 158,
+			"column": 2,
+			"character": 1679
+		},
+		"end": {
+			"line": 158,
+			"column": 16,
+			"character": 1693
+		},
+		"position": [
+			1679,
+			1693
+		],
+		"frame": "156:       color: green;\n157:     }\n158:     &:has(.unused) {\n                       ^\n159:       color: red;\n160:     }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":global(.foo):has(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 166,
+			"column": 1,
+			"character": 1763
+		},
+		"end": {
+			"line": 166,
+			"column": 27,
+			"character": 1789
+		},
+		"position": [
+			1763,
+			1789
+		],
+		"frame": "164:     color: green;\n165:   }\n166:   :global(.foo):has(.unused) {\n                                 ^\n167:     color: red;\n168:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"h:has(> h > i)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/has/input.svelte",
+		"start": {
+			"line": 173,
+			"column": 1,
+			"character": 1848
+		},
+		"end": {
+			"line": 173,
+			"column": 15,
+			"character": 1862
+		},
+		"position": [
+			1848,
+			1862
+		],
+		"frame": "171:     color: green;\n172:   }\n173:   h:has(> h > i) {\n                     ^\n174:     color: red;\n175:   }"
+	}
+]

@@ -1,0 +1,13 @@
+
+		<script>
+			{
+				const r = (v) => Promise.resolve(v);
+				const h = (window.__svelte ??= {}).h ??= new Map();
+
+				for (const [k, v] of [
+					["\u003C/script>\u003Cscript>throw new Error(\"pwned\")\u003C/script>",r("safe")]
+				]) {
+					h.set(k, v);
+				}
+			}
+		</script>

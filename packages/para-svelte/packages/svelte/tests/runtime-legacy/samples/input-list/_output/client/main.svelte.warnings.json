@@ -1,0 +1,62 @@
+[
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<option ...></option>` rather than `<option ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 3,
+			"column": 1,
+			"character": 56
+		},
+		"end": {
+			"line": 3,
+			"column": 22,
+			"character": 77
+		},
+		"position": [
+			56,
+			77
+		],
+		"frame": "1: <input list='suggestions'>\n2: <datalist id='suggestions'>\n3:   <option value='foo'/><option value='bar'/><option value='baz'/>\n                          ^\n4: </datalist>\n5: "
+	},
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<option ...></option>` rather than `<option ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 3,
+			"column": 22,
+			"character": 77
+		},
+		"end": {
+			"line": 3,
+			"column": 43,
+			"character": 98
+		},
+		"position": [
+			77,
+			98
+		],
+		"frame": "1: <input list='suggestions'>\n2: <datalist id='suggestions'>\n3:   <option value='foo'/><option value='bar'/><option value='baz'/>\n                                               ^\n4: </datalist>\n5: "
+	},
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<option ...></option>` rather than `<option ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 3,
+			"column": 43,
+			"character": 98
+		},
+		"end": {
+			"line": 3,
+			"column": 64,
+			"character": 119
+		},
+		"position": [
+			98,
+			119
+		],
+		"frame": "1: <input list='suggestions'>\n2: <datalist id='suggestions'>\n3:   <option value='foo'/><option value='bar'/><option value='baz'/>\n                                                                    ^\n4: </datalist>\n5: "
+	}
+]

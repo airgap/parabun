@@ -1,0 +1,22 @@
+[
+	{
+		"code": "element_implicitly_closed",
+		"message": "This element is implicitly closed by the following `</div>`, which can cause an unexpected DOM structure. Add an explicit `</duiv>` to avoid surprises.\nhttps://svelte.dev/e/element_implicitly_closed",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-legacy/samples/binding-this-multiple/main.svelte",
+		"start": {
+			"line": 25,
+			"column": 1,
+			"character": 705
+		},
+		"end": {
+			"line": 25,
+			"column": 7,
+			"character": 711
+		},
+		"position": [
+			705,
+			711
+		],
+		"frame": "23:     {/if}\n24:   </div>\n25:   <duiv>\n            ^\n26: </div>\n27: "
+	}
+]

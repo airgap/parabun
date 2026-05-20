@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<h1>Testing Styles</h1>\n<h2>Testing Styles 2</h2>\n<div>Testing Styles 3</div>\n<script>export const b = 2;</script>\n<style>\n\th1 {\n\t\t\n --done-replace-once: red;\n\t}\n\th2 {\n\t\t\n\n  --done-replace-twice: green;\n\t}\n\tdiv {\n\t\t--keep-me: blue;\n\t}\n</style>\n"
+	],
+	"mappings": ";;;;;;;;;;;;;kBAGA,CAAC;SAAoB,CAAC,GAAG,CAAC;;;;;;;;;;;;;;;EAAS",
+	"ignoreList": []
+}

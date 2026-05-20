@@ -1,0 +1,9 @@
+import 'svelte/internal/flags/async';
+import * as $ from 'svelte/internal/server';
+
+export default function Main($$renderer, $$props) {
+	let raw = $$props['raw'];
+
+	$$renderer.push(`<!---->before${$.html(raw)}after`);
+	$.bind_props($$props, { raw });
+}

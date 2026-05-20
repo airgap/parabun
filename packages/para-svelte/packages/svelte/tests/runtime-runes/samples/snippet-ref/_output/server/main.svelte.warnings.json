@@ -1,0 +1,22 @@
+[
+	{
+		"code": "non_reactive_update",
+		"message": "`thisBug` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates\nhttps://svelte.dev/e/non_reactive_update",
+		"filename": "main.svelte",
+		"start": {
+			"line": 2,
+			"column": 5,
+			"character": 14
+		},
+		"end": {
+			"line": 2,
+			"column": 12,
+			"character": 21
+		},
+		"position": [
+			14,
+			21
+		],
+		"frame": "1: <script>\n2:   let thisBug;\n                ^\n3: </script>\n4: "
+	}
+]

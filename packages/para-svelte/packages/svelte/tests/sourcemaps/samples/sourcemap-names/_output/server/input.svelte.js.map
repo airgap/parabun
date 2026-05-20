@@ -1,0 +1,16 @@
+{
+	"version": 3,
+	"names": [
+		"old_name_1",
+		"baritone",
+		"old_name_2"
+	],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>\n\texport let new_name_1 = { bar: 5 };\n\tlet new_name_2 = 'value_2';\n</script>\n<style>\n\tdiv {\n\t\tbackground-color: var(--baz);\n\t}\n</style>\n<h1>use-names</h1>\n<div>{new_name_1.bar}</div>\n<pre style=\"color: var(--baz)\">{new_name_2}</pre>\n"
+	],
+	"mappings": ";;;sCAAA,CAAC;MACWA,UAAU,8CAAKC,GAAQ,EAAE,CAAC;MACjCC,UAAU,GAAG,SAAS;;4EAQrBF,UAAU,CAACC,GAAQ;;CAPjB",
+	"ignoreList": []
+}

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 5,
+			"column": 16,
+			"character": 78
+		},
+		"end": {
+			"line": 5,
+			"column": 24,
+			"character": 86
+		},
+		"position": [
+			78,
+			86
+		],
+		"frame": "3: </script>\n4: \n5: <div {...props} on:click>\n                           ^\n6:   {@render children()}\n7: </div>"
+	}
+]

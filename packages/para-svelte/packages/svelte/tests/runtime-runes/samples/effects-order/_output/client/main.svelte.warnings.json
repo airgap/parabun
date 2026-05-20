@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 14,
+			"column": 8,
+			"character": 171
+		},
+		"end": {
+			"line": 14,
+			"column": 28,
+			"character": 191
+		},
+		"position": [
+			171,
+			191
+		],
+		"frame": "12: </script>\n13: \n14: <button on:click={() => x++}>{x}</button>\n                                ^\n15: <button on:click={() => y++}>{y}</button>\n16: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 15,
+			"column": 8,
+			"character": 213
+		},
+		"end": {
+			"line": 15,
+			"column": 28,
+			"character": 233
+		},
+		"position": [
+			213,
+			233
+		],
+		"frame": "13: \n14: <button on:click={() => x++}>{x}</button>\n15: <button on:click={() => y++}>{y}</button>\n                                ^\n16: "
+	}
+]

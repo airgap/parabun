@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"[data-active='true'] > span\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-ts-as-expression/input.svelte",
+		"start": {
+			"line": 10,
+			"column": 1,
+			"character": 100
+		},
+		"end": {
+			"line": 10,
+			"column": 28,
+			"character": 127
+		},
+		"position": [
+			100,
+			127
+		],
+		"frame": " 8: \n 9: <style>\n10:   [data-active='true'] > span {\n                                 ^\n11:     background-color: red;\n12:   }"
+	}
+]

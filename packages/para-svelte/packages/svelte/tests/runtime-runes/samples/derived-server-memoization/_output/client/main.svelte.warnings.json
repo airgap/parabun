@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `d`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 18,
+			"column": 13,
+			"character": 296
+		},
+		"end": {
+			"line": 18,
+			"column": 14,
+			"character": 297
+		},
+		"position": [
+			296,
+			297
+		],
+		"frame": "16:   });\n17: \n18:   console.log(d);\n                   ^\n19:   console.log(d);\n20:   console.log({ local_count });"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `d`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 13,
+			"character": 313
+		},
+		"end": {
+			"line": 19,
+			"column": 14,
+			"character": 314
+		},
+		"position": [
+			313,
+			314
+		],
+		"frame": "17: \n18:   console.log(d);\n19:   console.log(d);\n                   ^\n20:   console.log({ local_count });\n21: </script>"
+	}
+]

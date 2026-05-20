@@ -1,0 +1,22 @@
+[
+	{
+		"code": "block_empty",
+		"message": "Empty block\nhttps://svelte.dev/e/block_empty",
+		"filename": "main.svelte",
+		"start": {
+			"line": 13,
+			"column": 11,
+			"character": 397
+		},
+		"end": {
+			"line": 14,
+			"column": 0,
+			"character": 398
+		},
+		"position": [
+			397,
+			398
+		],
+		"frame": "11: <!-- This if block causes the derived to execute during the fork, switching its dependency\n12:      away from count_1 and over to count_2. After discard, count_1 should still be tracked. -->\n13: {#if count}\n    ^\n14: {/if}\n15: "
+	}
+]

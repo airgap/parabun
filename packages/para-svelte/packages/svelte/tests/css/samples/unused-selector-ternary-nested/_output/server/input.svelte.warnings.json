@@ -1,0 +1,42 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".hover.unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-ternary-nested/input.svelte",
+		"start": {
+			"line": 15,
+			"column": 2,
+			"character": 261
+		},
+		"end": {
+			"line": 15,
+			"column": 15,
+			"character": 274
+		},
+		"position": [
+			261,
+			274
+		],
+		"frame": "13:   .thing.active {color: blue;}\n14:   .hover { color: blue; }\n15:   .hover.unused { color: blue; }\n                   ^\n16: \n17:   .unused {color: blue;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-ternary-nested/input.svelte",
+		"start": {
+			"line": 17,
+			"column": 2,
+			"character": 295
+		},
+		"end": {
+			"line": 17,
+			"column": 9,
+			"character": 302
+		},
+		"position": [
+			295,
+			302
+		],
+		"frame": "15:   .hover.unused { color: blue; }\n16: \n17:   .unused {color: blue;}\n             ^\n18: </style>"
+	}
+]

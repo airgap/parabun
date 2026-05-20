@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-nested-at-rule/input.svelte",
+		"start": {
+			"line": 2,
+			"column": 1,
+			"character": 9
+		},
+		"end": {
+			"line": 2,
+			"column": 8,
+			"character": 16
+		},
+		"position": [
+			9,
+			16
+		],
+		"frame": "1: <style>\n2:   .unused {\n            ^\n3:     @media (min-width: 400px) {\n4:       color: red;"
+	}
+]

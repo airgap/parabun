@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `count`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "inner.svelte",
+		"start": {
+			"line": 3,
+			"column": 16,
+			"character": 55
+		},
+		"end": {
+			"line": 3,
+			"column": 21,
+			"character": 60
+		},
+		"position": [
+			55,
+			60
+		],
+		"frame": "1: <script>\n2:     let { count } = $props();\n3:     console.log(count);\n                        ^\n4: </script>\n5: "
+	}
+]

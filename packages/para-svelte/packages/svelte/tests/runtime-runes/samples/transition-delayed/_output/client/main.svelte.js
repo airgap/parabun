@@ -1,0 +1,35 @@
+import 'svelte/internal/disclose-version';
+import 'svelte/internal/flags/async';
+import * as $ from 'svelte/internal/client';
+
+var root_1 = $.from_html(`<p>delayed fade</p>`);
+var root = $.from_html(`<button>toggle</button> <!>`, 1);
+
+export default function Main($$anchor) {
+	function fade(_) {
+		return { delay: 100, duration: 100, css: (t) => `opacity: ${t}` };
+	}
+
+	let visible = $.state(false);
+	var fragment = root();
+	var button = $.first_child(fragment);
+	var node = $.sibling(button, 2);
+
+	{
+		var consequent = ($$anchor) => {
+			var p = root_1();
+
+			$.transition(3, p, () => fade);
+			$.append($$anchor, p);
+		};
+
+		$.if(node, ($$render) => {
+			if ($.get(visible)) $$render(consequent);
+		});
+	}
+
+	$.delegated('click', button, () => $.set(visible, !$.get(visible)));
+	$.append($$anchor, fragment);
+}
+
+$.delegate(['click']);

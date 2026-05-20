@@ -1,0 +1,22 @@
+[
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<textarea ...></textarea>` rather than `<textarea ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 5,
+			"column": 0,
+			"character": 90
+		},
+		"end": {
+			"line": 5,
+			"column": 23,
+			"character": 113
+		},
+		"position": [
+			90,
+			113
+		],
+		"frame": "3: </script>\n4: \n5: <textarea bind:value />\n                          ^\n6: "
+	}
+]

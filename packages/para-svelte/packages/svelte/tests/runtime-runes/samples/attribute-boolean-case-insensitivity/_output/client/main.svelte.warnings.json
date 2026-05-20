@@ -1,0 +1,82 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 12,
+			"column": 1,
+			"character": 388
+		},
+		"end": {
+			"line": 12,
+			"column": 39,
+			"character": 426
+		},
+		"position": [
+			388,
+			426
+		],
+		"frame": "10:   <input READONLY={val} REQUIRED={val} CHECKED={val} WEBKITDIRECTORY={val} />\n11:   <select MULTIPLE={val} DISABLED={val}></select>\n12:   <button FORMNOVALIDATE={val}></button>\n                                            ^\n13:   <img ISMAP={val} />\n14:   <video AUTOPLAY={val} CONTROLS={val} LOOP={val} MUTED={val} PLAYSINLINE={val} DISABLEPICTUREINPICTURE={val} DISABLEREMOTEPLAYBACK={val}></video>"
+	},
+	{
+		"code": "a11y_missing_attribute",
+		"message": "`<img>` element should have an alt attribute\nhttps://svelte.dev/e/a11y_missing_attribute",
+		"filename": "main.svelte",
+		"start": {
+			"line": 13,
+			"column": 1,
+			"character": 428
+		},
+		"end": {
+			"line": 13,
+			"column": 20,
+			"character": 447
+		},
+		"position": [
+			428,
+			447
+		],
+		"frame": "11:   <select MULTIPLE={val} DISABLED={val}></select>\n12:   <button FORMNOVALIDATE={val}></button>\n13:   <img ISMAP={val} />\n                         ^\n14:   <video AUTOPLAY={val} CONTROLS={val} LOOP={val} MUTED={val} PLAYSINLINE={val} DISABLEPICTUREINPICTURE={val} DISABLEREMOTEPLAYBACK={val}></video>\n15:   <audio DISABLEREMOTEPLAYBACK={val}></audio>"
+	},
+	{
+		"code": "a11y_missing_attribute",
+		"message": "`<iframe>` element should have a title attribute\nhttps://svelte.dev/e/a11y_missing_attribute",
+		"filename": "main.svelte",
+		"start": {
+			"line": 17,
+			"column": 1,
+			"character": 665
+		},
+		"end": {
+			"line": 17,
+			"column": 40,
+			"character": 704
+		},
+		"position": [
+			665,
+			704
+		],
+		"frame": "15:   <audio DISABLEREMOTEPLAYBACK={val}></audio>\n16:   <track DEFAULT={val} />\n17:   <iframe ALLOWFULLSCREEN={val}></iframe>\n                                             ^\n18:   <details OPEN={val}></details>\n19:   <ol REVERSED={val}></ol>"
+	},
+	{
+		"code": "a11y_autofocus",
+		"message": "Avoid using autofocus\nhttps://svelte.dev/e/a11y_autofocus",
+		"filename": "main.svelte",
+		"start": {
+			"line": 20,
+			"column": 6,
+			"character": 769
+		},
+		"end": {
+			"line": 20,
+			"column": 21,
+			"character": 784
+		},
+		"position": [
+			769,
+			784
+		],
+		"frame": "18:   <details OPEN={val}></details>\n19:   <ol REVERSED={val}></ol>\n20:   <div AUTOFOCUS={val}></div>\n                          ^\n21:   <span INERT={val}></span>\n22: {/each}"
+	}
+]

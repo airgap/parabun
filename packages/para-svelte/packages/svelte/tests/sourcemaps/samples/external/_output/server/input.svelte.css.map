@@ -1,0 +1,14 @@
+{
+	"version": 3,
+	"file": "input.svelte.css",
+	"sources": [
+		"../../common.scss",
+		"../../styles.scss"
+	],
+	"sourcesContent": [
+		"<style lang=\"scss\" src=\"./styles.scss\">:global(html) { height: 100%; }\n\n.awesome { color: orange; }\n</style>\n\n<div class=\"awesome\">Divs ftw!</div>"
+	],
+	"names": [],
+	"mappings": "AAAQ,IAAK,CAAC,EAAE,YAAY;;ACA5B,uBAAQ,CAAC,EAAE,aAAa",
+	"ignoreList": []
+}

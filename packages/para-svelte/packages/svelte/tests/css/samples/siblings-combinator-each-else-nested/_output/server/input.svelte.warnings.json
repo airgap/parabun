@@ -1,0 +1,122 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".a + .c\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else-nested/input.svelte",
+		"start": {
+			"line": 27,
+			"column": 1,
+			"character": 586
+		},
+		"end": {
+			"line": 27,
+			"column": 8,
+			"character": 593
+		},
+		"position": [
+			586,
+			593
+		],
+		"frame": "25: \n26:   /* no match */\n27:   .a + .c { color: red; }\n             ^\n28:   .b + .e { color: red; }\n29:   .d + .d { color: red; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".b + .e\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else-nested/input.svelte",
+		"start": {
+			"line": 28,
+			"column": 1,
+			"character": 611
+		},
+		"end": {
+			"line": 28,
+			"column": 8,
+			"character": 618
+		},
+		"position": [
+			611,
+			618
+		],
+		"frame": "26:   /* no match */\n27:   .a + .c { color: red; }\n28:   .b + .e { color: red; }\n             ^\n29:   .d + .d { color: red; }\n30:   .e + .f { color: red; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".d + .d\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else-nested/input.svelte",
+		"start": {
+			"line": 29,
+			"column": 1,
+			"character": 636
+		},
+		"end": {
+			"line": 29,
+			"column": 8,
+			"character": 643
+		},
+		"position": [
+			636,
+			643
+		],
+		"frame": "27:   .a + .c { color: red; }\n28:   .b + .e { color: red; }\n29:   .d + .d { color: red; }\n             ^\n30:   .e + .f { color: red; }\n31:   .f + .f { color: red; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".e + .f\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else-nested/input.svelte",
+		"start": {
+			"line": 30,
+			"column": 1,
+			"character": 661
+		},
+		"end": {
+			"line": 30,
+			"column": 8,
+			"character": 668
+		},
+		"position": [
+			661,
+			668
+		],
+		"frame": "28:   .b + .e { color: red; }\n29:   .d + .d { color: red; }\n30:   .e + .f { color: red; }\n             ^\n31:   .f + .f { color: red; }\n32:   .g + .h + .i + .j { color: red; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".f + .f\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else-nested/input.svelte",
+		"start": {
+			"line": 31,
+			"column": 1,
+			"character": 686
+		},
+		"end": {
+			"line": 31,
+			"column": 8,
+			"character": 693
+		},
+		"position": [
+			686,
+			693
+		],
+		"frame": "29:   .d + .d { color: red; }\n30:   .e + .f { color: red; }\n31:   .f + .f { color: red; }\n             ^\n32:   .g + .h + .i + .j { color: red; }\n33: </style>"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".g + .h + .i + .j\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else-nested/input.svelte",
+		"start": {
+			"line": 32,
+			"column": 1,
+			"character": 711
+		},
+		"end": {
+			"line": 32,
+			"column": 18,
+			"character": 728
+		},
+		"position": [
+			711,
+			728
+		],
+		"frame": "30:   .e + .f { color: red; }\n31:   .f + .f { color: red; }\n32:   .g + .h + .i + .j { color: red; }\n                       ^\n33: </style>\n34: "
+	}
+]

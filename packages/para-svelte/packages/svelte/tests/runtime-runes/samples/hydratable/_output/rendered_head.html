@@ -1,0 +1,12 @@
+
+		<script>
+			{
+				const h = (window.__svelte ??= {}).h ??= new Map();
+
+				for (const [k, v] of [
+					["environment","server"]
+				]) {
+					h.set(k, v);
+				}
+			}
+		</script>

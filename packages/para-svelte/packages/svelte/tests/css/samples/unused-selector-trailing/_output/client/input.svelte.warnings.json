@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"h2\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-trailing/input.svelte",
+		"start": {
+			"line": 5,
+			"column": 1,
+			"character": 30
+		},
+		"end": {
+			"line": 5,
+			"column": 3,
+			"character": 32
+		},
+		"position": [
+			30,
+			32
+		],
+		"frame": "3: <style>\n4:   h1,\n5:   h2 {\n       ^\n6:     color: red;\n7:   }"
+	}
+]

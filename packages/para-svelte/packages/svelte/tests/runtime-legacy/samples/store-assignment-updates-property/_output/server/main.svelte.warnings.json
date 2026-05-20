@@ -1,0 +1,62 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 0,
+			"character": 324
+		},
+		"end": {
+			"line": 22,
+			"column": 5,
+			"character": 412
+		},
+		"position": [
+			324,
+			412
+		],
+		"frame": "17: <p>b: {JSON.stringify($b)}</p>\n18: \n19: <button on:click={() => {\n         ^\n20:   $a.foo = $a.foo + 1;\n21:   $b = { foo: $b.foo + 1, baz: 0 };"
+	},
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<button ...></button>` rather than `<button ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 0,
+			"character": 324
+		},
+		"end": {
+			"line": 22,
+			"column": 5,
+			"character": 412
+		},
+		"position": [
+			324,
+			412
+		],
+		"frame": "17: <p>b: {JSON.stringify($b)}</p>\n18: \n19: <button on:click={() => {\n         ^\n20:   $a.foo = $a.foo + 1;\n21:   $b = { foo: $b.foo + 1, baz: 0 };"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 24,
+			"column": 0,
+			"character": 414
+		},
+		"end": {
+			"line": 24,
+			"column": 35,
+			"character": 449
+		},
+		"position": [
+			414,
+			449
+		],
+		"frame": "22: }} />\n23: \n24: <button on:click={update}></button>\n                                       ^\n25: "
+	}
+]

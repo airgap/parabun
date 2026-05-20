@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"h4\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-in-between/input.svelte",
+		"start": {
+			"line": 10,
+			"column": 1,
+			"character": 70
+		},
+		"end": {
+			"line": 10,
+			"column": 3,
+			"character": 72
+		},
+		"position": [
+			70,
+			72
+		],
+		"frame": " 8:   h2,\n 9:   h3,\n10:   h4,\n        ^\n11:   p {\n12:     color: red;"
+	}
+]

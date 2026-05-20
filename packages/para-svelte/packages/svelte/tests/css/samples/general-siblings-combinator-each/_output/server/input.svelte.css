@@ -1,0 +1,4 @@
+
+	div.svelte-xyz ~ span:where(.svelte-xyz) {
+		color: green;
+	}

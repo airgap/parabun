@@ -61,14 +61,14 @@
       "name": "@para/mcp",
       "version": "0.0.0-dev",
       "dependencies": {
-        "@para/signals": "workspace:*",
+        "@lyku/para-signals": "workspace:*",
       },
     },
     "packages/para-parallel": {
       "name": "@para/parallel",
       "version": "0.0.0-dev",
       "dependencies": {
-        "@para/signals": "workspace:*",
+        "@lyku/para-signals": "workspace:*",
       },
     },
     "packages/para-pipeline": {
@@ -79,20 +79,39 @@
         "@para/simd": "workspace:*",
       },
     },
+    "packages/para-preprocess": {
+      "name": "@lyku/para-preprocess",
+      "version": "0.0.1-pre.11",
+      "devDependencies": {
+        "bun-types": "workspace:*",
+        "svelte": "^5.20.4",
+        "typescript": "^5.0.0",
+      },
+      "peerDependencies": {
+        "svelte": "^5",
+      },
+    },
     "packages/para-rtp": {
       "name": "@para/rtp",
       "version": "0.0.0-dev",
       "dependencies": {
-        "@para/signals": "workspace:*",
+        "@lyku/para-signals": "workspace:*",
       },
     },
     "packages/para-signals": {
-      "name": "@para/signals",
-      "version": "0.0.0-dev",
+      "name": "@lyku/para-signals",
+      "version": "0.0.1-pre.4",
     },
     "packages/para-simd": {
       "name": "@para/simd",
       "version": "0.0.0-dev",
+    },
+    "packages/para-ui-native": {
+      "name": "@lyku/para-ui-native",
+      "version": "0.0.1-pre.0",
+      "peerDependencies": {
+        "@lyku/para-signals": "^0.0.1-pre.1",
+      },
     },
     "packages/parabun-browser-shims": {
       "name": "parabun-browser-shims",
@@ -176,6 +195,12 @@
 
     "@lezer/lr": ["@lezer/lr@1.4.3", "", { "dependencies": { "@lezer/common": "^1.0.0" } }, "sha512-yenN5SqAxAPv/qMnpWW0AT7l+SxVrgG+u0tNsRQWqbrz66HIl8DnEbBObvy21J5K7+I1v7gsAnlE2VQ5yYVSeA=="],
 
+    "@lyku/para-preprocess": ["@lyku/para-preprocess@workspace:packages/para-preprocess"],
+
+    "@lyku/para-signals": ["@lyku/para-signals@workspace:packages/para-signals"],
+
+    "@lyku/para-ui-native": ["@lyku/para-ui-native@workspace:packages/para-ui-native"],
+
     "@octokit/app": ["@octokit/app@14.1.0", "", { "dependencies": { "@octokit/auth-app": "^6.0.0", "@octokit/auth-unauthenticated": "^5.0.0", "@octokit/core": "^5.0.0", "@octokit/oauth-app": "^6.0.0", "@octokit/plugin-paginate-rest": "^9.0.0", "@octokit/types": "^12.0.0", "@octokit/webhooks": "^12.0.4" } }, "sha512-g3uEsGOQCBl1+W1rgfwoRFUIR6PtvB2T1E4RpygeUU5LrLvlOqcxrt5lfykIeRpUPpupreGJUYl70fqMDXdTpw=="],
 
     "@octokit/auth-app": ["@octokit/auth-app@6.1.4", "", { "dependencies": { "@octokit/auth-oauth-app": "^7.1.0", "@octokit/auth-oauth-user": "^4.1.0", "@octokit/request": "^8.3.1", "@octokit/request-error": "^5.1.0", "@octokit/types": "^13.1.0", "deprecation": "^2.3.1", "lru-cache": "npm:@wolfy1339/lru-cache@^11.0.2-patch.1", "universal-github-app-jwt": "^1.1.2", "universal-user-agent": "^6.0.0" } }, "sha512-QkXkSOHZK4dA5oUqY5Dk3S+5pN2s1igPjEASNQV8/vgJgW034fQWR16u7VsNOK/EljA00eyjYF5mWNxWKWhHRQ=="],
@@ -243,8 +268,6 @@
     "@para/pipeline": ["@para/pipeline@workspace:packages/para-pipeline"],
 
     "@para/rtp": ["@para/rtp@workspace:packages/para-rtp"],
-
-    "@para/signals": ["@para/signals@workspace:packages/para-signals"],
 
     "@para/simd": ["@para/simd@workspace:packages/para-simd"],
 
@@ -457,6 +480,8 @@
     "wrappy": ["wrappy@1.0.2", "", {}, "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="],
 
     "zimmerframe": ["zimmerframe@1.1.4", "", {}, "sha512-B58NGBEoc8Y9MWWCQGl/gq9xBCe4IiKM0a2x7GZdQKOW5Exr8S1W24J6OgM1njK8xCRGvAJIL/MxXHf6SkmQKQ=="],
+
+    "@lyku/para-preprocess/typescript": ["typescript@5.9.2", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-CWBzXQrc/qOkhidw1OzBTQuYRbfyxDXJMVJ1XNwUHGROVmuaeiEm3OslpZ1RV96d7SKKjZKrSJu3+t/xlw3R9A=="],
 
     "@octokit/app/@octokit/plugin-paginate-rest": ["@octokit/plugin-paginate-rest@9.2.2", "", { "dependencies": { "@octokit/types": "^12.6.0" }, "peerDependencies": { "@octokit/core": "5" } }, "sha512-u3KYkGF7GcZnSD/3UP0S7K5XUFT2FkOQdcfXZGZQPGv3lm4F2Xbf71lvjldr8c1H3nNbF+33cLEkWYbokGWqiQ=="],
 

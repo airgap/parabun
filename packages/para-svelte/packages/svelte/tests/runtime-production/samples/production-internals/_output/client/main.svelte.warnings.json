@@ -1,0 +1,22 @@
+[
+	{
+		"code": "non_reactive_update",
+		"message": "`foo` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates\nhttps://svelte.dev/e/non_reactive_update",
+		"filename": "main.svelte",
+		"start": {
+			"line": 4,
+			"column": 5,
+			"character": 52
+		},
+		"end": {
+			"line": 4,
+			"column": 8,
+			"character": 55
+		},
+		"position": [
+			52,
+			55
+		],
+		"frame": "2:   import Child from \"./Child.svelte\";\n3: \n4:   let foo;\n            ^\n5: \n6:   function onerror(err) {"
+	}
+]

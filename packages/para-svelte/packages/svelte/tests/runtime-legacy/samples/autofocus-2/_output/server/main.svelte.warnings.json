@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_autofocus",
+		"message": "Avoid using autofocus\nhttps://svelte.dev/e/a11y_autofocus",
+		"filename": "main.svelte",
+		"start": {
+			"line": 2,
+			"column": 7,
+			"character": 20
+		},
+		"end": {
+			"line": 2,
+			"column": 16,
+			"character": 29
+		},
+		"position": [
+			20,
+			29
+		],
+		"frame": "1: <h1>wat</h1>\n2: <input autofocus />\n                   ^\n3: "
+	}
+]

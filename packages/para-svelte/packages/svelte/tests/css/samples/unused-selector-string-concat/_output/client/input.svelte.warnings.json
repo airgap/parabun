@@ -1,0 +1,202 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".fooaa\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 11,
+			"column": 2,
+			"character": 206
+		},
+		"end": {
+			"line": 11,
+			"column": 8,
+			"character": 212
+		},
+		"position": [
+			206,
+			212
+		],
+		"frame": " 9: <style>\n10:   .foo {color: red;}\n11:   .fooaa {color: red;}\n            ^\n12:   .foobb {color: red;}\n13:   .foocc {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".foobb\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 12,
+			"column": 2,
+			"character": 229
+		},
+		"end": {
+			"line": 12,
+			"column": 8,
+			"character": 235
+		},
+		"position": [
+			229,
+			235
+		],
+		"frame": "10:   .foo {color: red;}\n11:   .fooaa {color: red;}\n12:   .foobb {color: red;}\n            ^\n13:   .foocc {color: red;}\n14:   .foodd {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".foodd\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 14,
+			"column": 2,
+			"character": 275
+		},
+		"end": {
+			"line": 14,
+			"column": 8,
+			"character": 281
+		},
+		"position": [
+			275,
+			281
+		],
+		"frame": "12:   .foobb {color: red;}\n13:   .foocc {color: red;}\n14:   .foodd {color: red;}\n            ^\n15:   .aa {color: red;}\n16:   .bb {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".bbbar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 20,
+			"column": 2,
+			"character": 401
+		},
+		"end": {
+			"line": 20,
+			"column": 8,
+			"character": 407
+		},
+		"position": [
+			401,
+			407
+		],
+		"frame": "18:   .dd {color: red;}\n19:   .aabar {color: red;}\n20:   .bbbar {color: red;}\n            ^\n21:   .ccbar {color: red;}\n22:   .ddbar {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".ccbar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 21,
+			"column": 2,
+			"character": 424
+		},
+		"end": {
+			"line": 21,
+			"column": 8,
+			"character": 430
+		},
+		"position": [
+			424,
+			430
+		],
+		"frame": "19:   .aabar {color: red;}\n20:   .bbbar {color: red;}\n21:   .ccbar {color: red;}\n            ^\n22:   .ddbar {color: red;}\n23:   .fooaabar {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".ddbar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 22,
+			"column": 2,
+			"character": 447
+		},
+		"end": {
+			"line": 22,
+			"column": 8,
+			"character": 453
+		},
+		"position": [
+			447,
+			453
+		],
+		"frame": "20:   .bbbar {color: red;}\n21:   .ccbar {color: red;}\n22:   .ddbar {color: red;}\n            ^\n23:   .fooaabar {color: red;}\n24:   .foobbbar {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".fooaabar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 23,
+			"column": 2,
+			"character": 470
+		},
+		"end": {
+			"line": 23,
+			"column": 11,
+			"character": 479
+		},
+		"position": [
+			470,
+			479
+		],
+		"frame": "21:   .ccbar {color: red;}\n22:   .ddbar {color: red;}\n23:   .fooaabar {color: red;}\n               ^\n24:   .foobbbar {color: red;}\n25:   .fooccbar {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".foobbbar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 24,
+			"column": 2,
+			"character": 496
+		},
+		"end": {
+			"line": 24,
+			"column": 11,
+			"character": 505
+		},
+		"position": [
+			496,
+			505
+		],
+		"frame": "22:   .ddbar {color: red;}\n23:   .fooaabar {color: red;}\n24:   .foobbbar {color: red;}\n               ^\n25:   .fooccbar {color: red;}\n26:   .fooddbar {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".fooccbar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 25,
+			"column": 2,
+			"character": 522
+		},
+		"end": {
+			"line": 25,
+			"column": 11,
+			"character": 531
+		},
+		"position": [
+			522,
+			531
+		],
+		"frame": "23:   .fooaabar {color: red;}\n24:   .foobbbar {color: red;}\n25:   .fooccbar {color: red;}\n               ^\n26:   .fooddbar {color: red;}\n27:   .baz {color: red;}"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-string-concat/input.svelte",
+		"start": {
+			"line": 28,
+			"column": 2,
+			"character": 595
+		},
+		"end": {
+			"line": 28,
+			"column": 9,
+			"character": 602
+		},
+		"position": [
+			595,
+			602
+		],
+		"frame": "26:   .fooddbar {color: red;}\n27:   .baz {color: red;}\n28:   .unused {color: red;}\n             ^\n29: </style>"
+	}
+]

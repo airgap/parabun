@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<h1>decoded-sourcemap</h1>\n<div>success</div>\n"
+	],
+	"mappings": "",
+	"ignoreList": []
+}

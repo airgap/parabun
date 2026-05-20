@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_click_events_have_key_events",
+		"message": "Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type=\"button\">` or `<a>` might be more appropriate\nhttps://svelte.dev/e/a11y_click_events_have_key_events",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 0,
+			"character": 85
+		},
+		"end": {
+			"line": 9,
+			"column": 51,
+			"character": 136
+		},
+		"position": [
+			85,
+			136
+		],
+		"frame": " 7: </script>\n 8: \n 9: <div style:background={bg} on:click={handle}></div>\n                                                       ^\n10: "
+	},
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<div>` with a click handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 0,
+			"character": 85
+		},
+		"end": {
+			"line": 9,
+			"column": 51,
+			"character": 136
+		},
+		"position": [
+			85,
+			136
+		],
+		"frame": " 7: </script>\n 8: \n 9: <div style:background={bg} on:click={handle}></div>\n                                                       ^\n10: "
+	}
+]

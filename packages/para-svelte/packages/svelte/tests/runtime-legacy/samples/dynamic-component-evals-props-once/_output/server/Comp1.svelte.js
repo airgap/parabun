@@ -1,0 +1,8 @@
+import * as $ from 'svelte/internal/server';
+
+export default function Comp1($$renderer, $$props) {
+	let value = $$props['value'];
+
+	$$renderer.push(`<p>value(1) = ${$.escape(value)}</p>`);
+	$.bind_props($$props, { value });
+}

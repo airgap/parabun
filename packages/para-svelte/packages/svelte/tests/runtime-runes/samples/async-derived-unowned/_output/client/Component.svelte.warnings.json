@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `double`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 3,
+			"column": 1,
+			"character": 38
+		},
+		"end": {
+			"line": 3,
+			"column": 7,
+			"character": 44
+		},
+		"position": [
+			38,
+			44
+		],
+		"frame": "1: <script>\n2:   let { double } = $props();\n3:   double; // derived is first read outside an active_reaction\n           ^\n4: </script>\n5: "
+	}
+]

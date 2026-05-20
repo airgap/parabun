@@ -1,0 +1,13 @@
+
+		<script>
+			{
+				const r = (v) => Promise.resolve(v);
+				const h = (window.__svelte ??= {}).h ??= new Map();
+
+				for (const [k, v] of [
+					["partially_used",{used:r("did you ever hear the tragedy of darth plagueis the wise?"),unused:r("no, sith daddy, please tell me")}]
+				]) {
+					h.set(k, v);
+				}
+			}
+		</script>

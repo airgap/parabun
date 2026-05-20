@@ -1,0 +1,62 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 11,
+			"column": 9,
+			"character": 241
+		},
+		"end": {
+			"line": 11,
+			"column": 43,
+			"character": 275
+		},
+		"position": [
+			241,
+			275
+		],
+		"frame": " 9: \n10: {#each a as item, i}\n11:   <button on:click={() => a[i].text = 'bar'}>{item.text}</button>\n                                                ^\n12: {/each}\n13: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 15,
+			"column": 9,
+			"character": 333
+		},
+		"end": {
+			"line": 15,
+			"column": 43,
+			"character": 367
+		},
+		"position": [
+			333,
+			367
+		],
+		"frame": "13: \n14: {#each b as item}\n15:   <button on:click={() => item.text = 'bar'}>{item.text}</button>\n                                                ^\n16: {/each}\n17: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 9,
+			"character": 425
+		},
+		"end": {
+			"line": 19,
+			"column": 43,
+			"character": 459
+		},
+		"position": [
+			425,
+			459
+		],
+		"frame": "17: \n18: {#each c as item}\n19:   <button on:click={() => item.text = 'bar'}>{item.text}</button>\n                                                ^\n20: {/each}\n21: "
+	}
+]

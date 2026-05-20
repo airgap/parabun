@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 22,
+			"column": 25,
+			"character": 417
+		},
+		"end": {
+			"line": 22,
+			"column": 56,
+			"character": 448
+		},
+		"position": [
+			417,
+			448
+		],
+		"frame": "20:   <p id=\"count\">Count: {count.value}</p>\n21:   <p id=\"fallback-count\">Fallback count: {fallback_count.value}</p>\n22:   <button id=\"increment\" on:click={() => (c.value += 1)}>Click to change referenced state value</button>\n                                                            ^\n23:   <button id=\"change-ref\" on:click={() => toggle_state = !toggle_state}>Click to change state reference</button>\n24: {/snippet}"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 23,
+			"column": 25,
+			"character": 522
+		},
+		"end": {
+			"line": 23,
+			"column": 70,
+			"character": 567
+		},
+		"position": [
+			522,
+			567
+		],
+		"frame": "21:   <p id=\"fallback-count\">Fallback count: {fallback_count.value}</p>\n22:   <button id=\"increment\" on:click={() => (c.value += 1)}>Click to change referenced state value</button>\n23:   <button id=\"change-ref\" on:click={() => toggle_state = !toggle_state}>Click to change state reference</button>\n                                                                           ^\n24: {/snippet}\n25: "
+	}
+]

@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "inner.svelte",
+		"start": {
+			"line": 11,
+			"column": 8,
+			"character": 202
+		},
+		"end": {
+			"line": 13,
+			"column": 2,
+			"character": 236
+		},
+		"position": [
+			202,
+			236
+		],
+		"frame": " 9: </p>\n10: \n11: <button on:click={() => {\n      ^\n12:   binding = 5;\n13: }}>set bindings to 5</button>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "inner.svelte",
+		"start": {
+			"line": 15,
+			"column": 8,
+			"character": 273
+		},
+		"end": {
+			"line": 17,
+			"column": 2,
+			"character": 315
+		},
+		"position": [
+			273,
+			315
+		],
+		"frame": "13: }}>set bindings to 5</button>\n14: \n15: <button on:click={() => {\n      ^\n16:   binding = undefined;\n17: }}>set bindings to undefined</button>"
+	}
+]

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_missing_content",
+		"message": "`<h1>` element should contain text\nhttps://svelte.dev/e/a11y_missing_content",
+		"filename": "main.svelte",
+		"start": {
+			"line": 7,
+			"column": 0,
+			"character": 100
+		},
+		"end": {
+			"line": 7,
+			"column": 9,
+			"character": 109
+		},
+		"position": [
+			100,
+			109
+		],
+		"frame": " 5: </script>\n 6: \n 7: <h1></h1>\n             ^\n 8: <svelte:element this=\"{'foo'}\"></svelte:element>\n 9: <svelte:element this={\"img\"}></svelte:element>"
+	}
+]

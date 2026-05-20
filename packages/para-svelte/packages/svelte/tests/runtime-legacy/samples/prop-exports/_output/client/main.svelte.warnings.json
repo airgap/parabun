@@ -1,0 +1,82 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'u1'. If it is for external reference only, please consider using `export const u1`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 3,
+			"column": 13,
+			"character": 69
+		},
+		"end": {
+			"line": 3,
+			"column": 15,
+			"character": 71
+		},
+		"position": [
+			69,
+			71
+		],
+		"frame": "1: <script>\n2:   // export multiple subscribables in one line\n3:   export let u1, s1, u2, s2\n                  ^\n4: \n5:   let p1, p2, p3"
+	},
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'u2'. If it is for external reference only, please consider using `export const u2`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 3,
+			"column": 21,
+			"character": 77
+		},
+		"end": {
+			"line": 3,
+			"column": 23,
+			"character": 79
+		},
+		"position": [
+			77,
+			79
+		],
+		"frame": "1: <script>\n2:   // export multiple subscribables in one line\n3:   export let u1, s1, u2, s2\n                          ^\n4: \n5:   let p1, p2, p3"
+	},
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'n1'. If it is for external reference only, please consider using `export const n1`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 31,
+			"column": 6,
+			"character": 628
+		},
+		"end": {
+			"line": 31,
+			"column": 8,
+			"character": 630
+		},
+		"position": [
+			628,
+			630
+		],
+		"frame": "29: \n30:   // aliased store surrounded by non-aliased non-stores\n31:   let n1, n2, s3\n            ^\n32:   export { n1, s3 as a6, n2 }\n33: "
+	},
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'n2'. If it is for external reference only, please consider using `export const n2`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 31,
+			"column": 10,
+			"character": 632
+		},
+		"end": {
+			"line": 31,
+			"column": 12,
+			"character": 634
+		},
+		"position": [
+			632,
+			634
+		],
+		"frame": "29: \n30:   // aliased store surrounded by non-aliased non-stores\n31:   let n1, n2, s3\n                ^\n32:   export { n1, s3 as a6, n2 }\n33: "
+	}
+]

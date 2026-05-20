@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `data`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 3,
+			"column": 22,
+			"character": 57
+		},
+		"end": {
+			"line": 3,
+			"column": 26,
+			"character": 61
+		},
+		"position": [
+			57,
+			61
+		],
+		"frame": "1: <script>\n2:   let { data } = $props();\n3:   let { foo } = $state(data);\n                              ^\n4: </script>\n5: "
+	}
+]

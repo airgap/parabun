@@ -1,0 +1,62 @@
+[
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<div>` with a keydown handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "wrapper.svelte",
+		"start": {
+			"line": 1,
+			"column": 0,
+			"character": 0
+		},
+		"end": {
+			"line": 3,
+			"column": 6,
+			"character": 64
+		},
+		"position": [
+			0,
+			64
+		],
+		"frame": "1: <div on:keydown={() => console.log('wrapper')}>\n         ^\n2:   <slot />\n3: </div>"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:keydown` to listen to the keydown event is deprecated. Use the event attribute `onkeydown` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "wrapper.svelte",
+		"start": {
+			"line": 1,
+			"column": 5,
+			"character": 5
+		},
+		"end": {
+			"line": 1,
+			"column": 46,
+			"character": 46
+		},
+		"position": [
+			5,
+			46
+		],
+		"frame": "1: <div on:keydown={() => console.log('wrapper')}>\n                                                 ^\n2:   <slot />\n3: </div>"
+	},
+	{
+		"code": "slot_element_deprecated",
+		"message": "Using `<slot>` to render parent content is deprecated. Use `{@render ...}` tags instead\nhttps://svelte.dev/e/slot_element_deprecated",
+		"filename": "wrapper.svelte",
+		"start": {
+			"line": 2,
+			"column": 1,
+			"character": 49
+		},
+		"end": {
+			"line": 2,
+			"column": 9,
+			"character": 57
+		},
+		"position": [
+			49,
+			57
+		],
+		"frame": "1: <div on:keydown={() => console.log('wrapper')}>\n2:   <slot />\n             ^\n3: </div>\n4: "
+	}
+]

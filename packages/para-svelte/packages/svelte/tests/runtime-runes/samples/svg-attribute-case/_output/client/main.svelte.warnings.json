@@ -1,0 +1,42 @@
+[
+	{
+		"code": "svelte_element_invalid_this",
+		"message": "`this` should be an `{expression}`. Using a string attribute value will cause an error in future versions of Svelte\nhttps://svelte.dev/e/svelte_element_invalid_this",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-runes/samples/svg-attribute-case/main.svelte",
+		"start": {
+			"line": 2,
+			"column": 16,
+			"character": 51
+		},
+		"end": {
+			"line": 2,
+			"column": 26,
+			"character": 61
+		},
+		"position": [
+			51,
+			61
+		],
+		"frame": "1: <svelte:options namespace=\"svg\" />\n2: <svelte:element this=\"svg\" viewBox=\"0 0 10 10\" />\n                             ^\n3: <svelte:element this=\"svg\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\" />\n4: <svg viewBox=\"\" />"
+	},
+	{
+		"code": "svelte_element_invalid_this",
+		"message": "`this` should be an `{expression}`. Using a string attribute value will cause an error in future versions of Svelte\nhttps://svelte.dev/e/svelte_element_invalid_this",
+		"filename": "/raid/parabun/packages/para-svelte/packages/svelte/tests/runtime-runes/samples/svg-attribute-case/main.svelte",
+		"start": {
+			"line": 3,
+			"column": 16,
+			"character": 101
+		},
+		"end": {
+			"line": 3,
+			"column": 26,
+			"character": 111
+		},
+		"position": [
+			101,
+			111
+		],
+		"frame": "1: <svelte:options namespace=\"svg\" />\n2: <svelte:element this=\"svg\" viewBox=\"0 0 10 10\" />\n3: <svelte:element this=\"svg\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\" />\n                             ^\n4: <svg viewBox=\"\" />"
+	}
+]

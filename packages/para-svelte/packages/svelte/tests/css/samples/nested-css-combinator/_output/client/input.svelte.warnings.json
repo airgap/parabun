@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"~ .unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/nested-css-combinator/input.svelte",
+		"start": {
+			"line": 11,
+			"column": 2,
+			"character": 100
+		},
+		"end": {
+			"line": 11,
+			"column": 11,
+			"character": 109
+		},
+		"position": [
+			100,
+			109
+		],
+		"frame": " 9:     }\n10: \n11:     ~ .unused {\n                 ^\n12:       color: red;\n13:     }"
+	}
+]

@@ -1,0 +1,7 @@
+
+	div.svelte-70s021 {
+		color: red;
+	}
+	div.svelte-70s021 > span:where(.svelte-70s021) {
+		font-weight: bold;
+	}

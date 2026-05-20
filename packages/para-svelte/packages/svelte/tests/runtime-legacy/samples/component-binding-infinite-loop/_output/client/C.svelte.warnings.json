@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_click_events_have_key_events",
+		"message": "Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type=\"button\">` or `<a>` might be more appropriate\nhttps://svelte.dev/e/a11y_click_events_have_key_events",
+		"filename": "C.svelte",
+		"start": {
+			"line": 14,
+			"column": 0,
+			"character": 250
+		},
+		"end": {
+			"line": 19,
+			"column": 7,
+			"character": 352
+		},
+		"position": [
+			250,
+			352
+		],
+		"frame": "12: </script>\n13: \n14: <span\n         ^\n15:   on:click=\"{toggle}\"\n16:   class=\"{isCurrentlySelected ? 'selected' : null}\""
+	},
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<span>` with a click handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "C.svelte",
+		"start": {
+			"line": 14,
+			"column": 0,
+			"character": 250
+		},
+		"end": {
+			"line": 19,
+			"column": 7,
+			"character": 352
+		},
+		"position": [
+			250,
+			352
+		],
+		"frame": "12: </script>\n13: \n14: <span\n         ^\n15:   on:click=\"{toggle}\"\n16:   class=\"{isCurrentlySelected ? 'selected' : null}\""
+	}
+]

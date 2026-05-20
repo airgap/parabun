@@ -1,0 +1,82 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 22,
+			"column": 0,
+			"character": 325
+		},
+		"end": {
+			"line": 22,
+			"column": 40,
+			"character": 365
+		},
+		"position": [
+			325,
+			365
+		],
+		"frame": "20: \n21: <App {a} {b} {c} {d} {e} {...f} />\n22: <button on:click={updateProps}></button>\n                                            ^\n23: <button on:click={updateRest}></button>\n24: <button on:click={updateSpread}></button>"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 23,
+			"column": 0,
+			"character": 366
+		},
+		"end": {
+			"line": 23,
+			"column": 39,
+			"character": 405
+		},
+		"position": [
+			366,
+			405
+		],
+		"frame": "21: <App {a} {b} {c} {d} {e} {...f} />\n22: <button on:click={updateProps}></button>\n23: <button on:click={updateRest}></button>\n                                           ^\n24: <button on:click={updateSpread}></button>\n25: <button on:click={updateSpread2}></button>"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 24,
+			"column": 0,
+			"character": 406
+		},
+		"end": {
+			"line": 24,
+			"column": 41,
+			"character": 447
+		},
+		"position": [
+			406,
+			447
+		],
+		"frame": "22: <button on:click={updateProps}></button>\n23: <button on:click={updateRest}></button>\n24: <button on:click={updateSpread}></button>\n                                             ^\n25: <button on:click={updateSpread2}></button>"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 25,
+			"column": 0,
+			"character": 448
+		},
+		"end": {
+			"line": 25,
+			"column": 42,
+			"character": 490
+		},
+		"position": [
+			448,
+			490
+		],
+		"frame": "23: <button on:click={updateRest}></button>\n24: <button on:click={updateSpread}></button>\n25: <button on:click={updateSpread2}></button>\n                                              ^"
+	}
+]

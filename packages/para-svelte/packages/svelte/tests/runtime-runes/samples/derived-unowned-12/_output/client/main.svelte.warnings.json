@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `count`. Did you mean to reference it inside a derived instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 5,
+			"column": 30,
+			"character": 99
+		},
+		"end": {
+			"line": 5,
+			"column": 35,
+			"character": 104
+		},
+		"position": [
+			99,
+			104
+		],
+		"frame": "3: \n4:   let count = $state(0);\n5:   let state = $state({current: count});\n                                       ^\n6: \n7:   let linked = $derived.by(() => {"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `linked`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 14,
+			"column": 1,
+			"character": 231
+		},
+		"end": {
+			"line": 14,
+			"column": 7,
+			"character": 237
+		},
+		"position": [
+			231,
+			237
+		],
+		"frame": "12:   });\n13: \n14:   linked.current++;\n            ^\n15: </script>\n16: "
+	}
+]

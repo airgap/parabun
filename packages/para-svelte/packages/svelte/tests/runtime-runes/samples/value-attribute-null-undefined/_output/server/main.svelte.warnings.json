@@ -1,0 +1,62 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 7,
+			"column": 0,
+			"character": 74
+		},
+		"end": {
+			"line": 7,
+			"column": 65,
+			"character": 139
+		},
+		"position": [
+			74,
+			139
+		],
+		"frame": " 5: <input type=\"text\" {value} />\n 6: \n 7: <button id=\"setString\" onclick={() => {value = \"foo\";}}></button>\n                                                                     ^\n 8: <button id=\"setNull\" onclick={() => {value = null;}}></button>\n 9: <button id=\"setUndefined\" onclick={() => {value = undefined;}}></button>"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 8,
+			"column": 0,
+			"character": 140
+		},
+		"end": {
+			"line": 8,
+			"column": 62,
+			"character": 202
+		},
+		"position": [
+			140,
+			202
+		],
+		"frame": " 6: \n 7: <button id=\"setString\" onclick={() => {value = \"foo\";}}></button>\n 8: <button id=\"setNull\" onclick={() => {value = null;}}></button>\n                                                                  ^\n 9: <button id=\"setUndefined\" onclick={() => {value = undefined;}}></button>\n10: "
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 0,
+			"character": 203
+		},
+		"end": {
+			"line": 9,
+			"column": 72,
+			"character": 275
+		},
+		"position": [
+			203,
+			275
+		],
+		"frame": " 7: <button id=\"setString\" onclick={() => {value = \"foo\";}}></button>\n 8: <button id=\"setNull\" onclick={() => {value = null;}}></button>\n 9: <button id=\"setUndefined\" onclick={() => {value = undefined;}}></button>\n                                                                            ^\n10: "
+	}
+]

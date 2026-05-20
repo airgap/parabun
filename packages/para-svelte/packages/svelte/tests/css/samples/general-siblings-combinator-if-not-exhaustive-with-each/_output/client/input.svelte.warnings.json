@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".b ~ .c\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator-if-not-exhaustive-with-each/input.svelte",
+		"start": {
+			"line": 18,
+			"column": 1,
+			"character": 319
+		},
+		"end": {
+			"line": 18,
+			"column": 8,
+			"character": 326
+		},
+		"position": [
+			319,
+			326
+		],
+		"frame": "16: \n17:   /* no match */\n18:   .b ~ .c { color: green; }\n             ^\n19: </style>\n20: "
+	}
+]

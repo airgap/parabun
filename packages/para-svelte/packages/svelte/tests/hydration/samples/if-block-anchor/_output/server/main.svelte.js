@@ -1,0 +1,27 @@
+import * as $ from 'svelte/internal/server';
+
+export default function Main($$renderer, $$props) {
+	let foo = $$props['foo'];
+	let bar = $$props['bar'];
+
+	$$renderer.push(`<div>`);
+
+	if (foo) {
+		$$renderer.push('<!--[0-->');
+		$$renderer.push(`<p>foo!</p>`);
+	} else {
+		$$renderer.push('<!--[-1-->');
+	}
+
+	$$renderer.push(`<!--]--> `);
+
+	if (bar) {
+		$$renderer.push('<!--[0-->');
+		$$renderer.push(`<p>bar!</p>`);
+	} else {
+		$$renderer.push('<!--[-1-->');
+	}
+
+	$$renderer.push(`<!--]--></div>`);
+	$.bind_props($$props, { foo, bar });
+}

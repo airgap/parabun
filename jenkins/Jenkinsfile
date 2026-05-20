@@ -56,14 +56,14 @@ pipeline {
         booleanParam(name: 'PUBLISH_DOCKER', defaultValue: true,
                      description: 'Build & push Docker image to registry.digitalocean.com/parabun/parabun (:latest, :<short-sha>)')
         booleanParam(name: 'PUBLISH_NPM',    defaultValue: false,
-                     description: 'Publish @lyku/para-signals + @lyku/para-ui + @lyku/para-preprocess to npm (--tag pre). Off by default — typical builds skip it; set true for explicit publish runs (you can also disable BUILD_* params for a publish-only fast path).')
+                     description: 'Publish @lyku/para-signals + @lyku/parabun-bin carriers to npm (--tag pre). (@lyku/para-ui + @lyku/para-transpile + @lyku/para-preprocess are published by airgap/para CI.) Off by default — typical builds skip it; set true for explicit publish runs.')
     }
 
     stages {
-        // Codegen / catalog-drift check moved to airgap/para with the
-        // extraction (para owns `scripts/codegen.ts` + `codegen:check`
-        // now). parabun no longer runs it — the script was git-rm'd here,
-        // so calling it only red-failed CI on a check para already owns.
+        // The catalog (src/language-surface.ts) + its codegen
+        // (grammars / LSP allowlist / splash highlighter) were extracted
+        // to airgap/para 2026-05-17 along with editors/*. The
+        // catalog→derived-files drift check now runs in para's CI.
         stage('Build') {
             parallel {
                 stage('Linux x64') {
@@ -376,19 +376,17 @@ pipeline {
             }
         }
 
-        // npm publish: ships @lyku/para-signals + @lyku/para-ui under --tag pre
-        // so consumers opt in via `bun add @lyku/para-ui@pre`. Uses the same
-        // Doppler NPM_ACCESS_TOKEN (ci-deploy/prd) lyku-npm-publish reads.
+        // npm publish: ships @lyku/para-signals +
+        // the @lyku/parabun-bin-<os>-<arch> carriers under --tag pre. Uses
+        // the Doppler NPM_ACCESS_TOKEN (ci-deploy/prd) lyku-npm-publish
+        // reads. (@lyku/para-ui + @lyku/para-transpile + the .vsix were
+        // extracted to airgap/para 2026-05-16 — para's CI owns those.)
         //
         // Designed for two trigger modes:
         //   - Full release run: BUILD_* + PUBLISH_RELEASE + PUBLISH_DOCKER + PUBLISH_NPM
         //   - Publish-only fast path: BUILD_* all off, RUN_TESTS off,
         //     PUBLISH_RELEASE off, PUBLISH_DOCKER off, PUBLISH_NPM on.
         //     Skips the build matrix entirely.
-        //
-        // The @lyku/para-ui stage sed-swaps the local-dev `file:` dep on
-        // @lyku/para-signals to a real semver before publish, reverts in
-        // `post.always` so the file: dep stays intact for local dev.
         stage('Publish npm') {
             when { expression { params.PUBLISH_NPM } }
             agent {
@@ -415,9 +413,9 @@ pipeline {
                     echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > "$HOME/.npmrc"
                     echo "auth ok: $(npm whoami)"
                 '''
-                // @lyku/para-signals first — @lyku/para-ui depends on it.
-                // Idempotent: if the version is already on npm, skip the publish
-                // rather than failing (lets re-runs proceed to @lyku/para-ui).
+                // @lyku/para-signals. Idempotent: skip if already on npm.
+                // (@lyku/para-ui + @lyku/para-transpile were extracted to
+                // airgap/para 2026-05-16 — para's CI publishes those now.)
                 sh '''
                     set -eu
                     export HOME="${WORKSPACE}"
@@ -429,46 +427,50 @@ pipeline {
                         npm publish --tag pre
                     fi
                 '''
-                // @lyku/para-ui — needs a build + the file:-dep swap dance.
+                // @lyku/para-preprocess is now published by airgap/para's
+                // CI (it owns the fixed source post-extraction; parabun's
+                // packages/para-preprocess is a stale pre-extraction dup
+                // pending deletion). Do NOT publish it from here — doing so
+                // shipped the stale copy and broke every Lyku .pui build.
+                // @lyku/parabun-bin-<os>-<arch> — per-platform binary
+                // carriers for the P2 boundary. The umbrella @lyku/parabun-bin
+                // (the resolver) is OWNED + PUBLISHED BY airgap/para at
+                // pin-bump (boundary invariant B2): it bakes its manifest
+                // from these carriers' `parabunSha256`. Jenkins only ships
+                // the carriers. Idempotent: skip versions already on npm.
+                // Only platforms whose BUILD_* ran (artifact present) are
+                // generated — the generator skips missing ones, never
+                // fabricates a binless package.
+                script {
+                    if (params.BUILD_LINUX)       { unstash 'linux-bin' }
+                    if (params.BUILD_LINUX_ARM64) { unstash 'linux-arm64-bin' }
+                    if (params.BUILD_MACOS)       { unstash 'macos-bin' }
+                    if (params.BUILD_WINDOWS)     { unstash 'windows-bin' }
+                }
                 sh '''
                     set -eu
                     export HOME="${WORKSPACE}"
-                    cd packages/para-svelte/packages/svelte
-                    PKG_VERSION=$(node -p "require('./package.json').version")
-                    if npm view "@lyku/para-ui@$PKG_VERSION" version >/dev/null 2>&1; then
-                        echo "@lyku/para-ui@$PKG_VERSION already published, skipping"
+                    if ! ls artifacts/parabun-* >/dev/null 2>&1; then
+                        echo "no platform artifacts unstashed — skipping parabun-bin carriers"
                         exit 0
                     fi
-                    SIGNALS_VERSION="^$(node -p "require('../../../para-signals/package.json').version")"
-                    sed -i 's|"@lyku/para-signals": "file:[^"]*"|"@lyku/para-signals": "'"$SIGNALS_VERSION"'"|' package.json
-                    pnpm install --frozen-lockfile=false
-                    pnpm run build
-                    npm publish --tag pre
-                '''
-                // @lyku/para-preprocess — tsc build then publish. Same idempotence.
-                // bun-types is a workspace dep at parabun root; install from
-                // root (not from the package subdir) so tsc finds it.
-                sh '''
-                    set -eu
-                    export HOME="${WORKSPACE}"
-                    PKG_VERSION=$(node -p "require('./packages/para-preprocess/package.json').version")
-                    if npm view "@lyku/para-preprocess@$PKG_VERSION" version >/dev/null 2>&1; then
-                        echo "@lyku/para-preprocess@$PKG_VERSION already published, skipping"
-                        exit 0
-                    fi
-                    bun install --ignore-scripts --no-audit --no-fund
-                    cd packages/para-preprocess
-                    bun run build
-                    npm publish --tag pre
+                    PIN_VERSION="0.0.0-pin-${SHORT_SHA}"
+                    DIRS=$(bun scripts/publish/parabun-bin-packages.ts \
+                        --artifacts artifacts --version "$PIN_VERSION" --out .parabun-bin-dist)
+                    for d in $DIRS; do
+                        NAME=$(node -p "require('./$d/package.json').name")
+                        if npm view "$NAME@$PIN_VERSION" version >/dev/null 2>&1; then
+                            echo "$NAME@$PIN_VERSION already published, skipping"
+                        else
+                            ( cd "$d" && npm publish --tag pre )
+                        fi
+                    done
                 '''
             }
             post {
                 always {
                     sh '''
                         export HOME="${WORKSPACE}"
-                        # Revert the file: dep swap so local dev stays intact.
-                        cd packages/para-svelte/packages/svelte
-                        git checkout package.json || true
                         # Don't leak the token.
                         rm -f "$HOME/.npmrc" || true
                     '''

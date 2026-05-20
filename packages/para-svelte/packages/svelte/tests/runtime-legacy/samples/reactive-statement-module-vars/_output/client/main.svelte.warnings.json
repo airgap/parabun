@@ -1,0 +1,22 @@
+[
+	{
+		"code": "reactive_declaration_module_script_dependency",
+		"message": "Reassignments of module-level declarations will not cause reactive statements to update\nhttps://svelte.dev/e/reactive_declaration_module_script_dependency",
+		"filename": "main.svelte",
+		"start": {
+			"line": 14,
+			"column": 8,
+			"character": 218
+		},
+		"end": {
+			"line": 14,
+			"column": 15,
+			"character": 225
+		},
+		"position": [
+			218,
+			225
+		],
+		"frame": "12:   }\n13: \n14:   $: a = moduleA;\n                    ^\n15:   $: b = moduleB;\n16: </script>"
+	}
+]

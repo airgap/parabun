@@ -1,0 +1,21 @@
+import * as $ from 'svelte/internal/server';
+
+export default function Main($$renderer, $$props) {
+	let thePromise = $$props['thePromise'];
+
+	$$renderer.push(`<div>`);
+
+	$.await(
+		$$renderer,
+		thePromise,
+		() => {
+			$$renderer.push(`<p>loading...</p>`);
+		},
+		(theValue) => {
+			$$renderer.push(`<p>the value is ${$.escape(theValue)}</p>`);
+		}
+	);
+
+	$$renderer.push(`<!--]--></div>`);
+	$.bind_props($$props, { thePromise });
+}

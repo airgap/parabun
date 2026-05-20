@@ -1,0 +1,82 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"article ~ div\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator/input.svelte",
+		"start": {
+			"line": 12,
+			"column": 1,
+			"character": 275
+		},
+		"end": {
+			"line": 12,
+			"column": 14,
+			"character": 288
+		},
+		"position": [
+			275,
+			288
+		],
+		"frame": "10: \n11:   /* no match */\n12:   article ~ div { color: green; }\n                   ^\n13:   span ~ article { color: green; }\n14:   b ~ article { color: green; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"span ~ article\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator/input.svelte",
+		"start": {
+			"line": 13,
+			"column": 1,
+			"character": 308
+		},
+		"end": {
+			"line": 13,
+			"column": 15,
+			"character": 322
+		},
+		"position": [
+			308,
+			322
+		],
+		"frame": "11:   /* no match */\n12:   article ~ div { color: green; }\n13:   span ~ article { color: green; }\n                    ^\n14:   b ~ article { color: green; }\n15:   span ~ div { color: green; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"b ~ article\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator/input.svelte",
+		"start": {
+			"line": 14,
+			"column": 1,
+			"character": 342
+		},
+		"end": {
+			"line": 14,
+			"column": 12,
+			"character": 353
+		},
+		"position": [
+			342,
+			353
+		],
+		"frame": "12:   article ~ div { color: green; }\n13:   span ~ article { color: green; }\n14:   b ~ article { color: green; }\n                 ^\n15:   span ~ div { color: green; }\n16: </style>"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"span ~ div\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator/input.svelte",
+		"start": {
+			"line": 15,
+			"column": 1,
+			"character": 373
+		},
+		"end": {
+			"line": 15,
+			"column": 11,
+			"character": 383
+		},
+		"position": [
+			373,
+			383
+		],
+		"frame": "13:   span ~ article { color: green; }\n14:   b ~ article { color: green; }\n15:   span ~ div { color: green; }\n                ^\n16: </style>\n17: "
+	}
+]

@@ -1,0 +1,42 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".a + .d\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else/input.svelte",
+		"start": {
+			"line": 12,
+			"column": 1,
+			"character": 171
+		},
+		"end": {
+			"line": 12,
+			"column": 8,
+			"character": 178
+		},
+		"position": [
+			171,
+			178
+		],
+		"frame": "10: \n11:   /* no match */\n12:   .a + .d { color: green; }\n             ^\n13:   .b + .c { color: green; }\n14: </style>"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".b + .c\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-each-else/input.svelte",
+		"start": {
+			"line": 13,
+			"column": 1,
+			"character": 198
+		},
+		"end": {
+			"line": 13,
+			"column": 8,
+			"character": 205
+		},
+		"position": [
+			198,
+			205
+		],
+		"frame": "11:   /* no match */\n12:   .a + .d { color: green; }\n13:   .b + .c { color: green; }\n             ^\n14: </style>\n15: "
+	}
+]

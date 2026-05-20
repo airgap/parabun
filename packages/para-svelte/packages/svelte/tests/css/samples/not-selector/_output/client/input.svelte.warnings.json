@@ -1,0 +1,42 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"span :not(.foo)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/not-selector/input.svelte",
+		"start": {
+			"line": 26,
+			"column": 1,
+			"character": 276
+		},
+		"end": {
+			"line": 26,
+			"column": 16,
+			"character": 291
+		},
+		"position": [
+			276,
+			291
+		],
+		"frame": "24:     color: green;\n25:   }\n26:   span :not(.foo) {\n                     ^\n27:     color: red;\n28:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"span :not(.unused)\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/not-selector/input.svelte",
+		"start": {
+			"line": 29,
+			"column": 1,
+			"character": 312
+		},
+		"end": {
+			"line": 29,
+			"column": 19,
+			"character": 330
+		},
+		"position": [
+			312,
+			330
+		],
+		"frame": "27:     color: red;\n28:   }\n29:   span :not(.unused) {\n                        ^\n30:     color: red;\n31:   }"
+	}
+]

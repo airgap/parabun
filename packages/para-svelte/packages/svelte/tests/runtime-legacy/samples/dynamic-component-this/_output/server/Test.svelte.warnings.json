@@ -1,0 +1,22 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'div'. If it is for external reference only, please consider using `export const div`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "Test.svelte",
+		"start": {
+			"line": 2,
+			"column": 13,
+			"character": 22
+		},
+		"end": {
+			"line": 2,
+			"column": 16,
+			"character": 25
+		},
+		"position": [
+			22,
+			25
+		],
+		"frame": "1: <script>\n2:   export let div;\n                   ^\n3: </script>\n4: "
+	}
+]

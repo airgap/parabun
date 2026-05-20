@@ -1,0 +1,13 @@
+import 'svelte/internal/flags/async';
+import * as $ from 'svelte/internal/server';
+import Child from "./Child.svelte";
+
+export default function Main($$renderer) {
+	$$renderer.push(`<!--[-->`);
+
+	{
+		Child($$renderer, {});
+	}
+
+	$$renderer.push(`<!--]-->`);
+}

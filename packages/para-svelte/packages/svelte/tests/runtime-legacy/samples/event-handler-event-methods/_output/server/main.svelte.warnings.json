@@ -1,0 +1,82 @@
+[
+	{
+		"code": "a11y_click_events_have_key_events",
+		"message": "Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type=\"button\">` or `<a>` might be more appropriate\nhttps://svelte.dev/e/a11y_click_events_have_key_events",
+		"filename": "main.svelte",
+		"start": {
+			"line": 6,
+			"column": 0,
+			"character": 70
+		},
+		"end": {
+			"line": 8,
+			"column": 6,
+			"character": 165
+		},
+		"position": [
+			70,
+			165
+		],
+		"frame": "4: </script>\n5: \n6: <div on:click='{() => foo = true}'>\n         ^\n7:   <button class='allow-propagation'>click me</button>\n8: </div>"
+	},
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<div>` with a click handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "main.svelte",
+		"start": {
+			"line": 6,
+			"column": 0,
+			"character": 70
+		},
+		"end": {
+			"line": 8,
+			"column": 6,
+			"character": 165
+		},
+		"position": [
+			70,
+			165
+		],
+		"frame": "4: </script>\n5: \n6: <div on:click='{() => foo = true}'>\n         ^\n7:   <button class='allow-propagation'>click me</button>\n8: </div>"
+	},
+	{
+		"code": "a11y_click_events_have_key_events",
+		"message": "Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type=\"button\">` or `<a>` might be more appropriate\nhttps://svelte.dev/e/a11y_click_events_have_key_events",
+		"filename": "main.svelte",
+		"start": {
+			"line": 10,
+			"column": 0,
+			"character": 167
+		},
+		"end": {
+			"line": 12,
+			"column": 6,
+			"character": 307
+		},
+		"position": [
+			167,
+			307
+		],
+		"frame": " 8: </div>\n 9: \n10: <div on:click='{() => bar = true}'>\n          ^\n11:   <button class='stop-propagation' on:click='{event => event.stopPropagation()}'>click me</button>\n12: </div>"
+	},
+	{
+		"code": "a11y_no_static_element_interactions",
+		"message": "`<div>` with a click handler must have an ARIA role\nhttps://svelte.dev/e/a11y_no_static_element_interactions",
+		"filename": "main.svelte",
+		"start": {
+			"line": 10,
+			"column": 0,
+			"character": 167
+		},
+		"end": {
+			"line": 12,
+			"column": 6,
+			"character": 307
+		},
+		"position": [
+			167,
+			307
+		],
+		"frame": " 8: </div>\n 9: \n10: <div on:click='{() => bar = true}'>\n          ^\n11:   <button class='stop-propagation' on:click='{event => event.stopPropagation()}'>click me</button>\n12: </div>"
+	}
+]

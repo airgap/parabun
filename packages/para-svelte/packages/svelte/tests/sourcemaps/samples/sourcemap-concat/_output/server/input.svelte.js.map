@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script>console.log(\"Injected first line\");\nconsole.log('Target')</script>\n\n<h1>Hello</h1>"
+	],
+	"mappings": ";;0CAAA,CAAC;CAAM;CAAC,OAAO,CAAC,GAAG,CAAC,QAAQ;;AAAS",
+	"ignoreList": []
+}

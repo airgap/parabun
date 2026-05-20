@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 18,
+			"column": 8,
+			"character": 249
+		},
+		"end": {
+			"line": 18,
+			"column": 27,
+			"character": 268
+		},
+		"position": [
+			249,
+			268
+		],
+		"frame": "16: </script>\n17: \n18: <button on:click={add_item}>add item</button>\n                               ^\n19: <button on:click={clear}>clear</button>\n20: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 19,
+			"column": 8,
+			"character": 295
+		},
+		"end": {
+			"line": 19,
+			"column": 24,
+			"character": 311
+		},
+		"position": [
+			295,
+			311
+		],
+		"frame": "17: \n18: <button on:click={add_item}>add item</button>\n19: <button on:click={clear}>clear</button>\n                            ^\n20: \n21: {#each items as item, index (item.id)}"
+	}
+]

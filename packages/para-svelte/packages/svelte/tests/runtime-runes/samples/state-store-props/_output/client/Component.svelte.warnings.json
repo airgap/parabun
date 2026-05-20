@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `data`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 5,
+			"column": 21,
+			"character": 99
+		},
+		"end": {
+			"line": 5,
+			"column": 25,
+			"character": 103
+		},
+		"position": [
+			99,
+			103
+		],
+		"frame": "3: \n4:   let { data } = $props();\n5:   let form = writable(data.form);\n                             ^\n6: \n7:   function addTag() {"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "Component.svelte",
+		"start": {
+			"line": 14,
+			"column": 8,
+			"character": 232
+		},
+		"end": {
+			"line": 14,
+			"column": 25,
+			"character": 249
+		},
+		"position": [
+			232,
+			249
+		],
+		"frame": "12: <pre>{JSON.stringify($form, null, 2)}</pre>\n13: \n14: <button on:click={addTag}>add</button>\n                             ^\n15: "
+	}
+]

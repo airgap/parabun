@@ -1,0 +1,62 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"article > *\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-child-combinator/input.svelte",
+		"start": {
+			"line": 2,
+			"column": 1,
+			"character": 9
+		},
+		"end": {
+			"line": 2,
+			"column": 12,
+			"character": 20
+		},
+		"position": [
+			9,
+			20
+		],
+		"frame": "1: <style>\n2:   article > * {\n                ^\n3:     font-size: 36px;\n4:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \"article *\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-child-combinator/input.svelte",
+		"start": {
+			"line": 6,
+			"column": 1,
+			"character": 47
+		},
+		"end": {
+			"line": 6,
+			"column": 10,
+			"character": 56
+		},
+		"position": [
+			47,
+			56
+		],
+		"frame": "4:   }\n5: \n6:   article * {\n              ^\n7:     font-size: 36px;\n8:   }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".article > *\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-child-combinator/input.svelte",
+		"start": {
+			"line": 10,
+			"column": 1,
+			"character": 83
+		},
+		"end": {
+			"line": 10,
+			"column": 13,
+			"character": 95
+		},
+		"position": [
+			83,
+			95
+		],
+		"frame": " 8:   }\n 9: \n10:   .article > * {\n                  ^\n11:     font-size: 48px;\n12:   }"
+	}
+]

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "svelte_component_deprecated",
+		"message": "`<svelte:component>` is deprecated in runes mode — components are dynamic by default\nhttps://svelte.dev/e/svelte_component_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 24,
+			"column": 0,
+			"character": 344
+		},
+		"end": {
+			"line": 24,
+			"column": 73,
+			"character": 417
+		},
+		"position": [
+			344,
+			417
+		],
+		"frame": "22: >\n23: \n24: <svelte:component this={type} bind:this={elem}>Content</svelte:component>\n                                                                             ^\n25: "
+	}
+]

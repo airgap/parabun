@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `foo`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 5,
+			"column": 13,
+			"character": 105
+		},
+		"end": {
+			"line": 5,
+			"column": 16,
+			"character": 108
+		},
+		"position": [
+			105,
+			108
+		],
+		"frame": "3:   var foo = $state(10);\n4:   var double = $derived(foo * 2);\n5:   console.log(foo, double);\n                    ^\n6: \n7:   function wrap(initial) {"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `double`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 5,
+			"column": 18,
+			"character": 110
+		},
+		"end": {
+			"line": 5,
+			"column": 24,
+			"character": 116
+		},
+		"position": [
+			110,
+			116
+		],
+		"frame": "3:   var foo = $state(10);\n4:   var double = $derived(foo * 2);\n5:   console.log(foo, double);\n                            ^\n6: \n7:   function wrap(initial) {"
+	}
+]

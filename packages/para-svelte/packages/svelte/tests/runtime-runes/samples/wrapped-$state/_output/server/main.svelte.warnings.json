@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 22,
+			"column": 8,
+			"character": 369
+		},
+		"end": {
+			"line": 22,
+			"column": 40,
+			"character": 401
+		},
+		"position": [
+			369,
+			401
+		],
+		"frame": "20: </script>\n21: \n22: <button on:click={() => array.push('y')}>Add entry</button>\n                                            ^\n23: \n24: {#each array.value as entry}"
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 29,
+			"column": 10,
+			"character": 516
+		},
+		"end": {
+			"line": 29,
+			"column": 38,
+			"character": 544
+		},
+		"position": [
+			516,
+			544
+		],
+		"frame": "27: \n28: {#if array.value.length > 1}\n29:   <button on:click={() => array.pop()}>Remove entry</button>\n                                          ^\n30: {/if}\n31: "
+	}
+]

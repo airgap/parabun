@@ -1,0 +1,22 @@
+[
+	{
+		"code": "block_empty",
+		"message": "Empty block\nhttps://svelte.dev/e/block_empty",
+		"filename": "packages/svelte/tests/hydration/samples/no-reset-snippet/main.svelte",
+		"start": {
+			"line": 2,
+			"column": 18,
+			"character": 24
+		},
+		"end": {
+			"line": 4,
+			"column": 1,
+			"character": 29
+		},
+		"position": [
+			24,
+			29
+		],
+		"frame": "1: <div>\n2:   {#snippet test()}\n     ^\n3:     \n4:   {/snippet}"
+	}
+]

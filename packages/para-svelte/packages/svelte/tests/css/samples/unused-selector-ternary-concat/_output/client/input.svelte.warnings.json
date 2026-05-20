@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".unused\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/unused-selector-ternary-concat/input.svelte",
+		"start": {
+			"line": 14,
+			"column": 2,
+			"character": 198
+		},
+		"end": {
+			"line": 14,
+			"column": 9,
+			"character": 205
+		},
+		"position": [
+			198,
+			205
+		],
+		"frame": "12:   .thing.active {color: blue;}\n13: \n14:   .unused {color: blue;}\n             ^\n15: </style>"
+	}
+]

@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `browser`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 21,
+			"column": 5,
+			"character": 684
+		},
+		"end": {
+			"line": 21,
+			"column": 12,
+			"character": 691
+		},
+		"position": [
+			684,
+			691
+		],
+		"frame": "19:   let observer;\n20: \n21:   if (browser) {\n                 ^\n22:     observer = new MutationObserver(update_mutation_records);\n23:     observer.observe(document.querySelector('#main'), { attributes: true, subtree: true });"
+	}
+]

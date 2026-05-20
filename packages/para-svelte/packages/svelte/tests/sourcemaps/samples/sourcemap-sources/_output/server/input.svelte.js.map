@@ -1,0 +1,16 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte",
+		"../../foo.js",
+		"../../bar.js",
+		"../../foo2.js",
+		"../../bar2.js"
+	],
+	"sourcesContent": [
+		"<script>\n\texport let name;\n\nvar answer = 42; // foo.js\n\nconsole.log(answer); // bar.js\n\nvar answer2 = 84; // foo2.js\n\nconsole.log(answer2); // bar2.js\n</script>\n<h1>sourcemap-sources {name}</h1>\n"
+	],
+	"mappings": ";;mDAAA,CAAC;KACW,IAAI;KCDZ,MAAM,GAAG,EAAE;;CCAf,OAAO,CAAC,GAAG,CAAC,MAAM;;KCAd,OAAO,GAAG,EAAE;;CCAhB,OAAO,CAAC,GAAG,CAAC,OAAO;mDJGI,IAAI;;AADnB",
+	"ignoreList": []
+}

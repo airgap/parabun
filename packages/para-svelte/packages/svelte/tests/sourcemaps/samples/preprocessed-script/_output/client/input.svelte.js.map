@@ -1,0 +1,14 @@
+{
+	"version": 3,
+	"names": [
+		"baritone"
+	],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<style>\n\th1 {\n\t\tcolor: red;\n\t}\n</style>\n<script>\n\texport let foo = { bar: { baz: 5 } }\n</script>\n<h1>{foo.bar.baz}</h1>\n"
+	],
+	"mappings": ";;;;;;iDAKA,CAAC;;;KACW,GAAG,uCAAKA,GAAQ,IAAI,GAAG,EAAE,CAAC;;;;KAErC,EAAE;oBAAF,EAAE;;SAAF,EAAE;6DAFS,GAAG,qBAEV,GAAG,GAAC,GAAG,CAAC,GAAG;oBAAf,EAAE;;AADK",
+	"ignoreList": []
+}

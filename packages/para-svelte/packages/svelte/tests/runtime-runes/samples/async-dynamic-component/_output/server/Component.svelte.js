@@ -1,0 +1,6 @@
+import 'svelte/internal/flags/async';
+import * as $ from 'svelte/internal/server';
+
+export default function Component($$renderer) {
+	$$renderer.push(`<!---->Hi`);
+}

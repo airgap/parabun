@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":global(.foo) .bar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/global-with-unused-descendant/input.svelte",
+		"start": {
+			"line": 2,
+			"column": 1,
+			"character": 9
+		},
+		"end": {
+			"line": 2,
+			"column": 19,
+			"character": 27
+		},
+		"position": [
+			9,
+			27
+		],
+		"frame": "1: <style>\n2:   :global(.foo) .bar {\n                       ^\n3:     color: red;\n4:   }"
+	}
+]

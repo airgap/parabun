@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 27,
+			"column": 8,
+			"character": 356
+		},
+		"end": {
+			"line": 27,
+			"column": 41,
+			"character": 389
+		},
+		"position": [
+			356,
+			389
+		],
+		"frame": "25: \n26: \n27: <button on:click={() => toggle = !toggle}>{toggle}</button>\n                                             ^\n28: <button on:click={() => toggleTransition = !toggleTransition}>{toggleTransition}</button>\n29: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 28,
+			"column": 8,
+			"character": 416
+		},
+		"end": {
+			"line": 28,
+			"column": 61,
+			"character": 469
+		},
+		"position": [
+			416,
+			469
+		],
+		"frame": "26: \n27: <button on:click={() => toggle = !toggle}>{toggle}</button>\n28: <button on:click={() => toggleTransition = !toggleTransition}>{toggleTransition}</button>\n                                                                 ^\n29: \n30: {#if toggle}<div transition:derived></div>{/if}"
+	}
+]

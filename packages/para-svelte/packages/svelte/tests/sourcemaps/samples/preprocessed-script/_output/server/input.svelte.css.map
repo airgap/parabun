@@ -1,0 +1,13 @@
+{
+	"version": 3,
+	"file": "input.svelte.css",
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<style>\n\th1 {\n\t\tcolor: red;\n\t}\n</style>\n<script>\n\texport let foo = { bar: { baz: 5 } }\n</script>\n<h1>{foo.bar.baz}</h1>\n"
+	],
+	"names": [],
+	"mappings": ";AACA,CAAC,iBAAE,CAAC;AACJ,EAAE,UAAU;AACZ",
+	"ignoreList": []
+}

@@ -1,0 +1,11 @@
+import 'svelte/internal/flags/async';
+import * as $ from 'svelte/internal/server';
+
+export default function Main($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		let foo = false;
+		let bar = $.derived(() => foo);
+
+		$$renderer.push(`<button>toggle (${$.escape(foo)})</button>`);
+	});
+}

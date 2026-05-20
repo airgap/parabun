@@ -1,0 +1,12 @@
+import 'svelte/internal/flags/async';
+import * as $ from 'svelte/internal/server';
+
+export default function Main($$renderer, $$props) {
+	$$renderer.component(($$renderer) => {
+		let x = 0;
+		let y = 0;
+		const cleanup = () => {};
+
+		$$renderer.push(`<button>${$.escape(x)}</button> <button>${$.escape(y)}</button> <button>cleanup</button>`);
+	});
+}

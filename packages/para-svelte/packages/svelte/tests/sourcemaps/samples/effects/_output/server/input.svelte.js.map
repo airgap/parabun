@@ -1,0 +1,11 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<script lang=\"ts\">\n\t$effect(() => {\n\t\tfoo;\n\t});\n\n\t$effect.pre(() => {\n\t\tbar;\n\t});\n</script>\n"
+	],
+	"mappings": ";;;sCAAA,CAAC,AAQO,CAAC;"
+}

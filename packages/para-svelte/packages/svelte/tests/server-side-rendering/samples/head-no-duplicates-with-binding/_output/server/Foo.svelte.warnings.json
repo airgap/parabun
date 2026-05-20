@@ -1,0 +1,22 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'bar'. If it is for external reference only, please consider using `export const bar`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "packages/svelte/tests/server-side-rendering/samples/head-no-duplicates-with-binding/Foo.svelte",
+		"start": {
+			"line": 2,
+			"column": 12,
+			"character": 21
+		},
+		"end": {
+			"line": 2,
+			"column": 15,
+			"character": 24
+		},
+		"position": [
+			21,
+			24
+		],
+		"frame": "1: <script>\n2:   export let bar = null\n                   ^\n3: </script>"
+	}
+]

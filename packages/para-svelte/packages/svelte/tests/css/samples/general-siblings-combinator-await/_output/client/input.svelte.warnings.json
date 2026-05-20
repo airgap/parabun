@@ -1,0 +1,62 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".b ~ .c\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator-await/input.svelte",
+		"start": {
+			"line": 15,
+			"column": 1,
+			"character": 269
+		},
+		"end": {
+			"line": 15,
+			"column": 8,
+			"character": 276
+		},
+		"position": [
+			269,
+			276
+		],
+		"frame": "13: \n14:   /* no match */\n15:   .b ~ .c { color: green; }\n             ^\n16:   .c ~ .d { color: green; }\n17:   .b ~ .d { color: green; }"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".c ~ .d\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator-await/input.svelte",
+		"start": {
+			"line": 16,
+			"column": 1,
+			"character": 296
+		},
+		"end": {
+			"line": 16,
+			"column": 8,
+			"character": 303
+		},
+		"position": [
+			296,
+			303
+		],
+		"frame": "14:   /* no match */\n15:   .b ~ .c { color: green; }\n16:   .c ~ .d { color: green; }\n             ^\n17:   .b ~ .d { color: green; }\n18: </style>"
+	},
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".b ~ .d\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator-await/input.svelte",
+		"start": {
+			"line": 17,
+			"column": 1,
+			"character": 323
+		},
+		"end": {
+			"line": 17,
+			"column": 8,
+			"character": 330
+		},
+		"position": [
+			323,
+			330
+		],
+		"frame": "15:   .b ~ .c { color: green; }\n16:   .c ~ .d { color: green; }\n17:   .b ~ .d { color: green; }\n             ^\n18: </style>\n19: "
+	}
+]

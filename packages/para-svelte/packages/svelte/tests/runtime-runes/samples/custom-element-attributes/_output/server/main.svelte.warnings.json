@@ -1,0 +1,82 @@
+[
+	{
+		"code": "attribute_avoid_is",
+		"message": "The \"is\" attribute is not supported cross-browser and should be avoided\nhttps://svelte.dev/e/attribute_avoid_is",
+		"filename": "main.svelte",
+		"start": {
+			"line": 39,
+			"column": 3,
+			"character": 798
+		},
+		"end": {
+			"line": 39,
+			"column": 15,
+			"character": 810
+		},
+		"position": [
+			798,
+			810
+		],
+		"frame": "37: \n38: <my-element string=\"test\" object={{ test: true }}></my-element>\n39: <a is=\"my-link\" string=\"test\" object={{ test: true }}></a>\n                   ^\n40: \n41: <value-element value=\"test\"></value-element>"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 39,
+			"column": 0,
+			"character": 795
+		},
+		"end": {
+			"line": 39,
+			"column": 58,
+			"character": 853
+		},
+		"position": [
+			795,
+			853
+		],
+		"frame": "37: \n38: <my-element string=\"test\" object={{ test: true }}></my-element>\n39: <a is=\"my-link\" string=\"test\" object={{ test: true }}></a>\n                                                              ^\n40: \n41: <value-element value=\"test\"></value-element>"
+	},
+	{
+		"code": "a11y_missing_attribute",
+		"message": "`<a>` element should have an href attribute\nhttps://svelte.dev/e/a11y_missing_attribute",
+		"filename": "main.svelte",
+		"start": {
+			"line": 39,
+			"column": 0,
+			"character": 795
+		},
+		"end": {
+			"line": 39,
+			"column": 58,
+			"character": 853
+		},
+		"position": [
+			795,
+			853
+		],
+		"frame": "37: \n38: <my-element string=\"test\" object={{ test: true }}></my-element>\n39: <a is=\"my-link\" string=\"test\" object={{ test: true }}></a>\n                                                              ^\n40: \n41: <value-element value=\"test\"></value-element>"
+	},
+	{
+		"code": "attribute_avoid_is",
+		"message": "The \"is\" attribute is not supported cross-browser and should be avoided\nhttps://svelte.dev/e/attribute_avoid_is",
+		"filename": "main.svelte",
+		"start": {
+			"line": 43,
+			"column": 5,
+			"character": 958
+		},
+		"end": {
+			"line": 43,
+			"column": 23,
+			"character": 976
+		},
+		"position": [
+			958,
+			976
+		],
+		"frame": "41: <value-element value=\"test\"></value-element>\n42: <value-element {...{value: \"test\"}}></value-element>\n43: <div is=\"value-builtin\" value=\"test\"></div>\n                           ^\n44: "
+	}
+]

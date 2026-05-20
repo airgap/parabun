@@ -1,0 +1,22 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 16,
+			"column": 0,
+			"character": 221
+		},
+		"end": {
+			"line": 16,
+			"column": 45,
+			"character": 266
+		},
+		"position": [
+			221,
+			266
+		],
+		"frame": "14: </script>\n15: \n16: <button onclick={()=>props.label++}></button>\n                                                 ^\n17: \n18: <Component {...filteredProps} />"
+	}
+]

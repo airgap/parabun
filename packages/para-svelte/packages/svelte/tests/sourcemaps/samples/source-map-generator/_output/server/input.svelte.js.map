@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<h1>Testing Styles</h1>\n<h2>Testing Styles 2</h2>\n<script>export const b = 2;</script>\n<style>\n\th1 {\n\t\t--bar: red;\n\t}\n\n\th2 {\n\t\t--baz: blue;\n\t}\n</style>\n"
+	],
+	"mappings": ";;mDAEA,CAAC;OAAoB,CAAC,GAAG,CAAC;;;;AAAS",
+	"ignoreList": []
+}

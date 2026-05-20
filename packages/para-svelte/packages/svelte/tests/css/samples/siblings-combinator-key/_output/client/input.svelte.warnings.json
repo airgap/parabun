@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \".a + .c\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/siblings-combinator-key/input.svelte",
+		"start": {
+			"line": 14,
+			"column": 1,
+			"character": 166
+		},
+		"end": {
+			"line": 14,
+			"column": 8,
+			"character": 173
+		},
+		"position": [
+			166,
+			173
+		],
+		"frame": "12: \n13:   /* no match */\n14:   .a + .c { color: red; }\n             ^\n15: </style>\n16: "
+	}
+]

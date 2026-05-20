@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `promise`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 4,
+			"column": 19,
+			"character": 58
+		},
+		"end": {
+			"line": 4,
+			"column": 26,
+			"character": 65
+		},
+		"position": [
+			58,
+			65
+		],
+		"frame": "2:   let { promise } = $props();\n3: \n4:   let value = await promise;\n                              ^\n5: </script>\n6: "
+	}
+]

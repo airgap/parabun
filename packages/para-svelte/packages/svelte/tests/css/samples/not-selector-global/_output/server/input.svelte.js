@@ -1,0 +1,5 @@
+import * as $ from 'svelte/internal/server';
+
+export default function Input($$renderer) {
+	$$renderer.push(`<p class="foo svelte-xyz">foo</p> <p class="bar svelte-xyz">bar <span class="svelte-xyz">baz</span></p> <span class="svelte-xyz">buzz</span>`);
+}

@@ -1,0 +1,42 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'x'. If it is for external reference only, please consider using `export const x`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 5,
+			"column": 12,
+			"character": 118
+		},
+		"end": {
+			"line": 5,
+			"column": 13,
+			"character": 119
+		},
+		"position": [
+			118,
+			119
+		],
+		"frame": "3:   export let fromDom = '';\n4:   export let fromState = '';\n5:   export let x = 0;\n                 ^\n6:   export let y = 0;\n7: "
+	},
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'y'. If it is for external reference only, please consider using `export const y`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "main.svelte",
+		"start": {
+			"line": 6,
+			"column": 12,
+			"character": 137
+		},
+		"end": {
+			"line": 6,
+			"column": 13,
+			"character": 138
+		},
+		"position": [
+			137,
+			138
+		],
+		"frame": "4:   export let fromState = '';\n5:   export let x = 0;\n6:   export let y = 0;\n                 ^\n7: \n8:   function tap(node, callback) {"
+	}
+]

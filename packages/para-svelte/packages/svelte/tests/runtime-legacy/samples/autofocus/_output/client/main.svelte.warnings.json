@@ -1,0 +1,82 @@
+[
+	{
+		"code": "a11y_autofocus",
+		"message": "Avoid using autofocus\nhttps://svelte.dev/e/a11y_autofocus",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 23,
+			"character": 207
+		},
+		"end": {
+			"line": 9,
+			"column": 32,
+			"character": 216
+		},
+		"position": [
+			207,
+			216
+		],
+		"frame": " 7: \n 8: {#if active === 'default'}\n 9:   <input title={active} autofocus />\n                                     ^\n10: {:else if active === 'dynamic-false'}\n11:   <input title={active} autofocus={autofocusFalse} />"
+	},
+	{
+		"code": "a11y_autofocus",
+		"message": "Avoid using autofocus\nhttps://svelte.dev/e/a11y_autofocus",
+		"filename": "main.svelte",
+		"start": {
+			"line": 11,
+			"column": 23,
+			"character": 281
+		},
+		"end": {
+			"line": 11,
+			"column": 49,
+			"character": 307
+		},
+		"position": [
+			281,
+			307
+		],
+		"frame": " 9:   <input title={active} autofocus />\n10: {:else if active === 'dynamic-false'}\n11:   <input title={active} autofocus={autofocusFalse} />\n                                                      ^\n12: {:else if active === 'dynamic-true'}\n13:   <input title={active} autofocus={autofocusTrue} />"
+	},
+	{
+		"code": "a11y_autofocus",
+		"message": "Avoid using autofocus\nhttps://svelte.dev/e/a11y_autofocus",
+		"filename": "main.svelte",
+		"start": {
+			"line": 13,
+			"column": 23,
+			"character": 371
+		},
+		"end": {
+			"line": 13,
+			"column": 48,
+			"character": 396
+		},
+		"position": [
+			371,
+			396
+		],
+		"frame": "11:   <input title={active} autofocus={autofocusFalse} />\n12: {:else if active === 'dynamic-true'}\n13:   <input title={active} autofocus={autofocusTrue} />\n                                                     ^\n14: {:else if active === 'spread'}\n15:   <input title={active} {...spread} />"
+	},
+	{
+		"code": "a11y_autofocus",
+		"message": "Avoid using autofocus\nhttps://svelte.dev/e/a11y_autofocus",
+		"filename": "main.svelte",
+		"start": {
+			"line": 17,
+			"column": 35,
+			"character": 544
+		},
+		"end": {
+			"line": 17,
+			"column": 52,
+			"character": 561
+		},
+		"position": [
+			544,
+			561
+		],
+		"frame": "15:   <input title={active} {...spread} />\n16: {:else if active === 'spread-override'}\n17:   <input title={active} {...spread} autofocus={false} />\n                                                         ^\n18: {/if}"
+	}
+]

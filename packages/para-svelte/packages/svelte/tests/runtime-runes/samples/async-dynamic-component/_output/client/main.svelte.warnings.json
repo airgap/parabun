@@ -1,0 +1,42 @@
+[
+	{
+		"code": "svelte_component_deprecated",
+		"message": "`<svelte:component>` is deprecated in runes mode — components are dynamic by default\nhttps://svelte.dev/e/svelte_component_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 8,
+			"column": 0,
+			"character": 168
+		},
+		"end": {
+			"line": 8,
+			"column": 29,
+			"character": 197
+		},
+		"position": [
+			168,
+			197
+		],
+		"frame": " 6: \n 7: <X />\n 8: <svelte:component this={X} />\n                                 ^\n 9: <Y />\n10: <svelte:component this={Y} />"
+	},
+	{
+		"code": "svelte_component_deprecated",
+		"message": "`<svelte:component>` is deprecated in runes mode — components are dynamic by default\nhttps://svelte.dev/e/svelte_component_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 10,
+			"column": 0,
+			"character": 204
+		},
+		"end": {
+			"line": 10,
+			"column": 29,
+			"character": 233
+		},
+		"position": [
+			204,
+			233
+		],
+		"frame": " 8: <svelte:component this={X} />\n 9: <Y />\n10: <svelte:component this={Y} />\n                                 ^\n11: "
+	}
+]

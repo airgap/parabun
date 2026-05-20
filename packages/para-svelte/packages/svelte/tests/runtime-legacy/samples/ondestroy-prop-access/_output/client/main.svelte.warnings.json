@@ -1,0 +1,42 @@
+[
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 8,
+			"column": 0,
+			"character": 138
+		},
+		"end": {
+			"line": 8,
+			"column": 41,
+			"character": 179
+		},
+		"position": [
+			138,
+			179
+		],
+		"frame": " 6: </script>\n 7: \n 8: <button onclick={()=> count++ }></button>\n                                             ^\n 9: <button onclick={()=> show = !show }></button>\n10: "
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "main.svelte",
+		"start": {
+			"line": 9,
+			"column": 0,
+			"character": 180
+		},
+		"end": {
+			"line": 9,
+			"column": 46,
+			"character": 226
+		},
+		"position": [
+			180,
+			226
+		],
+		"frame": " 7: \n 8: <button onclick={()=> count++ }></button>\n 9: <button onclick={()=> show = !show }></button>\n                                                  ^\n10: \n11: <!-- count with bind -->"
+	}
+]

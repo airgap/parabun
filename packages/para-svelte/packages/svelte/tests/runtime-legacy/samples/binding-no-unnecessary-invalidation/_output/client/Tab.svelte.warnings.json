@@ -1,0 +1,22 @@
+[
+	{
+		"code": "export_let_unused",
+		"message": "Component has unused export property 'tab'. If it is for external reference only, please consider using `export const tab`\nhttps://svelte.dev/e/export_let_unused",
+		"filename": "Tab.svelte",
+		"start": {
+			"line": 2,
+			"column": 12,
+			"character": 21
+		},
+		"end": {
+			"line": 2,
+			"column": 15,
+			"character": 24
+		},
+		"position": [
+			21,
+			24
+		],
+		"frame": "1: <script>\n2:   export let tab;\n                   ^\n3: </script>\n4: "
+	}
+]

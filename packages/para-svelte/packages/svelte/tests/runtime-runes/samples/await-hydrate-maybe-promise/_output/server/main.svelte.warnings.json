@@ -1,0 +1,42 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `browser`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 7,
+			"column": 9,
+			"character": 111
+		},
+		"end": {
+			"line": 7,
+			"column": 16,
+			"character": 118
+		},
+		"position": [
+			111,
+			118
+		],
+		"frame": " 5:   let promise = new Promise((f) => (fulfil = f));\n 6: \n 7:   let a = browser ? promise : 42;\n                     ^\n 8:   let b = browser ? 42 : promise;\n 9: </script>"
+	},
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `browser`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 8,
+			"column": 9,
+			"character": 144
+		},
+		"end": {
+			"line": 8,
+			"column": 16,
+			"character": 151
+		},
+		"position": [
+			144,
+			151
+		],
+		"frame": " 6: \n 7:   let a = browser ? promise : 42;\n 8:   let b = browser ? 42 : promise;\n                     ^\n 9: </script>\n10: "
+	}
+]

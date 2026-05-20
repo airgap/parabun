@@ -1,0 +1,102 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `test`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 4,
+			"column": 20,
+			"character": 89
+		},
+		"end": {
+			"line": 4,
+			"column": 24,
+			"character": 93
+		},
+		"position": [
+			89,
+			93
+		],
+		"frame": "2:   let { test, store } = $props();\n3:   let der = $derived(test);\n4:   let state = $state(test);\n                            ^\n5: </script>\n6: "
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 7,
+			"column": 0,
+			"character": 107
+		},
+		"end": {
+			"line": 15,
+			"column": 9,
+			"character": 282
+		},
+		"position": [
+			107,
+			282
+		],
+		"frame": " 5: </script>\n 6: \n 7: <button\n           ^\n 8:   onclick={() => {\n 9:     //svelte-ignore ownership_invalid_mutation"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 17,
+			"column": 0,
+			"character": 284
+		},
+		"end": {
+			"line": 25,
+			"column": 9,
+			"character": 457
+		},
+		"position": [
+			284,
+			457
+		],
+		"frame": "15: </button>\n16: \n17: <button\n           ^\n18:   onclick={() => {\n19:     //svelte-ignore ownership_invalid_mutation"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 27,
+			"column": 0,
+			"character": 459
+		},
+		"end": {
+			"line": 35,
+			"column": 9,
+			"character": 636
+		},
+		"position": [
+			459,
+			636
+		],
+		"frame": "25: </button>\n26: \n27: <button\n           ^\n28:   onclick={() => {\n29:     //svelte-ignore ownership_invalid_mutation"
+	},
+	{
+		"code": "a11y_consider_explicit_label",
+		"message": "Buttons and links should either contain text or have an `aria-label`, `aria-labelledby` or `title` attribute\nhttps://svelte.dev/e/a11y_consider_explicit_label",
+		"filename": "Child.svelte",
+		"start": {
+			"line": 37,
+			"column": 0,
+			"character": 638
+		},
+		"end": {
+			"line": 45,
+			"column": 9,
+			"character": 817
+		},
+		"position": [
+			638,
+			817
+		],
+		"frame": "35: </button>\n36: \n37: <button\n           ^\n38:   onclick={() => {\n39:     //svelte-ignore ownership_invalid_mutation"
+	}
+]

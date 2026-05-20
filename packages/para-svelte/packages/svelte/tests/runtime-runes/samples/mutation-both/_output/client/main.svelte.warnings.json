@@ -1,0 +1,42 @@
+[
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 21,
+			"column": 8,
+			"character": 438
+		},
+		"end": {
+			"line": 21,
+			"column": 33,
+			"character": 463
+		},
+		"position": [
+			438,
+			463
+		],
+		"frame": "19: \n20: <span>{count} * {multiplied.multiplier} = {multiplied.count}</span>\n21: <button on:click={multiplied.inc}>Increase multiplier</button>\n                                     ^\n22: <button on:click={() => count++}>Increase count</button>\n23: "
+	},
+	{
+		"code": "event_directive_deprecated",
+		"message": "Using `on:click` to listen to the click event is deprecated. Use the event attribute `onclick` instead\nhttps://svelte.dev/e/event_directive_deprecated",
+		"filename": "main.svelte",
+		"start": {
+			"line": 22,
+			"column": 8,
+			"character": 501
+		},
+		"end": {
+			"line": 22,
+			"column": 32,
+			"character": 525
+		},
+		"position": [
+			501,
+			525
+		],
+		"frame": "20: <span>{count} * {multiplied.multiplier} = {multiplied.count}</span>\n21: <button on:click={multiplied.inc}>Increase multiplier</button>\n22: <button on:click={() => count++}>Increase count</button>\n                                    ^\n23: "
+	}
+]

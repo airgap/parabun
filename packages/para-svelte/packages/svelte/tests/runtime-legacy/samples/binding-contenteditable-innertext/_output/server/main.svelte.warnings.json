@@ -1,0 +1,22 @@
+[
+	{
+		"code": "element_invalid_self_closing_tag",
+		"message": "Self-closing HTML tags for non-void elements are ambiguous — use `<editor ...></editor>` rather than `<editor ... />`\nhttps://svelte.dev/e/element_invalid_self_closing_tag",
+		"filename": "main.svelte",
+		"start": {
+			"line": 5,
+			"column": 0,
+			"character": 38
+		},
+		"end": {
+			"line": 5,
+			"column": 55,
+			"character": 93
+		},
+		"position": [
+			38,
+			93
+		],
+		"frame": "3: </script>\n4: \n5: <editor contenteditable=\"true\" bind:innerText={name} />\n                                                          ^\n6: <p>hello {name}</p>\n7: "
+	}
+]

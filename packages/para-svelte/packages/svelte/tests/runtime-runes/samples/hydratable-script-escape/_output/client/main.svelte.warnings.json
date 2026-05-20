@@ -1,0 +1,22 @@
+[
+	{
+		"code": "state_referenced_locally",
+		"message": "This reference only captures the initial value of `key`. Did you mean to reference it inside a closure instead?\nhttps://svelte.dev/e/state_referenced_locally",
+		"filename": "main.svelte",
+		"start": {
+			"line": 6,
+			"column": 32,
+			"character": 108
+		},
+		"end": {
+			"line": 6,
+			"column": 35,
+			"character": 111
+		},
+		"position": [
+			108,
+			111
+		],
+		"frame": "4:   const { key } = $props();\n5: \n6:   const value = await hydratable(key, () => Promise.resolve('safe'));\n                                       ^\n7: </script>\n8: "
+	}
+]

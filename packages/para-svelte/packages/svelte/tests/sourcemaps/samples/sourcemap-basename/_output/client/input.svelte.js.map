@@ -1,0 +1,12 @@
+{
+	"version": 3,
+	"names": [],
+	"sources": [
+		"../../input.svelte"
+	],
+	"sourcesContent": [
+		"<style src=\"external_code.css\">/* Filename from preprocess: src/input.svelte */\nspan {\n\t--external_code-var: 1px;\n}\n\n</style>\n\n<span>Hello world</span>\n"
+	],
+	"mappings": ";;;;;;;KAEC,IAAI;;oBAAJ,IAAI",
+	"ignoreList": []
+}

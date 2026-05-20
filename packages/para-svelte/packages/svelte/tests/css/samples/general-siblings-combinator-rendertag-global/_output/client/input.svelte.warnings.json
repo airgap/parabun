@@ -1,0 +1,22 @@
+[
+	{
+		"code": "css_unused_selector",
+		"message": "Unused CSS selector \":global(.x) + .bar\"\nhttps://svelte.dev/e/css_unused_selector",
+		"filename": "packages/svelte/tests/css/samples/general-siblings-combinator-rendertag-global/input.svelte",
+		"start": {
+			"line": 22,
+			"column": 1,
+			"character": 461
+		},
+		"end": {
+			"line": 22,
+			"column": 19,
+			"character": 479
+		},
+		"position": [
+			461,
+			479
+		],
+		"frame": "20: \n21:   /* no match */\n22:   :global(.x) + .bar { color: green; }\n                        ^\n23: </style>\n24: "
+	}
+]
