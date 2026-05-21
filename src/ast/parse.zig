@@ -1398,6 +1398,41 @@ pub fn Parse(
                         }
                     },
 
+                    // Parabun: "async { … }" block expression →
+                    // (async () => { … })(). Runs an async block from a
+                    // sync context without the hand-written IIFE wrapper,
+                    // and evaluates to the resulting Promise (like Rust's
+                    // `async { … }` produces a Future). Safe to claim
+                    // because `async {` is otherwise a syntax error —
+                    // `async` must precede `function`, `(`, or an arrow
+                    // parameter.
+                    .t_open_brace => {
+                        // No inner level gate (unlike the arrow cases):
+                        // the result is a CALL expression, which binds
+                        // tighter than assignment, so it's valid anywhere
+                        // the outer `level.lt(.member)` guard already
+                        // allows — including as `await`'s operand.
+                        // function_args scope mirrors the `async x =>`
+                        // path; parseFnBody pushes its own function_body
+                        // scope for the block.
+                        _ = try p.pushScopeForParsePass(.function_args, async_range.loc);
+                        var data = FnOrArrowDataParse{
+                            .allow_await = .allow_expr,
+                            .needs_async_loc = async_range.loc,
+                        };
+                        const body = try p.parseFnBody(&data);
+                        p.popScope();
+                        const arrow_expr = p.newExpr(E.Arrow{
+                            .args = &.{},
+                            .body = body,
+                            .is_async = true,
+                        }, async_range.loc);
+                        // Immediately invoke: (async () => { … })()
+                        return p.newExpr(E.Call{
+                            .target = arrow_expr,
+                        }, async_range.loc);
+                    },
+
                     else => {},
                 }
             }
