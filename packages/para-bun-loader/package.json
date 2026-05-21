@@ -1,5 +1,5 @@
 {
-  "name": "@para/bun-loader",
+  "name": "@lyku/para-bun-loader",
   "version": "0.1.0",
   "private": true,
   "description": "Bun plugin: transpiles .pts/.pjs/.ptsx/.pjsx files via parabun, lets system Bun load Para sources transparently.",

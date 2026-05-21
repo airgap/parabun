@@ -7,28 +7,28 @@ Para is two products. **Parabun** is the runtime that bundles them and adds nati
 
 | Product | What it is | Where it runs |
 |---|---|---|
-| **Para libraries** | Eight `@para/*` npm packages — pure JS / Wasm, no native deps | Any JS runtime: Node, Deno, Bun, browsers, Parabun |
+| **Para libraries** | Eight `@lyku/para-*` npm packages — pure JS / Wasm, no native deps | Any JS runtime: Node, Deno, Bun, browsers, Parabun |
 | **The `.pts` language** | Optional sugar that compiles to standard JavaScript at parse time | Same — once compiled, the output runs anywhere |
 | **Parabun** (the runtime) | A fork of [Bun](https://bun.com) that ships Para preinstalled and adds native modules | Linux / macOS / Windows |
 
-You can use any of the three on its own. Install one `@para/*` library from npm in a Node project — never touch `.pts` or Parabun. Use `.pts` syntax with plain Node — the compiled output imports from npm. Or use Parabun and get all three preinstalled with native modules on top.
+You can use any of the three on its own. Install one `@lyku/para-*` library from npm in a Node project — never touch `.pts` or Parabun. Use `.pts` syntax with plain Node — the compiled output imports from npm. Or use Parabun and get all three preinstalled with native modules on top.
 
 ## The libraries
 
-Eight `@para/*` packages on npm. Each is independent — install only the ones your code uses.
+Eight `@lyku/para-*` packages on npm. Each is independent — install only the ones your code uses.
 
 | Package | What it does |
 |---|---|
-| [`@para/signals`](/parabun/lib/signals) | Reactive state — Signal / Computed / Effect, Solid-style fine-grained reactivity |
-| [`@para/parallel`](/parabun/lib/parallel) | Worker-pool primitives — pmap / preduce / psort + Mutex / Semaphore over SharedArrayBuffer |
-| [`@para/arena`](/parabun/lib/arena) | Buffer-pool free list for typed-array hot loops + a `scope()` helper that defers GC inside Parabun |
-| [`@para/simd`](/parabun/lib/simd) | SIMD primitives over typed arrays — sum / dot / matVec / topK / scalar+vector arithmetic |
-| [`@para/csv`](/parabun/lib/csv) | RFC 4180 CSV parse / stringify with optional parallel-mode |
-| [`@para/arrow`](/parabun/lib/arrow) | In-memory Arrow + Arrow IPC + Parquet (bloom filters, predicate pushdown, multi-row-group, recursive nesting) |
-| [`@para/rtp`](/parabun/lib/rtp) | RFC 3550 RTP packet pack/parse + jitter buffer with reactive signals |
-| [`@para/mcp`](/parabun/lib/mcp) | Model Context Protocol client — stdio + WebSocket transports |
+| [`@lyku/para-signals`](/parabun/lib/signals) | Reactive state — Signal / Computed / Effect, Solid-style fine-grained reactivity |
+| [`@lyku/para-parallel`](/parabun/lib/parallel) | Worker-pool primitives — pmap / preduce / psort + Mutex / Semaphore over SharedArrayBuffer |
+| [`@lyku/para-arena`](/parabun/lib/arena) | Buffer-pool free list for typed-array hot loops + a `scope()` helper that defers GC inside Parabun |
+| [`@lyku/para-simd`](/parabun/lib/simd) | SIMD primitives over typed arrays — sum / dot / matVec / topK / scalar+vector arithmetic |
+| [`@lyku/para-csv`](/parabun/lib/csv) | RFC 4180 CSV parse / stringify with optional parallel-mode |
+| [`@lyku/para-arrow`](/parabun/lib/arrow) | In-memory Arrow + Arrow IPC + Parquet (bloom filters, predicate pushdown, multi-row-group, recursive nesting) |
+| [`@lyku/para-rtp`](/parabun/lib/rtp) | RFC 3550 RTP packet pack/parse + jitter buffer with reactive signals |
+| [`@lyku/para-mcp`](/parabun/lib/mcp) | Model Context Protocol client — stdio + WebSocket transports |
 
-Pure JS / Wasm. No native deps. Same exports under `para:*` inside Parabun. Same exports under `@para/*` on npm.
+Pure JS / Wasm. No native deps. Same exports under `para:*` inside Parabun. Same exports under `@lyku/para-*` on npm.
 
 ## The .pts language
 
@@ -45,12 +45,12 @@ Pure JS / Wasm. No native deps. Same exports under `para:*` inside Parabun. Same
 - `arena { … }` — GC-deferred scope
 - `.score` — leading-dot lambda sugar (selector → `x => x.score`)
 
-All extensions desugar to standard JavaScript at parse time — the compiled output imports from the same `@para/*` libraries. Two ancillary packages back the language layer:
+All extensions desugar to standard JavaScript at parse time — the compiled output imports from the same `@lyku/para-*` libraries. Two ancillary packages back the language layer:
 
 | Package | Backs which feature |
 |---|---|
-| [`@para/pipeline`](/parabun/lib/pipeline) | `\|>` runtime helpers + affine-chain `compile()` |
-| [`@para/decimal`](/parabun/lib/decimal) | Exact-decimal arithmetic for `0.1d` literals |
+| [`@lyku/para-pipeline`](/parabun/lib/pipeline) | `\|>` runtime helpers + affine-chain `compile()` |
+| [`@lyku/para-decimal`](/parabun/lib/decimal) | Exact-decimal arithmetic for `0.1d` literals |
 
 You don't import these directly — `para-transpile` references them when desugaring.
 
@@ -58,7 +58,7 @@ You don't import these directly — `para-transpile` references them when desuga
 
 A fork of Bun that:
 
-1. **Ships Para preinstalled.** All eight `@para/*` libraries are bundled — `import "@para/signals"` works without `npm install`.
+1. **Ships Para preinstalled.** All eight `@lyku/para-*` libraries are bundled — `import "@lyku/para-signals"` works without `npm install`.
 2. **Compiles `.pts` natively.** No build step — Parabun parses `.pts` files directly.
 3. **Adds twelve native modules** under the `parabun:*` namespace. These are runtime-only — they only work in Parabun, by design.
 
@@ -71,7 +71,7 @@ A fork of Bun that:
 | **Hardware (Linux)** | [`parabun:gpio`](/parabun/runtime/gpio), [`parabun:i2c`](/parabun/runtime/i2c), [`parabun:spi`](/parabun/runtime/spi), [`parabun:camera`](/parabun/runtime/camera) |
 | **Compute** | [`parabun:gpu`](/parabun/runtime/gpu) — CUDA + Metal kernels for matVec / matmul / conv2D / scan / reduce / quantile / variance / argmin/max / histogram / custom MSL+CUDA |
 
-Cross-runtime compatibility isn't a goal here — these are native modules linked into the binary. If you want code that runs on Node / Deno / browsers, stay in the `@para/*` libraries.
+Cross-runtime compatibility isn't a goal here — these are native modules linked into the binary. If you want code that runs on Node / Deno / browsers, stay in the `@lyku/para-*` libraries.
 
 ## Installation
 
@@ -84,9 +84,9 @@ Same install pattern as Bun. The binary identifies as `parabun` on the CLI; exis
 To use the libraries without Parabun:
 
 ```bash
-npm install @para/signals @para/parallel @para/arrow      # whichever you need
+npm install @lyku/para-signals @lyku/para-parallel @lyku/para-arrow      # whichever you need
 ```
 
 ## License
 
-Parabun is dual-licensed under MIT and Apache 2.0, matching upstream Bun. The Para language additions and the `@para/*` / `parabun:*` modules are first-party Parabun work.
+Parabun is dual-licensed under MIT and Apache 2.0, matching upstream Bun. The Para language additions and the `@lyku/para-*` / `parabun:*` modules are first-party Parabun work.

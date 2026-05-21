@@ -1,18 +1,18 @@
 ---
-title: "@para/mcp"
+title: "@lyku/para-mcp"
 description: Model Context Protocol client. stdio (subprocess JSON-RPC 2.0) and ws (WebSocket) transports. Lists tools / resources / prompts a server exposes; structurally compatible with parabun:assistant's tools option.
 ---
 
 ```bash
-npm install @para/mcp
+npm install @lyku/para-mcp
 ```
 
-`@para/mcp` is a Model Context Protocol **client**. Connects to any MCP server over stdio or WebSocket, lists what the server exposes, and proxies tool / resource / prompt calls back through one connection object. Server-side hosting is deliberately out of scope — for that, use the standard MCP SDK.
+`@lyku/para-mcp` is a Model Context Protocol **client**. Connects to any MCP server over stdio or WebSocket, lists what the server exposes, and proxies tool / resource / prompt calls back through one connection object. Server-side hosting is deliberately out of scope — for that, use the standard MCP SDK.
 
 ## Connecting
 
 ```ts
-import mcp from "@para/mcp";
+import mcp from "@lyku/para-mcp";
 
 await using conn = await mcp.connect("stdio", "node", {
   args: ["./my-mcp-server.js"],

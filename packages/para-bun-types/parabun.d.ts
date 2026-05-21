@@ -49,7 +49,7 @@ declare module "parabun:assistant" {
     run(args: any): unknown | Promise<unknown>;
   }
 
-  /** Structural shape of `@para/mcp`'s `MCPConnection`. */
+  /** Structural shape of `@lyku/para-mcp`'s `MCPConnection`. */
   interface MCPLike {
     tools: Array<{ name: string; description?: string; inputSchema: object }>;
     call(name: string, args: Record<string, unknown>): Promise<unknown>;
@@ -1545,7 +1545,7 @@ declare module "parabun:csv" {
     /** Skip leading rows BEFORE header detection. Default 0. */
     skipLines?: number;
     /**
-     * Opt-in parallel chunk parsing via @para/parallel's worker pool. Materializes
+     * Opt-in parallel chunk parsing via @lyku/para-parallel's worker pool. Materializes
      * the input first; falls back to serial if any quote character appears.
      */
     parallel?: boolean;

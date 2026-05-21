@@ -23,7 +23,7 @@ The transpiler rewrites `0.1d` to `new Decimal("0.1")` calls.
 
 Standard JS `Number` is IEEE-754 double-precision binary float. Decimal fractions like 0.1 / 0.2 / 0.0825 don't have exact binary representations, so arithmetic on them silently accumulates error. For money / financial / pricing math that's not acceptable.
 
-`@para/decimal` uses a high-precision Decimal128-style representation under the hood — every operation is exact (within the precision budget; default 34 significant digits per IEEE 754-2008 decimal128).
+`@lyku/para-decimal` uses a high-precision Decimal128-style representation under the hood — every operation is exact (within the precision budget; default 34 significant digits per IEEE 754-2008 decimal128).
 
 ## API
 
@@ -57,4 +57,4 @@ Aggregation helpers preserve exactness across N values without intermediate roun
 ## See also
 
 - [Para language → Exact-decimal literals](/parabun/language#exact-decimal-literals-01d)
-- [`@para/arrow`](/parabun/lib/arrow) — `decimal128` arrow kind uses `@para/decimal` for read/write
+- [`@lyku/para-arrow`](/parabun/lib/arrow) — `decimal128` arrow kind uses `@lyku/para-decimal` for read/write

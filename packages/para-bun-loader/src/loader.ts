@@ -2,7 +2,7 @@
 // .ptsx/.pjsx) by subprocessing to parabun for transpilation.
 //
 // Register via `bunfig.toml`:
-//   preload = ["@para/bun-loader/preload"]
+//   preload = ["@lyku/para-bun-loader/preload"]
 //
 // The plugin shells out to a parabun-debug binary for each .pts file
 // it sees. Set the binary path via PARABUN_BIN env var; defaults to
@@ -78,7 +78,7 @@ plugin({
         proc.exited,
       ]);
       if (code !== 0) {
-        throw new Error(`@para/bun-loader: failed to transpile ${args.path}\n  exit=${code}\n  stderr=${err}`);
+        throw new Error(`@lyku/para-bun-loader: failed to transpile ${args.path}\n  exit=${code}\n  stderr=${err}`);
       }
       return {
         contents: out,

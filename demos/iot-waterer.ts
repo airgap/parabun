@@ -19,8 +19,8 @@
 
 import gpio from "parabun:gpio";
 import i2c from "parabun:i2c";
-import signals from "@para/signals";
-import lifecycle from "@para/lifecycle";
+import signals from "@lyku/para-signals";
+import lifecycle from "@lyku/para-lifecycle";
 
 interface Plant {
   name: string;

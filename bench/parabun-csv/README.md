@@ -1,6 +1,6 @@
 # parabun-csv
 
-`@para/csv` routing-shim baseline. Establishes the JS-impl ceiling that LYK-800's native SIMD parser has to beat.
+`@lyku/para-csv` routing-shim baseline. Establishes the JS-impl ceiling that LYK-800's native SIMD parser has to beat.
 
 ```sh
 bun run build:release bench/parabun-csv/run.ts
@@ -23,7 +23,7 @@ Last measured baseline on a quiet box (Bun release build, single-threaded JS imp
 The same harness will compare:
 
 - `JS-only` — bypass the routing shim, force the bundled JS path.
-- `@para/csv` — let the routing shim use `parabun:csv` when available.
+- `@lyku/para-csv` — let the routing shim use `parabun:csv` when available.
 
 Acceptance criteria from LYK-800: **≥3× at 50 MB, ≥5× at 200 MB** for quote-aware input. Highway-SIMD parser through Zig FFI, packed-buffer row return to skip the structured-clone-back tax.
 

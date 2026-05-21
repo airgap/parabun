@@ -1,9 +1,9 @@
-# @para/parallel
+# @lyku/para-parallel
 
 Persistent Worker pool — `pmap` / `preduce` for data-parallel work, `run` for one-off off-thread tasks. Pure JS, runs on browsers, Node, Bun, Deno. Falls back to sequential execution in CSP-restricted contexts where `Worker` + `new Function` aren't available.
 
 ```js
-import { pmap, preduce, run, createPool } from "@para/parallel";
+import { pmap, preduce, run, createPool } from "@lyku/para-parallel";
 
 const rows = Array.from({ length: 1_000_000 }, (_, i) => `record-${i}`);
 const scores = await pmap(

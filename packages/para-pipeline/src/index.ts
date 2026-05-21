@@ -1,8 +1,8 @@
-// Hardcoded module "@para/pipeline"
+// Hardcoded module "@lyku/para-pipeline"
 //
 // Parabun: lazy streaming combinators for the `|>` operator.
 //
-//   import { map, filter, take, collect } from "@para/pipeline";
+//   import { map, filter, take, collect } from "@lyku/para-pipeline";
 //   const out = await (source |> map(double) |> filter(even) |> take(10) |> collect);
 //
 // Every combinator returns an async generator that consumes any iterable or
@@ -15,14 +15,14 @@
 // instead of wrapping the previous layer in another async generator. The
 // fusion-aware terminals (`collect`, `sum`, `toFloat32Array`,
 // `toFloat64Array`) walk the chain, compose affine kernels when possible,
-// and dispatch to `@para/simd` as a single pass. Non-fusion-aware combinators
+// and dispatch to `@lyku/para-simd` as a single pass. Non-fusion-aware combinators
 // (filter/take/etc.) still accept a FusedChain because it exposes
 // `Symbol.asyncIterator`, so they realize the chain on demand and proceed
 // on the existing async-generator path.
 
 let _simd: any = null;
 function simd(): any {
-  if (_simd === null) _simd = require("@para/simd");
+  if (_simd === null) _simd = require("@lyku/para-simd");
   return _simd;
 }
 
@@ -34,7 +34,7 @@ function simd(): any {
 // (Vite, esbuild, webpack) don't try to resolve `parabun:gpu` at build
 // time — it only exists in the ParaBun runtime. Outside ParaBun the
 // require throws and getGpu() returns null; the pipeline falls back to
-// the @para/simd path transparently.
+// the @lyku/para-simd path transparently.
 let gpuMod: any = null;
 let gpuLookedUp = false;
 function getGpu(): any {
@@ -121,10 +121,10 @@ function composeAffineChain(ops: FusedMap[]): { K: number; C: number } | null {
 }
 
 // Tier 3 — GPU dispatch for f32 affine chains. When the fused chain
-// collapses to a single `x*K + C` and the backend beats @para/simd at this
+// collapses to a single `x*K + C` and the backend beats @lyku/para-simd at this
 // size, route the single affine pass to the GPU (one kernel launch vs
 // two SIMD passes: mulScalar + addScalar). Non-affine chains and f64
-// stay on @para/simd — neither Metal nor CUDA ship a kernel for them yet.
+// stay on @lyku/para-simd — neither Metal nor CUDA ship a kernel for them yet.
 function affineGpuF32(source: Float32Array, K: number, C: number): Float32Array | null {
   const gpu = getGpu();
   if (gpu === null) return null;
@@ -819,7 +819,7 @@ function pipe<T>(source: Source<T>, ...transforms: Array<(s: any) => any>): any 
 }
 
 // ---------------------------------------------------------------------------
-// pipeParallel — parallel pipeline execution via @para/parallel
+// pipeParallel — parallel pipeline execution via @lyku/para-parallel
 //
 // Inspects tagged stages to identify parallelizable segments:
 // - Consecutive `map` stages are composed into a single function and
@@ -837,7 +837,7 @@ const PARALLEL_THRESHOLD = 256;
 
 let _parallel: any = null;
 function parallel(): any {
-  if (_parallel === null) _parallel = require("@para/parallel");
+  if (_parallel === null) _parallel = require("@lyku/para-parallel");
   return _parallel;
 }
 

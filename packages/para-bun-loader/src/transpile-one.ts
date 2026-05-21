@@ -3,7 +3,7 @@
 // (the parabun-fork transpiler understands all Para syntax — model,
 // match, ::, is, |>, pure, etc.), and write the resulting JS to stdout.
 //
-// Designed to be subprocessed by `@para/bun-loader`'s plugin from
+// Designed to be subprocessed by `@lyku/para-bun-loader`'s plugin from
 // system Bun. Per-call cost is ~10-30ms (parabun startup + transpile);
 // for a typical workspace build (a few hundred .pts files), total
 // transpile time is single-digit seconds.

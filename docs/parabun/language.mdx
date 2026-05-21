@@ -3,9 +3,9 @@ title: Para language
 description: Parabun adds a small set of language extensions to JavaScript / TypeScript — purity declarations, error chaining, pipelines, parallel composition, exact-decimal literals, and bare-dot lambda sugar. Everything desugars to standard JS at parse time.
 ---
 
-The Para language (`.pts` / `.pjs`) is a strict superset of JavaScript / TypeScript. It compiles to standard JS at parse time, and the compiled output imports from the [`@para/*` libraries](/parabun/overview#the-libraries) — so `.pts` is sugar over the same eight packages, not a separate ecosystem. The Para language is **optional**: every demo on this site has a `.ts` form that uses the libraries directly.
+The Para language (`.pts` / `.pjs`) is a strict superset of JavaScript / TypeScript. It compiles to standard JS at parse time, and the compiled output imports from the [`@lyku/para-*` libraries](/parabun/overview#the-libraries) — so `.pts` is sugar over the same eight packages, not a separate ecosystem. The Para language is **optional**: every demo on this site has a `.ts` form that uses the libraries directly.
 
-Inside Parabun, `.pts` is parsed by the built-in transpiler with no build step. A standalone transpiler (`@para/transpile`) for non-Parabun toolchains is in development.
+Inside Parabun, `.pts` is parsed by the built-in transpiler with no build step. A standalone transpiler (`@lyku/para-transpile`) for non-Parabun toolchains is in development.
 
 ## Purity (`pure function`)
 
@@ -80,7 +80,7 @@ parallel await using
 
 ## Exact-decimal literals (`0.1d`)
 
-Numeric literals with a `d` suffix are exact-decimal values backed by [`@para/decimal`](/parabun/lib/decimal):
+Numeric literals with a `d` suffix are exact-decimal values backed by [`@lyku/para-decimal`](/parabun/lib/decimal):
 
 ```ts
 const price = 0.1d + 0.2d;  // exactly 0.3, not 0.30000000000000004
@@ -106,6 +106,6 @@ Works in chain-op handlers (`..>`, `..!`, `..&`) AND in any argument position.
 - `.pts` — Para TypeScript
 - `.pjs` — Para JavaScript
 
-The transpiler ships as `@para/transpile` (npm) for use outside the Parabun runtime — same transforms, standard-JS output. Inside Parabun, all `.ts` and `.js` files also get the Para parser, so `.pts` is just a convention.
+The transpiler ships as `@lyku/para-transpile` (npm) for use outside the Parabun runtime — same transforms, standard-JS output. Inside Parabun, all `.ts` and `.js` files also get the Para parser, so `.pts` is just a convention.
 
-See [`@para/transpile`](https://github.com/airgap/para-transpile) for the standalone parser and the parity test suite.
+See [`@lyku/para-transpile`](https://github.com/airgap/para-transpile) for the standalone parser and the parity test suite.

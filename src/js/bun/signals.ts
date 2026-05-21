@@ -1,4 +1,4 @@
-// Hardcoded module "@para/signals"
+// Hardcoded module "@lyku/para-signals"
 //
 // Parabun: fine-grained reactive primitives. Three shapes:
 //   signal(v)    → State signal, .get()/.set()/.peek()
@@ -11,7 +11,7 @@
 // untrack(fn) to read signals without subscribing.
 //
 // The language surface (`signal x = 0`, `effect { ... }`) desugars to
-// calls against this module — same play as `arena { ... }` → @para/arena.
+// calls against this module — same play as `arena { ... }` → @lyku/para-arena.
 
 let currentTarget: ComputedSignal<any> | EffectImpl | null = null;
 let batchDepth = 0;
@@ -226,7 +226,7 @@ function signal<T>(v: T): StateSignal<T> {
  *
  *   signal now = Date.now() every 1_000;
  *   // ↓ desugars to ↓
- *   const now = require("@para/signals").signalEvery(() => Date.now(), 1_000);
+ *   const now = require("@lyku/para-signals").signalEvery(() => Date.now(), 1_000);
  *
  * `now.stop()` clears the interval; the internal timer is `.unref()`d
  * so a bare declaration doesn't pin the event loop. Errors thrown by
@@ -238,7 +238,7 @@ function signalEvery<T>(fn: () => T, periodMs: number): StateSignal<T> & { stop:
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
   if (typeof periodMs !== "number" || !Number.isFinite(periodMs) || periodMs < 1) {
-    throw new RangeError("@para/signals.signalEvery: periodMs must be a positive finite number");
+    throw new RangeError("@lyku/para-signals.signalEvery: periodMs must be a positive finite number");
   }
   const sig = new StateSignal<T>(fn());
   const id = setInterval(() => {
@@ -346,7 +346,7 @@ function fromAsync<T>(iterable: AsyncIterable<T>): DriverHandle<T | undefined>;
 function fromAsync<T, V>(iterable: AsyncIterable<T>, mapFn: (v: T) => V, init?: V): DriverHandle<V | undefined>;
 function fromAsync<T, V = T>(iterable: AsyncIterable<T>, mapFn?: (v: T) => V, init?: V): DriverHandle<V | undefined> {
   if (iterable == null || typeof (iterable as any)[Symbol.asyncIterator] !== "function") {
-    throw new TypeError("@para/signals.fromAsync: first argument must be an async iterable");
+    throw new TypeError("@lyku/para-signals.fromAsync: first argument must be an async iterable");
   }
   if (mapFn !== undefined && !$isCallable(mapFn)) {
     throw $ERR_INVALID_ARG_TYPE("mapFn", "function", mapFn);
@@ -360,10 +360,10 @@ function pump<T>(iterable: AsyncIterable<T>, sig: StateSignal<T>): () => void;
 function pump<T, V>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn: (v: T) => V): () => void;
 function pump<T, V = T>(iterable: AsyncIterable<T>, sig: StateSignal<V>, mapFn?: (v: T) => V): () => void {
   if (iterable == null || typeof (iterable as any)[Symbol.asyncIterator] !== "function") {
-    throw new TypeError("@para/signals.pump: first argument must be an async iterable");
+    throw new TypeError("@lyku/para-signals.pump: first argument must be an async iterable");
   }
   if (!(sig instanceof StateSignal)) {
-    throw new TypeError("@para/signals.pump: second argument must be a writable signal (from `signal()`)");
+    throw new TypeError("@lyku/para-signals.pump: second argument must be a writable signal (from `signal()`)");
   }
   if (mapFn !== undefined && !$isCallable(mapFn)) {
     throw $ERR_INVALID_ARG_TYPE("mapFn", "function", mapFn);
@@ -396,7 +396,7 @@ function fromInterval<T>(fn: () => T | Promise<T>, periodMs: number): DriverHand
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
   if (typeof periodMs !== "number" || !Number.isFinite(periodMs) || periodMs < 1) {
-    throw new RangeError("@para/signals.fromInterval: periodMs must be a positive finite number");
+    throw new RangeError("@lyku/para-signals.fromInterval: periodMs must be a positive finite number");
   }
   const sig = new StateSignal<T | undefined>(undefined);
   let stopped = false;
@@ -450,7 +450,7 @@ function readEdgeSource<T>(source: EdgeSource<T>): { peek: () => boolean; read: 
   if ($isCallable(source)) {
     return { peek: () => !!untrack(() => (source as () => T)()), read: () => !!(source as () => T)() };
   }
-  throw new TypeError("@para/signals.when: first argument must be a signal or a predicate function");
+  throw new TypeError("@lyku/para-signals.when: first argument must be a signal or a predicate function");
 }
 
 // Shared edge runner for `when` / `whenStart`. Fires `fn` on each
@@ -675,7 +675,7 @@ function wrapSyncIter<T>(it: Iterator<T>): AsyncIterator<T> {
 
 function fromStream<T>(stream: ReadableStream<T>, init?: T): { value: ReadableSignal<T | undefined> } & ResourceHandle {
   if (stream == null || typeof (stream as any).getReader !== "function") {
-    throw new TypeError("@para/signals.fromStream: first argument must be a ReadableStream");
+    throw new TypeError("@lyku/para-signals.fromStream: first argument must be a ReadableStream");
   }
   return resource(({ signal: sig, onDispose }) => {
     const value = sig<T | undefined>(init);
@@ -706,7 +706,7 @@ function fromEventTarget<T = Event>(
   opts: { initial?: T; map?: (e: Event) => T } = {},
 ): { value: ReadableSignal<T | undefined> } & ResourceHandle {
   if (target == null || typeof (target as any).addEventListener !== "function") {
-    throw new TypeError("@para/signals.fromEventTarget: first argument must be an EventTarget");
+    throw new TypeError("@lyku/para-signals.fromEventTarget: first argument must be an EventTarget");
   }
   const map = opts.map;
   return resource(({ signal: sig, onDispose }) => {
@@ -731,10 +731,10 @@ function fromEventTarget<T = Event>(
 
 function throttled<T>(source: ReadableSignal<T>, ms: number): { value: ReadableSignal<T> } & ResourceHandle {
   if (!(source instanceof ReadableSignal)) {
-    throw new TypeError("@para/signals.throttled: first argument must be a signal");
+    throw new TypeError("@lyku/para-signals.throttled: first argument must be a signal");
   }
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
-    throw new RangeError("@para/signals.throttled: ms must be a non-negative finite number");
+    throw new RangeError("@lyku/para-signals.throttled: ms must be a non-negative finite number");
   }
   return resource(({ signal: sig, onDispose }) => {
     const out = sig<T>(source.peek());
@@ -781,10 +781,10 @@ function throttled<T>(source: ReadableSignal<T>, ms: number): { value: ReadableS
 
 function debounced<T>(source: ReadableSignal<T>, ms: number): { value: ReadableSignal<T> } & ResourceHandle {
   if (!(source instanceof ReadableSignal)) {
-    throw new TypeError("@para/signals.debounced: first argument must be a signal");
+    throw new TypeError("@lyku/para-signals.debounced: first argument must be a signal");
   }
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) {
-    throw new RangeError("@para/signals.debounced: ms must be a non-negative finite number");
+    throw new RangeError("@lyku/para-signals.debounced: ms must be a non-negative finite number");
   }
   return resource(({ signal: sig, onDispose }) => {
     const out = sig<T>(source.peek());

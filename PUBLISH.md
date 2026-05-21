@@ -1,6 +1,6 @@
-# Publishing `@para/*` to npm
+# Publishing `@lyku/para-*` to npm
 
-You own the `@para` scope on public npm. Pre-release `@para/*` packages publish
+You own the `@para` scope on public npm. Pre-release `@lyku/para-*` packages publish
 there directly — no registry setup, no scope shuffling.
 
 ## Packages in the pre-release lane
@@ -68,7 +68,7 @@ cd packages/para-signals && npm version 0.0.1-pre.1 --no-git-tag-version
 ```
 
 When the API is stable enough to drop `-pre`, bump to `0.0.1` then `0.1.0`. The
-`feedback_no_partial_release` rule (`@para/transpile` stays gated until every
+`feedback_no_partial_release` rule (`@lyku/para-transpile` stays gated until every
 desugaring works) applies to GA versions only; pre-releases are explicit
 "not GA" and the API surface may change.
 

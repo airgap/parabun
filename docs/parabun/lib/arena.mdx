@@ -1,18 +1,18 @@
 ---
-title: "@para/arena"
+title: "@lyku/para-arena"
 description: Buffer-pool helpers for typed-array hot loops, plus a no-op scope() so .pts code with arena { … } blocks compiles cleanly outside Parabun.
 ---
 
 ```bash
-npm install @para/arena
+npm install @lyku/para-arena
 ```
 
-`@para/arena` is the cross-runtime backing for two .pts constructs — `arena { … }` blocks and explicit `Pool` reuse. The pool is a real typed-array free list everywhere; `scope` is a passthrough on Node / Deno / browsers (where GC isn't user-controllable) and defers JSC garbage collection inside Parabun.
+`@lyku/para-arena` is the cross-runtime backing for two .pts constructs — `arena { … }` blocks and explicit `Pool` reuse. The pool is a real typed-array free list everywhere; `scope` is a passthrough on Node / Deno / browsers (where GC isn't user-controllable) and defers JSC garbage collection inside Parabun.
 
 ## Pool
 
 ```ts
-import { Pool } from "@para/arena";
+import { Pool } from "@lyku/para-arena";
 
 const buf = new Pool(Float32Array, 1024, { prewarm: 4 });
 
@@ -31,7 +31,7 @@ buf.release(a);            // back to the free list
 ## scope
 
 ```ts
-import { scope } from "@para/arena";
+import { scope } from "@lyku/para-arena";
 
 scope(() => {
   // hot inner loop with no GC pauses inside Parabun

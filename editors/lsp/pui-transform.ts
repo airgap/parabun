@@ -30,7 +30,7 @@ import {
   transformPipeline,
   transformPure,
   transformRanges,
-} from "@para/transpile/syntactic"; // Babel-free entry — NOT the package
+} from "@lyku/para-transpile/syntactic"; // Babel-free entry — NOT the package
 // index (which drags bare-read/using-polyfill → @babel and breaks the
 // CI bundle build; was the cause of parabun build #235's failure).
 import { svelte2tsx } from "svelte2tsx";
@@ -340,10 +340,10 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
       }
     }
 
-    // ── general parabun syntax → TS, single-sourced via @para/transpile ──
+    // ── general parabun syntax → TS, single-sourced via @lyku/para-transpile ──
     // LYK-913/914/915: the build path lowers general parabun syntax via
     // Bun.Transpiler (type-stripping — fine for runtime). svelte2tsx
-    // needs *typed* TS, so the projection runs @para/transpile's
+    // needs *typed* TS, so the projection runs @lyku/para-transpile's
     // type-preserving, position-preserving passes instead:
     //   • transformDecimal   — `1.5d` → `__paraDec("1.5")`
     //   • transformFun       — `fun` → `function`
@@ -352,7 +352,7 @@ function lowerPuiFileWithMap(raw: string, filename: string): LoweredFile {
     //   • transformPipeline  — `x |> f` → `f(x)` (block-scope-aware)
     //   • transformErrorChain— `p ..! h`/`..&`/`..>` → .catch/.finally/.then
     //   • transformRanges    — `a..b` → `__parabunRange(a, b)`
-    // Order mirrors @para/transpile's own `transpile()` (decimal, fun,
+    // Order mirrors @lyku/para-transpile's own `transpile()` (decimal, fun,
     // pure, is, …, pipeline before error-chain so `|>` binds tighter,
     // ranges last). All are region-based / line-preserving, so the
     // per-line MagicString diff keeps low.map line-accurate. The injected

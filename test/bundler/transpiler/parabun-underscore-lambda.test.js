@@ -117,7 +117,7 @@ describe("Parabun expression-context `_` shorthand", () => {
     // wrap+substitute pipeline ran (otherwise filter would have
     // received a bare `_` identifier reference, blowing up at runtime).
     const out = ts(`
-      import { filter, collect } from "@para/pipeline";
+      import { filter, collect } from "@lyku/para-pipeline";
       const data = [1, -2, 3];
       const r = data |> filter(_ > 0) |> collect;
     `);

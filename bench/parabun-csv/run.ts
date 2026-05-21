@@ -1,9 +1,9 @@
-// Bench: @para/csv with the parabun:csv routing shim.
+// Bench: @lyku/para-csv with the parabun:csv routing shim.
 //
 //   bun run build:release bench/parabun-csv/run.ts
 //
 // Today (LYK-800 not landed): both paths run the bundled JS impl, so
-// the ratio prints ~1.00×. Once the native parser lands, the @para/csv
+// the ratio prints ~1.00×. Once the native parser lands, the @lyku/para-csv
 // path quietly starts using parabun:csv and the ratio shifts.
 //
 // What we measure: end-to-end parseCsv over a synthetic CSV at three
@@ -51,7 +51,7 @@ async function timeParseCsv(input: string, iters: number): Promise<number> {
   return samples[Math.floor(samples.length / 2)];
 }
 
-console.log(`@para/csv routing-shim bench`);
+console.log(`@lyku/para-csv routing-shim bench`);
 console.log(`(Today: routing falls through to JS impl; ratio ~= 1.00. Native lands w/ LYK-800.)`);
 console.log();
 console.log("size(MB)  rows       median(ms)   throughput");

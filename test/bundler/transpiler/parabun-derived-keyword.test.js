@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
 // Parabun `derived NAME = EXPR` declaration. Mirrors `signal NAME = EXPR`
-// but always lowers to `require("@para/signals").derived(() => EXPR)`,
+// but always lowers to `require("@lyku/para-signals").derived(() => EXPR)`,
 // regardless of whether EXPR reads other signals and regardless of the
 // `@parabun-strict-signals` file pragma. The declared name is signal-bound
 // so reads of NAME elsewhere desugar to `NAME.get()`.
@@ -27,20 +27,20 @@ async function runFixture(prefix, source) {
 describe("Parabun: derived NAME = EXPR — desugar", () => {
   it("plain literal RHS still desugars to derived(() => …)", () => {
     const out = transform(`derived x = 42;`);
-    expect(out).toContain(`/signals").derived(`);
+    expect(out).toContain(`signals").derived(`);
     expect(out).toMatch(/derived\(\(\)\s*=>\s*42\)/);
   });
 
   it("single signal read becomes .get() inside the arrow body", () => {
     const out = transform(`signal a = 1;\nderived b = a + 1;`);
-    expect(out).toContain(`/signals").derived(`);
+    expect(out).toContain(`signals").derived(`);
     expect(out).toContain("a.get()");
     expect(out).toMatch(/derived\(\(\)\s*=>\s*a\.get\(\)\s*\+\s*1\)/);
   });
 
   it("multi-signal read — each gets .get() inside the arrow body", () => {
     const out = transform(`signal a = 1;\nsignal b = 2;\nderived c = a + b;`);
-    expect(out).toContain(`/signals").derived(`);
+    expect(out).toContain(`signals").derived(`);
     expect(out).toContain("a.get()");
     expect(out).toContain("b.get()");
   });
@@ -58,13 +58,13 @@ describe("Parabun: derived NAME = EXPR — desugar", () => {
 
   it("TypeScript annotation is stripped from the desugared output", () => {
     const out = transform(`signal a = 1;\nderived b: number = a + 1;`);
-    expect(out).toContain(`/signals").derived(`);
+    expect(out).toContain(`signals").derived(`);
     expect(out).not.toContain(": number");
   });
 
   it("`derived` as a plain identifier (import / call) is not the keyword form", () => {
     const out = transform(
-      `import { signal, derived } from "@para/signals";\nconst a = signal(1);\nconst b = derived(() => a.get() * 2);`,
+      `import { signal, derived } from "@lyku/para-signals";\nconst a = signal(1);\nconst b = derived(() => a.get() * 2);`,
     );
     expect(out).toContain(`derived(() => a.get() * 2)`);
     // The const decl should remain a normal call, not be rewritten as a

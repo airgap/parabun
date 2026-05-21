@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import sigs from "@para/signals";
+import sigs from "@lyku/para-signals";
 
-// @para/signals.fromInterval — drive a signal from a periodic fn call.
+// @lyku/para-signals.fromInterval — drive a signal from a periodic fn call.
 
-describe("@para/signals.fromInterval", () => {
+describe("@lyku/para-signals.fromInterval", () => {
   test("first value lands without waiting periodMs", async () => {
     const { signal: sig, dispose } = sigs.fromInterval(() => 42, 1000);
     // Initial value is undefined…

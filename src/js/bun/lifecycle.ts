@@ -1,7 +1,7 @@
-// Hardcoded module "@para/lifecycle"
+// Hardcoded module "@lyku/para-lifecycle"
 //
 // Process-state coordination — SIGINT/SIGTERM-aware keep-alive with
-// an optional shutdown hook. Lives next to @para/arena because both
+// an optional shutdown hook. Lives next to @lyku/para-arena because both
 // are about process state, not reactive data flow.
 //
 // Typical use at the bottom of a long-running CLI/IoT script:
@@ -45,7 +45,7 @@ function keepAlive(options: KeepAliveOptions = {}): Promise<void> {
       try {
         await options.onShutdown();
       } catch (e) {
-        console.error("@para/lifecycle: onShutdown threw:", e);
+        console.error("@lyku/para-lifecycle: onShutdown threw:", e);
       }
     }
   });

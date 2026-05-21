@@ -1,4 +1,4 @@
-# `@para/bun-types`
+# `@lyku/para-bun-types`
 
 TypeScript ambient declarations for ParaBun's `parabun:*` runtime modules.
 
@@ -42,7 +42,7 @@ Workspaces / local link:
 // package.json
 {
   "devDependencies": {
-    "@para/bun-types": "file:../path/to/parabun/packages/para-bun-types"
+    "@lyku/para-bun-types": "file:../path/to/parabun/packages/para-bun-types"
   }
 }
 ```
@@ -50,7 +50,7 @@ Workspaces / local link:
 Once published, plain:
 
 ```sh
-bun add -d @para/bun-types
+bun add -d @lyku/para-bun-types
 ```
 
 ## Use
@@ -60,7 +60,7 @@ Add to your `tsconfig.json`:
 ```jsonc
 {
   "compilerOptions": {
-    "types": ["bun-types", "@para/bun-types"]
+    "types": ["bun-types", "@lyku/para-bun-types"]
   }
 }
 ```

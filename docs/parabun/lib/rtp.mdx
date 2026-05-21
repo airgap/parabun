@@ -1,18 +1,18 @@
 ---
-title: "@para/rtp"
+title: "@lyku/para-rtp"
 description: RFC 3550 RTP packet pack/parse + sequence-aware jitter buffer with reactive signals. Pure JS, no native deps. Build voice/video transport over UDP / WebSocket / raw TCP without a full WebRTC stack.
 ---
 
 ```bash
-npm install @para/rtp
+npm install @lyku/para-rtp
 ```
 
-`@para/rtp` is the framing-and-reorder layer that every higher-level real-time stack builds on. It does packet pack/parse and sequence-aware reorder; it does **not** do SRTP, RTCP, FEC, or rate adaptation — those belong above this layer.
+`@lyku/para-rtp` is the framing-and-reorder layer that every higher-level real-time stack builds on. It does packet pack/parse and sequence-aware reorder; it does **not** do SRTP, RTCP, FEC, or rate adaptation — those belong above this layer.
 
 ## Packet pack / parse
 
 ```ts
-import rtp from "@para/rtp";
+import rtp from "@lyku/para-rtp";
 
 const wire = rtp.pack({
   payloadType: 111,         // Opus default in many SDP configurations
@@ -31,7 +31,7 @@ const { sequence, timestamp, payload, marker, ssrc } = rtp.parse(wire);
 ## JitterBuffer
 
 ```ts
-import rtp from "@para/rtp";
+import rtp from "@lyku/para-rtp";
 
 const jb = new rtp.JitterBuffer({ depth: 8 });
 jb.push(packet);            // out-of-order is fine
@@ -51,7 +51,7 @@ A bounded reorder window. `depth` is the maximum lag (in sequence numbers) the b
 
 ## Reactive signals
 
-Three [`@para/signals`](/parabun/lib/signals) Signals on every JitterBuffer instance:
+Three [`@lyku/para-signals`](/parabun/lib/signals) Signals on every JitterBuffer instance:
 
 ```ts
 const jb = new rtp.JitterBuffer({ depth: 8 });
@@ -71,5 +71,5 @@ Wire them into a UI / metrics surface without polling.
 
 ## See also
 
-- [`@para/signals`](/parabun/lib/signals) — the reactive layer the JitterBuffer's signals come from
+- [`@lyku/para-signals`](/parabun/lib/signals) — the reactive layer the JitterBuffer's signals come from
 - [`parabun:audio`](/parabun/runtime/audio) — Opus encode/decode that pairs naturally with `rtp.pack`

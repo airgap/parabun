@@ -7,8 +7,8 @@
 // `signals.effect(() => { ... })`. Identical behavior.
 
 import gpio from "parabun:gpio";
-import signals from "@para/signals";
-import lifecycle from "@para/lifecycle";
+import signals from "@lyku/para-signals";
+import lifecycle from "@lyku/para-lifecycle";
 
 const args = process.argv.slice(2);
 const portIdx = args.indexOf("--port");

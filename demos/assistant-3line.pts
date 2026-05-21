@@ -7,7 +7,7 @@
 //
 // `assistant.create` takes a model trio + an optional system prompt + an
 // optional `tools` array (inline {name,schema,run} descriptors and/or
-// @para/mcp connection objects); `bot.run()` opens the mic + speaker
+// @lyku/para-mcp connection objects); `bot.run()` opens the mic + speaker
 // and loops: VAD → STT → LLM (grammar-constrained tool selection) →
 // TTS → speaker. The reactive `bot.state` signal cycles through
 // "idle" | "listening" | "thinking" | "speaking" — pipe it to a
@@ -32,7 +32,7 @@ await using bot = await assistant.create({
   stt: stt!,
   tts: tts!,
   system: "You are a concise voice assistant. Answer in one or two sentences.",
-  // Replace with real smart-home / media bridges (e.g. an @para/mcp connection).
+  // Replace with real smart-home / media bridges (e.g. an @lyku/para-mcp connection).
   tools: [
     {
       name: "setLight",

@@ -6,7 +6,7 @@
 // resolver (owned by the airgap/para repo) bakes its manifest from these
 // fields — see /raid/para-design/para-parabun-boundary.md (P2, decision 1).
 //
-// Scope is ALWAYS @lyku/* (the only scope the org owns; @para/* is
+// Scope is ALWAYS @lyku/* (the only scope the org owns; @lyku/para-* is
 // unpublishable). NEVER an oven-sh / upstream-Bun target.
 //
 // Usage:

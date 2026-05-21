@@ -621,7 +621,7 @@ describe("pipeline inline fusion", () => {
         const r = source() |> map(double) |> sum
       `);
       // source() may return an async iterable that needs runtime semantics
-      // (e.g. from @para/pipeline). Don't fuse calls.
+      // (e.g. from @lyku/para-pipeline). Don't fuse calls.
       expect(out).toContain("sum(");
       expect(out).not.toContain("for (");
     });
