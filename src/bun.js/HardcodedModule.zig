@@ -142,6 +142,20 @@ pub const HardcodedModule = enum {
         .{ "para:rtp", .@"@para/rtp" },
         .{ "para:signals", .@"@para/signals" },
         .{ "para:simd", .@"@para/simd" },
+        // LYK-806: `@lyku/para-*` is the canonical published scope (the
+        // parser emits these names for `signal`/`when`/`|>`/etc.). They
+        // route to the same bundled `@para/*` builtins; `@para/*` is kept
+        // as the registered name so existing imports keep resolving.
+        .{ "@lyku/para-arena", .@"@para/arena" },
+        .{ "@lyku/para-arrow", .@"@para/arrow" },
+        .{ "@lyku/para-lifecycle", .@"@para/lifecycle" },
+        .{ "@lyku/para-mcp", .@"@para/mcp" },
+        .{ "@lyku/para-parallel", .@"@para/parallel" },
+        .{ "@lyku/para-pipeline", .@"@para/pipeline" },
+        .{ "@lyku/para-rtp", .@"@para/rtp" },
+        .{ "@lyku/para-signals", .@"@para/signals" },
+        .{ "@lyku/para-simd", .@"@para/simd" },
+        .{ "@lyku/para-csv", .@"parabun:csv" },
         // Parabun runtime modules — native, runtime-only.
         .{ "parabun:assistant", .@"parabun:assistant" },
         .{ "parabun:audio", .@"parabun:audio" },
@@ -452,6 +466,19 @@ pub const HardcodedModule = enum {
             .{ "para:rtp", .{ .path = "@para/rtp" } },
             .{ "para:signals", .{ .path = "@para/signals" } },
             .{ "para:simd", .{ .path = "@para/simd" } },
+            // LYK-806: canonical `@lyku/para-*` scope. The parser emits
+            // these for reactive keywords (`signal`/`when`/`|>`); route
+            // them to the registered `@para/*` builtins.
+            .{ "@lyku/para-arena", .{ .path = "@para/arena" } },
+            .{ "@lyku/para-arrow", .{ .path = "@para/arrow" } },
+            .{ "@lyku/para-lifecycle", .{ .path = "@para/lifecycle" } },
+            .{ "@lyku/para-mcp", .{ .path = "@para/mcp" } },
+            .{ "@lyku/para-parallel", .{ .path = "@para/parallel" } },
+            .{ "@lyku/para-pipeline", .{ .path = "@para/pipeline" } },
+            .{ "@lyku/para-rtp", .{ .path = "@para/rtp" } },
+            .{ "@lyku/para-signals", .{ .path = "@para/signals" } },
+            .{ "@lyku/para-simd", .{ .path = "@para/simd" } },
+            .{ "@lyku/para-csv", .{ .path = "parabun:csv" } },
             // Parabun runtime modules.
             .{ "parabun:assistant", .{ .path = "parabun:assistant" } },
             .{ "parabun:audio", .{ .path = "parabun:audio" } },

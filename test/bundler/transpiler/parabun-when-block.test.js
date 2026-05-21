@@ -4,8 +4,8 @@ import { bunEnv, bunExe, tempDir } from "harness";
 // Parabun `when EXPR { body }` and `when not EXPR { body }` block
 // statements. Slot into the existing `effect { body }` / `arena { body }`
 // keyword-block family. Both desugar to a single helper:
-//   when EXPR { body }     →  require("@para/signals").when(() => EXPR, () => { body })
-//   when not EXPR { body } →  require("@para/signals").when(() => !(EXPR), () => { body })
+//   when EXPR { body }     →  require("@lyku/para-signals").when(() => EXPR, () => { body })
+//   when not EXPR { body } →  require("@lyku/para-signals").when(() => !(EXPR), () => { body })
 //
 // Block-form `when` is distinct from the suffix-form `when` clause used
 // by `~>` / `->` — position disambiguates. Suffix is an every-truthy
@@ -32,7 +32,7 @@ describe("Parabun: when block (rising / falling)", () => {
   describe("desugar", () => {
     it("`when EXPR { body }` calls signals.when with predicate + body arrows", () => {
       const out = transform(`signal a = false; when a { console.log("hi"); }`);
-      expect(out).toContain(`/signals").when(`);
+      expect(out).toContain(`signals").when(`);
       expect(out).toContain("a.get()");
       expect(out).toContain('console.log("hi")');
       // No standalone negation in the predicate for the positive form.
@@ -41,7 +41,7 @@ describe("Parabun: when block (rising / falling)", () => {
 
     it("`when not EXPR { body }` negates the predicate inside the same `when` helper", () => {
       const out = transform(`signal a = true; when not a { console.log("bye"); }`);
-      expect(out).toContain(`/signals").when(`);
+      expect(out).toContain(`signals").when(`);
       // Predicate is negated: `() => !a.get()` (or with surrounding parens).
       expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
     });
@@ -52,7 +52,7 @@ describe("Parabun: when block (rising / falling)", () => {
         signal b = "x";
         when a && b === "y" { console.log("match"); }
       `);
-      expect(out).toContain(`/signals").when(`);
+      expect(out).toContain(`signals").when(`);
       expect(out).toContain("a.get()");
       expect(out).toContain("b.get()");
     });
@@ -66,34 +66,34 @@ describe("Parabun: when block (rising / falling)", () => {
           console.log(n);
         }
       `);
-      expect(out).toContain(`/signals").when(`);
+      expect(out).toContain(`signals").when(`);
       expect(out).toContain("n++");
       expect(out).toContain("console.log(n)");
     });
 
     it("`when` followed by `(` parses as plain identifier (call)", () => {
       const out = transform(`const when = (fn) => fn(); when(() => 1);`);
-      // Helper-form would emit `require("@para/signals").when(`; user code
+      // Helper-form would emit `require("@lyku/para-signals").when(`; user code
       // calling a local `when` function should NOT match that pattern.
-      expect(out).not.toContain(`/signals").when(`);
+      expect(out).not.toContain(`signals").when(`);
       expect(out).toContain("when(");
     });
 
     it("`when` followed by `;` parses as plain identifier", () => {
       const out = transform(`const when = 42; export { when };`);
-      expect(out).not.toContain(`/signals").when(`);
+      expect(out).not.toContain(`signals").when(`);
       expect(out).toContain("when");
     });
 
     it("`when` followed by `=` parses as plain identifier", () => {
       const out = transform(`let when; when = 5; console.log(when);`);
-      expect(out).not.toContain(`/signals").when(`);
+      expect(out).not.toContain(`signals").when(`);
     });
 
     it("plain `effect { body }` still works alongside `when`", () => {
       const out = transform(`signal a = 0; effect { console.log(a); }`);
-      expect(out).toContain(`/signals").effect(`);
-      expect(out).not.toContain(`/signals").when(`);
+      expect(out).toContain(`signals").effect(`);
+      expect(out).not.toContain(`signals").when(`);
     });
   });
 
@@ -203,6 +203,98 @@ describe("Parabun: when block (rising / falling)", () => {
     });
   });
 
+  describe("cleanup (returned teardown)", () => {
+    it("a cleanup returned from the block runs on the falling edge, each cycle", async () => {
+      const { stdout, exitCode } = await runFixture(
+        "when-cleanup-edge",
+        `
+          signal a = false;
+          const out = [];
+          when a {
+            out.push("up");
+            return () => out.push("down");
+          }
+          a = true;   // rise → up
+          await Promise.resolve();
+          a = false;  // fall → down
+          await Promise.resolve();
+          a = true;   // rise → up (fresh cleanup captured)
+          await Promise.resolve();
+          console.log(out.join(","));
+        `,
+      );
+      expect(stdout).toBe("up,down,up");
+      expect(exitCode).toBe(0);
+    });
+
+    it("the teardown closes over the rising-edge block's own locals", async () => {
+      // This is the whole point of in-block cleanup: a separate
+      // `when stop { }` arm cannot see `id`, but the returned closure can.
+      const { stdout, exitCode } = await runFixture(
+        "when-cleanup-locals",
+        `
+          signal a = false;
+          const out = [];
+          let n = 0;
+          when a {
+            const id = ++n;
+            out.push("start" + id);
+            return () => out.push("stop" + id);
+          }
+          a = true;   await Promise.resolve();   // start1
+          a = false;  await Promise.resolve();   // stop1
+          a = true;   await Promise.resolve();   // start2
+          a = false;  await Promise.resolve();   // stop2
+          console.log(out.join(","));
+        `,
+      );
+      expect(stdout).toBe("start1,stop1,start2,stop2");
+      expect(exitCode).toBe(0);
+    });
+
+    it("disposing the `when` runs a still-pending teardown (predicate truthy at dispose)", async () => {
+      const { stdout, exitCode } = await runFixture(
+        "when-cleanup-dispose",
+        `
+          import { signal, when } from "@lyku/para-signals";
+          const a = signal(false);
+          const out = [];
+          const dispose = when(() => a.get(), () => {
+            out.push("up");
+            return () => out.push("down");
+          });
+          a.set(true);
+          await Promise.resolve();   // rise → up
+          dispose();                 // predicate still truthy → pending teardown runs
+          console.log(out.join(","));
+        `,
+      );
+      expect(stdout).toBe("up,down");
+      expect(exitCode).toBe(0);
+    });
+
+    it("`whenStart` honors a returned teardown too", async () => {
+      const { stdout, exitCode } = await runFixture(
+        "when-cleanup-start",
+        `
+          import { signal, whenStart } from "@lyku/para-signals";
+          const a = signal(true);
+          const out = [];
+          whenStart(() => a.get(), () => {
+            out.push("up");
+            return () => out.push("down");
+          });
+          await Promise.resolve();   // initial-truthy → up
+          a.set(false);
+          await Promise.resolve();   // fall → down
+          console.log(out.join(","));
+        `,
+      );
+      expect(stdout).toBe("up,down");
+      expect(exitCode).toBe(0);
+    });
+  });
+
   describe("paired form (when … when stop …)", () => {
     describe("desugar", () => {
       it("`when X { } when stop { }` emits two `when` calls — second predicate negated", () => {
@@ -212,7 +304,7 @@ describe("Parabun: when block (rising / falling)", () => {
           when stop { console.log("fall"); }
         `);
         // Two helper calls, both on signals.when.
-        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/signals"\)\.when\(/g) ?? []).length).toBe(2);
         // First arm: `() => a.get()`. Second arm: `() => !a.get()`.
         expect(out).toMatch(/\(\)\s*=>\s*a\.get\(\)/);
         expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
@@ -224,7 +316,7 @@ describe("Parabun: when block (rising / falling)", () => {
           when not a { console.log("fall"); }
           when stop  { console.log("rise"); }
         `);
-        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/signals"\)\.when\(/g) ?? []).length).toBe(2);
         // First: `() => !a.get()`. Second arm reuses RAW predicate sans
         // negation (avoids double-negation): `() => a.get()`.
         expect(out).toMatch(/\(\)\s*=>\s*!\s*a\.get\(\)/);
@@ -243,7 +335,7 @@ describe("Parabun: when block (rising / falling)", () => {
         // Both still emit, but each with its own predicate. The paired-form
         // lookahead requires bare `stop` (no predicate); `not Y` falls
         // through to the standard predicate-negation form.
-        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/signals"\)\.when\(/g) ?? []).length).toBe(2);
         expect(out).toContain("a.get()");
         expect(out).toContain("b.get()");
       });
@@ -260,7 +352,7 @@ describe("Parabun: when block (rising / falling)", () => {
           console.log("between");
           when stop { console.log("stopped"); }
         `);
-        expect((out.match(/require\("@para\/signals"\)\.when\(/g) ?? []).length).toBe(2);
+        expect((out.match(/signals"\)\.when\(/g) ?? []).length).toBe(2);
         expect(out).toContain("a.get()");
         expect(out).toContain("stop.get()");
       });

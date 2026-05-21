@@ -453,17 +453,64 @@ function readEdgeSource<T>(source: EdgeSource<T>): { peek: () => boolean; read: 
   throw new TypeError("@para/signals.when: first argument must be a signal or a predicate function");
 }
 
-function when<T>(source: EdgeSource<T>, fn: () => void): () => void {
+// Shared edge runner for `when` / `whenStart`. Fires `fn` on each
+// rising edge of `source`. If `fn` returns a cleanup function, that
+// cleanup runs on the next FALLING edge (and on dispose if the
+// predicate is still truthy) — so a `when running { … return () =>
+// teardown }` block owns its own teardown, instead of forcing the
+// teardown into a separate `when stop { … }` arm that can't see the
+// rising-edge block's locals.
+//
+// The cleanup is tracked manually rather than returned from the
+// effect body, because the effect re-runs whenever ANY predicate
+// dependency changes — not only on edges. Returning it as the
+// effect's cleanup would tear the resource down on every unrelated
+// dep change (and fail to set it back up, since `fn` only re-fires
+// on a true rising edge). Manual tracking keys teardown to the
+// falling edge exactly.
+//
+// `seedFalse` pre-seeds prev=false (the `whenStart` form) so an
+// initially-truthy predicate counts as a rising edge at registration.
+function runWhenEdge<T>(source: EdgeSource<T>, fn: () => unknown, seedFalse: boolean): () => void {
+  const { peek, read } = readEdgeSource(source);
+  let prev = seedFalse ? false : peek();
+  let cleanup: (() => void) | void = undefined;
+  const runCleanup = () => {
+    if ($isCallable(cleanup)) {
+      const c = cleanup;
+      cleanup = undefined;
+      c();
+    } else {
+      cleanup = undefined;
+    }
+  };
+  const dispose = effect(() => {
+    const now = read();
+    if (now && !prev) {
+      // Rising edge — clear any stale teardown defensively, run the
+      // block, and capture a returned cleanup for the falling edge.
+      runCleanup();
+      const ret = fn();
+      if ($isCallable(ret)) cleanup = ret as () => void;
+    } else if (!now && prev) {
+      // Falling edge — run the block's teardown.
+      runCleanup();
+    }
+    prev = now;
+  });
+  // Disposing the whole `when` stops the effect AND runs any teardown
+  // still pending (predicate truthy at dispose time).
+  return () => {
+    dispose();
+    runCleanup();
+  };
+}
+
+function when<T>(source: EdgeSource<T>, fn: () => unknown): () => void {
   if (!$isCallable(fn)) {
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
-  const { peek, read } = readEdgeSource(source);
-  let prev = peek();
-  return effect(() => {
-    const now = read();
-    if (now && !prev) fn();
-    prev = now;
-  });
+  return runWhenEdge(source, fn, false);
 }
 
 // `whenStart` — same as `when` but ALSO fires once at registration if
@@ -474,20 +521,11 @@ function when<T>(source: EdgeSource<T>, fn: () => void): () => void {
 // fake a press at startup. The `.pts` keyword form is `when X start`
 // (trailing modifier on a `when` block); `signals.whenStart(...)` is
 // the direct call form for `.ts` users.
-function whenStart<T>(source: EdgeSource<T>, fn: () => void): () => void {
+function whenStart<T>(source: EdgeSource<T>, fn: () => unknown): () => void {
   if (!$isCallable(fn)) {
     throw $ERR_INVALID_ARG_TYPE("fn", "function", fn);
   }
-  const { peek, read } = readEdgeSource(source);
-  // Pre-seed the previous value as `false` so the first observation,
-  // if true, counts as a rising edge. The effect body then handles
-  // every subsequent transition.
-  let prev = false;
-  return effect(() => {
-    const now = read();
-    if (now && !prev) fn();
-    prev = now;
-  });
+  return runWhenEdge(source, fn, true);
 }
 
 // ─── Resource-tied signals ─────────────────────────────────────────────────
