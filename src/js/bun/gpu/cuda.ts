@@ -4274,8 +4274,7 @@ function holdQ4K(blocks: Uint8Array, nElems: number): GpuHandle {
 //   - Layout matches the host-side code exactly (row-major, head-major
 //     for multi-head tensors) so parity is trivial to check.
 
-const DEV_CUDA_SOURCE =
-  `
+const DEV_CUDA_SOURCE = `
 // NVRTC ships without <math.h> / <limits>, so synthesize the constants.
 #define F_INF  __int_as_float(0x7f800000)
 #define F_NINF __int_as_float(0xff800000)
@@ -5585,8 +5584,7 @@ extern "C" __global__ void argmax_grid_f32(
 // their bitonic direction (ascending = (i & k) == 0). Total launches:
 // O(log²(n)) — for n = 2²⁰ that's 210 launches × 4096 blocks each, well
 // under a millisecond on consumer GPUs. NaN inputs are not handled
-// (CUDA's ` >
-  ` is unordered for NaN) — caller is responsible for filtering
+// (CUDA's '>' is unordered for NaN) — caller is responsible for filtering
 // or accepting CPU semantics divergence.
 extern "C" __global__ void bitonic_step_f32(
     float* __restrict__ arr,
