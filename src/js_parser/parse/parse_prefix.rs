@@ -255,12 +255,53 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let mut arms: bun_alloc::ArenaVec<'_, (Option<Expr>, Expr)> =
             bun_alloc::ArenaVec::new_in(p.arena);
         while p.lexer.token != T::TCloseBrace {
-            // Wildcard: the `else` keyword, or a bare `_` identifier.
+            // Pattern: wildcard (`else`/`_`), Result/Option tag
+            // (`Ok`/`Err`/`Some`/`None` + optional `(binding)`), or literal.
             let is_wildcard = p.lexer.token == T::TElse
                 || (p.lexer.token == T::TIdentifier && p.lexer.raw() == b"_");
+
+            // (bind_name, value_key) for a bound tag pattern like `Ok(v)`.
+            let mut bind: Option<(&'a [u8], &'static [u8])> = None;
+
             let test = if is_wildcard {
                 p.lexer.next()?;
                 None
+            } else if p.lexer.token == T::TIdentifier
+                && matches!(p.lexer.raw(), b"Ok" | b"Err" | b"Some" | b"None")
+            {
+                let tag_loc = p.lexer.loc();
+                let tag: &'a [u8] = p.lexer.raw();
+                let value_key: &'static [u8] = if tag == b"Err" { b"error" } else { b"value" };
+                p.lexer.next()?;
+                // Optional binding: `Ok(v)`.
+                if p.lexer.token == T::TOpenParen {
+                    p.lexer.next()?;
+                    if p.lexer.token == T::TIdentifier {
+                        bind = Some((p.lexer.identifier, value_key));
+                        p.lexer.next()?;
+                    }
+                    p.lexer.expect(T::TCloseParen)?;
+                }
+                // `__pm.tag === "<tag>"`
+                let m_ident = p.new_expr(E::Identifier::init(m_ref), tag_loc);
+                let tag_dot = p.new_expr(
+                    E::Dot {
+                        target: m_ident,
+                        name: E::Str::new(b"tag"),
+                        name_loc: tag_loc,
+                        ..Default::default()
+                    },
+                    tag_loc,
+                );
+                let tag_str = p.new_expr(E::EString::init(tag), tag_loc);
+                Some(p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinStrictEq,
+                        left: tag_dot,
+                        right: tag_str,
+                    },
+                    tag_loc,
+                ))
             } else {
                 let lit_loc = p.lexer.loc();
                 let lit = p.parse_expr(Level::Comma)?;
@@ -275,7 +316,63 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 ))
             };
             p.lexer.expect(T::TEqualsGreaterThan)?;
-            let result = p.parse_expr(Level::Comma)?;
+
+            // For a bound tag pattern, wrap the result in a per-arm IIFE arrow
+            // `((bind) => result)(__pm.value|error)` so the binding resolves to
+            // the extracted field with no AST-substitution pass. Same scope
+            // recipe as the outer match arrow.
+            let result = if let Some((bind_name, value_key)) = bind {
+                let arm_loc = p.lexer.loc();
+                let arm_body_loc = bun_ast::Loc {
+                    start: arm_loc.start + 1,
+                };
+                p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, arm_loc)?;
+                let param_ref = p.declare_symbol(symbol::Kind::Hoisted, arm_loc, bind_name)?;
+                p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, arm_body_loc)?;
+                let body = p.parse_expr(Level::Comma)?;
+                p.pop_scope();
+                p.pop_scope();
+
+                let ret = p.s(S::Return { value: Some(body) }, arm_loc);
+                let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+                let binding = p.b(B::Identifier { r#ref: param_ref }, arm_loc);
+                let arm_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(1, |_| G::Arg {
+                    binding,
+                    ..Default::default()
+                });
+                let arrow = p.new_expr(
+                    E::Arrow {
+                        args: bun_ast::StoreSlice::new_mut(arm_args),
+                        prefer_expr: true,
+                        body: G::FnBody {
+                            loc: arm_body_loc,
+                            stmts: bun_ast::StoreSlice::new_mut(stmts),
+                        },
+                        ..Default::default()
+                    },
+                    arm_loc,
+                );
+                let m_ident = p.new_expr(E::Identifier::init(m_ref), arm_loc);
+                let extracted = p.new_expr(
+                    E::Dot {
+                        target: m_ident,
+                        name: E::Str::new(value_key),
+                        name_loc: arm_loc,
+                        ..Default::default()
+                    },
+                    arm_loc,
+                );
+                p.new_expr(
+                    E::Call {
+                        target: arrow,
+                        args: ExprNodeList::init_one(extracted),
+                        ..Default::default()
+                    },
+                    arm_loc,
+                )
+            } else {
+                p.parse_expr(Level::Comma)?
+            };
             arms.push((test, result));
             if p.lexer.token == T::TComma {
                 p.lexer.next()?;
