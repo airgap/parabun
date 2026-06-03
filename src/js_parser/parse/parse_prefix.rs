@@ -1080,6 +1080,27 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(value)
     }
 
+    // Parabun: `<number>d` decimal literal → `__paraDec("<number>")`, keeping
+    // the exact source digits (a string) so no float precision is lost.
+    fn pfx_t_decimal_literal(p: &mut Self) -> PResult<Expr> {
+        let loc = p.lexer.loc();
+        let raw = p.lexer.raw(); // includes the trailing `d`
+        let text = &raw[..raw.len() - 1];
+        let str_expr = p.new_expr(E::EString::init(text), loc);
+        let dec_ref = p.store_name_in_ref(b"__paraDec")?;
+        let dec_ident = p.new_expr(E::Identifier::init(dec_ref), loc);
+        p.lexer.next()?;
+        Ok(p.new_expr(
+            E::Call {
+                target: dec_ident,
+                args: ExprNodeList::init_one(str_expr),
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
     #[inline]
     fn pfx_t_big_integer_literal(p: &mut Self) -> PResult<Expr> {
         let loc = p.lexer.loc();
@@ -1813,6 +1834,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             T::TThis => Self::pfx_t_this(p),
             T::TTemplateHead => Self::pfx_t_template_head(p),
             T::TNumericLiteral => Self::pfx_t_numeric_literal(p),
+            T::TDecimalLiteral => Self::pfx_t_decimal_literal(p),
             T::TBigIntegerLiteral => Self::pfx_t_big_integer_literal(p),
             T::TStringLiteral | T::TNoSubstitutionTemplateLiteral => p.parse_string_literal(),
             T::TSlashEquals | T::TSlash => Self::pfx_t_slash(p),

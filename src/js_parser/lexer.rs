@@ -3940,6 +3940,22 @@ lexer_impl_header! {
             self.step_with(contents);
         }
 
+        // Parabun: arbitrary-precision decimal suffix `d` (`0.1d`, `1d`,
+        // `100.25d`). Only when the `d` is not part of a longer identifier, so
+        // base-prefixed literals (hex `0x1d`) and invalid `1dx` are unaffected.
+        if self.code_point == 0x64 {
+            let next = if self.current < contents.len() {
+                contents[self.current]
+            } else {
+                0
+            };
+            if !is_identifier_continue(next as i32) {
+                self.step_with(contents);
+                self.token = T::TDecimalLiteral;
+                return Ok(());
+            }
+        }
+
         // Identifiers can't occur immediately after numbers;
         if is_identifier_start(self.code_point) {
             self.syntax_error()?;

@@ -246,6 +246,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         arrow_loc: bun_ast::Loc,
         body_loc: bun_ast::Loc,
         body: Expr,
+        is_async: bool,
     ) -> Expr {
         let ret = p.s(S::Return { value: Some(body) }, body_loc);
         let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
@@ -254,6 +255,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             E::Arrow {
                 args: bun_ast::StoreSlice::new_mut(no_args),
                 prefer_expr: true,
+                is_async,
                 body: G::FnBody {
                     loc: body_loc,
                     stmts: bun_ast::StoreSlice::new_mut(stmts),
@@ -344,7 +346,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     let body_loc = bun_ast::Loc { start: vloc.start + 1 };
                     p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, vloc)?;
                     p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
-                    let thunk = Self::zero_arg_thunk_expr(p, vloc, body_loc, value);
+                    let thunk = Self::zero_arg_thunk_expr(p, vloc, body_loc, value, false);
                     p.pop_scope();
                     p.pop_scope();
                     Self::para_signals_call(p, b"derived", ExprNodeList::init_one(thunk), vloc)?
@@ -388,7 +390,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let rhs = p.parse_expr(Level::Comma)?;
             p.pop_scope();
             p.pop_scope();
-            let thunk = Self::zero_arg_thunk_expr(p, name_loc, body_loc, rhs);
+            let thunk = Self::zero_arg_thunk_expr(p, name_loc, body_loc, rhs, false);
             let value =
                 Self::para_signals_call(p, b"derived", ExprNodeList::init_one(thunk), name_loc)?;
             p.signal_bound_refs.insert(binding_ref, ());
@@ -420,7 +422,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.lexer.expect(T::TOpenBrace)?;
         let mut stmts = StmtList::new_in(p.arena);
         while p.lexer.token != T::TCloseBrace {
-            let mut so = ParseStatementOptions::default();
+            let mut so = ParseStatementOptions {
+                lexical_decl: LexicalDecl::AllowAll,
+                ..Default::default()
+            };
             stmts.push(p.parse_stmt(&mut so)?);
         }
         p.lexer.expect(T::TCloseBrace)?;
@@ -439,7 +444,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             Self::zero_arg_thunk_block(p, loc, body_loc, stmts)
         } else {
             let e = p.parse_expr(Level::Lowest)?;
-            Self::zero_arg_thunk_expr(p, loc, body_loc, e)
+            Self::zero_arg_thunk_expr(p, loc, body_loc, e, false)
         };
         p.pop_scope();
         p.pop_scope();
@@ -479,7 +484,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 cloc,
             );
         }
-        let cond_thunk = Self::zero_arg_thunk_expr(p, loc, cond_body_loc, cond);
+        let cond_thunk = Self::zero_arg_thunk_expr(p, loc, cond_body_loc, cond, false);
 
         // Body thunk: () => { … }.
         let brace_loc = p.lexer.loc();
@@ -503,6 +508,116 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(p.s(
             S::SExpr {
                 value: call,
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parabun: `arena { … }` → `require("@lyku/para-arena").scope(() => { … })`.
+    fn t_arena(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+        let body_loc = bun_ast::Loc { start: loc.start + 1 };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+        let stmts = Self::parse_thunk_block_stmts(p)?;
+        p.pop_scope();
+        p.pop_scope();
+        let thunk = Self::zero_arg_thunk_block(p, loc, body_loc, stmts);
+
+        let require_ref = p.store_name_in_ref(b"require")?;
+        let require_ident = p.new_expr(E::Identifier::init(require_ref), loc);
+        let pkg = p.new_expr(E::EString::init(b"@lyku/para-arena"), loc);
+        let require_call = p.new_expr(
+            E::Call {
+                target: require_ident,
+                args: ExprNodeList::init_one(pkg),
+                ..Default::default()
+            },
+            loc,
+        );
+        let scope_dot = p.new_expr(
+            E::Dot {
+                target: require_call,
+                name: E::Str::new(b"scope"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        let call = p.new_expr(
+            E::Call {
+                target: scope_dot,
+                args: ExprNodeList::init_one(thunk),
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        );
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::SExpr {
+                value: call,
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parabun: `defer EXPR;` → `using <g> = __parabunDefer0(() => EXPR);` and
+    // `defer await EXPR;` → `await using <g> = __parabunAsyncDefer0(async () =>
+    // EXPR);`. The disposer fires at scope exit via the ES `using` protocol.
+    // The binding name `__paraDefer<n>` matches the parity gensym pattern so it
+    // renames structurally; the helper call names are bare globals.
+    fn t_defer(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+        let is_async = p.lexer.is_contextual_keyword(b"await");
+        if is_async {
+            p.lexer.next()?;
+        }
+        let gensym: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__paraDefer{}", loc.start)
+            .into_bump_str()
+            .as_bytes();
+        let binding_ref = p.declare_symbol(symbol::Kind::Constant, loc, gensym)?;
+
+        let body_loc = bun_ast::Loc { start: loc.start + 1 };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+        let expr = p.parse_expr(Level::Lowest)?;
+        p.pop_scope();
+        p.pop_scope();
+        let thunk = Self::zero_arg_thunk_expr(p, loc, body_loc, expr, is_async);
+
+        let helper_name: &[u8] = if is_async {
+            b"__parabunAsyncDefer0"
+        } else {
+            b"__parabunDefer0"
+        };
+        let helper_ref = p.store_name_in_ref(helper_name)?;
+        let helper_ident = p.new_expr(E::Identifier::init(helper_ref), loc);
+        let call = p.new_expr(
+            E::Call {
+                target: helper_ident,
+                args: ExprNodeList::init_one(thunk),
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        );
+
+        let binding = p.b(B::Identifier { r#ref: binding_ref }, loc);
+        let decl = G::Decl {
+            binding,
+            value: Some(call),
+        };
+        let kind = if is_async {
+            js_ast::s::Kind::KAwaitUsing
+        } else {
+            js_ast::s::Kind::KUsing
+        };
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::Local {
+                kind,
+                decls: G::DeclList::from_arena_slice(&[decl]),
                 ..Default::default()
             },
             loc,
@@ -2099,6 +2214,29 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.next()?;
             if !p.lexer.has_newline_before && p.lexer.is_contextual_keyword(b"let") {
                 return Self::t_parallel_let(p, kw_loc);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `arena { … }` scoped-allocation block.
+        if is_identifier && p.lexer.raw() == b"arena" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TOpenBrace && !p.lexer.has_newline_before {
+                return Self::t_arena(p, opts, kw_loc);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `defer EXPR;` / `defer await EXPR;`. `defer(…)` / `defer.x` /
+        // `defer = …` keep `defer` as a plain identifier.
+        if is_identifier && p.lexer.raw() == b"defer" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
+                return Self::t_defer(p, opts, kw_loc);
             }
             p.lexer.restore(&snapshot);
         }

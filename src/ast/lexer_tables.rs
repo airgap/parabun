@@ -143,6 +143,7 @@ pub enum T {
     // Parabun: `~>` / `->` reactive-binding operators.
     TTildeGreaterThan,
     TMinusGreaterThan,
+    TDecimalLiteral,
 }
 
 impl T {
@@ -508,6 +509,7 @@ pub static TOKEN_TO_STRING: TokenEnumType = TokenEnumType({
     token_enums[T::TDotDotGreaterThan as usize] = b"\"..>\"";
     token_enums[T::TTildeGreaterThan as usize] = b"\"~>\"";
     token_enums[T::TMinusGreaterThan as usize] = b"\"->\"";
+    token_enums[T::TDecimalLiteral as usize] = b"decimal literal";
     token_enums[T::TCaret as usize] = b"\"^\"";
     token_enums[T::TCloseBrace as usize] = b"\"}\"";
     token_enums[T::TCloseBracket as usize] = b"\"]\"";
