@@ -1297,10 +1297,28 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             return Ok(Continuation::Next);
         }
 
-        // `expr |> rhs` → `rhs(expr)`
+        // `expr |> rhs` → `rhs(expr)`. Placeholder form: when `rhs` is a call
+        // whose argument list contains the `_` placeholder, substitute the
+        // piped value into each `_` slot instead of wrapping — `x |> f(_, 10)`
+        // → `f(x, 10)`.
         let loc = left.loc;
         let piped = *left;
         let rhs = p.parse_expr(Level::NullishCoalescing)?;
+        if let ExprData::ECall(mut call) = rhs.data {
+            let mut substituted = false;
+            for arg in call.args.slice_mut() {
+                if let ExprData::EIdentifier(id) = arg.data {
+                    if p.load_name_from_ref(id.ref_) == b"_" {
+                        *arg = piped;
+                        substituted = true;
+                    }
+                }
+            }
+            if substituted {
+                *left = rhs;
+                return Ok(Continuation::Next);
+            }
+        }
         *left = p.new_expr(
             E::Call {
                 target: rhs,

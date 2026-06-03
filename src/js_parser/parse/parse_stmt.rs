@@ -8,7 +8,7 @@ use crate::p::P;
 use bun_ast as js_ast;
 
 use js_ast::op::Level;
-use js_ast::{E, Expr, ExprNodeList, G, LocRef, S, Stmt};
+use js_ast::{B, E, Expr, ExprData, ExprNodeList, G, LocRef, OpCode, S, Stmt, scope, symbol};
 use js_lexer::T;
 
 use crate::parser::fs;
@@ -200,47 +200,161 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         ))
     }
 
+    // Parabun: build `require("@lyku/para-signals").<method>(args…)`.
+    fn para_signals_call(
+        p: &mut Self,
+        method: &'static [u8],
+        args: ExprNodeList,
+        loc: bun_ast::Loc,
+    ) -> Result<Expr> {
+        let require_ref = p.store_name_in_ref(b"require")?;
+        let require_ident = p.new_expr(E::Identifier::init(require_ref), loc);
+        let pkg = p.new_expr(E::EString::init(b"@lyku/para-signals"), loc);
+        let require_call = p.new_expr(
+            E::Call {
+                target: require_ident,
+                args: ExprNodeList::init_one(pkg),
+                ..Default::default()
+            },
+            loc,
+        );
+        let dot = p.new_expr(
+            E::Dot {
+                target: require_call,
+                name: E::Str::new(method),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        Ok(p.new_expr(
+            E::Call {
+                target: dot,
+                args,
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Zero-arg expr-body thunk `() => body`. The FunctionArgs@arrow_loc /
+    // FunctionBody@body_loc scopes must already be pushed (and popped) by the
+    // caller *around* the body parse so they precede any scope the body pushes.
+    fn zero_arg_thunk_expr(
+        p: &mut Self,
+        arrow_loc: bun_ast::Loc,
+        body_loc: bun_ast::Loc,
+        body: Expr,
+    ) -> Expr {
+        let ret = p.s(S::Return { value: Some(body) }, body_loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+        let no_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
+        p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(no_args),
+                prefer_expr: true,
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            arrow_loc,
+        )
+    }
+
+    // Zero-arg block-body thunk `() => { stmts }`.
+    fn zero_arg_thunk_block(
+        p: &mut Self,
+        arrow_loc: bun_ast::Loc,
+        body_loc: bun_ast::Loc,
+        stmts: bun_ast::StoreSlice<Stmt>,
+    ) -> Expr {
+        let no_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
+        p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(no_args),
+                prefer_expr: false,
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts,
+                },
+                ..Default::default()
+            },
+            arrow_loc,
+        )
+    }
+
+    // Does `e` read a name currently registered as a signal? Drives the
+    // `signal NAME = RHS` → `derived(() => RHS)` promotion.
+    fn expr_uses_signal(p: &Self, e: &Expr) -> bool {
+        match &e.data {
+            ExprData::EIdentifier(id) => {
+                p.signal_bound_names.contains(p.load_name_from_ref(id.ref_))
+            }
+            ExprData::EBinary(b) => {
+                Self::expr_uses_signal(p, &b.left) || Self::expr_uses_signal(p, &b.right)
+            }
+            ExprData::EUnary(u) => Self::expr_uses_signal(p, &u.value),
+            ExprData::EDot(d) => Self::expr_uses_signal(p, &d.target),
+            ExprData::EIndex(ix) => {
+                Self::expr_uses_signal(p, &ix.target) || Self::expr_uses_signal(p, &ix.index)
+            }
+            ExprData::ECall(c) => {
+                Self::expr_uses_signal(p, &c.target)
+                    || c.args.iter().any(|a| Self::expr_uses_signal(p, a))
+            }
+            ExprData::EIf(f) => {
+                Self::expr_uses_signal(p, &f.test_)
+                    || Self::expr_uses_signal(p, &f.yes)
+                    || Self::expr_uses_signal(p, &f.no)
+            }
+            ExprData::ETemplate(t) => {
+                t.parts.slice().iter().any(|part| Self::expr_uses_signal(p, &part.value))
+            }
+            ExprData::EArray(a) => a.items.iter().any(|it| Self::expr_uses_signal(p, it)),
+            ExprData::ENew(n) => {
+                Self::expr_uses_signal(p, &n.target)
+                    || n.args.iter().any(|a| Self::expr_uses_signal(p, a))
+            }
+            ExprData::ESpread(s) => Self::expr_uses_signal(p, &s.value),
+            ExprData::EAwait(a) => Self::expr_uses_signal(p, &a.value),
+            _ => false,
+        }
+    }
+
     // Parabun: `signal NAME = RHS [, …]` → `const NAME = require(
-    // "@lyku/para-signals").signal(RHS)`, recording each binding ref so the
-    // visit pass rewrites reads (`x` → `x.get()`) and assignments
-    // (`x = v` → `x.set(v)`). Auto-derive, `every`, and the strict-signals
-    // pragma are not yet ported — every decl becomes a plain `signal(RHS)`.
+    // "@lyku/para-signals").signal(RHS)`, recording each binding so the visit
+    // pass rewrites reads (`x` → `x.get()`) and assignments (`x = v` →
+    // `x.set(v)`). An initializer that reads another signal is promoted to
+    // `derived(() => RHS)` (auto-derive). The `derived`/`effect`/`when`
+    // keywords share these builders.
     fn t_signal(p: &mut Self, opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
         let mut decls = p.parse_and_declare_decls(js_ast::symbol::Kind::Constant, opts)?;
         for decl in decls.slice_mut() {
-            if let js_ast::b::B::BIdentifier(ident) = decl.binding.data {
-                p.signal_bound_refs.insert(ident.r#ref, ());
-            }
             if let Some(value) = decl.value {
                 let vloc = value.loc;
-                let require_ref = p.store_name_in_ref(b"require")?;
-                let require_ident = p.new_expr(E::Identifier::init(require_ref), vloc);
-                let pkg = p.new_expr(E::EString::init(b"@lyku/para-signals"), vloc);
-                let require_call = p.new_expr(
-                    E::Call {
-                        target: require_ident,
-                        args: ExprNodeList::init_one(pkg),
-                        ..Default::default()
-                    },
-                    vloc,
-                );
-                let signal_dot = p.new_expr(
-                    E::Dot {
-                        target: require_call,
-                        name: E::Str::new(b"signal"),
-                        name_loc: vloc,
-                        ..Default::default()
-                    },
-                    vloc,
-                );
-                decl.value = Some(p.new_expr(
-                    E::Call {
-                        target: signal_dot,
-                        args: ExprNodeList::init_one(value),
-                        ..Default::default()
-                    },
-                    vloc,
-                ));
+                let derived = Self::expr_uses_signal(p, &value);
+                decl.value = Some(if derived {
+                    // Post-hoc wrap: the RHS was already parsed (no wrapper
+                    // scopes), so this is only sound when the RHS introduced no
+                    // nested scope of its own — true for the signal-reading
+                    // expressions auto-derive targets (a + b, `…${x}…`, etc.).
+                    let body_loc = bun_ast::Loc { start: vloc.start + 1 };
+                    p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, vloc)?;
+                    p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+                    let thunk = Self::zero_arg_thunk_expr(p, vloc, body_loc, value);
+                    p.pop_scope();
+                    p.pop_scope();
+                    Self::para_signals_call(p, b"derived", ExprNodeList::init_one(thunk), vloc)?
+                } else {
+                    Self::para_signals_call(p, b"signal", ExprNodeList::init_one(value), vloc)?
+                });
+            }
+            if let js_ast::b::B::BIdentifier(ident) = decl.binding.data {
+                p.signal_bound_refs.insert(ident.r#ref, ());
+                p.signal_bound_names.insert(p.load_name_from_ref(ident.r#ref));
             }
         }
         p.lexer.expect_or_insert_semicolon()?;
@@ -248,6 +362,147 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             S::Local {
                 kind: js_ast::s::Kind::KConst,
                 decls,
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parabun: `derived NAME = RHS [, …]` → `const NAME = require(
+    // "@lyku/para-signals").derived(() => RHS)`. The thunk scopes bracket the
+    // RHS parse so an arrow RHS (`derived f = () => 7`) nests correctly.
+    fn t_derived(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+        let mut decls: smallvec::SmallVec<[G::Decl; 4]> = smallvec::SmallVec::new();
+        loop {
+            if p.lexer.token != T::TIdentifier {
+                p.lexer.expect(T::TIdentifier)?;
+            }
+            let name_loc = p.lexer.loc();
+            let name = p.lexer.identifier;
+            let binding_ref = p.declare_symbol(symbol::Kind::Constant, name_loc, name)?;
+            p.lexer.next()?;
+            p.lexer.expect(T::TEquals)?;
+            let body_loc = bun_ast::Loc { start: name_loc.start + 1 };
+            p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, name_loc)?;
+            p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+            let rhs = p.parse_expr(Level::Comma)?;
+            p.pop_scope();
+            p.pop_scope();
+            let thunk = Self::zero_arg_thunk_expr(p, name_loc, body_loc, rhs);
+            let value =
+                Self::para_signals_call(p, b"derived", ExprNodeList::init_one(thunk), name_loc)?;
+            p.signal_bound_refs.insert(binding_ref, ());
+            p.signal_bound_names.insert(name);
+            let binding = p.b(B::Identifier { r#ref: binding_ref }, name_loc);
+            decls.push(G::Decl {
+                binding,
+                value: Some(value),
+            });
+            if p.lexer.token != T::TComma {
+                break;
+            }
+            p.lexer.next()?;
+        }
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::Local {
+                kind: js_ast::s::Kind::KConst,
+                decls: G::DeclList::from_arena_slice(&decls),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parse a `{ … }` block as a bare statement list (no extra Block scope) for
+    // a reactive thunk body. The FunctionBody scope is already on the stack.
+    fn parse_thunk_block_stmts(p: &mut Self) -> Result<bun_ast::StoreSlice<Stmt>> {
+        p.lexer.expect(T::TOpenBrace)?;
+        let mut stmts = StmtList::new_in(p.arena);
+        while p.lexer.token != T::TCloseBrace {
+            let mut so = ParseStatementOptions::default();
+            stmts.push(p.parse_stmt(&mut so)?);
+        }
+        p.lexer.expect(T::TCloseBrace)?;
+        Ok(bun_ast::StoreSlice::from_bump(stmts))
+    }
+
+    // Parabun: `effect { … }` / `effect EXPR;` → `require(
+    // "@lyku/para-signals").effect(() => …)`. Signal reads inside become
+    // `.get()` / `.set()` via the visit pass.
+    fn t_effect(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+        let body_loc = bun_ast::Loc { start: loc.start + 1 };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+        let thunk = if p.lexer.token == T::TOpenBrace {
+            let stmts = Self::parse_thunk_block_stmts(p)?;
+            Self::zero_arg_thunk_block(p, loc, body_loc, stmts)
+        } else {
+            let e = p.parse_expr(Level::Lowest)?;
+            Self::zero_arg_thunk_expr(p, loc, body_loc, e)
+        };
+        p.pop_scope();
+        p.pop_scope();
+        let call = Self::para_signals_call(p, b"effect", ExprNodeList::init_one(thunk), loc)?;
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::SExpr {
+                value: call,
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parabun: `when COND { … }` / `when not COND { … }` → `require(
+    // "@lyku/para-signals").when(() => COND, () => { … })`.
+    fn t_when(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+        let negate = p.lexer.token == T::TIdentifier && p.lexer.raw() == b"not";
+        if negate {
+            p.lexer.next()?;
+        }
+        // Condition thunk: () => COND.
+        let cond_body_loc = bun_ast::Loc { start: loc.start + 1 };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, cond_body_loc)?;
+        let mut cond = p.parse_expr(Level::Lowest)?;
+        p.pop_scope();
+        p.pop_scope();
+        if negate {
+            let cloc = cond.loc;
+            cond = p.new_expr(
+                E::Unary {
+                    op: OpCode::UnNot,
+                    value: cond,
+                    flags: bun_ast::e::UnaryFlags::default(),
+                },
+                cloc,
+            );
+        }
+        let cond_thunk = Self::zero_arg_thunk_expr(p, loc, cond_body_loc, cond);
+
+        // Body thunk: () => { … }.
+        let brace_loc = p.lexer.loc();
+        let body_fnbody_loc = bun_ast::Loc {
+            start: brace_loc.start + 1,
+        };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, brace_loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_fnbody_loc)?;
+        let stmts = Self::parse_thunk_block_stmts(p)?;
+        p.pop_scope();
+        p.pop_scope();
+        let body_thunk = Self::zero_arg_thunk_block(p, brace_loc, body_fnbody_loc, stmts);
+
+        let call = Self::para_signals_call(
+            p,
+            b"when",
+            ExprNodeList::from_slice(&[cond_thunk, body_thunk]),
+            loc,
+        )?;
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::SExpr {
+                value: call,
                 ..Default::default()
             },
             loc,
@@ -1744,6 +1999,18 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 p.lexer.next()?;
                 return p.parse_fn_stmt(pure_loc, opts, None);
             }
+            // `pure async function NAME(...) { ... }` → `async function …`.
+            if p.lexer.token == T::TIdentifier
+                && p.lexer.raw() == b"async"
+                && !p.lexer.has_newline_before
+            {
+                let async_range = p.lexer.range();
+                p.lexer.next()?;
+                if p.lexer.token == T::TFunction && !p.lexer.has_newline_before {
+                    p.lexer.next()?;
+                    return p.parse_fn_stmt(async_range.loc, opts, Some(async_range));
+                }
+            }
             p.lexer.restore(&snapshot);
         }
 
@@ -1756,6 +2023,43 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.next()?;
             if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
                 return Self::t_signal(p, opts, signal_loc);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `derived NAME = RHS` reactive declaration.
+        if is_identifier && p.lexer.raw() == b"derived" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
+                return Self::t_derived(p, opts, kw_loc);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `effect { … }` / `effect EXPR;`. `effect(…)` / `effect.x` /
+        // `effect = …` keep `effect` as a plain identifier.
+        if is_identifier && p.lexer.raw() == b"effect" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if !p.lexer.has_newline_before
+                && (p.lexer.token == T::TOpenBrace || p.lexer.token == T::TIdentifier)
+            {
+                return Self::t_effect(p, opts, kw_loc);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `when COND { … }` / `when not COND { … }`. `when(…)` /
+        // `when.x` / `when = …` keep `when` as a plain identifier.
+        if is_identifier && p.lexer.raw() == b"when" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
+                return Self::t_when(p, opts, kw_loc);
             }
             p.lexer.restore(&snapshot);
         }

@@ -257,6 +257,10 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// read of one of these into `NAME.get()` and an assignment into
     /// `NAME.set(value)`.
     pub signal_bound_refs: RefMap,
+    /// Parabun: names declared via `signal`/`derived` (by source text). Used at
+    /// parse time to decide whether a `signal NAME = RHS` initializer references
+    /// another signal and should therefore be promoted to a `derived(() => …)`.
+    pub signal_bound_names: std::collections::HashSet<&'a [u8]>,
 
     pub has_top_level_return: bool,
     pub latest_return_had_semicolon: bool,
@@ -9237,6 +9241,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             allow_in: true,
             in_chain_op_arrow_rhs: false,
             signal_bound_refs: RefMap::default(),
+            signal_bound_names: std::collections::HashSet::new(),
 
             call_target: null_expr_data(),
             delete_target: null_expr_data(),
