@@ -140,6 +140,8 @@ pub enum T {
     TDotDotExclamation,
     TDotDotAmpersand,
     TDotDotGreaterThan,
+    // Parabun: `~>` reactive-binding operator.
+    TTildeGreaterThan,
 }
 
 impl T {
@@ -503,6 +505,7 @@ pub static TOKEN_TO_STRING: TokenEnumType = TokenEnumType({
     token_enums[T::TDotDotExclamation as usize] = b"\"..!\"";
     token_enums[T::TDotDotAmpersand as usize] = b"\"..&\"";
     token_enums[T::TDotDotGreaterThan as usize] = b"\"..>\"";
+    token_enums[T::TTildeGreaterThan as usize] = b"\"~>\"";
     token_enums[T::TCaret as usize] = b"\"^\"";
     token_enums[T::TCloseBrace as usize] = b"\"}\"";
     token_enums[T::TCloseBracket as usize] = b"\"]\"";

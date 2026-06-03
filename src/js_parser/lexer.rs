@@ -1717,7 +1717,13 @@ lexer_impl_header! {
                             .add_unsupported_syntax_error(b"~ is not allowed in JSON");
                     }
                     self.step_with(contents);
-                    self.token = T::TTilde;
+                    if self.code_point == 0x3E {
+                        // Parabun: `~>` reactive-binding operator.
+                        self.step_with(contents);
+                        self.token = T::TTildeGreaterThan;
+                    } else {
+                        self.token = T::TTilde;
+                    }
                 }
                 0x3F => {
                     // '?' or '?.' or '??' or '??='

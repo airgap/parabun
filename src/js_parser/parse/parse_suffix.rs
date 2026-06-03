@@ -9,7 +9,7 @@ use crate::parser::DeferredErrors;
 use crate::scan::scan_side_effects::SideEffects;
 use bun_ast::expr::EFlags;
 use bun_ast::op::Level;
-use bun_ast::{E, Expr, ExprData, ExprNodeList, OpCode, OptionalChain};
+use bun_ast::{E, Expr, ExprData, ExprNodeList, G, OpCode, OptionalChain, S, Stmt, scope};
 
 // Zig: `fn ParseSuffix(comptime ts, comptime jsx, comptime scan_only) type { return struct { ... } }`
 // — file-split mixin pattern. Round-C lowered `const JSX: JSXTransformType` → `J: JsxT`, so this is
@@ -1385,6 +1385,93 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         );
         Ok(Continuation::Next)
     }
+    // Parabun: `A ~> B` reactive binding →
+    //   require("@lyku/para-signals").effect(() => { B = A; })
+    // B should be an assignable target; an invalid one yields an assignment
+    // that the engine rejects at runtime (no parse-time check yet).
+    fn sfx_t_tilde_greater_than(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        if level.gte(Level::Assign) {
+            return Ok(Continuation::Done);
+        }
+        let loc = left.loc;
+        let op_loc = p.lexer.loc();
+        p.lexer.next()?;
+        let body_loc = p.lexer.loc();
+        let rhs = p.parse_expr(Level::Assign)?;
+        let lhs = *left;
+
+        // Build the effect body `{ B = A; }`.
+        let assign = p.new_expr(
+            E::Binary {
+                op: OpCode::BinAssign,
+                left: rhs,
+                right: lhs,
+            },
+            body_loc,
+        );
+        let assign_stmt = p.s(
+            S::SExpr {
+                value: assign,
+                ..Default::default()
+            },
+            body_loc,
+        );
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[assign_stmt]);
+
+        // Zero-arg block-body arrow `() => { ... }`. Same scope recipe as the
+        // other synthetic arrows (nothing is parsed inside the scopes; LHS/RHS
+        // were parsed in the enclosing scope).
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+        p.pop_scope();
+        p.pop_scope();
+        let no_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
+        let arrow = p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(no_args),
+                prefer_expr: false,
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            op_loc,
+        );
+
+        // require("@lyku/para-signals").effect(arrow)
+        let require_ref = p.store_name_in_ref(b"require")?;
+        let require_ident = p.new_expr(E::Identifier::init(require_ref), op_loc);
+        let pkg = p.new_expr(E::EString::init(b"@lyku/para-signals"), op_loc);
+        let require_call = p.new_expr(
+            E::Call {
+                target: require_ident,
+                args: ExprNodeList::init_one(pkg),
+                ..Default::default()
+            },
+            op_loc,
+        );
+        let effect_dot = p.new_expr(
+            E::Dot {
+                target: require_call,
+                name: E::Str::new(b"effect"),
+                name_loc: op_loc,
+                ..Default::default()
+            },
+            op_loc,
+        );
+        *left = p.new_expr(
+            E::Call {
+                target: effect_dot,
+                args: ExprNodeList::init_one(arrow),
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        );
+        Ok(Continuation::Next)
+    }
+
     fn sfx_t_dot_dot_exclamation(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
         Self::sfx_chain_op(p, level, left, b"catch")
     }
@@ -1654,6 +1741,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 T::TDotDotExclamation => Self::sfx_t_dot_dot_exclamation(p, level, left),
                 T::TDotDotAmpersand => Self::sfx_t_dot_dot_ampersand(p, level, left),
                 T::TDotDotGreaterThan => Self::sfx_t_dot_dot_greater_than(p, level, left),
+                T::TTildeGreaterThan => Self::sfx_t_tilde_greater_than(p, level, left),
                 T::TBarBarEquals => Self::sfx_t_bar_bar_equals(p, level, left),
                 T::TBarEquals => Self::sfx_t_bar_equals(p, level, left),
                 T::TCaret => Self::sfx_t_caret(p, level, left),
