@@ -174,6 +174,35 @@ pub enum HardcodedModule {
     /// This is gated behind '--expose-internals'
     #[strum(serialize = "bun:internal-for-testing")]
     BunInternalForTesting,
+    // Parabun native runtime modules (parabun:*). Appended at the end so
+    // existing variant discriminants are unchanged. Mirrors the registrations
+    // in HardcodedModule.zig.
+    #[strum(serialize = "parabun:assistant")]
+    ParabunAssistant,
+    #[strum(serialize = "parabun:audio")]
+    ParabunAudio,
+    #[strum(serialize = "parabun:camera")]
+    ParabunCamera,
+    #[strum(serialize = "parabun:csv")]
+    ParabunCsv,
+    #[strum(serialize = "parabun:gpio")]
+    ParabunGpio,
+    #[strum(serialize = "parabun:gpu")]
+    ParabunGpu,
+    #[strum(serialize = "parabun:i2c")]
+    ParabunI2c,
+    #[strum(serialize = "parabun:image")]
+    ParabunImage,
+    #[strum(serialize = "parabun:llm")]
+    ParabunLlm,
+    #[strum(serialize = "parabun:speech")]
+    ParabunSpeech,
+    #[strum(serialize = "parabun:spi")]
+    ParabunSpi,
+    #[strum(serialize = "parabun:video")]
+    ParabunVideo,
+    #[strum(serialize = "parabun:vision")]
+    ParabunVision,
 }
 
 impl HardcodedModule {
@@ -193,6 +222,20 @@ impl HardcodedModule {
         b"bun:sqlite" => HardcodedModule::BunSqlite,
         b"bun:wrap" => HardcodedModule::BunWrap,
         b"bun:internal-for-testing" => HardcodedModule::BunInternalForTesting,
+        // Parabun native runtime modules
+        b"parabun:assistant" => HardcodedModule::ParabunAssistant,
+        b"parabun:audio" => HardcodedModule::ParabunAudio,
+        b"parabun:camera" => HardcodedModule::ParabunCamera,
+        b"parabun:csv" => HardcodedModule::ParabunCsv,
+        b"parabun:gpio" => HardcodedModule::ParabunGpio,
+        b"parabun:gpu" => HardcodedModule::ParabunGpu,
+        b"parabun:i2c" => HardcodedModule::ParabunI2c,
+        b"parabun:image" => HardcodedModule::ParabunImage,
+        b"parabun:llm" => HardcodedModule::ParabunLlm,
+        b"parabun:speech" => HardcodedModule::ParabunSpeech,
+        b"parabun:spi" => HardcodedModule::ParabunSpi,
+        b"parabun:video" => HardcodedModule::ParabunVideo,
+        b"parabun:vision" => HardcodedModule::ParabunVision,
         // Node.js
         b"node:assert" => HardcodedModule::NodeAssert,
         b"node:assert/strict" => HardcodedModule::NodeAssertStrict,
@@ -686,6 +729,39 @@ const BUN_EXTRA_ALIAS_KVS: &[AliasKv] = &[
     entry!("bun:sqlite"),
     entry!("bun:wrap"),
     entry!("bun:internal-for-testing"),
+    // Parabun native runtime modules (parabun:*)
+    entry!("parabun:assistant"),
+    entry!("parabun:audio"),
+    entry!("parabun:camera"),
+    entry!("parabun:csv"),
+    entry!("parabun:gpio"),
+    entry!("parabun:gpu"),
+    entry!("parabun:i2c"),
+    entry!("parabun:image"),
+    entry!("parabun:llm"),
+    entry!("parabun:speech"),
+    entry!("parabun:spi"),
+    entry!("parabun:video"),
+    entry!("parabun:vision"),
+    // LYK-804: legacy aliases for the native parabun:csv builtin.
+    (
+        b"@lyku/para-csv",
+        Alias {
+            path: zstr!("parabun:csv"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:csv",
+        Alias {
+            path: zstr!("parabun:csv"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
     (
         b"ffi",
         Alias {
