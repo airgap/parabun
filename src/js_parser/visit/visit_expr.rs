@@ -1214,6 +1214,77 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // `p.newExpr(e_, loc)` re-wraps the same pointer; here `*e` is already that.
     }
 
+    // Parabun: `NAME.get()` for a signal-bound ref.
+    fn signal_get_call(&mut self, ref_: Ref, loc: bun_ast::Loc) -> Expr {
+        let id = self.new_expr(E::Identifier::init(ref_), loc);
+        let dot = self.new_expr(
+            E::Dot {
+                target: id,
+                name: E::Str::new(b"get"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        self.new_expr(E::Call { target: dot, ..Default::default() }, loc)
+    }
+
+    // Parabun: rewrite `++x`/`--x`/`x++`/`x--` on a signal-bound ref into a
+    // comma expr. `++x` → `(x.set(x.get()+1), x.get())`; `x++` →
+    // `(x.set(x.get()+1), x.get()-1)`; `--`/post-dec mirror with the signs.
+    fn signal_update_rewrite(
+        &mut self,
+        ref_: Ref,
+        loc: bun_ast::Loc,
+        is_inc: bool,
+        is_post: bool,
+    ) -> Expr {
+        let get_for_set = self.signal_get_call(ref_, loc);
+        let one = self.new_expr(E::Number { value: 1.0 }, loc);
+        let delta = self.new_expr(
+            E::Binary {
+                op: if is_inc { Op::BinAdd } else { Op::BinSub },
+                left: get_for_set,
+                right: one,
+            },
+            loc,
+        );
+        let set_id = self.new_expr(E::Identifier::init(ref_), loc);
+        let set_dot = self.new_expr(
+            E::Dot {
+                target: set_id,
+                name: E::Str::new(b"set"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        let set_call = self.new_expr(
+            E::Call {
+                target: set_dot,
+                args: ExprNodeList::init_one(delta),
+                ..Default::default()
+            },
+            loc,
+        );
+        let read = self.signal_get_call(ref_, loc);
+        let result = if is_post {
+            // post-fix yields the OLD value: undo the just-applied delta.
+            let one2 = self.new_expr(E::Number { value: 1.0 }, loc);
+            self.new_expr(
+                E::Binary {
+                    op: if is_inc { Op::BinSub } else { Op::BinAdd },
+                    left: read,
+                    right: one2,
+                },
+                loc,
+            )
+        } else {
+            read
+        };
+        set_call.join_with_comma(result)
+    }
+
     fn e_unary(p: &mut Self, e: &mut Expr, _: ExprIn) {
         let expr = *e;
         let mut e_ = expr.data.e_unary().expect("infallible: variant checked");
@@ -1358,15 +1429,39 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     ////////////////////////////////////////////////////////////////////////////////
                     Op::UnPreDec => {
                         // TODO: private fields
+                        if let Data::EIdentifier(id) = e_.value.data {
+                            if p.signal_bound_refs.contains_key(&id.ref_) {
+                                *e = p.signal_update_rewrite(id.ref_, expr.loc, false, false);
+                                return;
+                            }
+                        }
                     }
                     Op::UnPreInc => {
                         // TODO: private fields
+                        if let Data::EIdentifier(id) = e_.value.data {
+                            if p.signal_bound_refs.contains_key(&id.ref_) {
+                                *e = p.signal_update_rewrite(id.ref_, expr.loc, true, false);
+                                return;
+                            }
+                        }
                     }
                     Op::UnPostDec => {
                         // TODO: private fields
+                        if let Data::EIdentifier(id) = e_.value.data {
+                            if p.signal_bound_refs.contains_key(&id.ref_) {
+                                *e = p.signal_update_rewrite(id.ref_, expr.loc, false, true);
+                                return;
+                            }
+                        }
                     }
                     Op::UnPostInc => {
                         // TODO: private fields
+                        if let Data::EIdentifier(id) = e_.value.data {
+                            if p.signal_bound_refs.contains_key(&id.ref_) {
+                                *e = p.signal_update_rewrite(id.ref_, expr.loc, true, true);
+                                return;
+                            }
+                        }
                     }
                     _ => {}
                 }
