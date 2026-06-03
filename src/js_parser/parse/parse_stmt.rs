@@ -1677,6 +1677,22 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     ) -> Result<Stmt> {
         let is_identifier = p.lexer.token == T::TIdentifier;
         let name = p.lexer.identifier;
+
+        // Parabun: "pure function NAME(...) { ... }" statement → function
+        // declaration. Peek past `pure`; restore if it isn't `pure function`
+        // so `pure` stays usable as a plain identifier. Purity *enforcement*
+        // (rejecting impure ops) is not yet ported.
+        if is_identifier && p.lexer.raw() == b"pure" {
+            let snapshot = p.lexer.snapshot();
+            let pure_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TFunction && !p.lexer.has_newline_before {
+                p.lexer.next()?;
+                return p.parse_fn_stmt(pure_loc, opts, None);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
         // Parse either an async function, an async expression, or a normal expression.
         // Every branch below either assigns `expr` or `return`s.
         let mut expr: Expr;

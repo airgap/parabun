@@ -141,6 +141,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         p.lexer.next()?;
 
+        // Parabun: "pure function ..." parses as a (pure) function expression.
+        // Purity *enforcement* (rejecting impure ops / this / free vars) is not
+        // yet ported — this makes `pure function f(){}` parse and run. Arrow
+        // forms (`pure x =>`, `pure () =>`) are also not yet ported.
+        if name == b"pure" && !p.lexer.has_newline_before && p.lexer.token == T::TFunction {
+            return p.parse_fn_expr(loc, false, bun_ast::Range::NONE);
+        }
+
         // Handle async and await expressions
         match async_kind {
             AsyncPrefixExpression::IsAsync => {
