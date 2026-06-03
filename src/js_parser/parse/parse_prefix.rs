@@ -310,17 +310,44 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 p.lexer.next()?;
                 None
             } else {
+                // Literal pattern, optionally OR-chained: `1 | 2 | 3 => ...`.
+                // Each alternative parses at BitwiseOr level so the `|`
+                // separator isn't swallowed as a bitwise-or expression;
+                // builds `__pm === a || __pm === b || ...`.
                 let lit_loc = p.lexer.loc();
-                let lit = p.parse_expr(Level::Comma)?;
+                let first = p.parse_expr(Level::BitwiseOr)?;
                 let m_ident = p.new_expr(E::Identifier::init(m_ref), lit_loc);
-                Some(p.new_expr(
+                let mut test_expr = p.new_expr(
                     E::Binary {
                         op: OpCode::BinStrictEq,
                         left: m_ident,
-                        right: lit,
+                        right: first,
                     },
                     lit_loc,
-                ))
+                );
+                while p.lexer.token == T::TBar {
+                    p.lexer.next()?;
+                    let alt_loc = p.lexer.loc();
+                    let alt = p.parse_expr(Level::BitwiseOr)?;
+                    let m_alt = p.new_expr(E::Identifier::init(m_ref), alt_loc);
+                    let eq = p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinStrictEq,
+                            left: m_alt,
+                            right: alt,
+                        },
+                        alt_loc,
+                    );
+                    test_expr = p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinLogicalOr,
+                            left: test_expr,
+                            right: eq,
+                        },
+                        alt_loc,
+                    );
+                }
+                Some(test_expr)
             };
             p.lexer.expect(T::TEqualsGreaterThan)?;
 
