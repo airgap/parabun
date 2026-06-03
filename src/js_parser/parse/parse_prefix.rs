@@ -158,6 +158,70 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         ))
     }
 
+    // Parabun: leading-dot sugar. A bare `.member.chain()` at expression
+    // position (argument: `map(.score)`, or chain-op RHS: `..! .message`)
+    // synthesizes `(__pcv) => __pcv.member.chain()`. The lexer is at the `.`
+    // on entry; the regular suffix loop (run with in_chain_op_arrow_rhs set)
+    // consumes the full member/call chain and stops at the next chain op.
+    // `op_loc` is the chain-operator loc, or the dot loc itself for the
+    // argument-position form.
+    pub(crate) fn parse_leading_dot_chain_handler(
+        p: &mut Self,
+        op_loc: bun_ast::Loc,
+    ) -> PResult<Expr> {
+        let dot_loc = p.lexer.loc();
+        let arrow_loc = if op_loc.start < dot_loc.start {
+            op_loc
+        } else {
+            bun_ast::Loc {
+                start: if dot_loc.start > 0 { dot_loc.start - 1 } else { 0 },
+            }
+        };
+
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, arrow_loc)?;
+        let param_ref = p.declare_symbol(symbol::Kind::Constant, dot_loc, b"__pcv")?;
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, dot_loc)?;
+
+        // Run the suffix loop on the synthetic param so the leading `.` and any
+        // following members/indexes/calls fold into the arrow body.
+        let mut body_expr = p.new_expr(E::Identifier::init(param_ref), dot_loc);
+        let prev = p.in_chain_op_arrow_rhs;
+        p.in_chain_op_arrow_rhs = true;
+        p.parse_suffix(&mut body_expr, Level::Assign, None, EFlags::None)?;
+        p.in_chain_op_arrow_rhs = prev;
+
+        p.pop_scope(); // FunctionBody
+        p.pop_scope(); // FunctionArgs
+
+        let ret_stmt = p.s(S::Return { value: Some(body_expr) }, dot_loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret_stmt]);
+
+        let arg_binding = p.b(B::Identifier { r#ref: param_ref }, dot_loc);
+        let args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(1, |_| G::Arg {
+            binding: arg_binding,
+            ..Default::default()
+        });
+
+        Ok(p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(args),
+                prefer_expr: true,
+                body: G::FnBody {
+                    loc: dot_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            arrow_loc,
+        ))
+    }
+
+    // Prefix dispatch for a leading `.` — argument-position form (op_loc == dot).
+    fn pfx_t_dot(p: &mut Self, _level: Level) -> PResult<Expr> {
+        let dot_loc = p.lexer.loc();
+        Self::parse_leading_dot_chain_handler(p, dot_loc)
+    }
+
     // Parabun: `match SUBJECT { lit => res, ..., else => res }` → an IIFE
     // ternary: `((__pm) => __pm === lit1 ? res1 : ... : elseRes)(SUBJECT)`.
     // Subset: literal patterns + `else`/`_` wildcard. Bindings, OR patterns,
@@ -1255,6 +1319,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         match p.lexer.token {
             T::TOpenBracket => Self::pfx_t_open_bracket(p, errors),
             T::TOpenBrace => Self::pfx_t_open_brace(p, errors),
+            // Parabun: leading-dot sugar `.member` at expression position.
+            T::TDot => Self::pfx_t_dot(p, level),
             T::TLessThan => Self::pfx_t_less_than(p, level, errors, flags),
             T::TImport => Self::pfx_t_import(p, level),
             T::TOpenParen => Self::pfx_t_open_paren(p, level),

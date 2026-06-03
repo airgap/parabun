@@ -1348,16 +1348,23 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         if level.gte(Level::Conditional) || p.in_chain_op_arrow_rhs {
             return Ok(Continuation::Done);
         }
+        let op_loc = p.lexer.loc();
         p.lexer.next()?;
         let loc = left.loc;
         let target = *left;
         // RHS parses at assign level so a bare arrow handler works
         // (`p ..! err => fallback`); the flag makes any nested chain op back
-        // off so `A ..> h1 ..! h2` is `A.then(h1).catch(h2)`.
-        let prev_in_chain = p.in_chain_op_arrow_rhs;
-        p.in_chain_op_arrow_rhs = true;
-        let handler = p.parse_expr(Level::Assign)?;
-        p.in_chain_op_arrow_rhs = prev_in_chain;
+        // off so `A ..> h1 ..! h2` is `A.then(h1).catch(h2)`. A leading `.`
+        // (`..! .message`) becomes a synthetic `(__pcv) => __pcv.message`.
+        let handler = if p.lexer.token == T::TDot {
+            Self::parse_leading_dot_chain_handler(p, op_loc)?
+        } else {
+            let prev_in_chain = p.in_chain_op_arrow_rhs;
+            p.in_chain_op_arrow_rhs = true;
+            let h = p.parse_expr(Level::Assign)?;
+            p.in_chain_op_arrow_rhs = prev_in_chain;
+            h
+        };
         let member = p.new_expr(
             E::Dot {
                 target,
