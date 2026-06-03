@@ -507,9 +507,37 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // Purity *enforcement* (rejecting impure ops / this / free vars) is not
         // yet ported — this makes `pure function f(){}` parse and run. Arrow
         // forms (`pure x =>`, `pure () =>`) are also not yet ported.
-        if name == b"pure" && !p.lexer.has_newline_before && p.lexer.token == T::TFunction {
-            return p.parse_fn_expr(loc, false, bun_ast::Range::NONE);
+        if name == b"pure" && !p.lexer.has_newline_before {
+            // `pure function ...`
+            if p.lexer.token == T::TFunction {
+                return p.parse_fn_expr(loc, false, bun_ast::Range::NONE);
+            }
+            // `pure x => ...` — single-param arrow (a bare `pure IDENT` is not
+            // valid JS otherwise, so delegating is safe).
+            if p.lexer.token == T::TIdentifier {
+                return Self::pfx_t_identifier(p, level);
+            }
+            // `pure (params) => ...` — keep only if it's actually an arrow, so a
+            // call to a `pure` binding (`pure(x)`) is left for the suffix loop.
+            // Purity enforcement is deferred, so the `pure` marker is dropped.
+            if p.lexer.token == T::TOpenParen {
+                let snap = p.lexer.snapshot();
+                let result = Self::pfx_t_open_paren(p, level)?;
+                if matches!(result.data, ExprData::EArrow(_)) {
+                    return Ok(result);
+                }
+                p.lexer.restore(&snap);
+            }
         }
+
+        // Parabun: `memo (params) => ...` → __parabunMemo(arrow, arity).
+        // PARSER IMPLEMENTED but DEFERRED: the desugaring is correct, but
+        // `__parabunMemo` must be registered in the fixed `Runtime::Imports`
+        // registry (src/ast/runtime.rs: ALL / ALL_SORTED / ALL_SORTED_INDEX /
+        // field / field_mut, pinned by `all_sorted_matches_zig_comptime`) or
+        // the generated symbol resolves to nothing at runtime. Same blocker as
+        // range (`__parabunRange*`, which additionally need adding to
+        // src/runtime.js). Re-enable the memo hook once those are registered.
 
         // Parabun: Result / Option constructor desugaring.
         //   Ok(x) → {tag:"Ok",value:x}; Err(e) → {tag:"Err",error:e};
