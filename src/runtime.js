@@ -365,6 +365,10 @@ export var __parabunRangeInclusive = (a, b) => {
   for (var i = a; i <= b; i++) out.push(i);
   return out;
 };
+// Parabun: `schema { ... }` → __paraFromSchema(() => ({ ... })). The thunk is
+// invoked once (after surrounding bindings exist, so self/mutual recursion
+// works) and its object is returned as the schema value.
+export var __paraFromSchema = (thunk) => thunk();
 export var __parabunMemo = (fn, arity) => {
   if (arity === 0) {
     var __has = false,

@@ -225,6 +225,41 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Self::parse_leading_dot_chain_handler(p, dot_loc)
     }
 
+    // Parabun: `schema { ... }` → `__paraFromSchema(() => ({ ... }))`. The body
+    // `{ ... }` parses as an object literal inside a synthesized zero-arg thunk
+    // (so its identifier refs belong to the arrow, and the schema is built
+    // lazily). At entry: `schema` consumed, lexer on `{`.
+    fn parse_schema_object_expr(p: &mut Self, range_loc: bun_ast::Loc) -> PResult<Expr> {
+        let body_loc = p.lexer.loc();
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, range_loc)?;
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, body_loc)?;
+
+        // `.comma` so a `schema { … }` nested in an object literal stops at the
+        // outer `,` instead of swallowing it as a sequence expression.
+        let body_expr = p.parse_expr(Level::Comma)?;
+
+        let ret = p.s(S::Return { value: Some(body_expr) }, body_loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+        let no_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
+        let thunk = p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(no_args),
+                prefer_expr: true,
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            range_loc,
+        );
+
+        p.pop_scope();
+        p.pop_scope();
+
+        Ok(p.call_runtime(range_loc, b"__paraFromSchema", ExprNodeList::init_one(thunk)))
+    }
+
     // Parabun: `parallel { k0: v0, k1: v1 }` →
     //   Promise.all([v0, v1]).then(([__pb0, __pb1]) => ({ k0: __pb0, k1: __pb1 }))
     fn parse_parallel_object_expr(p: &mut Self, range_loc: bun_ast::Loc) -> PResult<Expr> {
@@ -758,6 +793,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             && p.lexer.token == T::TOpenBrace
         {
             return Self::parse_parallel_object_expr(p, loc);
+        }
+
+        // Parabun: `schema { ... }` → `__paraFromSchema(() => ({ ... }))` —
+        // inline schema literal wrapped in a thunk.
+        if name == b"schema" && !p.lexer.has_newline_before && p.lexer.token == T::TOpenBrace {
+            return Self::parse_schema_object_expr(p, loc);
         }
 
         // Parabun: `match SUBJECT { lit => res, ..., else => res }`. Triggers
