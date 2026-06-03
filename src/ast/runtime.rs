@@ -173,10 +173,15 @@ pub struct Imports {
     pub __callDispose: Option<Ref>,
     pub __jsonParse: Option<Ref>,
     pub __promiseAll: Option<Ref>,
+    // Parabun runtime helpers (appended at the end so existing indices are
+    // unchanged). Exported from src/runtime.js.
+    pub __parabunMemo: Option<Ref>,
+    pub __parabunRange: Option<Ref>,
+    pub __parabunRangeInclusive: Option<Ref>,
 }
 
 impl Imports {
-    pub const ALL: [&'static [u8]; 25] = [
+    pub const ALL: [&'static [u8]; 28] = [
         b"__name",
         b"__require",
         b"__export",
@@ -202,12 +207,15 @@ impl Imports {
         b"__callDispose",
         b"__jsonParse",
         b"__promiseAll",
+        b"__parabunMemo",
+        b"__parabunRange",
+        b"__parabunRangeInclusive",
     ];
 
     /// Zig computed this at comptime via `std.sort.pdq`. Rust stable cannot sort in
     /// `const`; precomputed here and verified by `tests::all_sorted_matches_zig_comptime`.
     #[cfg_attr(not(test), allow(dead_code))]
-    const ALL_SORTED: [&'static [u8]; 25] = [
+    const ALL_SORTED: [&'static [u8]; 28] = [
         b"$$typeof",
         b"__callDispose",
         b"__decorateElement",
@@ -222,6 +230,9 @@ impl Imports {
         b"__legacyMetadataTS",
         b"__merge",
         b"__name",
+        b"__parabunMemo",
+        b"__parabunRange",
+        b"__parabunRangeInclusive",
         b"__privateAdd",
         b"__privateGet",
         b"__privateIn",
@@ -237,32 +248,35 @@ impl Imports {
 
     /// When generating the list of runtime imports, we sort it for determinism.
     /// This is a lookup table so we don't need to resort the strings each time
-    pub const ALL_SORTED_INDEX: [usize; 25] = [
+    pub const ALL_SORTED_INDEX: [usize; 28] = [
         13, // __name
-        22, // __require
+        25, // __require
         5,  // __export
-        21, // __reExport
+        24, // __reExport
         7,  // __exportValue
         6,  // __exportDefault
         12, // __merge
         9,  // __legacyDecorateClassTS
         10, // __legacyDecorateParamTS
         11, // __legacyMetadataTS
-        20, // __publicField
-        16, // __privateIn
-        15, // __privateGet
-        14, // __privateAdd
-        18, // __privateSet
-        17, // __privateMethod
+        23, // __publicField
+        19, // __privateIn
+        18, // __privateGet
+        17, // __privateAdd
+        21, // __privateSet
+        20, // __privateMethod
         4,  // __decoratorStart
         3,  // __decoratorMetadata
-        23, // __runInitializers
+        26, // __runInitializers
         2,  // __decorateElement
         0,  // $$typeof
-        24, // __using
+        27, // __using
         1,  // __callDispose
         8,  // __jsonParse
-        19, // __promiseAll
+        22, // __promiseAll
+        14, // __parabunMemo
+        15, // __parabunRange
+        16, // __parabunRangeInclusive
     ];
 
     pub const NAME: &'static [u8] = b"bun:wrap";
@@ -296,6 +310,9 @@ impl Imports {
             22 => self.__callDispose,
             23 => self.__jsonParse,
             24 => self.__promiseAll,
+            25 => self.__parabunMemo,
+            26 => self.__parabunRange,
+            27 => self.__parabunRangeInclusive,
             _ => None,
         }
     }
@@ -328,6 +345,9 @@ impl Imports {
             22 => Some(&mut self.__callDispose),
             23 => Some(&mut self.__jsonParse),
             24 => Some(&mut self.__promiseAll),
+            25 => Some(&mut self.__parabunMemo),
+            26 => Some(&mut self.__parabunRange),
+            27 => Some(&mut self.__parabunRangeInclusive),
             _ => None,
         }
     }

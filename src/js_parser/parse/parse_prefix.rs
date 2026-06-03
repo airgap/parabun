@@ -530,14 +530,40 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
         }
 
-        // Parabun: `memo (params) => ...` → __parabunMemo(arrow, arity).
-        // PARSER IMPLEMENTED but DEFERRED: the desugaring is correct, but
-        // `__parabunMemo` must be registered in the fixed `Runtime::Imports`
-        // registry (src/ast/runtime.rs: ALL / ALL_SORTED / ALL_SORTED_INDEX /
-        // field / field_mut, pinned by `all_sorted_matches_zig_comptime`) or
-        // the generated symbol resolves to nothing at runtime. Same blocker as
-        // range (`__parabunRange*`, which additionally need adding to
-        // src/runtime.js). Re-enable the memo hook once those are registered.
+        // Parabun: `memo (params) => ...` / `memo x => ...` → memoized arrow
+        //   __parabunMemo(arrow, arity). `memo(x)` (a call) is left alone.
+        if name == b"memo" && !p.lexer.has_newline_before {
+            let arrow = if p.lexer.token == T::TIdentifier {
+                Some(Self::pfx_t_identifier(p, level)?)
+            } else if p.lexer.token == T::TOpenParen {
+                let snap = p.lexer.snapshot();
+                let r = Self::pfx_t_open_paren(p, level)?;
+                if matches!(r.data, ExprData::EArrow(_)) {
+                    Some(r)
+                } else {
+                    p.lexer.restore(&snap);
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(arrow) = arrow {
+                if let ExprData::EArrow(a) = arrow.data {
+                    let arity: f64 = match a.args.len() {
+                        0 => 0.0,
+                        1 => 1.0,
+                        _ => 2.0,
+                    };
+                    let arity_expr = p.new_expr(E::Number { value: arity }, loc);
+                    return Ok(p.call_runtime(
+                        loc,
+                        b"__parabunMemo",
+                        ExprNodeList::from_slice(&[arrow, arity_expr]),
+                    ));
+                }
+                return Ok(arrow);
+            }
+        }
 
         // Parabun: Result / Option constructor desugaring.
         //   Ok(x) → {tag:"Ok",value:x}; Err(e) → {tag:"Err",error:e};
