@@ -133,6 +133,13 @@ pub enum T {
     // Parabun: `|>` pipe operator. Appended at the end so existing variant
     // discriminants are unchanged (repr(u8); the array is sized by Enum::LENGTH).
     TBarGreaterThan,
+    // Parabun: `..` family — range (`..`/`..=`) and error-chaining
+    // (`..!`/`..&`/`..>`). Also appended at the end.
+    TDotDot,
+    TDotDotEquals,
+    TDotDotExclamation,
+    TDotDotAmpersand,
+    TDotDotGreaterThan,
 }
 
 impl T {
@@ -491,6 +498,11 @@ pub static TOKEN_TO_STRING: TokenEnumType = TokenEnumType({
     token_enums[T::TBar as usize] = b"\"|\"";
     token_enums[T::TBarBar as usize] = b"\"||\"";
     token_enums[T::TBarGreaterThan as usize] = b"\"|>\""; // Parabun pipe
+    token_enums[T::TDotDot as usize] = b"\"..\"";
+    token_enums[T::TDotDotEquals as usize] = b"\"..=\"";
+    token_enums[T::TDotDotExclamation as usize] = b"\"..!\"";
+    token_enums[T::TDotDotAmpersand as usize] = b"\"..&\"";
+    token_enums[T::TDotDotGreaterThan as usize] = b"\"..>\"";
     token_enums[T::TCaret as usize] = b"\"^\"";
     token_enums[T::TCloseBrace as usize] = b"\"}\"";
     token_enums[T::TCloseBracket as usize] = b"\"]\"";

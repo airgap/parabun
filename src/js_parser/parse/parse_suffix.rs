@@ -1313,6 +1313,75 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(Continuation::Next)
     }
 
+    // Parabun: `a..b` → `__parabunRange(a, b)` (exclusive range).
+    fn sfx_t_dot_dot(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        if level.gte(Level::Shift) {
+            return Ok(Continuation::Done);
+        }
+        let op_loc = p.lexer.loc();
+        p.lexer.next()?;
+        let lhs = *left;
+        let rhs = p.parse_expr(Level::Shift)?;
+        *left = p.call_runtime(op_loc, b"__parabunRange", ExprNodeList::from_slice(&[lhs, rhs]));
+        Ok(Continuation::Next)
+    }
+
+    // Parabun: `a ..= b` → `__parabunRangeInclusive(a, b)`.
+    fn sfx_t_dot_dot_equals(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        if level.gte(Level::Shift) {
+            return Ok(Continuation::Done);
+        }
+        let op_loc = p.lexer.loc();
+        p.lexer.next()?;
+        let lhs = *left;
+        let rhs = p.parse_expr(Level::Shift)?;
+        *left =
+            p.call_runtime(op_loc, b"__parabunRangeInclusive", ExprNodeList::from_slice(&[lhs, rhs]));
+        Ok(Continuation::Next)
+    }
+
+    // Parabun: chain-op error handling. `e ..! h` → `e.catch(h)`,
+    // `e ..& h` → `e.finally(h)`, `e ..> h` → `e.then(h)`. RHS parses at
+    // assign level so a bare arrow handler works. Leading-dot sugar
+    // (`..! .message`) is not yet ported.
+    fn sfx_chain_op(p: &mut Self, level: Level, left: &mut Expr, method: &'static [u8]) -> CResult {
+        if level.gte(Level::Conditional) {
+            return Ok(Continuation::Done);
+        }
+        p.lexer.next()?;
+        let loc = left.loc;
+        let target = *left;
+        let handler = p.parse_expr(Level::Assign)?;
+        let member = p.new_expr(
+            E::Dot {
+                target,
+                name: E::Str::new(method),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        *left = p.new_expr(
+            E::Call {
+                target: member,
+                args: ExprNodeList::init_one(handler),
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        );
+        Ok(Continuation::Next)
+    }
+    fn sfx_t_dot_dot_exclamation(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        Self::sfx_chain_op(p, level, left, b"catch")
+    }
+    fn sfx_t_dot_dot_ampersand(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        Self::sfx_chain_op(p, level, left, b"finally")
+    }
+    fn sfx_t_dot_dot_greater_than(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        Self::sfx_chain_op(p, level, left, b"then")
+    }
+
     fn sfx_t_bar_equals(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
         if level.gte(Level::Assign) {
             return Ok(Continuation::Done);
@@ -1567,6 +1636,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 T::TAsteriskEquals => Self::sfx_t_asterisk_equals(p, level, left),
                 T::TBar => Self::sfx_t_bar(p, level, left),
                 T::TBarGreaterThan => Self::sfx_t_bar_greater_than(p, level, left),
+                T::TDotDot => Self::sfx_t_dot_dot(p, level, left),
+                T::TDotDotEquals => Self::sfx_t_dot_dot_equals(p, level, left),
+                T::TDotDotExclamation => Self::sfx_t_dot_dot_exclamation(p, level, left),
+                T::TDotDotAmpersand => Self::sfx_t_dot_dot_ampersand(p, level, left),
+                T::TDotDotGreaterThan => Self::sfx_t_dot_dot_greater_than(p, level, left),
                 T::TBarBarEquals => Self::sfx_t_bar_bar_equals(p, level, left),
                 T::TBarEquals => Self::sfx_t_bar_equals(p, level, left),
                 T::TCaret => Self::sfx_t_caret(p, level, left),

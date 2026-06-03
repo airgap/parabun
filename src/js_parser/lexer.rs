@@ -3569,15 +3569,35 @@ lexer_impl_header! {
         if first == 0x2E
             && (self.code_point < 0x30 || self.code_point > 0x39)
         {
-            // "..."
-            if (self.code_point == 0x2E
-                && self.current < contents.len())
-                && contents[self.current] == b'.'
-            {
-                self.step_with(contents);
-                self.step_with(contents);
-                self.token = T::TDotDotDot;
-                return Ok(());
+            // ".." prefix — check for "...", and (Parabun) "..=", "..!",
+            // "..&", "..>", or bare ".." (exclusive range).
+            if self.code_point == 0x2E && self.current < contents.len() {
+                let third = contents[self.current];
+                if third == b'.' {
+                    self.step_with(contents);
+                    self.step_with(contents);
+                    self.token = T::TDotDotDot;
+                    return Ok(());
+                } else if !IS_JSON {
+                    // Parabun "..X" operators
+                    let two_char = match third {
+                        b'=' => Some(T::TDotDotEquals),
+                        b'!' => Some(T::TDotDotExclamation),
+                        b'&' => Some(T::TDotDotAmpersand),
+                        b'>' => Some(T::TDotDotGreaterThan),
+                        _ => None,
+                    };
+                    if let Some(tok) = two_char {
+                        self.step_with(contents);
+                        self.step_with(contents);
+                        self.token = tok;
+                        return Ok(());
+                    }
+                    // bare ".." exclusive range (consumes the second dot only)
+                    self.step_with(contents);
+                    self.token = T::TDotDot;
+                    return Ok(());
+                }
             }
 
             // "."
