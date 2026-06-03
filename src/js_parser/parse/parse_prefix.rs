@@ -123,6 +123,61 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(p.new_expr(E::PrivateIdentifier { ref_ }, loc))
     }
 
+    // Parabun: `Tag(value)` → `{ tag: <tag>, <value_key>: value }`.
+    fn parse_result_ctor(
+        p: &mut Self,
+        tag_name: &'static [u8],
+        value_key: &'static [u8],
+        loc: bun_ast::Loc,
+    ) -> PResult<Expr> {
+        p.lexer.expect(T::TOpenParen)?;
+        let value = p.parse_expr(Level::Comma)?;
+        p.lexer.expect(T::TCloseParen)?;
+
+        let mut properties: bun_alloc::ArenaVec<'_, G::Property> =
+            bun_alloc::ArenaVec::new_in(p.arena);
+        let tag_key = p.new_expr(E::EString::init(b"tag"), loc);
+        let tag_val = p.new_expr(E::EString::init(tag_name), loc);
+        properties.push(G::Property {
+            key: Some(tag_key),
+            value: Some(tag_val),
+            ..Default::default()
+        });
+        let vkey = p.new_expr(E::EString::init(value_key), loc);
+        properties.push(G::Property {
+            key: Some(vkey),
+            value: Some(value),
+            ..Default::default()
+        });
+        Ok(p.new_expr(
+            E::Object {
+                properties: G::PropertyList::from_bump_vec(properties),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parabun: bare `None` → `{ tag: "None" }`.
+    fn parse_none_literal(p: &mut Self, loc: bun_ast::Loc) -> PResult<Expr> {
+        let mut properties: bun_alloc::ArenaVec<'_, G::Property> =
+            bun_alloc::ArenaVec::new_in(p.arena);
+        let tag_key = p.new_expr(E::EString::init(b"tag"), loc);
+        let tag_val = p.new_expr(E::EString::init(b"None"), loc);
+        properties.push(G::Property {
+            key: Some(tag_key),
+            value: Some(tag_val),
+            ..Default::default()
+        });
+        Ok(p.new_expr(
+            E::Object {
+                properties: G::PropertyList::from_bump_vec(properties),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
     fn pfx_t_identifier(p: &mut Self, level: Level) -> PResult<Expr> {
         let loc = p.lexer.loc();
         let name = p.lexer.identifier;
@@ -147,6 +202,31 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // forms (`pure x =>`, `pure () =>`) are also not yet ported.
         if name == b"pure" && !p.lexer.has_newline_before && p.lexer.token == T::TFunction {
             return p.parse_fn_expr(loc, false, bun_ast::Range::NONE);
+        }
+
+        // Parabun: Result / Option constructor desugaring.
+        //   Ok(x) → {tag:"Ok",value:x}; Err(e) → {tag:"Err",error:e};
+        //   Some(x) → {tag:"Some",value:x}; None → {tag:"None"}
+        // Ok/Err/Some only trigger before `(`, so `import { Ok }` and plain
+        // identifier uses are unaffected.
+        if p.lexer.token == T::TOpenParen {
+            if name == b"Ok" {
+                return Self::parse_result_ctor(p, b"Ok", b"value", loc);
+            }
+            if name == b"Err" {
+                return Self::parse_result_ctor(p, b"Err", b"error", loc);
+            }
+            if name == b"Some" {
+                return Self::parse_result_ctor(p, b"Some", b"value", loc);
+            }
+        }
+        if name == b"None" {
+            // Bare `None` — desugar unless a continuation would treat it as a
+            // plain identifier (`(` / `.` / `[` / `=`).
+            match p.lexer.token {
+                T::TOpenParen | T::TDot | T::TOpenBracket | T::TEquals => {}
+                _ => return Self::parse_none_literal(p, loc),
+            }
         }
 
         // Handle async and await expressions
