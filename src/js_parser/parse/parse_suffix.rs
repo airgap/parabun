@@ -1408,6 +1408,105 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // Shared by `~>` (assignment body) and `->` (call body). Uses the synthetic
     // zero-arg block-body arrow scope recipe (nothing is parsed inside the
     // scopes; the body value was built from already-parsed LHS/RHS).
+    // Parabun: `LHS is A | B | …` → `(LHS === A || LHS === B || …)`;
+    // `LHS is not A | B` → `(LHS !== A && LHS !== B)`; `LHS is Type` (a single
+    // bare identifier RHS) → `Type.parse(LHS).tag === "Ok"`. Each `|`-separated
+    // alternative parses at bitwise-or level so `|` delimits them; a quoted
+    // `'a|b'` is one string token and stays intact.
+    fn sfx_is_membership(p: &mut Self, left: &mut Expr) -> Result<(), Error> {
+        let loc = left.loc;
+        p.lexer.next()?; // consume `is`
+        let negate = p.lexer.token == T::TIdentifier
+            && !p.lexer.has_newline_before
+            && p.lexer.raw() == b"not";
+        if negate {
+            p.lexer.next()?;
+        }
+        let subject = *left;
+        let first = p.parse_expr(Level::BitwiseOr)?;
+
+        // A single bare identifier RHS is a schema/type membership check.
+        if matches!(first.data, ExprData::EIdentifier(_)) && p.lexer.token != T::TBar {
+            let parse_dot = p.new_expr(
+                E::Dot {
+                    target: first,
+                    name: E::Str::new(b"parse"),
+                    name_loc: loc,
+                    ..Default::default()
+                },
+                loc,
+            );
+            let parse_call = p.new_expr(
+                E::Call {
+                    target: parse_dot,
+                    args: ExprNodeList::init_one(subject),
+                    ..Default::default()
+                },
+                loc,
+            );
+            let tag_dot = p.new_expr(
+                E::Dot {
+                    target: parse_call,
+                    name: E::Str::new(b"tag"),
+                    name_loc: loc,
+                    ..Default::default()
+                },
+                loc,
+            );
+            let ok = p.new_expr(E::EString::init(b"Ok"), loc);
+            *left = p.new_expr(
+                E::Binary {
+                    op: OpCode::BinStrictEq,
+                    left: tag_dot,
+                    right: ok,
+                },
+                loc,
+            );
+            return Ok(());
+        }
+
+        let eq_op = if negate {
+            OpCode::BinStrictNe
+        } else {
+            OpCode::BinStrictEq
+        };
+        let fold_op = if negate {
+            OpCode::BinLogicalAnd
+        } else {
+            OpCode::BinLogicalOr
+        };
+        let mut result = p.new_expr(
+            E::Binary {
+                op: eq_op,
+                left: subject,
+                right: first,
+            },
+            loc,
+        );
+        while p.lexer.token == T::TBar {
+            p.lexer.next()?;
+            let alt = p.parse_expr(Level::BitwiseOr)?;
+            let cmp = p.new_expr(
+                E::Binary {
+                    op: eq_op,
+                    left: subject,
+                    right: alt,
+                },
+                loc,
+            );
+            result = p.new_expr(
+                E::Binary {
+                    op: fold_op,
+                    left: result,
+                    right: cmp,
+                },
+                loc,
+            );
+        }
+        *left = result;
+        Ok(())
+    }
+
     fn build_reactive_effect(
         p: &mut Self,
         op_loc: bun_ast::Loc,
@@ -1776,6 +1875,16 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             // treat "c.d" as OptionalChainContinue in "a?.b + c.d".
             let old_optional_chain = optional_chain;
             optional_chain = None;
+
+            // Parabun: `LHS is …` membership operator (contextual keyword,
+            // relational precedence).
+            if !p.lexer.has_newline_before
+                && level.lt(Level::Compare)
+                && p.lexer.is_contextual_keyword(b"is")
+            {
+                Self::sfx_is_membership(p, left)?;
+                continue;
+            }
 
             // Each of these tokens are split into a function to conserve
             // stack space. Currently in Zig, the compiler does not reuse

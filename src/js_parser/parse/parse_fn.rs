@@ -495,6 +495,72 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(p.new_expr(E::Function { func }, loc))
     }
 
+    // Parabun: `memo NAME(params) { … }` (statement form) →
+    //   `const NAME = __parabunMemo(function (params) { … }, arity)`.
+    // The function expression is anonymous so recursion resolves through the
+    // `const NAME` binding (matching the canonical lowering). The lexer is
+    // positioned at the optional `async` / the function name.
+    pub fn t_memo(&mut self, loc: bun_ast::Loc, is_async: bool) -> Result<Stmt, Error> {
+        let p = self;
+        let async_range = if is_async {
+            let r = p.lexer.range();
+            p.lexer.next()?;
+            r
+        } else {
+            bun_ast::Range::NONE
+        };
+        if p.lexer.token != T::TIdentifier {
+            p.lexer.expect(T::TIdentifier)?;
+        }
+        let name_loc = p.lexer.loc();
+        let name = p.lexer.identifier;
+        let binding_ref = p.declare_symbol(js_ast::symbol::Kind::Constant, name_loc, name)?;
+        p.lexer.next()?;
+        let fn_loc = name_loc;
+        let _ = p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, fn_loc)?;
+        let func = p.parse_fn(
+            None,
+            FnOrArrowDataParse {
+                needs_async_loc: fn_loc,
+                async_range,
+                allow_await: if is_async {
+                    AwaitOrYield::AllowExpr
+                } else {
+                    AwaitOrYield::AllowIdent
+                },
+                allow_yield: AwaitOrYield::AllowIdent,
+                ..Default::default()
+            },
+        )?;
+        p.pop_scope();
+        let arity: f64 = match func.args.slice().len() {
+            0 => 0.0,
+            1 => 1.0,
+            _ => 2.0,
+        };
+        let fn_expr = p.new_expr(E::Function { func }, fn_loc);
+        let arity_expr = p.new_expr(E::Number { value: arity }, loc);
+        let memo_call = p.call_runtime(
+            loc,
+            b"__parabunMemo",
+            js_ast::ExprNodeList::from_slice(&[fn_expr, arity_expr]),
+        );
+        let binding = p.b(js_ast::B::Identifier { r#ref: binding_ref }, name_loc);
+        let decl = G::Decl {
+            binding,
+            value: Some(memo_call),
+        };
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::Local {
+                kind: js_ast::s::Kind::KConst,
+                decls: G::DeclList::from_arena_slice(&[decl]),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
     pub fn parse_fn_body(&mut self, data: &mut FnOrArrowDataParse) -> Result<G::FnBody, Error> {
         let p = self;
         let old_fn_or_arrow_data = p.fn_or_arrow_data_parse.clone();

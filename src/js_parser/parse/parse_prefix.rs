@@ -418,6 +418,87 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         ))
     }
 
+    // Parabun: `parallel let A = x, B = y;` / `para let …` →
+    //   `const [A, B] = await Promise.all([x, y]);`
+    // Each initializer parses at comma level so a trailing error-chain
+    // (`x ..! null`) folds into the awaited operand. The lexer is positioned
+    // at `let`.
+    pub(crate) fn t_parallel_let(p: &mut Self, loc: bun_ast::Loc) -> PResult<Stmt> {
+        p.lexer.next()?; // consume `let`
+        let mut items: bun_alloc::ArenaVec<'_, ArrayBinding> = bun_alloc::ArenaVec::new_in(p.arena);
+        let mut values: bun_alloc::ArenaVec<'_, Expr> = bun_alloc::ArenaVec::new_in(p.arena);
+        loop {
+            if p.lexer.token != T::TIdentifier {
+                p.lexer.expect(T::TIdentifier)?;
+            }
+            let name_loc = p.lexer.loc();
+            let name = p.lexer.identifier;
+            let binding_ref = p.declare_symbol(symbol::Kind::Constant, name_loc, name)?;
+            p.lexer.next()?;
+            p.lexer.expect(T::TEquals)?;
+            let value = p.parse_expr(Level::Comma)?;
+            let id_binding = p.b(B::Identifier { r#ref: binding_ref }, name_loc);
+            items.push(ArrayBinding {
+                binding: id_binding,
+                default_value: None,
+            });
+            values.push(value);
+            if p.lexer.token != T::TComma {
+                break;
+            }
+            p.lexer.next()?;
+        }
+        p.lexer.expect_or_insert_semicolon()?;
+
+        let promise_ref = p.store_name_in_ref(b"Promise")?;
+        let promise_id = p.new_expr(E::Identifier::init(promise_ref), loc);
+        let all_dot = p.new_expr(
+            E::Dot {
+                target: promise_id,
+                name: E::Str::new(b"all"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        let values_array = p.new_expr(
+            E::Array {
+                items: ExprNodeList::from_slice(values.as_slice()),
+                ..Default::default()
+            },
+            loc,
+        );
+        let all_call = p.new_expr(
+            E::Call {
+                target: all_dot,
+                args: ExprNodeList::init_one(values_array),
+                ..Default::default()
+            },
+            loc,
+        );
+        let await_expr = p.new_expr(E::Await { value: all_call }, loc);
+        let array_binding = p.b(
+            js_ast::b::Array {
+                items: bun_ast::StoreSlice::from_bump(items),
+                has_spread: false,
+                is_single_line: true,
+            },
+            loc,
+        );
+        let decl = G::Decl {
+            binding: array_binding,
+            value: Some(await_expr),
+        };
+        Ok(p.s(
+            S::Local {
+                kind: js_ast::s::Kind::KConst,
+                decls: G::DeclList::from_arena_slice(&[decl]),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
     // Parabun: `match SUBJECT { lit => res, ..., else => res }` → an IIFE
     // ternary: `((__pm) => __pm === lit1 ? res1 : ... : elseRes)(SUBJECT)`.
     // Subset: literal patterns + `else`/`_` wildcard. Bindings, OR patterns,

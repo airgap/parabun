@@ -2064,6 +2064,45 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.restore(&snapshot);
         }
 
+        // Parabun: `memo NAME(params) { … }` statement-form memoized function.
+        // `memo (x) => …` / `memo x => …` stay expression-form (handled in the
+        // prefix parser), so only the named-function shape triggers here.
+        if is_identifier && p.lexer.raw() == b"memo" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            let after_memo = p.lexer.snapshot();
+            let same_line = !p.lexer.has_newline_before;
+            let is_async = p.lexer.token == T::TIdentifier
+                && p.lexer.raw() == b"async"
+                && !p.lexer.has_newline_before;
+            if is_async {
+                p.lexer.next()?;
+            }
+            let looks_like_fn = p.lexer.token == T::TIdentifier && {
+                p.lexer.next()?;
+                p.lexer.token == T::TOpenParen
+            };
+            p.lexer.restore(&after_memo);
+            if same_line && looks_like_fn {
+                return p.t_memo(kw_loc, is_async);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `parallel let …` / `para let …` → destructured
+        // `const [..] = await Promise.all([..])`. The `parallel { … }`
+        // expression forms are handled in the prefix parser.
+        if is_identifier && (p.lexer.raw() == b"parallel" || p.lexer.raw() == b"para") {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if !p.lexer.has_newline_before && p.lexer.is_contextual_keyword(b"let") {
+                return Self::t_parallel_let(p, kw_loc);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
         // Parse either an async function, an async expression, or a normal expression.
         // Every branch below either assigns `expr` or `return`s.
         let mut expr: Expr;
