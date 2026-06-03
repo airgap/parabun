@@ -200,9 +200,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         e_.ref_ = result.r#ref;
         e_.set_must_keep_due_to_with_stmt(result.is_inside_with_scope);
 
-        // Handle assigning to a constant
+        // Handle assigning to a constant. Parabun: signal-bound identifiers are
+        // declared `const` but `x = v` becomes `x.set(v)`, so suppress the error.
         if in_.assign_target != js_ast::AssignTarget::None {
             if p.symbols[result.r#ref.inner_index() as usize].kind == js_ast::symbol::Kind::Constant
+                && !p.signal_bound_refs.contains_key(&result.r#ref)
             {
                 // TODO: silence this for runtime transpiler
                 let r = js_lexer::range_of_identifier(p.source, expr.loc);
@@ -341,6 +343,33 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 )
                 .with_was_originally_identifier(true),
         );
+
+        // Parabun: rewrite a bare read of a signal-bound identifier into
+        // `NAME.get()`. Skipped on the LHS of an assignment, a delete target,
+        // or a call target (those are handled elsewhere or aren't reads).
+        if !p.signal_bound_refs.is_empty()
+            && in_.assign_target == js_ast::AssignTarget::None
+            && !is_delete_target
+            && matches!(e.data.tag(), Tag::EIdentifier)
+        {
+            let id_ref = e.data.e_identifier().unwrap().ref_;
+            let is_call_target = matches!(p.call_target.tag(), Tag::EIdentifier)
+                && p.call_target.e_identifier().unwrap().ref_.eql(id_ref);
+            if !is_call_target && p.signal_bound_refs.contains_key(&id_ref) {
+                let loc = e.loc;
+                let target = *e;
+                let dot = p.new_expr(
+                    E::Dot {
+                        target,
+                        name: E::Str::new(b"get"),
+                        name_loc: loc,
+                        ..Default::default()
+                    },
+                    loc,
+                );
+                *e = p.new_expr(E::Call { target: dot, ..Default::default() }, loc);
+            }
+        }
     }
     // PERF(port:frame): keep these large, infrequently-taken arms out of the
     // `visit_expr_in_out` dispatcher frame. Without `inline(never)` LLVM folds the

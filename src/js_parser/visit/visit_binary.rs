@@ -7,7 +7,7 @@ use crate::parser::{ExprIn, float_to_int32, prefill};
 use crate::scan::scan_side_effects::SideEffects;
 use bun_ast::fold_string_addition::{FoldStringAdditionKind, fold_string_addition};
 use bun_ast::{
-    self as js_ast, E, Expr, ExprData, Op, StoreRef, Symbol,
+    self as js_ast, E, Expr, ExprData, ExprNodeList, Op, StoreRef, Symbol,
     expr::{Equality, LooseEql, StrictEql},
 };
 
@@ -737,6 +737,32 @@ impl BinaryExpressionVisitor {
 
             // ---------------------------------------------------------------------------------------------------
             Op::Code::BinAssign => {
+                // Parabun: `x = v` where x is signal-bound → `x.set(v)`.
+                if let ExprData::EIdentifier(ident) = e_.left.data {
+                    if !p.signal_bound_refs.is_empty()
+                        && p.signal_bound_refs.contains_key(&ident.ref_)
+                    {
+                        let loc = e_.left.loc;
+                        let target = e_.left;
+                        let dot = p.new_expr(
+                            E::Dot {
+                                target,
+                                name: E::Str::new(b"set"),
+                                name_loc: loc,
+                                ..Default::default()
+                            },
+                            loc,
+                        );
+                        return p.new_expr(
+                            E::Call {
+                                target: dot,
+                                args: ExprNodeList::init_one(e_.right),
+                                ..Default::default()
+                            },
+                            loc,
+                        );
+                    }
+                }
                 // Optionally preserve the name
                 if let ExprData::EIdentifier(ident) = e_.left.data {
                     // PORT NOTE: reshaped for borrowck — copy the `StoreStr` out of

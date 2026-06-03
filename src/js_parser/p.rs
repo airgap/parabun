@@ -253,6 +253,10 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// so nested chain ops back off, terminating the (possibly arrow) RHS at the
     /// next chain op. `A ..> h1 ..! h2` → `A.then(h1).catch(h2)`.
     pub in_chain_op_arrow_rhs: bool,
+    /// Parabun: refs declared via `signal NAME = …`. The visit pass rewrites a
+    /// read of one of these into `NAME.get()` and an assignment into
+    /// `NAME.set(value)`.
+    pub signal_bound_refs: RefMap,
 
     pub has_top_level_return: bool,
     pub latest_return_had_semicolon: bool,
@@ -9232,6 +9236,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             // It will fail for the case in the "in-keyword.js" file
             allow_in: true,
             in_chain_op_arrow_rhs: false,
+            signal_bound_refs: RefMap::default(),
 
             call_target: null_expr_data(),
             delete_target: null_expr_data(),

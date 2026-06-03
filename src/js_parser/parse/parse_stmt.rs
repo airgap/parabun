@@ -8,7 +8,7 @@ use crate::p::P;
 use bun_ast as js_ast;
 
 use js_ast::op::Level;
-use js_ast::{Expr, G, LocRef, S, Stmt};
+use js_ast::{E, Expr, ExprNodeList, G, LocRef, S, Stmt};
 use js_lexer::T;
 
 use crate::parser::fs;
@@ -194,6 +194,60 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 kind: js_ast::s::Kind::KConst,
                 decls,
                 is_export: opts.is_export,
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
+    // Parabun: `signal NAME = RHS [, …]` → `const NAME = require(
+    // "@lyku/para-signals").signal(RHS)`, recording each binding ref so the
+    // visit pass rewrites reads (`x` → `x.get()`) and assignments
+    // (`x = v` → `x.set(v)`). Auto-derive, `every`, and the strict-signals
+    // pragma are not yet ported — every decl becomes a plain `signal(RHS)`.
+    fn t_signal(p: &mut Self, opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+        let mut decls = p.parse_and_declare_decls(js_ast::symbol::Kind::Constant, opts)?;
+        for decl in decls.slice_mut() {
+            if let js_ast::b::B::BIdentifier(ident) = decl.binding.data {
+                p.signal_bound_refs.insert(ident.r#ref, ());
+            }
+            if let Some(value) = decl.value {
+                let vloc = value.loc;
+                let require_ref = p.store_name_in_ref(b"require")?;
+                let require_ident = p.new_expr(E::Identifier::init(require_ref), vloc);
+                let pkg = p.new_expr(E::EString::init(b"@lyku/para-signals"), vloc);
+                let require_call = p.new_expr(
+                    E::Call {
+                        target: require_ident,
+                        args: ExprNodeList::init_one(pkg),
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                let signal_dot = p.new_expr(
+                    E::Dot {
+                        target: require_call,
+                        name: E::Str::new(b"signal"),
+                        name_loc: vloc,
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                decl.value = Some(p.new_expr(
+                    E::Call {
+                        target: signal_dot,
+                        args: ExprNodeList::init_one(value),
+                        ..Default::default()
+                    },
+                    vloc,
+                ));
+            }
+        }
+        p.lexer.expect_or_insert_semicolon()?;
+        Ok(p.s(
+            S::Local {
+                kind: js_ast::s::Kind::KConst,
+                decls,
                 ..Default::default()
             },
             loc,
@@ -1689,6 +1743,19 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             if p.lexer.token == T::TFunction && !p.lexer.has_newline_before {
                 p.lexer.next()?;
                 return p.parse_fn_stmt(pure_loc, opts, None);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `signal NAME = RHS` reactive declaration. `signal x` (a name
+        // follows) is a declaration; `signal = …` / `signal(…)` / `signal.x`
+        // keep `signal` as a plain identifier.
+        if is_identifier && p.lexer.raw() == b"signal" {
+            let snapshot = p.lexer.snapshot();
+            let signal_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
+                return Self::t_signal(p, opts, signal_loc);
             }
             p.lexer.restore(&snapshot);
         }
