@@ -260,8 +260,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let is_wildcard = p.lexer.token == T::TElse
                 || (p.lexer.token == T::TIdentifier && p.lexer.raw() == b"_");
 
-            // (bind_name, value_key) for a bound tag pattern like `Ok(v)`.
-            let mut bind: Option<(&'a [u8], &'static [u8])> = None;
+            // (bind_name, field): `Some(k)` extracts `__pm.k` (tag binding like
+            // `Ok(v)`), `None` binds the whole subject (`n => ...`).
+            let mut bind: Option<(&'a [u8], Option<&'static [u8]>)> = None;
 
             let test = if is_wildcard {
                 p.lexer.next()?;
@@ -277,7 +278,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 if p.lexer.token == T::TOpenParen {
                     p.lexer.next()?;
                     if p.lexer.token == T::TIdentifier {
-                        bind = Some((p.lexer.identifier, value_key));
+                        bind = Some((p.lexer.identifier, Some(value_key)));
                         p.lexer.next()?;
                     }
                     p.lexer.expect(T::TCloseParen)?;
@@ -302,6 +303,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     },
                     tag_loc,
                 ))
+            } else if p.lexer.token == T::TIdentifier {
+                // Identifier-bind: `n => ...` binds the whole subject to `n` and
+                // always matches (catch-all, like `else` but named).
+                bind = Some((p.lexer.identifier, None));
+                p.lexer.next()?;
+                None
             } else {
                 let lit_loc = p.lexer.loc();
                 let lit = p.parse_expr(Level::Comma)?;
@@ -353,15 +360,19 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     arm_loc,
                 );
                 let m_ident = p.new_expr(E::Identifier::init(m_ref), arm_loc);
-                let extracted = p.new_expr(
-                    E::Dot {
-                        target: m_ident,
-                        name: E::Str::new(value_key),
-                        name_loc: arm_loc,
-                        ..Default::default()
-                    },
-                    arm_loc,
-                );
+                // `Some(k)` → `__pm.k` (tag binding); `None` → whole `__pm`.
+                let extracted = match value_key {
+                    Some(k) => p.new_expr(
+                        E::Dot {
+                            target: m_ident,
+                            name: E::Str::new(k),
+                            name_loc: arm_loc,
+                            ..Default::default()
+                        },
+                        arm_loc,
+                    ),
+                    None => m_ident,
+                };
                 p.new_expr(
                     E::Call {
                         target: arrow,
