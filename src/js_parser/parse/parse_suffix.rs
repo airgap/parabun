@@ -1406,10 +1406,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         );
         let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[stmt]);
 
-        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
-        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
-        p.pop_scope();
-        p.pop_scope();
+        // The FunctionArgs@op_loc / FunctionBody@body_loc scopes are pushed and
+        // popped by the CALLER *around* the RHS parse, so they precede any scope
+        // the RHS itself pushed (e.g. an arrow RHS in `x -> (t => f)`).
+        // arrow.loc / FnBody.loc must match those locs for the visit pass.
         let no_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
         let arrow = p.new_expr(
             E::Arrow {
@@ -1463,7 +1463,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let loc = left.loc;
         let op_loc = p.lexer.loc();
         p.lexer.next()?;
-        let body_loc = p.lexer.loc();
+        // body_loc inside the operator (op_loc+1) — strictly between op_loc and
+        // the RHS. Bracket the RHS parse with the wrapper-arrow scopes so they
+        // precede any scope the RHS pushes (matches the visit pass — see comment
+        // in build_reactive_effect).
+        let body_loc = bun_ast::Loc { start: op_loc.start + 1 };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let rhs = p.parse_expr(Level::Assign)?;
         let lhs = *left;
         let assign = p.new_expr(
@@ -1474,6 +1480,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             body_loc,
         );
+        p.pop_scope();
+        p.pop_scope();
         *left = Self::build_reactive_effect(p, op_loc, body_loc, assign, loc)?;
         Ok(Continuation::Next)
     }
@@ -1486,7 +1494,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let loc = left.loc;
         let op_loc = p.lexer.loc();
         p.lexer.next()?;
-        let body_loc = p.lexer.loc();
+        // body_loc sits inside the operator (op_loc+1) so it is strictly
+        // between op_loc and the RHS — avoids colliding with an arrow RHS's
+        // own scope loc.
+        let body_loc = bun_ast::Loc { start: op_loc.start + 1 };
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
+        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let rhs = p.parse_expr(Level::Assign)?;
         let lhs = *left;
         let call = p.new_expr(
@@ -1497,6 +1510,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             body_loc,
         );
+        p.pop_scope();
+        p.pop_scope();
         *left = Self::build_reactive_effect(p, op_loc, body_loc, call, loc)?;
         Ok(Continuation::Next)
     }
