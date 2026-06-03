@@ -12,7 +12,7 @@ use bun_ast::e::UnaryFlags;
 use bun_ast::expr::EFlags;
 use bun_ast::g::{Arg, PropertyKind};
 use bun_ast::op::Level;
-use bun_ast::{self as js_ast, B, E, Expr, ExprData, ExprNodeList, G, OpCode, scope, symbol};
+use bun_ast::{self as js_ast, B, E, Expr, ExprData, ExprNodeList, G, OpCode, S, Stmt, scope, symbol};
 
 // TODO(port): narrow error set — Zig used `anyerror!Expr` throughout
 type PResult<T> = core::result::Result<T, bun_core::Error>;
@@ -158,6 +158,114 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         ))
     }
 
+    // Parabun: `match SUBJECT { lit => res, ..., else => res }` → an IIFE
+    // ternary: `((__pm) => __pm === lit1 ? res1 : ... : elseRes)(SUBJECT)`.
+    // Subset: literal patterns + `else`/`_` wildcard. Bindings, OR patterns,
+    // Ok/Err/Some/None patterns, `is Type` guards, and the switch (jump-table)
+    // lowering are not yet ported.
+    fn parse_match_expr(p: &mut Self, match_loc: bun_ast::Loc) -> PResult<Expr> {
+        let subject = p.parse_expr(Level::Lowest)?;
+        p.lexer.expect(T::TOpenBrace)?;
+
+        // Synthesize the IIFE arrow whose single param is the matched value.
+        // Scope locs must strictly increase: args at the `match` loc, body one
+        // past it. Arm-body scopes (inside the braces, after the subject) land
+        // strictly later, so the monotonic check holds for literal/identifier
+        // subjects (which push no scopes of their own).
+        let args_loc = match_loc;
+        let body_loc = bun_ast::Loc {
+            start: match_loc.start + 1,
+        };
+
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, args_loc)?;
+        let m_ref = p.declare_symbol(symbol::Kind::Hoisted, args_loc, b"__pm")?;
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, body_loc)?;
+
+        let arg_binding = p.b(B::Identifier { r#ref: m_ref }, args_loc);
+        let args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(1, |_| G::Arg {
+            binding: arg_binding,
+            ..Default::default()
+        });
+
+        // Collect arms: (test = `__pm === lit` | None for wildcard, result).
+        let mut arms: bun_alloc::ArenaVec<'_, (Option<Expr>, Expr)> =
+            bun_alloc::ArenaVec::new_in(p.arena);
+        while p.lexer.token != T::TCloseBrace {
+            // Wildcard: the `else` keyword, or a bare `_` identifier.
+            let is_wildcard = p.lexer.token == T::TElse
+                || (p.lexer.token == T::TIdentifier && p.lexer.raw() == b"_");
+            let test = if is_wildcard {
+                p.lexer.next()?;
+                None
+            } else {
+                let lit_loc = p.lexer.loc();
+                let lit = p.parse_expr(Level::Comma)?;
+                let m_ident = p.new_expr(E::Identifier::init(m_ref), lit_loc);
+                Some(p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinStrictEq,
+                        left: m_ident,
+                        right: lit,
+                    },
+                    lit_loc,
+                ))
+            };
+            p.lexer.expect(T::TEqualsGreaterThan)?;
+            let result = p.parse_expr(Level::Comma)?;
+            arms.push((test, result));
+            if p.lexer.token == T::TComma {
+                p.lexer.next()?;
+            }
+        }
+        p.lexer.expect(T::TCloseBrace)?;
+
+        p.pop_scope(); // FunctionBody
+        p.pop_scope(); // FunctionArgs
+
+        // Right-fold the arms into a ternary chain. A wildcard arm's result
+        // becomes the chain tail; with none, fall through to `undefined`.
+        let mut acc = p.new_expr(E::Undefined {}, match_loc);
+        for &(test, result) in arms.iter().rev() {
+            acc = match test {
+                Some(t) => p.new_expr(
+                    E::If {
+                        test_: t,
+                        yes: result,
+                        no: acc,
+                    },
+                    match_loc,
+                ),
+                None => result,
+            };
+        }
+
+        let ret_stmt = p.s(S::Return { value: Some(acc) }, match_loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret_stmt]);
+        let arrow = p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(args),
+                prefer_expr: true,
+                // body.loc must equal the parse-time FunctionBody scope loc
+                // (body_loc); the visit pass pushes FunctionBody at e.body.loc.
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            match_loc,
+        );
+
+        Ok(p.new_expr(
+            E::Call {
+                target: arrow,
+                args: ExprNodeList::init_one(subject),
+                ..Default::default()
+            },
+            match_loc,
+        ))
+    }
+
     // Parabun: bare `None` → `{ tag: "None" }`.
     fn parse_none_literal(p: &mut Self, loc: bun_ast::Loc) -> PResult<Expr> {
         let mut properties: bun_alloc::ArenaVec<'_, G::Property> =
@@ -226,6 +334,29 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             match p.lexer.token {
                 T::TOpenParen | T::TDot | T::TOpenBracket | T::TEquals => {}
                 _ => return Self::parse_none_literal(p, loc),
+            }
+        }
+
+        // Parabun: `match SUBJECT { lit => res, ..., else => res }`. Triggers
+        // when `match` is followed (no newline) by an expression-starting token;
+        // `match(x)`/`match[i]` stay plain identifier uses (excluded below).
+        if name == b"match" && !p.lexer.has_newline_before {
+            match p.lexer.token {
+                T::TIdentifier
+                | T::TNumericLiteral
+                | T::TStringLiteral
+                | T::TTrue
+                | T::TFalse
+                | T::TNull
+                | T::TMinus
+                | T::TPlus
+                | T::TExclamation
+                | T::TTilde
+                | T::TTypeof
+                | T::TVoid
+                | T::TDelete
+                | T::TNew => return Self::parse_match_expr(p, loc),
+                _ => {}
             }
         }
 
