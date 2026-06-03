@@ -249,6 +249,10 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     pub lexer: js_lexer::Lexer<'a>,
     pub allow_in: bool,
     pub allow_private_identifiers: bool,
+    /// Parabun: set while parsing the RHS of a chain operator (`..!`/`..&`/`..>`)
+    /// so nested chain ops back off, terminating the (possibly arrow) RHS at the
+    /// next chain op. `A ..> h1 ..! h2` → `A.then(h1).catch(h2)`.
+    pub in_chain_op_arrow_rhs: bool,
 
     pub has_top_level_return: bool,
     pub latest_return_had_semicolon: bool,
@@ -9227,6 +9231,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             // This must default to true or else parsing "in" won't work right.
             // It will fail for the case in the "in-keyword.js" file
             allow_in: true,
+            in_chain_op_arrow_rhs: false,
 
             call_target: null_expr_data(),
             delete_target: null_expr_data(),

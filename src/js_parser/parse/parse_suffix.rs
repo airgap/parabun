@@ -1345,13 +1345,19 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // assign level so a bare arrow handler works. Leading-dot sugar
     // (`..! .message`) is not yet ported.
     fn sfx_chain_op(p: &mut Self, level: Level, left: &mut Expr, method: &'static [u8]) -> CResult {
-        if level.gte(Level::Conditional) {
+        if level.gte(Level::Conditional) || p.in_chain_op_arrow_rhs {
             return Ok(Continuation::Done);
         }
         p.lexer.next()?;
         let loc = left.loc;
         let target = *left;
+        // RHS parses at assign level so a bare arrow handler works
+        // (`p ..! err => fallback`); the flag makes any nested chain op back
+        // off so `A ..> h1 ..! h2` is `A.then(h1).catch(h2)`.
+        let prev_in_chain = p.in_chain_op_arrow_rhs;
+        p.in_chain_op_arrow_rhs = true;
         let handler = p.parse_expr(Level::Assign)?;
+        p.in_chain_op_arrow_rhs = prev_in_chain;
         let member = p.new_expr(
             E::Dot {
                 target,
