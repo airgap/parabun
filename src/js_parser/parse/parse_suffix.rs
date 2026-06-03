@@ -1385,42 +1385,27 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         );
         Ok(Continuation::Next)
     }
-    // Parabun: `A ~> B` reactive binding →
-    //   require("@lyku/para-signals").effect(() => { B = A; })
-    // B should be an assignable target; an invalid one yields an assignment
-    // that the engine rejects at runtime (no parse-time check yet).
-    fn sfx_t_tilde_greater_than(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
-        if level.gte(Level::Assign) {
-            return Ok(Continuation::Done);
-        }
-        let loc = left.loc;
-        let op_loc = p.lexer.loc();
-        p.lexer.next()?;
-        let body_loc = p.lexer.loc();
-        let rhs = p.parse_expr(Level::Assign)?;
-        let lhs = *left;
-
-        // Build the effect body `{ B = A; }`.
-        let assign = p.new_expr(
-            E::Binary {
-                op: OpCode::BinAssign,
-                left: rhs,
-                right: lhs,
-            },
-            body_loc,
-        );
-        let assign_stmt = p.s(
+    // Parabun: wrap a reactive body statement in
+    //   require("@lyku/para-signals").effect(() => { <body_value>; })
+    // Shared by `~>` (assignment body) and `->` (call body). Uses the synthetic
+    // zero-arg block-body arrow scope recipe (nothing is parsed inside the
+    // scopes; the body value was built from already-parsed LHS/RHS).
+    fn build_reactive_effect(
+        p: &mut Self,
+        op_loc: bun_ast::Loc,
+        body_loc: bun_ast::Loc,
+        body_value: Expr,
+        outer_loc: bun_ast::Loc,
+    ) -> Result<Expr, Error> {
+        let stmt = p.s(
             S::SExpr {
-                value: assign,
+                value: body_value,
                 ..Default::default()
             },
             body_loc,
         );
-        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[assign_stmt]);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[stmt]);
 
-        // Zero-arg block-body arrow `() => { ... }`. Same scope recipe as the
-        // other synthetic arrows (nothing is parsed inside the scopes; LHS/RHS
-        // were parsed in the enclosing scope).
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         p.pop_scope();
@@ -1439,7 +1424,6 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             op_loc,
         );
 
-        // require("@lyku/para-signals").effect(arrow)
         let require_ref = p.store_name_in_ref(b"require")?;
         let require_ident = p.new_expr(E::Identifier::init(require_ref), op_loc);
         let pkg = p.new_expr(E::EString::init(b"@lyku/para-signals"), op_loc);
@@ -1460,15 +1444,60 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             op_loc,
         );
-        *left = p.new_expr(
+        Ok(p.new_expr(
             E::Call {
                 target: effect_dot,
                 args: ExprNodeList::init_one(arrow),
                 close_paren_loc: p.lexer.loc(),
                 ..Default::default()
             },
-            loc,
+            outer_loc,
+        ))
+    }
+
+    // Parabun: `A ~> B` (B assignable) → effect(() => { B = A; }).
+    fn sfx_t_tilde_greater_than(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        if level.gte(Level::Assign) {
+            return Ok(Continuation::Done);
+        }
+        let loc = left.loc;
+        let op_loc = p.lexer.loc();
+        p.lexer.next()?;
+        let body_loc = p.lexer.loc();
+        let rhs = p.parse_expr(Level::Assign)?;
+        let lhs = *left;
+        let assign = p.new_expr(
+            E::Binary {
+                op: OpCode::BinAssign,
+                left: rhs,
+                right: lhs,
+            },
+            body_loc,
         );
+        *left = Self::build_reactive_effect(p, op_loc, body_loc, assign, loc)?;
+        Ok(Continuation::Next)
+    }
+
+    // Parabun: `A -> fn` → effect(() => { fn(A); }).
+    fn sfx_t_minus_greater_than(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        if level.gte(Level::Assign) {
+            return Ok(Continuation::Done);
+        }
+        let loc = left.loc;
+        let op_loc = p.lexer.loc();
+        p.lexer.next()?;
+        let body_loc = p.lexer.loc();
+        let rhs = p.parse_expr(Level::Assign)?;
+        let lhs = *left;
+        let call = p.new_expr(
+            E::Call {
+                target: rhs,
+                args: ExprNodeList::init_one(lhs),
+                ..Default::default()
+            },
+            body_loc,
+        );
+        *left = Self::build_reactive_effect(p, op_loc, body_loc, call, loc)?;
         Ok(Continuation::Next)
     }
 
@@ -1742,6 +1771,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 T::TDotDotAmpersand => Self::sfx_t_dot_dot_ampersand(p, level, left),
                 T::TDotDotGreaterThan => Self::sfx_t_dot_dot_greater_than(p, level, left),
                 T::TTildeGreaterThan => Self::sfx_t_tilde_greater_than(p, level, left),
+                T::TMinusGreaterThan => Self::sfx_t_minus_greater_than(p, level, left),
                 T::TBarBarEquals => Self::sfx_t_bar_bar_equals(p, level, left),
                 T::TBarEquals => Self::sfx_t_bar_equals(p, level, left),
                 T::TCaret => Self::sfx_t_caret(p, level, left),

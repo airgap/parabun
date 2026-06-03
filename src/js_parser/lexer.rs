@@ -1923,6 +1923,16 @@ lexer_impl_header! {
 
                             self.token = T::TMinusMinus;
                         }
+                        0x3E => {
+                            // Parabun: `->` reactive function-call binding.
+                            if IS_JSON {
+                                return self.add_unsupported_syntax_error(
+                                    b"Operators are not allowed in JSON",
+                                );
+                            }
+                            self.step_with(contents);
+                            self.token = T::TMinusGreaterThan;
+                        }
                         _ => {
                             self.token = T::TMinus;
                         }
