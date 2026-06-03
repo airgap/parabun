@@ -12,7 +12,10 @@ use bun_ast::e::UnaryFlags;
 use bun_ast::expr::EFlags;
 use bun_ast::g::{Arg, PropertyKind};
 use bun_ast::op::Level;
-use bun_ast::{self as js_ast, B, E, Expr, ExprData, ExprNodeList, G, OpCode, S, Stmt, scope, symbol};
+use bun_ast::{
+    self as js_ast, ArrayBinding, B, E, Expr, ExprData, ExprNodeList, G, OpCode, S, Stmt, scope,
+    symbol,
+};
 
 // TODO(port): narrow error set — Zig used `anyerror!Expr` throughout
 type PResult<T> = core::result::Result<T, bun_core::Error>;
@@ -220,6 +223,164 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     fn pfx_t_dot(p: &mut Self, _level: Level) -> PResult<Expr> {
         let dot_loc = p.lexer.loc();
         Self::parse_leading_dot_chain_handler(p, dot_loc)
+    }
+
+    // Parabun: `parallel { k0: v0, k1: v1 }` →
+    //   Promise.all([v0, v1]).then(([__pb0, __pb1]) => ({ k0: __pb0, k1: __pb1 }))
+    fn parse_parallel_object_expr(p: &mut Self, range_loc: bun_ast::Loc) -> PResult<Expr> {
+        p.lexer.expect(T::TOpenBrace)?;
+
+        let mut keys: bun_alloc::ArenaVec<'_, Expr> = bun_alloc::ArenaVec::new_in(p.arena);
+        let mut values: bun_alloc::ArenaVec<'_, Expr> = bun_alloc::ArenaVec::new_in(p.arena);
+        while p.lexer.token != T::TCloseBrace {
+            let key_loc = p.lexer.loc();
+            let key = match p.lexer.token {
+                T::TIdentifier | T::TStringLiteral => {
+                    let id = p.lexer.identifier;
+                    p.lexer.next()?;
+                    p.new_expr(E::EString::init(id), key_loc)
+                }
+                T::TNumericLiteral => {
+                    let num = p.lexer.number;
+                    p.lexer.next()?;
+                    p.new_expr(E::Number { value: num }, key_loc)
+                }
+                _ => {
+                    p.lexer.expect(T::TIdentifier)?;
+                    return Err(bun_core::err!("SyntaxError"));
+                }
+            };
+            p.lexer.expect(T::TColon)?;
+            let value = p.parse_expr(Level::Comma)?;
+            keys.push(key);
+            values.push(value);
+            if p.lexer.token != T::TComma {
+                break;
+            }
+            p.lexer.next()?;
+        }
+        p.lexer.expect(T::TCloseBrace)?;
+
+        // Promise.all([v0, v1, ...])
+        let promise_ref = p.store_name_in_ref(b"Promise")?;
+        let promise_id = p.new_expr(E::Identifier::init(promise_ref), range_loc);
+        let all_dot = p.new_expr(
+            E::Dot {
+                target: promise_id,
+                name: E::Str::new(b"all"),
+                name_loc: range_loc,
+                ..Default::default()
+            },
+            range_loc,
+        );
+        let values_array = p.new_expr(
+            E::Array {
+                items: ExprNodeList::from_slice(values.as_slice()),
+                ..Default::default()
+            },
+            range_loc,
+        );
+        let all_call = p.new_expr(
+            E::Call {
+                target: all_dot,
+                args: ExprNodeList::init_one(values_array),
+                ..Default::default()
+            },
+            range_loc,
+        );
+
+        // `([__pb…]) => ({ k…: __pb… })` — scope recipe: args@range_loc, body@+1.
+        let arrow_loc = range_loc;
+        let body_loc = bun_ast::Loc {
+            start: range_loc.start + 1,
+        };
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, arrow_loc)?;
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, body_loc)?;
+
+        let n = keys.len();
+        let args_slice: &'a mut [G::Arg];
+        let obj_expr: Expr;
+        if n == 0 {
+            args_slice = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
+            obj_expr = p.new_expr(E::Object::default(), body_loc);
+        } else {
+            let mut items: bun_alloc::ArenaVec<'_, ArrayBinding> =
+                bun_alloc::ArenaVec::new_in(p.arena);
+            let mut props: bun_alloc::ArenaVec<'_, G::Property> =
+                bun_alloc::ArenaVec::new_in(p.arena);
+            for i in 0..n {
+                let tmp_name: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__pb{}", i)
+                    .into_bump_str()
+                    .as_bytes();
+                let tmp_ref = p.declare_symbol(symbol::Kind::Constant, body_loc, tmp_name)?;
+                let binding = p.b(B::Identifier { r#ref: tmp_ref }, body_loc);
+                items.push(ArrayBinding {
+                    binding,
+                    default_value: None,
+                });
+                let val_ident = p.new_expr(E::Identifier::init(tmp_ref), body_loc);
+                props.push(G::Property {
+                    key: Some(keys[i]),
+                    value: Some(val_ident),
+                    ..Default::default()
+                });
+            }
+            let array_binding = p.b(
+                js_ast::b::Array {
+                    items: bun_ast::StoreSlice::from_bump(items),
+                    has_spread: false,
+                    is_single_line: true,
+                },
+                arrow_loc,
+            );
+            args_slice = p.arena.alloc_slice_fill_with(1, |_| G::Arg {
+                binding: array_binding,
+                ..Default::default()
+            });
+            obj_expr = p.new_expr(
+                E::Object {
+                    properties: G::PropertyList::from_bump_vec(props),
+                    ..Default::default()
+                },
+                body_loc,
+            );
+        }
+
+        let ret = p.s(S::Return { value: Some(obj_expr) }, body_loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+        let arrow = p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(args_slice),
+                prefer_expr: true,
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            arrow_loc,
+        );
+
+        p.pop_scope();
+        p.pop_scope();
+
+        let then_dot = p.new_expr(
+            E::Dot {
+                target: all_call,
+                name: E::Str::new(b"then"),
+                name_loc: range_loc,
+                ..Default::default()
+            },
+            range_loc,
+        );
+        Ok(p.new_expr(
+            E::Call {
+                target: then_dot,
+                args: ExprNodeList::init_one(arrow),
+                ..Default::default()
+            },
+            range_loc,
+        ))
     }
 
     // Parabun: `match SUBJECT { lit => res, ..., else => res }` → an IIFE
@@ -588,6 +749,15 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 T::TOpenParen | T::TDot | T::TOpenBracket | T::TEquals => {}
                 _ => return Self::parse_none_literal(p, loc),
             }
+        }
+
+        // Parabun: `parallel { k: v, … }` / `para { … }` → fan-out promise
+        // composition: `Promise.all([v…]).then(([__pb…]) => ({ k: __pb… }))`.
+        if (name == b"parallel" || name == b"para")
+            && !p.lexer.has_newline_before
+            && p.lexer.token == T::TOpenBrace
+        {
+            return Self::parse_parallel_object_expr(p, loc);
         }
 
         // Parabun: `match SUBJECT { lit => res, ..., else => res }`. Triggers
