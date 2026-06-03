@@ -94,6 +94,11 @@ async function buildOne(name: string): Promise<void> {
   }
 
   await Bun.write(outPath, outfile);
+  // Release builds embed the zstd-compressed copy (see
+  // src/resolver/node_fallbacks.rs) so the ~1 MB of polyfill text doesn't
+  // sit uncompressed in the binary; debug builds keep reading the plain
+  // `.js` at runtime.
+  await Bun.write(`${outPath}.zst`, Bun.zstdCompressSync(Buffer.from(outfile), { level: 19 }));
 }
 
 // Serial, not Promise.all. Earlier concurrent version deadlocked on

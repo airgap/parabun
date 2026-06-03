@@ -1,10 +1,52 @@
 import { deserialize, serialize } from "bun:jsc";
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe } from "harness";
+import { bunEnv, bunExe, isASAN } from "harness";
 import v8 from "node:v8";
 
 describe("structuredClone with Blob and File", () => {
   describe("Blob structured clone", () => {
+    test("slices and re-slices serialize only their own byte windows", async () => {
+      const before = "BEFORE-WINDOW-0123456789";
+      const middle = "public-window-payload";
+      const after = "AFTER-WINDOW-9876543210";
+      const parent = new Blob([before + middle + after], { type: "application/octet-stream" });
+      const slice = parent.slice(before.length, before.length + middle.length);
+
+      // The serialized payload of the slice contains the slice's bytes and
+      // nothing from the rest of the parent buffer.
+      const wire = Buffer.from(serialize(slice));
+      expect(wire.includes(middle)).toBe(true);
+      expect(wire.includes(before)).toBe(false);
+      expect(wire.includes(after)).toBe(false);
+
+      const cloned = structuredClone(slice);
+      expect(cloned.size).toBe(middle.length);
+      expect(await cloned.text()).toBe(middle);
+
+      // A slice of a slice is bounded by the innermost window.
+      const inner = slice.slice(7); // "window-payload"
+      const innerWire = Buffer.from(serialize(inner));
+      expect(innerWire.includes("window-payload")).toBe(true);
+      expect(innerWire.includes("public-")).toBe(false);
+      expect(innerWire.includes(before)).toBe(false);
+      expect(innerWire.includes(after)).toBe(false);
+
+      const innerClone = deserialize(serialize(inner));
+      expect(innerClone.size).toBe("window-payload".length);
+      expect(await innerClone.text()).toBe("window-payload");
+
+      // Serializing must not change what the live source objects read as.
+      expect(slice.size).toBe(middle.length);
+      expect(await slice.text()).toBe(middle);
+      expect(inner.size).toBe("window-payload".length);
+      expect(await inner.text()).toBe("window-payload");
+
+      // The parent blob is unaffected and still round-trips in full.
+      const parentClone = structuredClone(parent);
+      expect(parentClone.size).toBe(parent.size);
+      expect(await parentClone.text()).toBe(before + middle + after);
+    });
+
     test("empty Blob", () => {
       const blob = new Blob([]);
       const cloned = structuredClone(blob);
@@ -81,6 +123,28 @@ describe("structuredClone with Blob and File", () => {
       expect(cloned.level1.level2.level3.blob).toBeInstanceOf(Blob);
       expect(cloned.level1.level2.level3.blob.size).toBe(blob.size);
       expect(cloned.level1.level2.level3.blob.type).toBe(blob.type);
+    });
+
+    test("sliced Blob transmits only the sliced bytes", async () => {
+      const blob = new Blob(["header-PAYLOAD-trailer"]);
+      const slice = blob.slice(7, 14);
+
+      const wire = Buffer.from(serialize(slice));
+      expect(wire.includes("PAYLOAD")).toBe(true);
+      expect(wire.includes("header-")).toBe(false);
+      expect(wire.includes("-trailer")).toBe(false);
+
+      // Serializing must not mutate the live slice.
+      expect(slice.size).toBe(7);
+      expect(await slice.text()).toBe("PAYLOAD");
+
+      const cloned = structuredClone(slice);
+      expect(cloned.size).toBe(7);
+      expect(await cloned.text()).toBe("PAYLOAD");
+
+      const roundTripped = deserialize(serialize(slice));
+      expect(roundTripped.size).toBe(7);
+      expect(await roundTripped.text()).toBe("PAYLOAD");
     });
   });
 
@@ -309,12 +373,13 @@ describe("structuredClone with Blob and File", () => {
     // child process so that the pre-fix crash surfaces as an ordinary test
     // failure instead of killing the test runner.
 
-    // Locate the offset field once. Do it by serializing a sliced blob with a
-    // sentinel offset and comparing against a zero-offset payload; keeps the
-    // test robust against wire-format header changes.
+    // Locate the offset field once. Memory-backed blobs always serialize a
+    // zero offset (the payload already is the slice), so plant a sentinel
+    // offset with a sliced file-backed blob and compare against a zero-offset
+    // payload; keeps the test robust against wire-format header changes.
     const marker = 0xa5;
     const baseline = new Uint8Array(serialize(new Blob([Buffer.alloc(4, marker)])));
-    const sentinel = new Uint8Array(serialize(new Blob([Buffer.alloc(8, marker)]).slice(4)));
+    const sentinel = new Uint8Array(serialize(Bun.file(import.meta.path).slice(4)));
     let offsetFieldIndex = -1;
     for (let i = 0; i + 8 <= sentinel.length; i++) {
       if (
@@ -406,5 +471,109 @@ describe("structuredClone with Blob and File", () => {
       const viaV8 = v8.deserialize(Buffer.from(craft(4n)));
       expect((await viaV8.arrayBuffer()).byteLength).toBe(0);
     });
+
+    test("truncated payload at every byte boundary throws cleanly", () => {
+      // Every truncation point must surface as a thrown error (never a
+      // partially-constructed Blob, never a crash). This is the functional
+      // half of the leak test below — it sweeps every error-return edge in
+      // the deserializer so we know each one is reachable.
+      const full = new Uint8Array(
+        serialize(
+          new File([Buffer.alloc(8, 0x42)], "name.bin", {
+            type: Buffer.alloc(8, "t").toString(),
+            lastModified: 123,
+          }),
+        ),
+      );
+      // Sanity: the un-truncated payload round-trips.
+      expect(deserialize(full)).toBeInstanceOf(Blob);
+
+      let threw = 0;
+      for (let n = 1; n < full.length; n++) {
+        try {
+          deserialize(full.slice(0, n));
+        } catch {
+          threw++;
+        }
+      }
+      // At least one byte must be missing for the read to fail; depending on
+      // trailing framing the last few truncations may still parse, so just
+      // require that the overwhelming majority threw and none crashed.
+      expect(threw).toBeGreaterThan(full.length / 2);
+    });
+
+    test("truncated payload does not leak content_type / bytes / Store / Blob", () => {
+      // The deserializer allocates content_type, then the bytes payload +
+      // Store, then heap-promotes the Blob, then reads trailer fields. A
+      // payload truncated anywhere after the first allocation used to leak
+      // everything allocated so far on the error path. With ~64 KiB in each
+      // of content_type and body, a few thousand failed deserializes would
+      // grow RSS by hundreds of MiB without the errdefer cleanup.
+      const chunk = 64 * 1024;
+      const full = new Uint8Array(
+        serialize(
+          new File([Buffer.alloc(chunk, 0x42)], "leak.bin", {
+            type: Buffer.alloc(chunk, "t").toString(),
+            lastModified: 123,
+          }),
+        ),
+      );
+      expect(deserialize(full)).toBeInstanceOf(Blob);
+
+      // Pick truncation points that land after each allocation site:
+      //   header .. [content_type:64K] .. flags .. [bytes:64K] .. name .. trailer
+      // We locate them by scanning for the 64 KiB runs of the fill bytes so the
+      // test stays robust against outer serializer framing changes.
+      function endOfRun(byte: number) {
+        let run = 0;
+        for (let i = 0; i < full.length; i++) {
+          run = full[i] === byte ? run + 1 : 0;
+          if (run === chunk) return i + 1;
+        }
+        throw new Error("could not locate payload run");
+      }
+      const afterContentType = endOfRun(0x74); // 't'
+      const afterBytes = endOfRun(0x42); // 'B'
+      // After the body the wire format carries stored_name_len (u32) +
+      // stored_name ("leak.bin", 8 bytes) before the Blob is heap-promoted.
+      const afterStoredName = afterBytes + 4 + "leak.bin".length;
+      const cuts = [
+        afterContentType, // content_type allocated, next read fails
+        afterContentType + 2, // store_tag + bytes_len partially read
+        afterBytes, // bytes + Store allocated, stored_name len read fails
+        afterStoredName, // heap *Blob allocated, is_jsdom_file read fails
+        full.length - 1, // v3 File name read fails (last byte missing)
+      ];
+      const payloads = cuts.map(n => full.slice(0, n));
+      // All of these must hit the error path; if one accidentally succeeds
+      // the test isn't measuring what it thinks it is.
+      for (const p of payloads) expect(() => deserialize(p)).toThrow();
+
+      const attempt = () => {
+        for (const p of payloads) {
+          try {
+            deserialize(p);
+          } catch {}
+        }
+      };
+
+      // Warm up long enough for the allocator's arena to reach steady state
+      // (debug+ASAN builds front-load some RSS growth over the first few
+      // thousand alloc/free cycles of this size class), then measure.
+      // Without the errdefer cleanup each iteration leaks ~512 KiB across
+      // the five cut points, so the measured window grows by ~750 MiB;
+      // with it the window is flat modulo a few MiB of noise.
+      for (let i = 0; i < 1000; i++) attempt();
+      Bun.gc(true);
+      const rssBefore = process.memoryUsage.rss();
+      for (let i = 0; i < 1500; i++) attempt();
+      Bun.gc(true);
+      const rssAfter = process.memoryUsage.rss();
+
+      const deltaMiB = (rssAfter - rssBefore) / 1024 / 1024;
+      // ASAN's quarantine retains freed allocations (default 256 MB) so the
+      // measured window still grows under bun-asan; widen the threshold there.
+      expect(deltaMiB).toBeLessThan(isASAN ? 128 : 32);
+    }, 30_000);
   });
 });

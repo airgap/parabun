@@ -1,0 +1,4077 @@
+pub fn ParseStmt(
+    comptime parser_feature__typescript: bool,
+    comptime parser_feature__jsx: JSXTransformType,
+    comptime parser_feature__scan_only: bool,
+) type {
+    return struct {
+        const P = js_parser.NewParser_(parser_feature__typescript, parser_feature__jsx, parser_feature__scan_only);
+        const createDefaultName = P.createDefaultName;
+        const extractDeclsForBinding = P.extractDeclsForBinding;
+        const is_typescript_enabled = P.is_typescript_enabled;
+        const track_symbol_usage_during_parse_pass = P.track_symbol_usage_during_parse_pass;
+
+        fn t_semicolon(p: *P) anyerror!Stmt {
+            try p.lexer.next();
+            return Stmt.empty();
+        }
+
+        fn t_export(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            const previous_export_keyword = p.esm_export_keyword;
+            if (opts.is_module_scope) {
+                p.esm_export_keyword = p.lexer.range();
+            } else if (!opts.is_namespace_scope) {
+                try p.lexer.unexpected();
+                return error.SyntaxError;
+            }
+            try p.lexer.next();
+
+            // TypeScript decorators only work on class declarations
+            // "@decorator export class Foo {}"
+            // "@decorator export abstract class Foo {}"
+            // "@decorator export default class Foo {}"
+            // "@decorator export default abstract class Foo {}"
+            // "@decorator export declare class Foo {}"
+            // "@decorator export declare abstract class Foo {}"
+            if (opts.ts_decorators != null and p.lexer.token != js_lexer.T.t_class and
+                p.lexer.token != js_lexer.T.t_default and
+                !p.lexer.isContextualKeyword("abstract") and
+                !p.lexer.isContextualKeyword("declare"))
+            {
+                try p.lexer.expected(js_lexer.T.t_class);
+            }
+
+            switch (p.lexer.token) {
+                T.t_class, T.t_const, T.t_function, T.t_var => {
+                    opts.is_export = true;
+                    return p.parseStmt(opts);
+                },
+
+                T.t_import => {
+                    // "export import foo = bar"
+                    if (is_typescript_enabled and (opts.is_module_scope or opts.is_namespace_scope)) {
+                        opts.is_export = true;
+                        return p.parseStmt(opts);
+                    }
+
+                    try p.lexer.unexpected();
+                    return error.SyntaxError;
+                },
+
+                T.t_enum => {
+                    if (!is_typescript_enabled) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
+                    opts.is_export = true;
+                    return p.parseStmt(opts);
+                },
+
+                T.t_identifier => {
+                    if (p.lexer.isContextualKeyword("let")) {
+                        opts.is_export = true;
+                        return p.parseStmt(opts);
+                    }
+
+                    if (comptime is_typescript_enabled) {
+                        if (opts.is_typescript_declare and p.lexer.isContextualKeyword("as")) {
+                            // "export as namespace ns;"
+                            try p.lexer.next();
+                            try p.lexer.expectContextualKeyword("namespace");
+                            try p.lexer.expect(T.t_identifier);
+                            try p.lexer.expectOrInsertSemicolon();
+
+                            return p.s(S.TypeScript{}, loc);
+                        }
+                    }
+
+                    // Parabun: "export schema NAME = <expr>" / "export schema NAME from <expr>"
+                    // / "export schema NAME { ... }".
+                    if (p.lexer.isContextualKeyword("schema")) {
+                        const kw_range = p.lexer.range();
+                        try p.lexer.next();
+                        if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                            opts.is_export = true;
+                            return try parseModelStmt(p, kw_range, opts);
+                        }
+                        // `export schema` not followed by an identifier name —
+                        // unexpected; let downstream handle.
+                    }
+
+                    // Parabun: "export memo name(...)" / "export memo async name(...)"
+                    if (p.lexer.isContextualKeyword("memo")) {
+                        const memo_range = p.lexer.range();
+                        try p.lexer.next();
+                        if (p.lexer.has_newline_before) {
+                            try p.log.addRangeError(p.source, memo_range, "Unexpected newline after \"memo\"");
+                            return error.SyntaxError;
+                        }
+                        opts.is_export = true;
+                        return try parseMemoFnStmt(p, opts, memo_range);
+                    }
+
+                    // Parabun: "export pure function" / "export pure async function"
+                    if (p.lexer.isContextualKeyword("pure")) {
+                        const pure_range = p.lexer.range();
+                        try p.lexer.next();
+                        if (p.lexer.has_newline_before) {
+                            try p.log.addRangeError(p.source, pure_range, "Unexpected newline after \"pure\"");
+                        }
+
+                        if (p.lexer.isContextualKeyword("async")) {
+                            const asyncRange = p.lexer.range();
+                            try p.lexer.next();
+                            if (p.lexer.has_newline_before) {
+                                try p.log.addRangeError(p.source, asyncRange, "Unexpected newline after \"async\"");
+                            }
+                            try p.lexer.expect(T.t_function);
+                            opts.is_export = true;
+                            return try p.parseFnStmt(loc, opts, asyncRange, true);
+                        }
+
+                        try p.lexer.expect(T.t_function);
+                        opts.is_export = true;
+                        return try p.parseFnStmt(loc, opts, null, true);
+                    }
+
+                    if (p.lexer.isContextualKeyword("async")) {
+                        const asyncRange = p.lexer.range();
+                        try p.lexer.next();
+                        if (p.lexer.has_newline_before) {
+                            try p.log.addRangeError(p.source, asyncRange, "Unexpected newline after \"async\"");
+                        }
+
+                        try p.lexer.expect(T.t_function);
+                        opts.is_export = true;
+                        return try p.parseFnStmt(loc, opts, asyncRange, false);
+                    }
+
+                    if (is_typescript_enabled) {
+                        if (TypeScript.Identifier.forStr(p.lexer.identifier)) |ident| {
+                            switch (ident) {
+                                .s_type => {
+                                    // "export type foo = ..."
+                                    const type_range = p.lexer.range();
+                                    try p.lexer.next();
+                                    if (p.lexer.has_newline_before) {
+                                        try p.log.addErrorFmt(p.source, type_range.end(), p.allocator, "Unexpected newline after \"type\"", .{});
+                                        return error.SyntaxError;
+                                    }
+                                    var skipper = ParseStatementOptions{ .is_module_scope = opts.is_module_scope, .is_export = true };
+                                    try p.skipTypeScriptTypeStmt(&skipper);
+                                    return p.s(S.TypeScript{}, loc);
+                                },
+                                .s_namespace, .s_abstract, .s_module, .s_interface => {
+                                    // "export namespace Foo {}"
+                                    // "export abstract class Foo {}"
+                                    // "export module Foo {}"
+                                    // "export interface Foo {}"
+                                    opts.is_export = true;
+                                    return try p.parseStmt(opts);
+                                },
+                                .s_declare => {
+                                    // "export declare class Foo {}"
+                                    opts.is_export = true;
+                                    opts.lexical_decl = .allow_all;
+                                    opts.is_typescript_declare = true;
+                                    return try p.parseStmt(opts);
+                                },
+                            }
+                        }
+                    }
+
+                    try p.lexer.unexpected();
+                    return error.SyntaxError;
+                },
+
+                T.t_default => {
+                    if (!opts.is_module_scope and (!opts.is_namespace_scope or !opts.is_typescript_declare)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
+                    const defaultLoc = p.lexer.loc();
+                    try p.lexer.next();
+
+                    // TypeScript decorators only work on class declarations
+                    // "@decorator export default class Foo {}"
+                    // "@decorator export default abstract class Foo {}"
+                    if (opts.ts_decorators != null and p.lexer.token != T.t_class and !p.lexer.isContextualKeyword("abstract")) {
+                        try p.lexer.expected(T.t_class);
+                    }
+
+                    if (p.lexer.isContextualKeyword("async")) {
+                        const async_range = p.lexer.range();
+                        try p.lexer.next();
+                        if (p.lexer.token == T.t_function and !p.lexer.has_newline_before) {
+                            try p.lexer.next();
+                            var stmtOpts = ParseStatementOptions{
+                                .is_name_optional = true,
+                                .lexical_decl = .allow_all,
+                            };
+                            const stmt = try p.parseFnStmt(loc, &stmtOpts, async_range, false);
+                            if (@as(Stmt.Tag, stmt.data) == .s_type_script) {
+                                // This was just a type annotation
+                                return stmt;
+                            }
+
+                            const defaultName = if (stmt.data.s_function.func.name) |name|
+                                js_ast.LocRef{ .loc = name.loc, .ref = name.ref }
+                            else
+                                try p.createDefaultName(defaultLoc);
+
+                            const value = js_ast.StmtOrExpr{ .stmt = stmt };
+                            return p.s(S.ExportDefault{ .default_name = defaultName, .value = value }, loc);
+                        }
+
+                        const defaultName = try createDefaultName(p, loc);
+
+                        var expr = try p.parseAsyncPrefixExpr(async_range, Level.comma);
+                        try p.parseSuffix(&expr, Level.comma, null, Expr.EFlags.none);
+                        try p.lexer.expectOrInsertSemicolon();
+                        const value = js_ast.StmtOrExpr{ .expr = expr };
+                        p.has_export_default = true;
+                        return p.s(S.ExportDefault{ .default_name = defaultName, .value = value }, loc);
+                    }
+
+                    if (p.lexer.token == .t_function or p.lexer.token == .t_class or p.lexer.isContextualKeyword("interface")) {
+                        var _opts = ParseStatementOptions{
+                            .ts_decorators = opts.ts_decorators,
+                            .is_name_optional = true,
+                            .lexical_decl = .allow_all,
+                        };
+                        const stmt = try p.parseStmt(&_opts);
+
+                        const default_name: js_ast.LocRef = default_name_getter: {
+                            switch (stmt.data) {
+                                // This was just a type annotation
+                                .s_type_script => {
+                                    return stmt;
+                                },
+
+                                .s_function => |func_container| {
+                                    if (func_container.func.name) |name| {
+                                        break :default_name_getter LocRef{ .loc = name.loc, .ref = name.ref };
+                                    }
+                                },
+                                .s_class => |class| {
+                                    if (class.class.class_name) |name| {
+                                        break :default_name_getter LocRef{ .loc = name.loc, .ref = name.ref };
+                                    }
+                                },
+                                else => {},
+                            }
+
+                            break :default_name_getter createDefaultName(p, defaultLoc) catch unreachable;
+                        };
+                        p.has_export_default = true;
+                        p.has_es_module_syntax = true;
+                        return p.s(
+                            S.ExportDefault{ .default_name = default_name, .value = js_ast.StmtOrExpr{ .stmt = stmt } },
+                            loc,
+                        );
+                    }
+
+                    const is_identifier = p.lexer.token == .t_identifier;
+                    const name = p.lexer.identifier;
+                    const expr = try p.parseExpr(.comma);
+
+                    // Handle the default export of an abstract class in TypeScript
+                    if (is_typescript_enabled and is_identifier and (p.lexer.token == .t_class or opts.ts_decorators != null) and strings.eqlComptime(name, "abstract")) {
+                        switch (expr.data) {
+                            .e_identifier => {
+                                var stmtOpts = ParseStatementOptions{
+                                    .ts_decorators = opts.ts_decorators,
+                                    .is_name_optional = true,
+                                };
+                                const stmt: Stmt = try p.parseClassStmt(loc, &stmtOpts);
+
+                                // Use the statement name if present, since it's a better name
+                                const default_name: js_ast.LocRef = default_name_getter: {
+                                    switch (stmt.data) {
+                                        // This was just a type annotation
+                                        .s_type_script => {
+                                            return stmt;
+                                        },
+
+                                        .s_function => |func_container| {
+                                            if (func_container.func.name) |_name| {
+                                                break :default_name_getter LocRef{ .loc = defaultLoc, .ref = _name.ref };
+                                            }
+                                        },
+                                        .s_class => |class| {
+                                            if (class.class.class_name) |_name| {
+                                                break :default_name_getter LocRef{ .loc = defaultLoc, .ref = _name.ref };
+                                            }
+                                        },
+                                        else => {},
+                                    }
+
+                                    break :default_name_getter createDefaultName(p, defaultLoc) catch unreachable;
+                                };
+                                p.has_export_default = true;
+                                return p.s(S.ExportDefault{ .default_name = default_name, .value = js_ast.StmtOrExpr{ .stmt = stmt } }, loc);
+                            },
+                            else => {
+                                p.panic("internal error: unexpected", .{});
+                            },
+                        }
+                    }
+
+                    try p.lexer.expectOrInsertSemicolon();
+
+                    // Use the expression name if present, since it's a better name
+                    p.has_export_default = true;
+                    return p.s(
+                        S.ExportDefault{
+                            .default_name = p.defaultNameForExpr(expr, defaultLoc),
+                            .value = js_ast.StmtOrExpr{
+                                .expr = expr,
+                            },
+                        },
+                        loc,
+                    );
+                },
+                T.t_asterisk => {
+                    if (!opts.is_module_scope and !(opts.is_namespace_scope or !opts.is_typescript_declare)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
+                    try p.lexer.next();
+                    var namespace_ref: Ref = Ref.None;
+                    var alias: ?js_ast.G.ExportStarAlias = null;
+                    var path: ParsedPath = undefined;
+
+                    if (p.lexer.isContextualKeyword("as")) {
+                        // "export * as ns from 'path'"
+                        try p.lexer.next();
+                        const name = try p.parseClauseAlias("export");
+                        namespace_ref = try p.storeNameInRef(name);
+                        alias = G.ExportStarAlias{ .loc = p.lexer.loc(), .original_name = name };
+                        try p.lexer.next();
+                        try p.lexer.expectContextualKeyword("from");
+                        path = try p.parsePath();
+                    } else {
+                        // "export * from 'path'"
+                        try p.lexer.expectContextualKeyword("from");
+                        path = try p.parsePath();
+                        const name = try fs.PathName.init(path.text).nonUniqueNameString(p.allocator);
+                        namespace_ref = try p.storeNameInRef(name);
+                    }
+
+                    const import_record_index = p.addImportRecord(
+                        ImportKind.stmt,
+                        path.loc,
+                        path.text,
+                        // TODO: import assertions
+                        // path.assertions
+                    );
+
+                    if (path.is_macro) {
+                        try p.log.addError(p.source, path.loc, "cannot use macro in export statement");
+                    } else if (path.import_tag != .none) {
+                        try p.log.addError(p.source, loc, "cannot use export statement with \"type\" attribute");
+                    }
+
+                    if (comptime track_symbol_usage_during_parse_pass) {
+                        // In the scan pass, we need _some_ way of knowing *not* to mark as unused
+                        p.import_records.items[import_record_index].flags.calls_runtime_re_export_fn = true;
+                    }
+
+                    try p.lexer.expectOrInsertSemicolon();
+                    p.has_es_module_syntax = true;
+                    return p.s(S.ExportStar{
+                        .namespace_ref = namespace_ref,
+                        .alias = alias,
+                        .import_record_index = import_record_index,
+                    }, loc);
+                },
+                T.t_open_brace => {
+                    if (!opts.is_module_scope and !(opts.is_namespace_scope or !opts.is_typescript_declare)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
+                    const export_clause = try p.parseExportClause();
+                    if (p.lexer.isContextualKeyword("from")) {
+                        try p.lexer.expectContextualKeyword("from");
+                        const parsedPath = try p.parsePath();
+
+                        try p.lexer.expectOrInsertSemicolon();
+
+                        if (comptime is_typescript_enabled) {
+                            // export {type Foo} from 'bar';
+                            // ->
+                            // nothing
+                            // https://www.typescriptlang.org/play?useDefineForClassFields=true&esModuleInterop=false&declaration=false&target=99&isolatedModules=false&ts=4.5.4#code/KYDwDg9gTgLgBDAnmYcDeAxCEC+cBmUEAtnAOQBGAhlGQNwBQQA
+                            if (export_clause.clauses.len == 0 and export_clause.had_type_only_exports) {
+                                return p.s(S.TypeScript{}, loc);
+                            }
+                        }
+
+                        if (parsedPath.is_macro) {
+                            try p.log.addError(p.source, loc, "export from cannot be used with \"type\": \"macro\"");
+                        } else if (parsedPath.import_tag != .none) {
+                            try p.log.addError(p.source, loc, "export from cannot be used with \"type\" attribute");
+                        }
+
+                        const import_record_index = p.addImportRecord(.stmt, parsedPath.loc, parsedPath.text);
+                        const path_name = fs.PathName.init(parsedPath.text);
+                        const namespace_ref = p.storeNameInRef(
+                            std.fmt.allocPrint(
+                                p.allocator,
+                                "import_{f}",
+                                .{
+                                    path_name.fmtIdentifier(),
+                                },
+                            ) catch |err| bun.handleOom(err),
+                        ) catch |err| bun.handleOom(err);
+
+                        if (comptime track_symbol_usage_during_parse_pass) {
+                            // In the scan pass, we need _some_ way of knowing *not* to mark as unused
+                            p.import_records.items[import_record_index].flags.calls_runtime_re_export_fn = true;
+                        }
+                        p.current_scope.is_after_const_local_prefix = true;
+                        p.has_es_module_syntax = true;
+                        return p.s(
+                            S.ExportFrom{
+                                .items = export_clause.clauses,
+                                .is_single_line = export_clause.is_single_line,
+                                .namespace_ref = namespace_ref,
+                                .import_record_index = import_record_index,
+                            },
+                            loc,
+                        );
+                    }
+                    try p.lexer.expectOrInsertSemicolon();
+
+                    if (comptime is_typescript_enabled) {
+                        // export {type Foo};
+                        // ->
+                        // nothing
+                        // https://www.typescriptlang.org/play?useDefineForClassFields=true&esModuleInterop=false&declaration=false&target=99&isolatedModules=false&ts=4.5.4#code/KYDwDg9gTgLgBDAnmYcDeAxCEC+cBmUEAtnAOQBGAhlGQNwBQQA
+                        if (export_clause.clauses.len == 0 and export_clause.had_type_only_exports) {
+                            return p.s(S.TypeScript{}, loc);
+                        }
+                    }
+                    p.has_es_module_syntax = true;
+                    return p.s(S.ExportClause{
+                        .items = export_clause.clauses,
+                        .is_single_line = export_clause.is_single_line,
+                    }, loc);
+                },
+                T.t_equals => {
+                    // "export = value;"
+
+                    p.esm_export_keyword = previous_export_keyword; // This wasn't an ESM export statement after all
+                    if (is_typescript_enabled) {
+                        try p.lexer.next();
+                        const value = try p.parseExpr(.lowest);
+                        try p.lexer.expectOrInsertSemicolon();
+                        return p.s(S.ExportEquals{ .value = value }, loc);
+                    }
+                    try p.lexer.unexpected();
+                    return error.SyntaxError;
+                },
+                else => {
+                    try p.lexer.unexpected();
+                    return error.SyntaxError;
+                },
+            }
+        }
+
+        fn t_function(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            return try p.parseFnStmt(loc, opts, null, false);
+        }
+        fn t_enum(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            if (!is_typescript_enabled) {
+                try p.lexer.unexpected();
+                return error.SyntaxError;
+            }
+            return p.parseTypescriptEnumStmt(loc, opts);
+        }
+        fn t_at(p: *P, opts: *ParseStatementOptions) anyerror!Stmt {
+            // Parse decorators before class statements, which are potentially exported
+            if (is_typescript_enabled or p.options.features.standard_decorators) {
+                const scope_index = p.scopes_in_order.items.len;
+                const ts_decorators = try p.parseTypeScriptDecorators();
+
+                // If this turns out to be a "declare class" statement, we need to undo the
+                // scopes that were potentially pushed while parsing the decorator arguments.
+                // That can look like any one of the following:
+                //
+                //   "@decorator declare class Foo {}"
+                //   "@decorator declare abstract class Foo {}"
+                //   "@decorator export declare class Foo {}"
+                //   "@decorator export declare abstract class Foo {}"
+                //
+                opts.ts_decorators = DeferredTsDecorators{
+                    .values = ts_decorators,
+                    .scope_index = scope_index,
+                };
+
+                // "@decorator class Foo {}"
+                // "@decorator abstract class Foo {}"
+                // "@decorator declare class Foo {}"
+                // "@decorator declare abstract class Foo {}"
+                // "@decorator export class Foo {}"
+                // "@decorator export abstract class Foo {}"
+                // "@decorator export declare class Foo {}"
+                // "@decorator export declare abstract class Foo {}"
+                // "@decorator export default class Foo {}"
+                // "@decorator export default abstract class Foo {}"
+                if (p.lexer.token != .t_class and p.lexer.token != .t_export and
+                    !(is_typescript_enabled and p.lexer.isContextualKeyword("abstract")) and
+                    !(is_typescript_enabled and p.lexer.isContextualKeyword("declare")))
+                {
+                    try p.lexer.expected(.t_class);
+                }
+
+                return p.parseStmt(opts);
+            }
+            // notimpl();
+
+            try p.lexer.unexpected();
+            return error.SyntaxError;
+        }
+        fn t_class(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(loc);
+            }
+
+            return try p.parseClassStmt(loc, opts);
+        }
+        fn t_var(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            var decls = try p.parseAndDeclareDecls(.hoisted, opts);
+            try p.lexer.expectOrInsertSemicolon();
+            return p.s(S.Local{
+                .kind = .k_var,
+                .decls = Decl.List.moveFromList(&decls),
+                .is_export = opts.is_export,
+            }, loc);
+        }
+        fn t_const(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(loc);
+            }
+            // p.markSyntaxFeature(compat.Const, p.lexer.Range())
+
+            try p.lexer.next();
+
+            if (is_typescript_enabled and p.lexer.token == T.t_enum) {
+                return p.parseTypescriptEnumStmt(loc, opts);
+            }
+
+            var decls = try p.parseAndDeclareDecls(.constant, opts);
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (!opts.is_typescript_declare) {
+                try p.requireInitializers(.k_const, decls.items);
+            }
+
+            // Parabun: register `const NAME = pure (x) => expr` arrows as
+            // pipeline-fusable, mirroring the `pure function NAME(x) { return expr }`
+            // path in parseFn.zig. let/var are excluded — the inlining is only
+            // sound when the binding can't be reassigned.
+            for (decls.items) |decl| {
+                if (decl.binding.data != .b_identifier) continue;
+                const value = decl.value orelse continue;
+                if (value.data != .e_arrow) continue;
+                const arrow = value.data.e_arrow;
+                if (!arrow.is_pure) continue;
+                if (arrow.args.len != 1) continue;
+                if (arrow.args[0].default != null) continue;
+                if (arrow.args[0].binding.data != .b_identifier) continue;
+                if (arrow.body.stmts.len != 1) continue;
+                if (arrow.body.stmts[0].data != .s_return) continue;
+                const body_expr = arrow.body.stmts[0].data.s_return.value orelse continue;
+
+                p.pure_inline_fns.append(p.allocator, .{
+                    .fn_name = p.loadNameFromRef(decl.binding.data.b_identifier.ref),
+                    .param_name = p.loadNameFromRef(arrow.args[0].binding.data.b_identifier.ref),
+                    .body_expr = body_expr,
+                }) catch {};
+            }
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = Decl.List.moveFromList(&decls),
+                .is_export = opts.is_export,
+            }, loc);
+        }
+        fn t_if(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            var current_loc = loc;
+            var root_if: ?Stmt = null;
+            var current_if: ?*S.If = null;
+
+            while (true) {
+                try p.lexer.next();
+                try p.lexer.expect(.t_open_paren);
+                const test_ = try p.parseExpr(.lowest);
+                try p.lexer.expect(.t_close_paren);
+                var stmtOpts = ParseStatementOptions{
+                    .lexical_decl = .allow_fn_inside_if,
+                };
+                const yes = try p.parseStmt(&stmtOpts);
+
+                // Create the if node
+                const if_stmt = p.s(S.If{
+                    .test_ = test_,
+                    .yes = yes,
+                    .no = null,
+                }, current_loc);
+
+                // First if statement becomes root
+                if (root_if == null) {
+                    root_if = if_stmt;
+                }
+
+                // Link to previous if statement's else branch
+                if (current_if) |prev_if| {
+                    prev_if.no = if_stmt;
+                }
+
+                // Set current if for next iteration
+                current_if = if_stmt.data.s_if;
+
+                if (p.lexer.token != .t_else) {
+                    return root_if.?;
+                }
+
+                try p.lexer.next();
+
+                // Handle final else
+                if (p.lexer.token != .t_if) {
+                    stmtOpts = ParseStatementOptions{
+                        .lexical_decl = .allow_fn_inside_if,
+                    };
+                    current_if.?.no = try p.parseStmt(&stmtOpts);
+                    return root_if.?;
+                }
+
+                // Continue with else if
+                current_loc = p.lexer.loc();
+            }
+
+            unreachable;
+        }
+        fn t_do(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            var stmtOpts = ParseStatementOptions{};
+            const body = try p.parseStmt(&stmtOpts);
+            try p.lexer.expect(.t_while);
+            try p.lexer.expect(.t_open_paren);
+            const test_ = try p.parseExpr(.lowest);
+            try p.lexer.expect(.t_close_paren);
+
+            // This is a weird corner case where automatic semicolon insertion applies
+            // even without a newline present
+            if (p.lexer.token == .t_semicolon) {
+                try p.lexer.next();
+            }
+            return p.s(S.DoWhile{ .body = body, .test_ = test_ }, loc);
+        }
+        fn t_while(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+
+            try p.lexer.expect(.t_open_paren);
+            const test_ = try p.parseExpr(.lowest);
+            try p.lexer.expect(.t_close_paren);
+
+            var stmtOpts = ParseStatementOptions{};
+            const body = try p.parseStmt(&stmtOpts);
+
+            return p.s(S.While{
+                .body = body,
+                .test_ = test_,
+            }, loc);
+        }
+        fn t_with(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            try p.lexer.expect(.t_open_paren);
+            const test_ = try p.parseExpr(.lowest);
+            const body_loc = p.lexer.loc();
+            try p.lexer.expect(.t_close_paren);
+
+            // Push a scope so we make sure to prevent any bare identifiers referenced
+            // within the body from being renamed. Renaming them might change the
+            // semantics of the code.
+            _ = try p.pushScopeForParsePass(.with, body_loc);
+            var stmtOpts = ParseStatementOptions{};
+            const body = try p.parseStmt(&stmtOpts);
+            p.popScope();
+
+            return p.s(S.With{ .body = body, .body_loc = body_loc, .value = test_ }, loc);
+        }
+        fn t_switch(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+
+            try p.lexer.expect(.t_open_paren);
+            const test_ = try p.parseExpr(.lowest);
+            try p.lexer.expect(.t_close_paren);
+
+            const body_loc = p.lexer.loc();
+            _ = try p.pushScopeForParsePass(.block, body_loc);
+            defer p.popScope();
+
+            try p.lexer.expect(.t_open_brace);
+            var cases = ListManaged(js_ast.Case).init(p.allocator);
+            var foundDefault = false;
+            var stmtOpts = ParseStatementOptions{ .lexical_decl = .allow_all };
+            var value: ?js_ast.Expr = null;
+            while (p.lexer.token != .t_close_brace) {
+                var body = StmtList.init(p.allocator);
+                value = null;
+                if (p.lexer.token == .t_default) {
+                    if (foundDefault) {
+                        try p.log.addRangeError(p.source, p.lexer.range(), "Multiple default clauses are not allowed");
+                        return error.SyntaxError;
+                    }
+
+                    foundDefault = true;
+                    try p.lexer.next();
+                    try p.lexer.expect(.t_colon);
+                } else {
+                    try p.lexer.expect(.t_case);
+                    value = try p.parseExpr(.lowest);
+                    try p.lexer.expect(.t_colon);
+                }
+
+                caseBody: while (true) {
+                    switch (p.lexer.token) {
+                        .t_close_brace, .t_case, .t_default => {
+                            break :caseBody;
+                        },
+                        else => {
+                            stmtOpts = ParseStatementOptions{ .lexical_decl = .allow_all };
+                            try body.append(try p.parseStmt(&stmtOpts));
+                        },
+                    }
+                }
+                try cases.append(js_ast.Case{ .value = value, .body = body.items, .loc = logger.Loc.Empty });
+            }
+            try p.lexer.expect(.t_close_brace);
+            return p.s(S.Switch{ .test_ = test_, .body_loc = body_loc, .cases = cases.items }, loc);
+        }
+        fn t_try(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            const body_loc = p.lexer.loc();
+            try p.lexer.expect(.t_open_brace);
+            _ = try p.pushScopeForParsePass(.block, loc);
+            var stmt_opts = ParseStatementOptions{};
+            const body = try p.parseStmtsUpTo(.t_close_brace, &stmt_opts);
+            p.popScope();
+            try p.lexer.next();
+
+            var catch_: ?js_ast.Catch = null;
+            var finally: ?js_ast.Finally = null;
+
+            if (p.lexer.token == .t_catch) {
+                const catch_loc = p.lexer.loc();
+                _ = try p.pushScopeForParsePass(.catch_binding, catch_loc);
+                try p.lexer.next();
+                var binding: ?js_ast.Binding = null;
+
+                // The catch binding is optional, and can be omitted
+                if (p.lexer.token != .t_open_brace) {
+                    try p.lexer.expect(.t_open_paren);
+                    var value = try p.parseBinding(.{});
+
+                    // Skip over types
+                    if (is_typescript_enabled and p.lexer.token == .t_colon) {
+                        try p.lexer.expect(.t_colon);
+                        try p.skipTypeScriptType(.lowest);
+                    }
+
+                    try p.lexer.expect(.t_close_paren);
+
+                    // Bare identifiers are a special case
+                    var kind = Symbol.Kind.other;
+                    switch (value.data) {
+                        .b_identifier => {
+                            kind = .catch_identifier;
+                        },
+                        else => {},
+                    }
+                    try p.declareBinding(kind, &value, &stmt_opts);
+                    binding = value;
+                }
+
+                const catch_body_loc = p.lexer.loc();
+                try p.lexer.expect(.t_open_brace);
+
+                _ = try p.pushScopeForParsePass(.block, catch_body_loc);
+                const stmts = try p.parseStmtsUpTo(.t_close_brace, &stmt_opts);
+                p.popScope();
+                try p.lexer.next();
+                catch_ = js_ast.Catch{
+                    .loc = catch_loc,
+                    .binding = binding,
+                    .body = stmts,
+                    .body_loc = catch_body_loc,
+                };
+                p.popScope();
+            }
+
+            if (p.lexer.token == .t_finally or catch_ == null) {
+                const finally_loc = p.lexer.loc();
+                _ = try p.pushScopeForParsePass(.block, finally_loc);
+                try p.lexer.expect(.t_finally);
+                try p.lexer.expect(.t_open_brace);
+                const stmts = try p.parseStmtsUpTo(.t_close_brace, &stmt_opts);
+                try p.lexer.next();
+                finally = js_ast.Finally{ .loc = finally_loc, .stmts = stmts };
+                p.popScope();
+            }
+
+            return p.s(
+                S.Try{ .body_loc = body_loc, .body = body, .catch_ = catch_, .finally = finally },
+                loc,
+            );
+        }
+        fn t_for(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            _ = try p.pushScopeForParsePass(.block, loc);
+            defer p.popScope();
+
+            try p.lexer.next();
+
+            // "for await (let x of y) {}"
+            var isForAwait = p.lexer.isContextualKeyword("await");
+            if (isForAwait) {
+                const await_range = p.lexer.range();
+                if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
+                    try p.log.addRangeError(p.source, await_range, "Cannot use \"await\" outside an async function");
+                    isForAwait = false;
+                } else {
+                    // TODO: improve error handling here
+                    //                 didGenerateError := p.markSyntaxFeature(compat.ForAwait, awaitRange)
+                    if (p.fn_or_arrow_data_parse.is_top_level) {
+                        p.top_level_await_keyword = await_range;
+                        // p.markSyntaxFeature(compat.TopLevelAwait, awaitRange)
+                    }
+                }
+                try p.lexer.next();
+            }
+
+            try p.lexer.expect(.t_open_paren);
+
+            var init_: ?Stmt = null;
+            var test_: ?Expr = null;
+            var update: ?Expr = null;
+
+            // "in" expressions aren't allowed here
+            p.allow_in = false;
+
+            var bad_let_range: ?logger.Range = null;
+            if (p.lexer.isContextualKeyword("let")) {
+                bad_let_range = p.lexer.range();
+            }
+
+            var decls: G.Decl.List = .{};
+            const init_loc = p.lexer.loc();
+            var is_var = false;
+            switch (p.lexer.token) {
+                // for (var )
+                .t_var => {
+                    is_var = true;
+                    try p.lexer.next();
+                    var stmtOpts = ParseStatementOptions{};
+                    var decls_list = try p.parseAndDeclareDecls(.hoisted, &stmtOpts);
+                    decls = .moveFromList(&decls_list);
+                    init_ = p.s(S.Local{ .kind = .k_var, .decls = decls }, init_loc);
+                },
+                // for (const )
+                .t_const => {
+                    try p.lexer.next();
+                    var stmtOpts = ParseStatementOptions{};
+                    var decls_list = try p.parseAndDeclareDecls(.constant, &stmtOpts);
+                    decls = .moveFromList(&decls_list);
+                    init_ = p.s(S.Local{ .kind = .k_const, .decls = decls }, init_loc);
+                },
+                // for (;)
+                .t_semicolon => {},
+                else => {
+                    var stmtOpts = ParseStatementOptions{
+                        .lexical_decl = .allow_all,
+                        .is_for_loop_init = true,
+                    };
+
+                    const res = try p.parseExprOrLetStmt(&stmtOpts);
+                    switch (res.stmt_or_expr) {
+                        .stmt => |stmt| {
+                            bad_let_range = null;
+                            // Keep the "let"/"using" declarations visible to the for-in/for-of
+                            // checks below ("forbidInitializers"), like the "var"/"const" cases.
+                            decls = .fromOwnedSlice(res.decls);
+                            init_ = stmt;
+                        },
+                        .expr => |expr| {
+                            init_ = p.s(S.SExpr{
+                                .value = expr,
+                            }, init_loc);
+                        },
+                    }
+                },
+            }
+
+            // "in" expressions are allowed again
+            p.allow_in = true;
+
+            // Detect for-of loops
+            if (p.lexer.isContextualKeyword("of") or isForAwait) {
+                if (bad_let_range) |r| {
+                    try p.log.addRangeError(p.source, r, "\"let\" must be wrapped in parentheses to be used as an expression here");
+                    return error.SyntaxError;
+                }
+
+                if (isForAwait and !p.lexer.isContextualKeyword("of")) {
+                    if (init_ != null) {
+                        try p.lexer.expectedString("\"of\"");
+                    } else {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+                }
+
+                try p.forbidInitializers(decls.slice(), "of", false);
+                try p.lexer.next();
+                const value = try p.parseExpr(.comma);
+                try p.lexer.expect(.t_close_paren);
+                var stmtOpts = ParseStatementOptions{};
+                const body = try p.parseStmt(&stmtOpts);
+                return p.s(S.ForOf{ .is_await = isForAwait, .init = init_ orelse unreachable, .value = value, .body = body }, loc);
+            }
+
+            // Detect for-in loops
+            if (p.lexer.token == .t_in) {
+                try p.forbidInitializers(decls.slice(), "in", is_var);
+                try p.lexer.next();
+                const value = try p.parseExpr(.lowest);
+                try p.lexer.expect(.t_close_paren);
+                var stmtOpts = ParseStatementOptions{};
+                const body = try p.parseStmt(&stmtOpts);
+                return p.s(S.ForIn{ .init = init_ orelse unreachable, .value = value, .body = body }, loc);
+            }
+
+            // Only require "const" statement initializers when we know we're a normal for loop
+            if (init_) |init_stmt| {
+                switch (init_stmt.data) {
+                    .s_local => {
+                        if (init_stmt.data.s_local.kind == .k_const) {
+                            try p.requireInitializers(.k_const, decls.slice());
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            try p.lexer.expect(.t_semicolon);
+            if (p.lexer.token != .t_semicolon) {
+                test_ = try p.parseExpr(.lowest);
+            }
+
+            try p.lexer.expect(.t_semicolon);
+
+            if (p.lexer.token != .t_close_paren) {
+                update = try p.parseExpr(.lowest);
+            }
+
+            try p.lexer.expect(.t_close_paren);
+            var stmtOpts = ParseStatementOptions{};
+            const body = try p.parseStmt(&stmtOpts);
+            return p.s(
+                S.For{ .init = init_, .test_ = test_, .update = update, .body = body },
+                loc,
+            );
+        }
+        fn t_import(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            const previous_import_keyword = p.esm_import_keyword;
+            p.esm_import_keyword = p.lexer.range();
+            try p.lexer.next();
+            var stmt: S.Import = S.Import{
+                .namespace_ref = Ref.None,
+                .import_record_index = std.math.maxInt(u32),
+            };
+            var was_originally_bare_import = false;
+
+            // "export import foo = bar"
+            if ((opts.is_export or (opts.is_namespace_scope and !opts.is_typescript_declare)) and p.lexer.token != .t_identifier) {
+                try p.lexer.expected(.t_identifier);
+            }
+
+            switch (p.lexer.token) {
+                // "import('path')"
+                // "import.meta"
+                .t_open_paren, .t_dot => {
+                    p.esm_import_keyword = previous_import_keyword; // this wasn't an esm import statement after all
+                    var expr = try p.parseImportExpr(loc, .lowest);
+                    try p.parseSuffix(&expr, .lowest, null, Expr.EFlags.none);
+                    try p.lexer.expectOrInsertSemicolon();
+                    return p.s(S.SExpr{
+                        .value = expr,
+                    }, loc);
+                },
+                .t_string_literal, .t_no_substitution_template_literal => {
+                    // "import 'path'"
+                    if (!opts.is_module_scope and (!opts.is_namespace_scope or !opts.is_typescript_declare)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+                    was_originally_bare_import = true;
+                },
+                .t_asterisk => {
+                    // "import * as ns from 'path'"
+                    if (!opts.is_module_scope and (!opts.is_namespace_scope or !opts.is_typescript_declare)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
+                    try p.lexer.next();
+                    try p.lexer.expectContextualKeyword("as");
+                    stmt = S.Import{
+                        .namespace_ref = try p.storeNameInRef(p.lexer.identifier),
+                        .star_name_loc = p.lexer.loc(),
+                        .import_record_index = std.math.maxInt(u32),
+                    };
+                    try p.lexer.expect(.t_identifier);
+                    try p.lexer.expectContextualKeyword("from");
+                },
+                .t_open_brace => {
+                    // "import {item1, item2} from 'path'"
+                    if (!opts.is_module_scope and (!opts.is_namespace_scope or !opts.is_typescript_declare)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+                    const importClause = try p.parseImportClause();
+                    if (comptime is_typescript_enabled) {
+                        if (importClause.had_type_only_imports and importClause.items.len == 0) {
+                            try p.lexer.expectContextualKeyword("from");
+                            _ = try p.parsePath();
+                            try p.lexer.expectOrInsertSemicolon();
+                            return p.s(S.TypeScript{}, loc);
+                        }
+                    }
+
+                    stmt = S.Import{
+                        .namespace_ref = Ref.None,
+                        .import_record_index = std.math.maxInt(u32),
+                        .items = importClause.items,
+                        .is_single_line = importClause.is_single_line,
+                    };
+                    try p.lexer.expectContextualKeyword("from");
+                },
+                .t_identifier => {
+                    // "import defaultItem from 'path'"
+                    // "import foo = bar"
+                    if (!opts.is_module_scope and (!opts.is_namespace_scope)) {
+                        try p.lexer.unexpected();
+                        return error.SyntaxError;
+                    }
+
+                    var default_name = p.lexer.identifier;
+                    stmt = S.Import{ .namespace_ref = Ref.None, .import_record_index = std.math.maxInt(u32), .default_name = LocRef{
+                        .loc = p.lexer.loc(),
+                        .ref = try p.storeNameInRef(default_name),
+                    } };
+                    try p.lexer.next();
+
+                    if (comptime is_typescript_enabled) {
+                        // Skip over type-only imports
+                        if (strings.eqlComptime(default_name, "type")) {
+                            switch (p.lexer.token) {
+                                .t_identifier => {
+                                    if (!strings.eqlComptime(p.lexer.identifier, "from")) {
+                                        default_name = p.lexer.identifier;
+                                        stmt.default_name.?.loc = p.lexer.loc();
+                                        try p.lexer.next();
+
+                                        if (p.lexer.token == .t_equals) {
+                                            // "import type foo = require('bar');"
+                                            // "import type foo = bar.baz;"
+                                            opts.is_typescript_declare = true;
+                                            return try p.parseTypeScriptImportEqualsStmt(loc, opts, stmt.default_name.?.loc, default_name);
+                                        } else {
+                                            // "import type foo from 'bar';"
+                                            try p.lexer.expectContextualKeyword("from");
+                                            _ = try p.parsePath();
+                                            try p.lexer.expectOrInsertSemicolon();
+                                            return p.s(S.TypeScript{}, loc);
+                                        }
+                                    }
+                                },
+                                .t_asterisk => {
+                                    // "import type * as foo from 'bar';"
+                                    try p.lexer.next();
+                                    try p.lexer.expectContextualKeyword("as");
+                                    try p.lexer.expect(.t_identifier);
+                                    try p.lexer.expectContextualKeyword("from");
+                                    _ = try p.parsePath();
+                                    try p.lexer.expectOrInsertSemicolon();
+                                    return p.s(S.TypeScript{}, loc);
+                                },
+
+                                .t_open_brace => {
+                                    // "import type {foo} from 'bar';"
+                                    _ = try p.parseImportClause();
+                                    try p.lexer.expectContextualKeyword("from");
+                                    _ = try p.parsePath();
+                                    try p.lexer.expectOrInsertSemicolon();
+                                    return p.s(S.TypeScript{}, loc);
+                                },
+                                else => {},
+                            }
+                        }
+
+                        // Parse TypeScript import assignment statements
+                        if (p.lexer.token == .t_equals or opts.is_export or (opts.is_namespace_scope and !opts.is_typescript_declare)) {
+                            p.esm_import_keyword = previous_import_keyword; // This wasn't an ESM import statement after all;
+                            return p.parseTypeScriptImportEqualsStmt(loc, opts, logger.Loc.Empty, default_name);
+                        }
+                    }
+
+                    if (p.lexer.token == .t_comma) {
+                        try p.lexer.next();
+
+                        switch (p.lexer.token) {
+                            // "import defaultItem, * as ns from 'path'"
+                            .t_asterisk => {
+                                try p.lexer.next();
+                                try p.lexer.expectContextualKeyword("as");
+                                stmt.namespace_ref = try p.storeNameInRef(p.lexer.identifier);
+                                stmt.star_name_loc = p.lexer.loc();
+                                try p.lexer.expect(.t_identifier);
+                            },
+                            // "import defaultItem, {item1, item2} from 'path'"
+                            .t_open_brace => {
+                                const importClause = try p.parseImportClause();
+
+                                stmt.items = importClause.items;
+                                stmt.is_single_line = importClause.is_single_line;
+                            },
+                            else => {
+                                try p.lexer.unexpected();
+                                return error.SyntaxError;
+                            },
+                        }
+                    }
+
+                    try p.lexer.expectContextualKeyword("from");
+                },
+                else => {
+                    try p.lexer.unexpected();
+                    return error.SyntaxError;
+                },
+            }
+
+            const path = try p.parsePath();
+            try p.lexer.expectOrInsertSemicolon();
+
+            return try p.processImportStatement(stmt, path, loc, was_originally_bare_import);
+        }
+        fn t_break(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            const name = try p.parseLabelName();
+            try p.lexer.expectOrInsertSemicolon();
+            return p.s(S.Break{ .label = name }, loc);
+        }
+        fn t_continue(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            const name = try p.parseLabelName();
+            try p.lexer.expectOrInsertSemicolon();
+            return p.s(S.Continue{ .label = name }, loc);
+        }
+        fn t_return(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            if (p.fn_or_arrow_data_parse.is_return_disallowed) {
+                try p.log.addRangeError(p.source, p.lexer.range(), "A return statement cannot be used here");
+            }
+            try p.lexer.next();
+            var value: ?Expr = null;
+            if ((p.lexer.token != .t_semicolon and
+                !p.lexer.has_newline_before and
+                p.lexer.token != .t_close_brace and
+                p.lexer.token != .t_end_of_file))
+            {
+                value = try p.parseExpr(.lowest);
+            }
+            p.latest_return_had_semicolon = p.lexer.token == .t_semicolon;
+            try p.lexer.expectOrInsertSemicolon();
+
+            return p.s(S.Return{ .value = value }, loc);
+        }
+        fn t_throw(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            if (p.lexer.has_newline_before) {
+                try p.log.addError(p.source, logger.Loc{
+                    .start = loc.start + 5,
+                }, "Unexpected newline after \"throw\"");
+                return error.SyntaxError;
+            }
+            const expr = try p.parseExpr(.lowest);
+            try p.lexer.expectOrInsertSemicolon();
+            return p.s(S.Throw{ .value = expr }, loc);
+        }
+        fn t_debugger(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            try p.lexer.next();
+            try p.lexer.expectOrInsertSemicolon();
+            return p.s(S.Debugger{}, loc);
+        }
+        fn t_open_brace(p: *P, _: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            _ = try p.pushScopeForParsePass(.block, loc);
+            defer p.popScope();
+            try p.lexer.next();
+            var stmtOpts = ParseStatementOptions{};
+            const stmts = try p.parseStmtsUpTo(.t_close_brace, &stmtOpts);
+            const close_brace_loc = p.lexer.loc();
+            try p.lexer.next();
+            return p.s(S.Block{
+                .stmts = stmts,
+                .close_brace_loc = close_brace_loc,
+            }, loc);
+        }
+
+        // Parabun: parse a `memo <name>(...) { ... }` statement (sync) or
+        // `memo async <name>(...) { ... }` statement. `memo` is a standalone
+        // declarator — it implies both purity and function-ness, so no `pure`
+        // or `function` keywords. At entry, p.lexer is positioned on the token
+        // immediately after `memo` (either `async` or the function name).
+        //
+        // Desugar:
+        //   memo fib(n) { ...body... }
+        // becomes:
+        //   const fib = __parabunMemo(function(n) { ...body... }, 1);
+        //
+        // The inner function is rendered anonymous (func.name = null) so that
+        // recursive references to `fib` inside the body resolve to the outer
+        // `const fib`, which is the memoized wrapper — otherwise a named function
+        // expression would bind `fib` inside its own scope and bypass memoization.
+        //
+        // Arity passed to the runtime helper controls cache layout:
+        //   0 args, no rest  → 0 (singleton cache)
+        //   1 arg, no rest   → 1 (direct Map)
+        //   otherwise        → 2 (nested Maps — also handles rest args correctly)
+        /// Peek-only check: does what follows the already-consumed `memo` keyword
+        /// look like a statement-form declaration (`memo name(` / `memo async name(` /
+        /// `memo name<` / legacy `memo function` / `memo fun` / `memo pure`)?
+        /// If not, the caller should treat `memo` as an expression prefix so
+        /// `memo (x) => ...` / `memo x => ...` arrows still parse correctly.
+        /// Restores the lexer to its current position on return.
+        fn isMemoStmtForm(p: *P) !bool {
+            const saved = p.lexer;
+            defer p.lexer.restore(&saved);
+
+            if (p.lexer.has_newline_before) return false;
+
+            // Legacy forms route into parseMemoFnStmt for a helpful error.
+            if (p.lexer.token == .t_function) return true;
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) return true;
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "fun")) return true;
+
+            // Optional `async` modifier before the name.
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "async")) {
+                try p.lexer.next();
+                if (p.lexer.has_newline_before) return false;
+                // After async, only stmt form has `name(` / `name<`. `async (` or
+                // `async x =>` should fall through to the expression path.
+            }
+
+            if (p.lexer.token != .t_identifier) return false;
+
+            // Peek one more token to see if this identifier is followed by `(` or `<`
+            // — which means it's a function declaration (stmt) rather than an arrow
+            // expression like `memo x => x`.
+            try p.lexer.next();
+            return p.lexer.token == .t_open_paren or p.lexer.token == .t_less_than;
+        }
+
+        fn parseMemoFnStmt(p: *P, opts: *ParseStatementOptions, memo_range: logger.Range) anyerror!Stmt {
+            // Reject legacy `memo pure function ...` with a helpful migration hint.
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
+                try p.log.addRangeError(p.source, p.lexer.range(), "`memo` now implies `pure` and drops `function`/`fun` — write `memo name(...)` (or `memo async name(...)`)");
+                return error.SyntaxError;
+            }
+            // Reject `memo function ...` / `memo fun ...` — `function`/`fun` is
+            // redundant because `memo` itself introduces a function declaration.
+            // Point the diagnostic at the offending keyword (not `memo`) so the
+            // editor underlines the token the user actually needs to delete.
+            if (p.lexer.token == .t_function or
+                (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "fun")))
+            {
+                try p.log.addRangeError(p.source, p.lexer.range(), "`memo` introduces a function declaration — drop the `function`/`fun` keyword (write `memo name(...)`)");
+                return error.SyntaxError;
+            }
+
+            var async_range: ?logger.Range = null;
+            if (p.lexer.isContextualKeyword("async")) {
+                async_range = p.lexer.range();
+                try p.lexer.next();
+                if (p.lexer.has_newline_before) {
+                    try p.log.addRangeError(p.source, async_range.?, "Unexpected newline after \"async\"");
+                    return error.SyntaxError;
+                }
+            }
+
+            if (p.lexer.token != .t_identifier) {
+                try p.log.addRangeError(p.source, memo_range, "`memo` requires a name — anonymous memoized functions aren't supported");
+                return error.SyntaxError;
+            }
+
+            // Remember whether the declaration is exported; parseFnStmt consults
+            // opts.is_export and will bake it into the resulting symbol. We move
+            // that onto the S.Local we emit instead, so clear it locally.
+            const is_export = opts.is_export;
+            opts.is_export = false;
+            defer opts.is_export = is_export;
+
+            const fn_stmt = try p.parseFnStmt(memo_range.loc, opts, async_range, true);
+            // parseFnStmt may return S.TypeScript for forward declarations — memo on
+            // those makes no sense, so reject it.
+            if (fn_stmt.data != .s_function) {
+                try p.log.addRangeError(p.source, memo_range, "`memo` cannot be applied to a TypeScript forward declaration");
+                return error.SyntaxError;
+            }
+
+            var func = fn_stmt.data.s_function.func;
+            const name_loc_ref = func.name.?;
+            const name_ref = name_loc_ref.ref.?;
+
+            // The function was declared as .hoisted_function by parseFnStmt;
+            // demote to .constant so later passes treat it as a const binding.
+            p.symbols.items[name_ref.innerIndex()].kind = .constant;
+
+            // Strip the inner name so recursive references inside the body
+            // resolve to the outer const (the memoized wrapper).
+            func.name = null;
+
+            const has_rest = func.flags.contains(.has_rest_arg);
+            const arity: f64 = blk: {
+                if (has_rest) break :blk 2;
+                if (func.args.len == 0) break :blk 0;
+                if (func.args.len == 1) break :blk 1;
+                break :blk 2;
+            };
+
+            // When visit traverses an E.Function, it pushes the function_args
+            // scope at the expression's own loc; when it traversed an S.Function,
+            // it pushed at func.open_parens_loc. To keep the visit-pass scope
+            // order consistent with what the parse pass recorded, emit the
+            // E.Function at open_parens_loc.
+            const fn_loc = func.open_parens_loc;
+            const fn_expr = p.newExpr(E.Function{ .func = func }, fn_loc);
+
+            const memo_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+            memo_args[0] = fn_expr;
+            memo_args[1] = p.newExpr(E.Number{ .value = arity }, fn_loc);
+            const memo_call = p.callRuntime(memo_range.loc, "__parabunMemo", memo_args);
+
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc_ref.loc),
+                .value = memo_call,
+            };
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = is_export,
+            }, memo_range.loc);
+        }
+
+        // Parabun: parse a `defer <expr>;` or `defer await <expr>;` statement.
+        // Desugars to an ES2024 `using` / `await using` declaration whose
+        // initializer wraps a thunk in a disposable shape:
+        //
+        //   defer fs.closeSync(fd);
+        //     → using __parabun_defer_0$ = __parabunDefer0(() => fs.closeSync(fd));
+        //
+        //   defer await client.disconnect();
+        //     → await using __parabun_defer_0$ = __parabunAsyncDefer0(async () => client.disconnect());
+        //
+        // Disposal order (LIFO), early-return, throw, loop-per-iteration, and
+        // SuppressedError chaining all come for free from `using` semantics.
+        //
+        // At entry: `defer` has already been consumed; p.lexer is on the token
+        // following it.
+        fn parseDeferStmt(p: *P, opts: *ParseStatementOptions, defer_range: logger.Range) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(defer_range.loc);
+            }
+
+            // Optional `await` for async defer. Requires the enclosing function
+            // to allow await expressions — otherwise the synthesized async arrow
+            // body couldn't await anyway, so we reject at parse time with a
+            // clearer message than "unexpected await" deep inside the arrow.
+            const is_async = blk: {
+                if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
+                    strings.eqlComptime(p.lexer.raw(), "await"))
+                {
+                    if (p.fn_or_arrow_data_parse.allow_await != .allow_expr) {
+                        try p.log.addRangeError(p.source, p.lexer.range(), "\"defer await\" can only be used inside an async function");
+                        return error.SyntaxError;
+                    }
+                    try p.lexer.next();
+                    break :blk true;
+                }
+                break :blk false;
+            };
+
+            // The synthesized arrow needs the same two scopes a real arrow gets
+            // during the parse pass so the visit pass finds them at matching
+            // locs. function_args goes at `defer`; function_body uses a
+            // synthetic offset inside the `defer` keyword itself so it remains
+            // strictly less than any loc the operand's own parsing will push
+            // (critical for operands that synthesize their own scopes, like
+            // `defer throw EXPR` which is itself an IIFE).
+            const arrow_loc = defer_range.loc;
+            const body_loc = logger.Loc{ .start = defer_range.loc.start + 1 };
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            // Swap fn_or_arrow_data_parse to match the arrow's async-ness so
+            // `await` inside the body is valid only when `defer await` was used.
+            // A sync arrow body forbids await even if the outer function is async.
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = if (is_async) .allow_expr else .allow_ident;
+            // Arrows don't allow yield regardless of enclosing generator.
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            const expr = try p.parseExpr(.lowest);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            // Build `() => EXPR` (or `async () => EXPR`) as a single-return arrow.
+            const stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            stmts[0] = p.s(S.Return{ .value = expr }, body_loc);
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = stmts },
+                .prefer_expr = true,
+                .is_async = is_async,
+            }, arrow_loc);
+
+            const defer_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            defer_args[0] = arrow;
+            const defer_call = if (is_async)
+                p.callRuntime(defer_range.loc, "__parabunAsyncDefer0", defer_args)
+            else
+                p.callRuntime(defer_range.loc, "__parabunDefer0", defer_args);
+
+            // Synthesize a unique binding name. We bump temp_ref_count so names
+            // can't collide across multiple defers in the same scope. The symbol
+            // is declared in the outer scope (current_scope after the two pops).
+            p.temp_ref_count += 1;
+            const name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__parabun_defer_{x}$", .{p.temp_ref_count}));
+            const binding_ref = try p.declareSymbol(.constant, defer_range.loc, name);
+
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = binding_ref }, defer_range.loc),
+                .value = defer_call,
+            };
+
+            return p.s(S.Local{
+                .kind = if (is_async) .k_await_using else .k_using,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = false,
+            }, defer_range.loc);
+        }
+
+        // Parabun: parse an `arena { ...body... }` block statement. Desugars to
+        //   __parabunArena(() => { ...body... });
+        // which delegates to @lyku/para-arena's `scope` — running the body with JSC
+        // GC deferred, then requesting an Eden collection on scope exit.
+        // Latency-smoothing, not a bump allocator.
+        //
+        // The body is a block of statements lifted into an arrow; therefore
+        // `return`, `break`, and `continue` inside the body are arrow-local
+        // (same semantics as forEach callbacks). This is documented — if the
+        // caller needs a value out, assign to an outer-let from inside.
+        //
+        // At entry: `arena` has already been consumed; p.lexer is on the `{`.
+        fn parseArenaStmt(p: *P, arena_range: logger.Range) anyerror!Stmt {
+            const arrow_loc = arena_range.loc;
+            const body_loc = p.lexer.loc();
+
+            // The synthesized arrow needs function_args and function_body
+            // scopes at distinct locs, same shape real arrows get.
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            // Swap fn_or_arrow_data_parse to sync-arrow defaults — await is
+            // forbidden inside the arena body (DeferGC is sync-only anyway:
+            // microtasks fire after scope releases).
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            // Consume `{`, parse statements up to `}`.
+            try p.lexer.expect(.t_open_brace);
+            var body_opts = ParseStatementOptions{};
+            const body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts);
+            try p.lexer.expect(.t_close_brace);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, arrow_loc);
+
+            // Build `require("@lyku/para-arena").scope(arrow)` via the user-typed
+            // require identifier shape. During the visit pass the parser's
+            // transposeRequire path rewrites the literal require call into
+            // an E.RequireString with correct part-level import-record
+            // bookkeeping; emitting E.RequireString directly from the parse
+            // pass skips that and breaks ESM runtime loads.
+            //
+            // `require_ref` isn't declared yet during parse — user code also
+            // lands identifiers through storeNameInRef, which the visit pass
+            // resolves via findSymbol to whatever `require` is bound to.
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-arena" }, arena_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, arena_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, arena_range.loc);
+            const scope_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "scope",
+                .name_loc = arena_range.loc,
+            }, arena_range.loc);
+            const arena_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            arena_args[0] = arrow;
+            const arena_call = p.newExpr(E.Call{
+                .target = scope_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(arena_args),
+            }, arena_range.loc);
+
+            return p.s(S.SExpr{ .value = arena_call }, arena_range.loc);
+        }
+
+        // Parabun: parse a `signal NAME = RHS` declaration. `signal` implies
+        // `const` — there's no `signal let`/`const`/`var` form. Each RHS is
+        // wrapped in
+        //   require("@lyku/para-signals").signal(RHS)
+        // by default, or
+        //   require("@lyku/para-signals").derived(() => RHS)
+        // when the RHS references another in-scope signal name (auto-derive).
+        // The file-level pragma `// @parabun-strict-signals` disables
+        // auto-derive, making every decl a plain `signal(RHS)`.
+        //
+        // Each declared ref is recorded in p.signal_bound_refs so the visit
+        // pass rewrites bare reads into `.get()` calls and assignments into
+        // `.set(...)` calls. The declared name is also counted in
+        // p.signal_bound_names so later decls can auto-derive from it.
+        //
+        // Only simple identifier bindings are allowed in v1 — destructuring
+        // (`signal { a, b } = ...`) reports an error.
+        //
+        // On entry, the lexer is on the binding name (t_identifier).
+        //
+        // `force_derive` distinguishes the two entry points:
+        //   - `signal NAME = RHS` → force_derive = false. Wraps the RHS in
+        //     `signal(RHS)` by default, or `derived(() => RHS)` when the
+        //     RHS reads other in-scope signals (auto-derive). The
+        //     `@parabun-strict-signals` file pragma disables auto-derive.
+        //   - `derived NAME = RHS` → force_derive = true. ALWAYS wraps the
+        //     RHS in `derived(() => RHS)`. The strict-signals pragma is
+        //     ignored — the user is being explicit. RHS that doesn't read
+        //     any signals just produces a derived that never re-fires;
+        //     this is allowed (mirrors how `signal NAME = LITERAL` is also
+        //     allowed even though it could be a plain `const`).
+        fn parseSignalStmt(p: *P, signal_range: logger.Range, opts: *ParseStatementOptions, force_derive: bool) anyerror!Stmt {
+            if (!p.parabun_strict_signals_scanned) {
+                p.parabun_strict_signals_scanned = true;
+                p.parabun_strict_signals = strings.contains(p.source.contents, "@parabun-strict-signals");
+            }
+
+            // Parse binding list manually so we can push an arrow scope-pair
+            // around each RHS — needed because auto-derive wraps the RHS as
+            // `() => RHS` and E.Arrow requires scopes that are visible to the
+            // visit pass via scopes_in_order. We push the scopes unconditionally
+            // and always wrap the RHS in an arrow; for the non-derive case
+            // the arrow is immediately invoked (`signal((() => RHS)())`), so
+            // the scopes stay consistent either way.
+            var decls = ListManaged(G.Decl).init(p.allocator);
+
+            while (true) {
+                var local = try p.parseBinding(.{});
+                p.declareBinding(.constant, &local, opts) catch unreachable;
+
+                if (comptime is_typescript_enabled) {
+                    const is_definite_assignment_assertion = p.lexer.token == .t_exclamation and !p.lexer.has_newline_before;
+                    if (is_definite_assignment_assertion) try p.lexer.next();
+                    if (is_definite_assignment_assertion or p.lexer.token == .t_colon) {
+                        try p.lexer.expect(.t_colon);
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                }
+
+                var value: ?Expr = null;
+                if (p.lexer.token == .t_equals) {
+                    // Anchor the wrapper-arrow scopes to `equals_loc - 1` and
+                    // `equals_loc`. These are the only locs we can use that
+                    // are STRICTLY between the previous decl's RHS (which has
+                    // already pushed inner scopes at locs after its source
+                    // span) and the current decl's RHS (which will push at
+                    // locs > the equals sign once parseExpr advances).
+                    //
+                    // The previous attempt — `p.lexer.loc()` (= start of RHS)
+                    // — collides with inner-arrow args scopes for
+                    // `signal x = () => …;`. The synthetic-loc-from-keyword
+                    // attempt (`signal_range.loc + decl_index*2`) fails for
+                    // multi-decl because decl N+1's synthetic loc lands BEFORE
+                    // decl N's already-pushed inner scopes, breaking the
+                    // monotonic-scopes_in_order invariant.
+                    const equals_loc = p.lexer.loc();
+                    try p.lexer.next();
+                    const arrow_loc = logger.Loc{ .start = equals_loc.start - 1 };
+                    const body_loc = equals_loc;
+
+                    _ = p.pushScopeForParsePass(.function_args, arrow_loc) catch bun.outOfMemory();
+                    _ = p.pushScopeForParsePass(.function_body, body_loc) catch bun.outOfMemory();
+
+                    const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+                    var arrow_data = p.fn_or_arrow_data_parse;
+                    arrow_data.allow_await = .allow_ident;
+                    arrow_data.allow_yield = .allow_ident;
+                    p.fn_or_arrow_data_parse = arrow_data;
+
+                    const rhs = try p.parseExpr(.comma);
+
+                    p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+                    p.popScope();
+                    p.popScope();
+
+                    // Parabun: optional `every MS_EXPR` postfix after a
+                    // `signal NAME = RHS` decl turns the signal into an
+                    // interval-driven cell. The RHS becomes the tick
+                    // function (re-evaluated every MS); the resulting
+                    // signal carries a `.stop()` method to clear the
+                    // interval. `every` is a contextual keyword — only
+                    // recognized here, parses as an identifier in any
+                    // other position.
+                    var every_ms: ?Expr = null;
+                    if (!force_derive and
+                        p.lexer.token == .t_identifier and
+                        strings.eqlComptime(p.lexer.raw(), "every"))
+                    {
+                        try p.lexer.next();
+                        every_ms = try p.parseExpr(.comma);
+                    }
+
+                    switch (local.data) {
+                        .b_identifier => |id| {
+                            bun.handleOom(p.signal_bound_refs.put(p.allocator, id.ref, {}));
+
+                            const name = p.symbols.items[id.ref.innerIndex()].original_name;
+                            // `derived NAME = RHS` is unconditional. `signal NAME = RHS`
+                            // auto-derives only when the RHS references another in-scope
+                            // signal name AND the @parabun-strict-signals pragma is off.
+                            const should_derive = force_derive or
+                                (!p.parabun_strict_signals and rhsHasSignalName(p, rhs));
+
+                            const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                            arrow_stmts[0] = p.s(S.Return{ .value = rhs }, body_loc);
+                            const arrow = p.newExpr(E.Arrow{
+                                .args = &.{},
+                                .body = .{ .loc = body_loc, .stmts = arrow_stmts },
+                                .prefer_expr = true,
+                                .is_async = false,
+                            }, arrow_loc);
+
+                            const require_ref = p.storeNameInRef("require") catch unreachable;
+                            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, signal_range.loc);
+                            const require_call = p.newExpr(E.Call{
+                                .target = p.newExpr(E.Identifier{ .ref = require_ref }, signal_range.loc),
+                                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+                            }, signal_range.loc);
+
+                            // Three lowering paths, picked off the postfix shape:
+                            //   `derived NAME = RHS`            → derived(arrow)
+                            //   `signal NAME = RHS every MS`    → signalEvery(arrow, ms)
+                            //   `signal NAME = RHS`             → signal((arrow)())
+                            const wrap_name: []const u8 = if (should_derive)
+                                "derived"
+                            else if (every_ms != null)
+                                "signalEvery"
+                            else
+                                "signal";
+                            const wrap_dot = p.newExpr(E.Dot{
+                                .target = require_call,
+                                .name = wrap_name,
+                                .name_loc = signal_range.loc,
+                            }, signal_range.loc);
+
+                            const wrap_args = if (every_ms) |ms| blk: {
+                                // signalEvery(() => RHS, MS). The arrow node
+                                // (already built for scope-tracking) becomes
+                                // the tick fn; the runtime helper calls it for
+                                // both the initial value and every interval
+                                // tick, and attaches `.stop()` to the result.
+                                const args = bun.handleOom(p.allocator.alloc(Expr, 2));
+                                args[0] = arrow;
+                                args[1] = ms;
+                                break :blk args;
+                            } else if (should_derive) blk: {
+                                // derived(() => RHS). Pure thunk semantics —
+                                // the derived signal calls the arrow each
+                                // time its deps change.
+                                const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                                args[0] = arrow;
+                                break :blk args;
+                            } else blk: {
+                                // signal((() => RHS)()). The arrow wrapper
+                                // is invoked immediately so signal() sees a
+                                // concrete value. The arrow exists only to
+                                // keep scopes_in_order consistent at parse
+                                // time.
+                                const invoke_args = js_ast.ExprNodeList.empty;
+                                const invoked = p.newExpr(E.Call{
+                                    .target = arrow,
+                                    .args = invoke_args,
+                                }, arrow_loc);
+                                const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                                args[0] = invoked;
+                                break :blk args;
+                            };
+
+                            const wrap_call = p.newExpr(E.Call{
+                                .target = wrap_dot,
+                                .args = js_ast.ExprNodeList.fromOwnedSlice(wrap_args),
+                            }, signal_range.loc);
+                            value = wrap_call;
+
+                            const gop = bun.handleOom(p.signal_bound_names.getOrPut(p.allocator, name));
+                            if (!gop.found_existing) gop.value_ptr.* = 0;
+                            gop.value_ptr.* += 1;
+                        },
+                        else => {
+                            const keyword: []const u8 = if (force_derive) "derived" else "signal";
+                            const msg = std.fmt.allocPrint(p.allocator, "\"{s}\" declarations must use a simple identifier binding (no destructuring)", .{keyword}) catch unreachable;
+                            p.log.addRangeError(p.source, signal_range, msg) catch unreachable;
+                            value = rhs;
+                        },
+                    }
+                }
+
+                decls.append(G.Decl{ .binding = local, .value = value }) catch unreachable;
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (!opts.is_typescript_declare) {
+                try p.requireInitializers(.k_const, decls.items);
+            }
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.moveFromList(&decls),
+                .is_export = opts.is_export,
+            }, signal_range.loc);
+        }
+
+        // Parabun: parse `parallel let|const NAME = EXPR, NAME = EXPR, …;`.
+        // Each RHS is collected into a single `Promise.all([...])`, awaited,
+        // and array-destructured back into the original names — sidestepping
+        // the positional-array footgun of `const [a, b] = await Promise.all([f, g])`
+        // where reordering the names alone silently mis-binds.
+        //
+        //   parallel let a = f(), b = g();
+        //     → const [a, b] = await Promise.all([f(), g()]);
+        //
+        // `let` reads better at the call site (it mirrors the multi-decl
+        // `let a = …, b = …` shape) but the lowering uses `const` because
+        // a destructured awaited tuple isn't meaningfully rebindable.
+        //
+        // At entry: `parallel` and `let`/`const` have both been consumed;
+        // p.lexer is on the first identifier of the binding list.
+        fn parseParallelLetStmt(p: *P, parallel_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(parallel_range.loc);
+            }
+
+            // Collect: ordered list of (name_loc, name_ref, RHS expr).
+            var names = ListManaged(struct { loc: logger.Loc, ref: js_ast.Ref }).init(p.allocator);
+            var values = ListManaged(Expr).init(p.allocator);
+
+            while (true) {
+                if (p.lexer.token != .t_identifier) {
+                    try p.lexer.expect(.t_identifier);
+                    return error.SyntaxError;
+                }
+                const name_loc = p.lexer.loc();
+                const name = p.lexer.identifier;
+                try p.lexer.next();
+
+                // Optional TS type annotation: skip `: TYPE` until `=`.
+                if (comptime is_typescript_enabled) {
+                    if (p.lexer.token == .t_colon) {
+                        try p.lexer.next();
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                }
+
+                try p.lexer.expect(.t_equals);
+                const rhs = try p.parseExpr(.comma);
+
+                const ref = try p.declareSymbol(.constant, name_loc, name);
+                try names.append(.{ .loc = name_loc, .ref = ref });
+                try values.append(rhs);
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (names.items.len == 0) {
+                try p.log.addRangeError(p.source, parallel_range, "`parallel let` requires at least one declaration");
+                return error.SyntaxError;
+            }
+
+            // Build  await Promise.all([rhs0, rhs1, ...])
+            const promise_id = p.newExpr(E.Identifier{ .ref = try p.storeNameInRef("Promise") }, parallel_range.loc);
+            const promise_all_dot = p.newExpr(E.Dot{
+                .target = promise_id,
+                .name = "all",
+                .name_loc = parallel_range.loc,
+            }, parallel_range.loc);
+            const values_array = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(try values.toOwnedSlice()),
+            }, parallel_range.loc);
+            const promise_all_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            promise_all_args[0] = values_array;
+            const promise_all_call = p.newExpr(E.Call{
+                .target = promise_all_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(promise_all_args),
+            }, parallel_range.loc);
+            const await_expr = p.newExpr(E.Await{ .value = promise_all_call }, parallel_range.loc);
+
+            // Build the array binding pattern  [name0, name1, ...]
+            const items = bun.handleOom(p.allocator.alloc(js_ast.ArrayBinding, names.items.len));
+            for (names.items, 0..) |entry, i| {
+                items[i] = .{
+                    .binding = p.b(B.Identifier{ .ref = entry.ref }, entry.loc),
+                };
+            }
+            const array_binding = p.b(B.Array{ .items = items, .has_spread = false, .is_single_line = true }, parallel_range.loc);
+
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            decls[0] = .{ .binding = array_binding, .value = await_expr };
+
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = opts.is_export,
+            }, parallel_range.loc);
+        }
+
+        // Parabun: parse `parallel using NAME = EXPR, NAME = EXPR, …;` and
+        // `parallel await using NAME = EXPR, NAME = EXPR, …;`. Each RHS
+        // runs in parallel via `Promise.all([...])`; resolved values are
+        // then bound as `using` / `await using` so `Symbol.dispose` /
+        // `Symbol.asyncDispose` run at scope exit.
+        //
+        //   parallel await using a = f(), b = g();
+        //     → const [__pu_0, __pu_1] = await Promise.all([f(), g()]);
+        //       await using a = __pu_0, b = __pu_1;
+        //
+        // Both lowered statements need to land in the *enclosing* scope
+        // (so subsequent code can reference `a`, `b`), so we wrap them
+        // in a transparent `S.Block` that the visit pass splices into
+        // its parent without pushing a new scope.
+        //
+        // At entry: `parallel`/`para` and `using`/`await using` have
+        // both been consumed; p.lexer is on the first identifier of the
+        // binding list.
+        fn parseParallelUsingStmt(p: *P, parallel_range: logger.Range, opts: *ParseStatementOptions, is_await_using: bool) anyerror!Stmt {
+            if (opts.lexical_decl != .allow_all) {
+                try p.forbidLexicalDecl(parallel_range.loc);
+            }
+
+            // Collect: ordered list of (name_loc, name_ref, RHS expr).
+            var names = ListManaged(struct { loc: logger.Loc, ref: js_ast.Ref }).init(p.allocator);
+            var values = ListManaged(Expr).init(p.allocator);
+
+            while (true) {
+                if (p.lexer.token != .t_identifier) {
+                    try p.lexer.expect(.t_identifier);
+                    return error.SyntaxError;
+                }
+                const name_loc = p.lexer.loc();
+                const name = p.lexer.identifier;
+                try p.lexer.next();
+
+                if (comptime is_typescript_enabled) {
+                    if (p.lexer.token == .t_colon) {
+                        try p.lexer.next();
+                        try p.skipTypeScriptType(.lowest);
+                    }
+                }
+
+                try p.lexer.expect(.t_equals);
+                const rhs = try p.parseExpr(.comma);
+
+                // The user-visible name is bound by the `using` decl
+                // below, so register it as a `using` symbol (matching
+                // the kind for correct dispose-tracking by the visit
+                // pass).
+                const sym_kind: js_ast.Symbol.Kind = if (is_await_using) .constant else .constant;
+                const ref = try p.declareSymbol(sym_kind, name_loc, name);
+                try names.append(.{ .loc = name_loc, .ref = ref });
+                try values.append(rhs);
+
+                if (p.lexer.token != .t_comma) break;
+                try p.lexer.next();
+            }
+
+            try p.lexer.expectOrInsertSemicolon();
+
+            if (names.items.len == 0) {
+                const which = if (is_await_using) "`parallel await using`" else "`parallel using`";
+                try p.log.addRangeErrorFmt(p.source, parallel_range, p.allocator, "{s} requires at least one declaration", .{which});
+                return error.SyntaxError;
+            }
+
+            // Synthesize one temp ref per binding: __pu_<i>.
+            const temps = bun.handleOom(p.allocator.alloc(js_ast.Ref, names.items.len));
+            for (0..names.items.len) |i| {
+                const temp_name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__pu_{d}", .{i}));
+                temps[i] = try p.declareSymbol(.constant, parallel_range.loc, temp_name);
+            }
+
+            // Build:  await Promise.all([rhs0, rhs1, ...])
+            const promise_id = p.newExpr(E.Identifier{ .ref = try p.storeNameInRef("Promise") }, parallel_range.loc);
+            const promise_all_dot = p.newExpr(E.Dot{
+                .target = promise_id,
+                .name = "all",
+                .name_loc = parallel_range.loc,
+            }, parallel_range.loc);
+            const values_array = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(try values.toOwnedSlice()),
+            }, parallel_range.loc);
+            const promise_all_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            promise_all_args[0] = values_array;
+            const promise_all_call = p.newExpr(E.Call{
+                .target = promise_all_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(promise_all_args),
+            }, parallel_range.loc);
+            const await_expr = p.newExpr(E.Await{ .value = promise_all_call }, parallel_range.loc);
+
+            // Statement 1:  const [__pu_0, __pu_1, ...] = <await Promise.all>
+            const temp_items = bun.handleOom(p.allocator.alloc(js_ast.ArrayBinding, temps.len));
+            for (temps, 0..) |t, i| {
+                temp_items[i] = .{ .binding = p.b(B.Identifier{ .ref = t }, parallel_range.loc) };
+            }
+            const temp_array_binding = p.b(B.Array{
+                .items = temp_items,
+                .has_spread = false,
+                .is_single_line = true,
+            }, parallel_range.loc);
+            const temp_decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+            temp_decls[0] = .{ .binding = temp_array_binding, .value = await_expr };
+            const temp_const_stmt = p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(temp_decls),
+            }, parallel_range.loc);
+
+            // Statement 2:  using NAME0 = __pu_0, NAME1 = __pu_1, ...
+            //          (or  await using NAME0 = __pu_0, NAME1 = __pu_1, ...)
+            const using_decls = bun.handleOom(p.allocator.alloc(G.Decl, names.items.len));
+            for (names.items, temps, 0..) |entry, t, i| {
+                using_decls[i] = .{
+                    .binding = p.b(B.Identifier{ .ref = entry.ref }, entry.loc),
+                    .value = p.newExpr(E.Identifier{ .ref = t }, entry.loc),
+                };
+            }
+            const using_stmt = p.s(S.Local{
+                .kind = if (is_await_using) .k_await_using else .k_using,
+                .decls = G.Decl.List.fromOwnedSlice(using_decls),
+                .is_export = opts.is_export,
+            }, parallel_range.loc);
+
+            // Wrap both in a transparent block so the visit pass splices
+            // them into the enclosing scope instead of creating a new one.
+            const inner = bun.handleOom(p.allocator.alloc(Stmt, 2));
+            inner[0] = temp_const_stmt;
+            inner[1] = using_stmt;
+            return p.s(S.Block{
+                .stmts = inner,
+                .is_transparent = true,
+            }, parallel_range.loc);
+        }
+
+        // Parabun: best-effort walk of `expr` looking for any `e_identifier`
+        // whose name appears in `p.signal_bound_names`. Stops at nested
+        // arrows/functions/classes — those introduce new scopes and it's
+        // safer to not auto-derive than to over-promote. If detection misses
+        // a dep, the user can switch to explicit `derived(() => ...)` or
+        // the `@parabun-strict-signals` pragma.
+        fn rhsHasSignalName(p: *P, expr: Expr) bool {
+            return switch (expr.data) {
+                .e_identifier => |id| blk: {
+                    const name = p.loadNameFromRef(id.ref);
+                    break :blk p.signal_bound_names.contains(name);
+                },
+                .e_binary => |e| rhsHasSignalName(p, e.left) or rhsHasSignalName(p, e.right),
+                .e_unary => |e| rhsHasSignalName(p, e.value),
+                .e_call => |e| blk: {
+                    if (rhsHasSignalName(p, e.target)) break :blk true;
+                    for (e.args.slice()) |arg| {
+                        if (rhsHasSignalName(p, arg)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_new => |e| blk: {
+                    if (rhsHasSignalName(p, e.target)) break :blk true;
+                    for (e.args.slice()) |arg| {
+                        if (rhsHasSignalName(p, arg)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_dot => |e| rhsHasSignalName(p, e.target),
+                .e_index => |e| rhsHasSignalName(p, e.target) or rhsHasSignalName(p, e.index),
+                .e_if => |e| rhsHasSignalName(p, e.test_) or rhsHasSignalName(p, e.yes) or rhsHasSignalName(p, e.no),
+                .e_template => |e| blk: {
+                    if (e.tag) |tag| {
+                        if (rhsHasSignalName(p, tag)) break :blk true;
+                    }
+                    for (e.parts) |part| {
+                        if (rhsHasSignalName(p, part.value)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_array => |e| blk: {
+                    for (e.items.slice()) |item| {
+                        if (rhsHasSignalName(p, item)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_object => |e| blk: {
+                    for (e.properties.slice()) |prop| {
+                        if (prop.key) |k| if (rhsHasSignalName(p, k)) break :blk true;
+                        if (prop.value) |v| if (rhsHasSignalName(p, v)) break :blk true;
+                        if (prop.initializer) |init| if (rhsHasSignalName(p, init)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                .e_spread => |e| rhsHasSignalName(p, e.value),
+                .e_await => |e| rhsHasSignalName(p, e.value),
+                .e_yield => |e| if (e.value) |v| rhsHasSignalName(p, v) else false,
+                // Opaque: nested scopes (arrow, function, class) — don't peek
+                // inside. Primitives (string/number/bool/etc) — no names.
+                else => false,
+            };
+        }
+
+        // Parabun: parse an `effect { ...body... }` block statement. Desugars to
+        //   require("@lyku/para-signals").effect(() => { ...body... });
+        // The runtime wraps the arrow in an EffectImpl which runs once eagerly,
+        // tracks any signal `.get()` reads as deps, and re-runs on invalidation.
+        // Return a function from the body for cleanup (React-style); it fires
+        // before the next run and on dispose.
+        //
+        // The body is lifted into an arrow, so `return`/`break`/`continue`
+        // inside the body are arrow-local. Await is forbidden — effects are
+        // synchronous (the flush loop assumes so).
+        //
+        // At entry: `effect` has already been consumed; p.lexer is on the `{`.
+        // Parabun: `model NAME { field: type, ... }` declaration. Produces
+        // a const binding `NAME = { parse: (v) => Result<NAME, str> }` —
+        // a pure data shape with a runtime validator, no methods. Field
+        // types: int / str / bool / float / num. Optional via `T?` suffix.
+        // Arrays and nested-model refs are deferred (not in this MVP).
+
+        // Capitalized identifiers that are JS / TS builtins — exclude
+        // these from `::`-marker auto-validation so `(s:: String) => ...`
+        // doesn't try to call `String.parse(s)` on a TS-builtin annotation.
+        pub fn isJsBuiltinTypeName(tn: []const u8) bool {
+            const builtins = [_][]const u8{
+                "String",        "Number",      "Boolean",        "Object",       "Array",        "Function",  "Date",
+                "RegExp",        "Error",       "Map",            "Set",          "WeakMap",      "WeakSet",   "Promise",
+                "Symbol",        "BigInt",      "Buffer",         "ArrayBuffer",  "Uint8Array",   "Int8Array", "Uint16Array",
+                "Int16Array",    "Uint32Array", "Int32Array",     "Float32Array", "Float64Array", "DataView",  "Iterator",
+                "AsyncIterator", "Generator",   "AsyncGenerator", "JSON",         "Math",         "Reflect",   "Proxy",
+            };
+            inline for (builtins) |b| {
+                if (strings.eqlComptime(tn, b)) return true;
+            }
+            return false;
+        }
+
+        fn parseModelStmt(p: *P, model_range: logger.Range, opts: *ParseStatementOptions) anyerror!Stmt {
+            const name = p.lexer.identifier;
+            const name_loc = p.lexer.loc();
+            const name_ref = try p.declareSymbol(.constant, name_loc, name);
+            try p.lexer.next();
+
+            // `model X from <expr>` OR `model X = <expr>` — ingest an
+            // existing JSON Schema at runtime. Both forms desugar to
+            // `const X = __paraFromSchema(<expr>)`. The `=` form mirrors
+            // lockstep's `export const x = { properties: ... }` pattern
+            // — friendlier when porting existing pg-models / TSON files.
+            const is_from = p.lexer.token == .t_identifier and bun.strings.eqlComptime(p.lexer.raw(), "from");
+            const is_eq = p.lexer.token == .t_equals;
+            if (is_from or is_eq) {
+                try p.lexer.next();
+                // Push scopes BEFORE parsing so the body's identifiers
+                // belong to the arrow we're about to construct around it.
+                // Without this the visit pass walks a Stmt whose contents
+                // were registered to the outer scope — crashes.
+                const body_loc = p.lexer.loc();
+                _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, model_range.loc) catch bun.outOfMemory();
+                _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+                const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+                var arrow_data = p.fn_or_arrow_data_parse;
+                arrow_data.allow_await = .allow_ident;
+                arrow_data.allow_yield = .allow_ident;
+                p.fn_or_arrow_data_parse = arrow_data;
+                const schema_expr = try p.parseExpr(.lowest);
+                p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+                p.popScope();
+                p.popScope();
+
+                const arrow_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                arrow_stmts[0] = p.s(S.Return{ .value = schema_expr }, body_loc);
+                const thunk = p.newExpr(E.Arrow{
+                    .args = &.{},
+                    .body = .{ .loc = body_loc, .stmts = arrow_stmts },
+                    .prefer_expr = true,
+                    .is_async = false,
+                }, model_range.loc);
+                const args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                args[0] = thunk;
+                const call = p.callRuntime(model_range.loc, "__paraFromSchema", args);
+                const decls = bun.handleOom(p.allocator.alloc(G.Decl, 1));
+                decls[0] = .{
+                    .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc),
+                    .value = call,
+                };
+                return p.s(S.Local{
+                    .kind = .k_const,
+                    .decls = G.Decl.List.fromOwnedSlice(decls),
+                    .is_export = opts.is_export,
+                }, model_range.loc);
+            }
+
+            try p.lexer.expect(.t_open_brace);
+
+            const Field = struct {
+                name: []const u8,
+                type_name: []const u8,
+                optional: bool,
+                is_array: bool,
+                // Inner-value bounds: `int(0..150)` or `str(1..=100)`.
+                range_min: ?f64,
+                range_max: ?f64,
+                inclusive_max: bool,
+                // Array-length bounds: `tags: [Tag](1..=10)`.
+                array_min: ?f64,
+                array_max: ?f64,
+                array_inclusive_max: bool,
+                // Literal-union pattern: `"a" | "b" | "c"`. When non-null,
+                // type_name is empty; the field must equal one of these
+                // string/number literals.
+                literals: ?[]Expr,
+                loc: logger.Loc,
+            };
+            var fields = ListManaged(Field).init(p.allocator);
+            while (p.lexer.token != .t_close_brace) {
+                if (p.lexer.token != .t_identifier) break;
+                const field_name = p.lexer.identifier;
+                const field_loc = p.lexer.loc();
+                try p.lexer.next();
+                try p.lexer.expect(.t_colon);
+
+                var type_name: []const u8 = "";
+                var is_array = false;
+                var range_min: ?f64 = null;
+                var range_max: ?f64 = null;
+                var inclusive_max = false;
+                var array_min: ?f64 = null;
+                var array_max: ?f64 = null;
+                var array_inclusive_max = false;
+                var literals: ?[]Expr = null;
+
+                if (p.lexer.token == .t_string_literal or p.lexer.token == .t_numeric_literal) {
+                    // Literal-union field type: `"a" | "b" | 42`.
+                    var lits = ListManaged(Expr).init(p.allocator);
+                    while (true) {
+                        if (p.lexer.token == .t_string_literal) {
+                            const s = try p.lexer.toUTF8EString();
+                            bun.handleOom(lits.append(p.newExpr(s, p.lexer.loc())));
+                            try p.lexer.next();
+                        } else if (p.lexer.token == .t_numeric_literal) {
+                            bun.handleOom(lits.append(p.newExpr(E.Number{ .value = p.lexer.number }, p.lexer.loc())));
+                            try p.lexer.next();
+                        } else break;
+                        if (p.lexer.token == .t_bar) {
+                            try p.lexer.next();
+                        } else break;
+                    }
+                    literals = bun.handleOom(lits.toOwnedSlice());
+                } else {
+                    // Array field: `field: [T]`. Inner type is parsed as
+                    // a plain identifier; nested arrays not supported.
+                    if (p.lexer.token == .t_open_bracket) {
+                        is_array = true;
+                        try p.lexer.next();
+                    }
+                    if (p.lexer.token != .t_identifier) break;
+                    type_name = p.lexer.identifier;
+                    try p.lexer.next();
+
+                    // Inner-value range refinement: `int(0..150)`,
+                    // `str(1..=100)`. Numeric/string base types only;
+                    // other types parse-and-ignore the range (so it's not
+                    // a syntax error to attach one to a model ref).
+                    if (!is_array and p.lexer.token == .t_open_paren) {
+                        try p.lexer.next();
+                        if (p.lexer.token == .t_numeric_literal) {
+                            range_min = p.lexer.number;
+                            try p.lexer.next();
+                        }
+                        if (p.lexer.token == .t_dot_dot_equals) {
+                            inclusive_max = true;
+                            try p.lexer.next();
+                        } else if (p.lexer.token == .t_dot_dot) {
+                            try p.lexer.next();
+                        }
+                        if (p.lexer.token == .t_numeric_literal) {
+                            range_max = p.lexer.number;
+                            try p.lexer.next();
+                        }
+                        try p.lexer.expect(.t_close_paren);
+                    }
+
+                    if (is_array) {
+                        try p.lexer.expect(.t_close_bracket);
+                        // Array-length bounds: `[T](1..=10)`.
+                        if (p.lexer.token == .t_open_paren) {
+                            try p.lexer.next();
+                            if (p.lexer.token == .t_numeric_literal) {
+                                array_min = p.lexer.number;
+                                try p.lexer.next();
+                            }
+                            if (p.lexer.token == .t_dot_dot_equals) {
+                                array_inclusive_max = true;
+                                try p.lexer.next();
+                            } else if (p.lexer.token == .t_dot_dot) {
+                                try p.lexer.next();
+                            }
+                            if (p.lexer.token == .t_numeric_literal) {
+                                array_max = p.lexer.number;
+                                try p.lexer.next();
+                            }
+                            try p.lexer.expect(.t_close_paren);
+                        }
+                    }
+                }
+
+                const optional = p.lexer.token == .t_question;
+                if (optional) try p.lexer.next();
+                bun.handleOom(fields.append(.{
+                    .name = field_name,
+                    .type_name = type_name,
+                    .optional = optional,
+                    .is_array = is_array,
+                    .range_min = range_min,
+                    .range_max = range_max,
+                    .inclusive_max = inclusive_max,
+                    .array_min = array_min,
+                    .array_max = array_max,
+                    .array_inclusive_max = array_inclusive_max,
+                    .literals = literals,
+                    .loc = field_loc,
+                }));
+                if (p.lexer.token == .t_comma or p.lexer.token == .t_semicolon) {
+                    try p.lexer.next();
+                } else break;
+            }
+            try p.lexer.expect(.t_close_brace);
+
+            // Synth arrow scopes at model_range.loc — at the START of the
+            // `model` keyword. This lets array-field inner-arrow scopes
+            // (synthesized later at field.loc + offset) fit naturally
+            // between the outer body_loc and the model's closing brace
+            // without overshooting subsequent stmts' natural lexer locs.
+            const args_loc = model_range.loc;
+            const body_loc = logger.Loc{ .start = args_loc.start + 1 };
+
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, args_loc);
+            const v_ref = try p.declareSymbol(.hoisted, args_loc, "v");
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc);
+
+            var stmts = ListManaged(Stmt).init(p.allocator);
+
+            // Outer object check: typeof v !== "object" || v === null.
+            {
+                const typeof_v = p.newExpr(E.Unary{
+                    .op = .un_typeof,
+                    .value = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
+                }, body_loc);
+                const not_object = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_v,
+                    .right = p.newExpr(E.String{ .data = "object" }, body_loc),
+                }, body_loc);
+                const v_null = p.newExpr(E.Binary{
+                    .op = .bin_strict_eq,
+                    .left = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
+                    .right = p.newExpr(E.Null{}, body_loc),
+                }, body_loc);
+                const test_expr = p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = not_object,
+                    .right = v_null,
+                }, body_loc);
+                const err_obj = buildResultErrLiteral(p, "expected object", body_loc);
+                const ret_stmt = p.s(S.Return{ .value = err_obj }, body_loc);
+                bun.handleOom(stmts.append(p.s(S.If{
+                    .test_ = test_expr,
+                    .yes = ret_stmt,
+                    .no = null,
+                }, body_loc)));
+            }
+
+            // Per-field type check. Array fields synthesize an inner
+            // `.some(x => ...)` arrow that needs its own scopes pushed.
+            // Use field.loc + offset for inner scopes — field locs are
+            // monotonically increasing during the field-decl parse and
+            // strictly between outer body_loc (model_range.loc + 1) and
+            // the model's closing brace, so they don't overshoot the
+            // next stmt's natural lexer position.
+            for (fields.items) |field| {
+                const field_access = p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = v_ref }, body_loc),
+                    .name = field.name,
+                    .name_loc = field.loc,
+                }, field.loc);
+                // Build the un-gated mismatch test. Pass optional=false to
+                // the inner builders — they don't need to worry about the
+                // optional gate; we wrap the whole combined test at the
+                // end so layered range/length/literal checks all share
+                // the single "field is present" guard.
+                var test_expr_opt = if (field.literals) |lits|
+                    buildLiteralUnionMismatch(p, field_access, lits, field.loc)
+                else if (field.is_array) blk: {
+                    const inner_args_loc = logger.Loc{ .start = field.loc.start + 1 };
+                    const inner_body_loc = logger.Loc{ .start = field.loc.start + 2 };
+                    break :blk buildArrayMismatchTest(p, field_access, field.type_name, false, field.loc, inner_args_loc, inner_body_loc) catch null;
+                } else buildTypeMismatchTest(p, field_access, field.type_name, false, field.loc);
+
+                // Layer range refinement on top (inner-value bounds).
+                if (field.range_min != null or field.range_max != null) {
+                    if (buildRangeMismatchTest(p, field_access, field.type_name, field.range_min, field.range_max, field.inclusive_max, field.loc)) |range_test| {
+                        test_expr_opt = if (test_expr_opt) |existing|
+                            p.newExpr(E.Binary{
+                                .op = .bin_logical_or,
+                                .left = existing,
+                                .right = range_test,
+                            }, field.loc)
+                        else
+                            range_test;
+                    }
+                }
+
+                // Array-length bounds: `[T](1..=10)`.
+                if (field.is_array and (field.array_min != null or field.array_max != null)) {
+                    if (buildArrayLengthMismatchTest(p, field_access, field.array_min, field.array_max, field.array_inclusive_max, field.loc)) |len_test| {
+                        test_expr_opt = if (test_expr_opt) |existing|
+                            p.newExpr(E.Binary{
+                                .op = .bin_logical_or,
+                                .left = existing,
+                                .right = len_test,
+                            }, field.loc)
+                        else
+                            len_test;
+                    }
+                }
+
+                if (test_expr_opt) |raw_test| {
+                    // Wrap the combined test in an optional-presence gate
+                    // when the field is optional: only run the mismatch
+                    // checks if the field is actually present.
+                    const test_expr = if (field.optional) blk: {
+                        const not_undef = p.newExpr(E.Binary{
+                            .op = .bin_strict_ne,
+                            .left = field_access,
+                            .right = p.newExpr(E.Undefined{}, field.loc),
+                        }, field.loc);
+                        const not_null = p.newExpr(E.Binary{
+                            .op = .bin_strict_ne,
+                            .left = field_access,
+                            .right = p.newExpr(E.Null{}, field.loc),
+                        }, field.loc);
+                        const present = p.newExpr(E.Binary{
+                            .op = .bin_logical_and,
+                            .left = not_undef,
+                            .right = not_null,
+                        }, field.loc);
+                        break :blk p.newExpr(E.Binary{
+                            .op = .bin_logical_and,
+                            .left = present,
+                            .right = raw_test,
+                        }, field.loc);
+                    } else raw_test;
+
+                    const err_msg = if (field.literals != null)
+                        bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected one of the allowed literals", .{field.name}))
+                    else if (field.is_array)
+                        bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected [{s}]", .{ field.name, field.type_name }))
+                    else
+                        bun.handleOom(std.fmt.allocPrint(p.allocator, "{s}: expected {s}", .{ field.name, field.type_name }));
+                    const err_obj = buildResultErrLiteral(p, err_msg, field.loc);
+                    const ret_stmt = p.s(S.Return{ .value = err_obj }, field.loc);
+                    bun.handleOom(stmts.append(p.s(S.If{
+                        .test_ = test_expr,
+                        .yes = ret_stmt,
+                        .no = null,
+                    }, field.loc)));
+                }
+            }
+
+            // Final: return Ok(v).
+            {
+                const ok_obj = buildResultOkLiteral(p, p.newExpr(E.Identifier{ .ref = v_ref }, body_loc), body_loc);
+                bun.handleOom(stmts.append(p.s(S.Return{ .value = ok_obj }, body_loc)));
+            }
+
+            p.popScope();
+            p.popScope();
+
+            // Arrow `(v) => { ... }`.
+            const arrow_args = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+            arrow_args[0] = .{ .binding = p.b(B.Identifier{ .ref = v_ref }, args_loc) };
+            const arrow = p.newExpr(E.Arrow{
+                .args = arrow_args,
+                .body = .{ .loc = body_loc, .stmts = bun.handleOom(stmts.toOwnedSlice()) },
+                .prefer_expr = false,
+                .is_async = false,
+            }, args_loc);
+
+            // Build the JSON Schema object alongside the parse fn so the
+            // model is bidirectional — parse for fast inline validation,
+            // schema for interop with OpenAPI / MongoDB validators / any
+            // tool that speaks JSON Schema 2020-12.
+            const schema_obj = buildModelSchema(p, fields.items, body_loc);
+
+            // Model object: spread the schema first so existing consumers
+            // can read `User.properties` / `User.required` directly, then
+            // add `parse`, `validate`, and `schema` on top.
+            //
+            // `validate` should be a second emission of the same
+            // validation arrow — but the visit pass crashes if the
+            // SAME E.Arrow is referenced from two properties (scope-
+            // frame double-registration), and `Expr.clone()` only
+            // shallow-copies the outer pointer so the inner body
+            // slices still alias. The simplest fix: bind the arrow to
+            // a synthetic const first, then have both `parse` and
+            // `validate` reference that const by identifier. Two
+            // separate variable declarations emitted in one
+            // statement:
+            //
+            //   const __pa_NAME = <arrow>, NAME = { parse: __pa_NAME, validate: __pa_NAME, schema: ... };
+            //
+            // Shared identifier refs are first-class in the visit
+            // pass (every variable read is one); only shared subtrees
+            // are problematic.
+            //
+            // Today the two methods are behaviorally identical. The
+            // semantic split (parse takes a JSON string + JSON.parses,
+            // validate takes an already-parsed object) is a planned
+            // follow-up.
+            const fn_name = bun.handleOom(std.fmt.allocPrint(p.allocator, "__pa_{s}", .{name}));
+            const fn_ref = try p.declareSymbol(.constant, name_loc, fn_name);
+            const fn_ident_for_parse = p.newExpr(E.Identifier{ .ref = fn_ref }, body_loc);
+            const fn_ident_for_validate = p.newExpr(E.Identifier{ .ref = fn_ref }, body_loc);
+
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 4));
+            props[0] = .{
+                .kind = .spread,
+                .key = p.newExpr(E.Missing{}, body_loc),
+                .value = schema_obj,
+            };
+            props[1] = .{
+                .key = p.newExpr(E.String{ .data = "parse" }, body_loc),
+                .value = fn_ident_for_parse,
+            };
+            props[2] = .{
+                .key = p.newExpr(E.String{ .data = "validate" }, body_loc),
+                .value = fn_ident_for_validate,
+            };
+            props[3] = .{
+                .key = p.newExpr(E.String{ .data = "schema" }, body_loc),
+                .value = schema_obj,
+            };
+            const model_obj = p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, model_range.loc);
+
+            // const __pa_NAME = <arrow>, NAME = { parse: __pa_NAME, validate: __pa_NAME, schema: ... }
+            const decls = bun.handleOom(p.allocator.alloc(G.Decl, 2));
+            decls[0] = .{
+                .binding = p.b(B.Identifier{ .ref = fn_ref }, name_loc),
+                .value = arrow,
+            };
+            decls[1] = .{
+                .binding = p.b(B.Identifier{ .ref = name_ref }, name_loc),
+                .value = model_obj,
+            };
+            return p.s(S.Local{
+                .kind = .k_const,
+                .decls = G.Decl.List.fromOwnedSlice(decls),
+                .is_export = opts.is_export,
+            }, model_range.loc);
+        }
+
+        // (Endpoint shapes — `{ request, response, throws, ... }` — are
+        // not handled by the parser. They're plain JS objects whose schema
+        // slots are written either as imported `schema X = ...` bindings
+        // or inline via the `schema { ... }` expression literal. Lockstep
+        // or any other consumer provides per-slot helpers from there.)
+
+        // For a given field expression and type name, returns a test
+        // expression that's TRUE when the value is INVALID (used as the
+        // if-cond that triggers the early Err return). Returns null for
+        // unknown type names — caller skips the check (permissive default).
+        fn buildTypeMismatchTest(p: *P, field_access: Expr, type_name: []const u8, optional: bool, loc: logger.Loc) ?Expr {
+            const typeof_field = p.newExpr(E.Unary{
+                .op = .un_typeof,
+                .value = field_access,
+            }, loc);
+            const inner_check: Expr = if (strings.eqlComptime(type_name, "int")) blk: {
+                // typeof !== "number" || !Number.isInteger(field)
+                const not_num = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "number" }, loc),
+                }, loc);
+                const number_id = p.newExpr(E.Identifier{ .ref = p.storeNameInRef("Number") catch return null }, loc);
+                const is_int_dot = p.newExpr(E.Dot{
+                    .target = number_id,
+                    .name = "isInteger",
+                    .name_loc = loc,
+                }, loc);
+                const is_int_args = p.allocator.alloc(Expr, 1) catch return null;
+                is_int_args[0] = field_access;
+                const is_int_call = p.newExpr(E.Call{
+                    .target = is_int_dot,
+                    .args = js_ast.ExprNodeList.fromOwnedSlice(is_int_args),
+                }, loc);
+                const not_int = p.newExpr(E.Unary{
+                    .op = .un_not,
+                    .value = is_int_call,
+                }, loc);
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = not_num,
+                    .right = not_int,
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "str") or strings.eqlComptime(type_name, "string")) blk: {
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "string" }, loc),
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "bool") or strings.eqlComptime(type_name, "boolean")) blk: {
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "boolean" }, loc),
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "float") or strings.eqlComptime(type_name, "num") or strings.eqlComptime(type_name, "number")) blk: {
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = typeof_field,
+                    .right = p.newExpr(E.String{ .data = "number" }, loc),
+                }, loc);
+            } else if (strings.eqlComptime(type_name, "Email")) blk: {
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "UUID")) blk: {
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "Url")) blk: {
+                // Pragmatic URL matcher: scheme + "://" + at least one non-space char.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[a-z][a-z0-9+.-]*:\\/\\/[^\\s]+$/i", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "IpV4")) blk: {
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "IpV6")) blk: {
+                // Coarse IPv6 — accepts canonical and `::`-shortened forms.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,7}:$|^::([0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,6}(:[0-9a-f]{1,4})+$/i", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "Date")) blk: {
+                // ISO calendar date: YYYY-MM-DD.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^\\d{4}-\\d{2}-\\d{2}$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "DateTime")) blk: {
+                // ISO 8601 datetime with optional ms and timezone.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})?$/", loc) orelse return null;
+            } else if (strings.eqlComptime(type_name, "Slug")) blk: {
+                // URL-safe lowercase slug.
+                break :blk buildStringRegexMismatch(p, field_access, typeof_field, "/^[a-z0-9]+(-[a-z0-9]+)*$/", loc) orelse return null;
+            } else if (type_name.len > 0 and type_name[0] >= 'A' and type_name[0] <= 'Z') blk: {
+                // Capitalized identifier — treat as a model reference.
+                // Emit `TypeName.parse(field).tag !== "Ok"`. Allows
+                // nested models without forward-decl tracking. If
+                // TypeName isn't actually a model at runtime, JS will
+                // throw — that's a programmer error, not something we
+                // try to handle gracefully here.
+                const ref = p.storeNameInRef(type_name) catch return null;
+                const parse_dot = p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = ref }, loc),
+                    .name = "parse",
+                    .name_loc = loc,
+                }, loc);
+                const args = p.allocator.alloc(Expr, 1) catch return null;
+                args[0] = field_access;
+                const parse_call = p.newExpr(E.Call{
+                    .target = parse_dot,
+                    .args = js_ast.ExprNodeList.fromOwnedSlice(args),
+                }, loc);
+                const tag_access = p.newExpr(E.Dot{
+                    .target = parse_call,
+                    .name = "tag",
+                    .name_loc = loc,
+                }, loc);
+                break :blk p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = tag_access,
+                    .right = p.newExpr(E.String{ .data = "Ok" }, loc),
+                }, loc);
+            } else {
+                // Unknown lowercase type — permissive (skip the check).
+                return null;
+            };
+
+            if (!optional) return inner_check;
+
+            // Optional: only check if field is not null/undefined.
+            //   (field !== undefined && field !== null) && inner_check
+            const not_undef = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Undefined{}, loc),
+            }, loc);
+            const not_null2 = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Null{}, loc),
+            }, loc);
+            const present = p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = not_undef,
+                .right = not_null2,
+            }, loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = present,
+                .right = inner_check,
+            }, loc);
+        }
+
+        // Build the JSON Schema object for the model:
+        //   { type: "object", properties: { ... }, required: [ ... ] }
+        // Calls buildFieldSchema for each field's value-side schema.
+        fn buildModelSchema(p: *P, fields: anytype, loc: logger.Loc) Expr {
+            // properties: { name: <field-schema>, ... }
+            var prop_props = ListManaged(G.Property).init(p.allocator);
+            for (fields) |field| {
+                bun.handleOom(prop_props.append(.{
+                    .key = p.newExpr(E.String{ .data = field.name }, loc),
+                    .value = buildFieldSchema(p, field, loc),
+                }));
+            }
+            const properties_obj = p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(prop_props.toOwnedSlice())),
+            }, loc);
+
+            // required: [ "name", "name", ... ] — only non-optional fields.
+            var req_items = ListManaged(Expr).init(p.allocator);
+            for (fields) |field| {
+                if (!field.optional) {
+                    bun.handleOom(req_items.append(p.newExpr(E.String{ .data = field.name }, loc)));
+                }
+            }
+            const required_arr = p.newExpr(E.Array{
+                .items = js_ast.ExprNodeList.fromOwnedSlice(bun.handleOom(req_items.toOwnedSlice())),
+            }, loc);
+
+            // Top-level: { type: "object", properties: ..., required: [...] }
+            const top_props = bun.handleOom(p.allocator.alloc(G.Property, 3));
+            top_props[0] = .{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = "object" }, loc),
+            };
+            top_props[1] = .{
+                .key = p.newExpr(E.String{ .data = "properties" }, loc),
+                .value = properties_obj,
+            };
+            top_props[2] = .{
+                .key = p.newExpr(E.String{ .data = "required" }, loc),
+                .value = required_arr,
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(top_props),
+            }, loc);
+        }
+
+        // Build the JSON Schema sub-object for a single field, including
+        // type, format, bounds, enum, and array wrapping.
+        fn buildFieldSchema(p: *P, field: anytype, loc: logger.Loc) Expr {
+            // Literal-union → { enum: [lit1, lit2, ...] }
+            if (field.literals) |lits| {
+                const enum_items = bun.handleOom(p.allocator.alloc(Expr, lits.len));
+                for (lits, 0..) |lit, i| enum_items[i] = lit;
+                const enum_arr = p.newExpr(E.Array{
+                    .items = js_ast.ExprNodeList.fromOwnedSlice(enum_items),
+                }, loc);
+                const props = bun.handleOom(p.allocator.alloc(G.Property, 1));
+                props[0] = .{
+                    .key = p.newExpr(E.String{ .data = "enum" }, loc),
+                    .value = enum_arr,
+                };
+                return p.newExpr(E.Object{
+                    .properties = G.Property.List.fromOwnedSlice(props),
+                }, loc);
+            }
+
+            // Array → { type: "array", items: <inner>, minItems?, maxItems? }
+            if (field.is_array) {
+                var arr_props = ListManaged(G.Property).init(p.allocator);
+                bun.handleOom(arr_props.append(.{
+                    .key = p.newExpr(E.String{ .data = "type" }, loc),
+                    .value = p.newExpr(E.String{ .data = "array" }, loc),
+                }));
+                bun.handleOom(arr_props.append(.{
+                    .key = p.newExpr(E.String{ .data = "items" }, loc),
+                    .value = buildBaseTypeSchema(p, field.type_name, null, null, false, loc),
+                }));
+                if (field.array_min) |amin| {
+                    bun.handleOom(arr_props.append(.{
+                        .key = p.newExpr(E.String{ .data = "minItems" }, loc),
+                        .value = p.newExpr(E.Number{ .value = amin }, loc),
+                    }));
+                }
+                if (field.array_max) |amax| {
+                    // JSON Schema's maxItems is inclusive. Map our excl
+                    // `..` form to maxItems = amax - 1.
+                    const json_max: f64 = if (field.array_inclusive_max) amax else amax - 1;
+                    bun.handleOom(arr_props.append(.{
+                        .key = p.newExpr(E.String{ .data = "maxItems" }, loc),
+                        .value = p.newExpr(E.Number{ .value = json_max }, loc),
+                    }));
+                }
+                return p.newExpr(E.Object{
+                    .properties = G.Property.List.fromOwnedSlice(bun.handleOom(arr_props.toOwnedSlice())),
+                }, loc);
+            }
+
+            // Scalar / refinement / nested-model.
+            return buildBaseTypeSchema(p, field.type_name, field.range_min, field.range_max, field.inclusive_max, loc);
+        }
+
+        // Map a Para base-type-name to its JSON Schema sub-object.
+        // Capitalized non-builtin names → `<TypeName>.schema` reference,
+        // composing nested model schemas at runtime via the const binding.
+        fn buildBaseTypeSchema(p: *P, type_name: []const u8, range_min: ?f64, range_max: ?f64, inclusive_max: bool, loc: logger.Loc) Expr {
+            // Range-aware numeric / string types.
+            if (strings.eqlComptime(type_name, "int")) {
+                return numericSchema(p, "integer", range_min, range_max, inclusive_max, loc);
+            } else if (strings.eqlComptime(type_name, "float") or strings.eqlComptime(type_name, "num") or strings.eqlComptime(type_name, "number")) {
+                return numericSchema(p, "number", range_min, range_max, inclusive_max, loc);
+            } else if (strings.eqlComptime(type_name, "str") or strings.eqlComptime(type_name, "string")) {
+                return stringSchema(p, null, null, range_min, range_max, inclusive_max, loc);
+            } else if (strings.eqlComptime(type_name, "bool") or strings.eqlComptime(type_name, "boolean")) {
+                return singleTypeSchema(p, "boolean", loc);
+            } else if (strings.eqlComptime(type_name, "Email")) {
+                return stringSchema(p, "email", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "UUID")) {
+                return stringSchema(p, "uuid", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "Url")) {
+                return stringSchema(p, "uri", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "Date")) {
+                return stringSchema(p, "date", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "DateTime")) {
+                return stringSchema(p, "date-time", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "IpV4")) {
+                return stringSchema(p, "ipv4", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "IpV6")) {
+                return stringSchema(p, "ipv6", null, null, null, false, loc);
+            } else if (strings.eqlComptime(type_name, "Slug")) {
+                return stringSchema(p, null, "^[a-z0-9]+(-[a-z0-9]+)*$", null, null, false, loc);
+            } else if (type_name.len > 0 and type_name[0] >= 'A' and type_name[0] <= 'Z') {
+                // Nested model reference → `<TypeName>.schema`.
+                const ref = p.storeNameInRef(type_name) catch unreachable;
+                return p.newExpr(E.Dot{
+                    .target = p.newExpr(E.Identifier{ .ref = ref }, loc),
+                    .name = "schema",
+                    .name_loc = loc,
+                }, loc);
+            }
+            // Lowercase unknown → empty schema (permissive).
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(p.allocator.alloc(G.Property, 0))),
+            }, loc);
+        }
+
+        fn singleTypeSchema(p: *P, comptime type_str: []const u8, loc: logger.Loc) Expr {
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 1));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = type_str }, loc),
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, loc);
+        }
+
+        fn numericSchema(p: *P, comptime type_str: []const u8, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) Expr {
+            var props = ListManaged(G.Property).init(p.allocator);
+            bun.handleOom(props.append(.{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = type_str }, loc),
+            }));
+            if (min) |min_v| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "minimum" }, loc),
+                    .value = p.newExpr(E.Number{ .value = min_v }, loc),
+                }));
+            }
+            if (max) |max_v| {
+                const key: []const u8 = if (inclusive_max) "maximum" else "exclusiveMaximum";
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = key }, loc),
+                    .value = p.newExpr(E.Number{ .value = max_v }, loc),
+                }));
+            }
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(props.toOwnedSlice())),
+            }, loc);
+        }
+
+        fn stringSchema(p: *P, format_or_null: ?[]const u8, pattern_or_null: ?[]const u8, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) Expr {
+            var props = ListManaged(G.Property).init(p.allocator);
+            bun.handleOom(props.append(.{
+                .key = p.newExpr(E.String{ .data = "type" }, loc),
+                .value = p.newExpr(E.String{ .data = "string" }, loc),
+            }));
+            if (format_or_null) |fmt| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "format" }, loc),
+                    .value = p.newExpr(E.String{ .data = fmt }, loc),
+                }));
+            }
+            if (pattern_or_null) |pat| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "pattern" }, loc),
+                    .value = p.newExpr(E.String{ .data = pat }, loc),
+                }));
+            }
+            if (min) |min_v| {
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "minLength" }, loc),
+                    .value = p.newExpr(E.Number{ .value = min_v }, loc),
+                }));
+            }
+            if (max) |max_v| {
+                const v: f64 = if (inclusive_max) max_v else max_v - 1;
+                bun.handleOom(props.append(.{
+                    .key = p.newExpr(E.String{ .data = "maxLength" }, loc),
+                    .value = p.newExpr(E.Number{ .value = v }, loc),
+                }));
+            }
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(bun.handleOom(props.toOwnedSlice())),
+            }, loc);
+        }
+
+        // Literal-union mismatch test: `field !== lit1 && field !== lit2 && ...`
+        // (= true when the field doesn't equal ANY of the literals).
+        fn buildLiteralUnionMismatch(p: *P, field_access: Expr, literals: []const Expr, loc: logger.Loc) ?Expr {
+            if (literals.len == 0) return null;
+            var combined: ?Expr = null;
+            for (literals) |lit| {
+                const ne = p.newExpr(E.Binary{
+                    .op = .bin_strict_ne,
+                    .left = field_access,
+                    .right = lit,
+                }, loc);
+                combined = if (combined) |existing|
+                    p.newExpr(E.Binary{
+                        .op = .bin_logical_and,
+                        .left = existing,
+                        .right = ne,
+                    }, loc)
+                else
+                    ne;
+            }
+            return combined;
+        }
+
+        // Array-length bounds: `field.length < min || field.length > max`
+        // (or `>= max` when the max is exclusive).
+        fn buildArrayLengthMismatchTest(p: *P, field_access: Expr, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) ?Expr {
+            const len = p.newExpr(E.Dot{
+                .target = field_access,
+                .name = "length",
+                .name_loc = loc,
+            }, loc);
+            var combined: ?Expr = null;
+            if (min) |min_val| {
+                combined = p.newExpr(E.Binary{
+                    .op = .bin_lt,
+                    .left = len,
+                    .right = p.newExpr(E.Number{ .value = min_val }, loc),
+                }, loc);
+            }
+            if (max) |max_val| {
+                const gt = p.newExpr(E.Binary{
+                    .op = if (inclusive_max) .bin_gt else .bin_ge,
+                    .left = len,
+                    .right = p.newExpr(E.Number{ .value = max_val }, loc),
+                }, loc);
+                combined = if (combined) |existing|
+                    p.newExpr(E.Binary{
+                        .op = .bin_logical_or,
+                        .left = existing,
+                        .right = gt,
+                    }, loc)
+                else
+                    gt;
+            }
+            return combined;
+        }
+
+        // Range refinement check: `int(0..150)` or `str(1..=100)`.
+        // For numeric base types, compares the field directly. For string
+        // base types, compares `.length`. min/max are nullable —
+        // half-open ranges are allowed.
+        fn buildRangeMismatchTest(p: *P, field_access: Expr, type_name: []const u8, min: ?f64, max: ?f64, inclusive_max: bool, loc: logger.Loc) ?Expr {
+            const is_string = strings.eqlComptime(type_name, "str") or strings.eqlComptime(type_name, "string");
+            const compare_expr: Expr = if (is_string)
+                p.newExpr(E.Dot{
+                    .target = field_access,
+                    .name = "length",
+                    .name_loc = loc,
+                }, loc)
+            else
+                field_access;
+
+            var combined: ?Expr = null;
+            if (min) |min_val| {
+                const lt_min = p.newExpr(E.Binary{
+                    .op = .bin_lt,
+                    .left = compare_expr,
+                    .right = p.newExpr(E.Number{ .value = min_val }, loc),
+                }, loc);
+                combined = lt_min;
+            }
+            if (max) |max_val| {
+                const gt_max = p.newExpr(E.Binary{
+                    .op = if (inclusive_max) .bin_gt else .bin_ge,
+                    .left = compare_expr,
+                    .right = p.newExpr(E.Number{ .value = max_val }, loc),
+                }, loc);
+                combined = if (combined) |existing|
+                    p.newExpr(E.Binary{
+                        .op = .bin_logical_or,
+                        .left = existing,
+                        .right = gt_max,
+                    }, loc)
+                else
+                    gt_max;
+            }
+            return combined;
+        }
+
+        // Helper for refinement types whose mismatch is "not a string OR
+        // string fails regex.test(field)". `regex_literal` is the full
+        // /pattern/flags form; we hand it to the AST as an E.RegExp.
+        fn buildStringRegexMismatch(p: *P, field_access: Expr, typeof_field: Expr, comptime regex_literal: []const u8, loc: logger.Loc) ?Expr {
+            const not_str = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = typeof_field,
+                .right = p.newExpr(E.String{ .data = "string" }, loc),
+            }, loc);
+            const regex_expr = p.newExpr(E.RegExp{ .value = regex_literal }, loc);
+            const test_dot = p.newExpr(E.Dot{
+                .target = regex_expr,
+                .name = "test",
+                .name_loc = loc,
+            }, loc);
+            const test_args = p.allocator.alloc(Expr, 1) catch return null;
+            test_args[0] = field_access;
+            const test_call = p.newExpr(E.Call{
+                .target = test_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(test_args),
+            }, loc);
+            const not_test = p.newExpr(E.Unary{
+                .op = .un_not,
+                .value = test_call,
+            }, loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_logical_or,
+                .left = not_str,
+                .right = not_test,
+            }, loc);
+        }
+
+        // Mismatch test for array field types `[T]`. Emits
+        //   !Array.isArray(field) || field.some(x => <T-mismatch>(x))
+        // — i.e. true (= invalid) when the field isn't an array, or
+        // when any element fails the inner type check. The `.some(...)`
+        // arrow needs its own pair of scopes (function_args + function_body)
+        // pushed at fresh locs so the visit pass can walk it.
+        fn buildArrayMismatchTest(p: *P, field_access: Expr, inner_type: []const u8, optional: bool, loc: logger.Loc, inner_args_loc: logger.Loc, inner_body_loc: logger.Loc) anyerror!?Expr {
+            // Array.isArray(field)
+            const array_id = p.newExpr(E.Identifier{ .ref = p.storeNameInRef("Array") catch return null }, loc);
+            const is_array_dot = p.newExpr(E.Dot{
+                .target = array_id,
+                .name = "isArray",
+                .name_loc = loc,
+            }, loc);
+            const is_array_args = p.allocator.alloc(Expr, 1) catch return null;
+            is_array_args[0] = field_access;
+            const is_array_call = p.newExpr(E.Call{
+                .target = is_array_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(is_array_args),
+            }, loc);
+            const not_array = p.newExpr(E.Unary{
+                .op = .un_not,
+                .value = is_array_call,
+            }, loc);
+
+            // Push scopes for the .some(x => ...) arrow. Declare `x`
+            // inside the function_args scope so the inner mismatch test
+            // resolves it correctly.
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, inner_args_loc);
+            const x_ref = try p.declareSymbol(.hoisted, inner_args_loc, "x");
+            _ = try p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, inner_body_loc);
+
+            const x_expr = p.newExpr(E.Identifier{ .ref = x_ref }, inner_args_loc);
+            const inner_mismatch_opt = buildTypeMismatchTest(p, x_expr, inner_type, false, inner_args_loc);
+
+            p.popScope();
+            p.popScope();
+
+            const has_inner_check = inner_mismatch_opt != null;
+
+            // .some((x) => inner_mismatch(x))
+            var some_test: ?Expr = null;
+            if (inner_mismatch_opt) |inner_mismatch| {
+                const some_args = bun.handleOom(p.allocator.alloc(G.Arg, 1));
+                some_args[0] = .{ .binding = p.b(B.Identifier{ .ref = x_ref }, inner_args_loc) };
+                const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                body_stmts[0] = p.s(S.Return{ .value = inner_mismatch }, inner_body_loc);
+                const some_arrow = p.newExpr(E.Arrow{
+                    .args = some_args,
+                    .body = .{ .loc = inner_body_loc, .stmts = body_stmts },
+                    .prefer_expr = true,
+                    .is_async = false,
+                }, inner_args_loc);
+                const some_dot = p.newExpr(E.Dot{
+                    .target = field_access,
+                    .name = "some",
+                    .name_loc = loc,
+                }, loc);
+                const some_args_call = p.allocator.alloc(Expr, 1) catch return null;
+                some_args_call[0] = some_arrow;
+                some_test = p.newExpr(E.Call{
+                    .target = some_dot,
+                    .args = js_ast.ExprNodeList.fromOwnedSlice(some_args_call),
+                }, loc);
+            }
+
+            const inner_check: Expr = if (has_inner_check)
+                p.newExpr(E.Binary{
+                    .op = .bin_logical_or,
+                    .left = not_array,
+                    .right = some_test.?,
+                }, loc)
+            else
+                not_array;
+
+            if (!optional) return inner_check;
+
+            // Optional gate: (field !== undefined && field !== null) && inner.
+            const not_undef = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Undefined{}, loc),
+            }, loc);
+            const not_null = p.newExpr(E.Binary{
+                .op = .bin_strict_ne,
+                .left = field_access,
+                .right = p.newExpr(E.Null{}, loc),
+            }, loc);
+            const present = p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = not_undef,
+                .right = not_null,
+            }, loc);
+            return p.newExpr(E.Binary{
+                .op = .bin_logical_and,
+                .left = present,
+                .right = inner_check,
+            }, loc);
+        }
+
+        fn buildResultOkLiteral(p: *P, value: Expr, loc: logger.Loc) Expr {
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 2));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "tag" }, loc),
+                .value = p.newExpr(E.String{ .data = "Ok" }, loc),
+            };
+            props[1] = .{
+                .key = p.newExpr(E.String{ .data = "value" }, loc),
+                .value = value,
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, loc);
+        }
+
+        fn buildResultErrLiteral(p: *P, msg: []const u8, loc: logger.Loc) Expr {
+            const props = bun.handleOom(p.allocator.alloc(G.Property, 2));
+            props[0] = .{
+                .key = p.newExpr(E.String{ .data = "tag" }, loc),
+                .value = p.newExpr(E.String{ .data = "Err" }, loc),
+            };
+            props[1] = .{
+                .key = p.newExpr(E.String{ .data = "error" }, loc),
+                .value = p.newExpr(E.String{ .data = msg }, loc),
+            };
+            return p.newExpr(E.Object{
+                .properties = G.Property.List.fromOwnedSlice(props),
+            }, loc);
+        }
+
+        fn parseEffectStmt(p: *P, effect_range: logger.Range) anyerror!Stmt {
+            const arrow_loc = effect_range.loc;
+            const body_loc = p.lexer.loc();
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            try p.lexer.expect(.t_open_brace);
+            var body_opts = ParseStatementOptions{};
+            const body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts);
+            try p.lexer.expect(.t_close_brace);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, arrow_loc);
+
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, effect_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, effect_range.loc);
+            const effect_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "effect",
+                .name_loc = effect_range.loc,
+            }, effect_range.loc);
+            const effect_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            effect_args[0] = arrow;
+            const effect_call = p.newExpr(E.Call{
+                .target = effect_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(effect_args),
+            }, effect_range.loc);
+
+            return p.s(S.SExpr{ .value = effect_call }, effect_range.loc);
+        }
+
+        // Single-statement effect: `effect EXPR;` desugars to an
+        // EXPRESSION-bodied arrow —
+        //   require("@lyku/para-signals").effect(() => EXPR);
+        // NOT a block body. This preserves the arrow's implicit return so
+        // an effect whose expression returns a teardown
+        // (`effect useKeybind(...)`, `effect onResize(...)`, …) still
+        // registers that teardown as the effect's cleanup — exactly like
+        // `$effect(() => EXPR)`. Mirrors the `derived NAME = RHS` →
+        // `derived(() => RHS)` expression-form precedent (S.Return +
+        // prefer_expr). The block form `effect { …; return cleanup; }`
+        // remains for multi-statement / explicit teardown. At entry:
+        // `effect` consumed, lexer on the first token of the expression.
+        fn parseEffectSingleStmt(p: *P, effect_range: logger.Range) anyerror!Stmt {
+            const arrow_loc = effect_range.loc;
+            const body_loc = p.lexer.loc();
+
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            const body_expr = try p.parseExpr(.comma);
+            try p.lexer.expectOrInsertSemicolon();
+            const body_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            body_stmts[0] = p.s(S.Return{ .value = body_expr }, body_loc);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+
+            p.popScope();
+            p.popScope();
+
+            const arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, arrow_loc);
+
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, effect_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, effect_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, effect_range.loc);
+            const effect_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = "effect",
+                .name_loc = effect_range.loc,
+            }, effect_range.loc);
+            const effect_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            effect_args[0] = arrow;
+            const effect_call = p.newExpr(E.Call{
+                .target = effect_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(effect_args),
+            }, effect_range.loc);
+
+            return p.s(S.SExpr{ .value = effect_call }, effect_range.loc);
+        }
+
+        // Parabun: parse `when EXPR { body }` / `when not EXPR { body }` /
+        // `when EXPR start { body }` / `when not EXPR start { body }`
+        // statements. All four lower to the same shape — the trailing
+        // `start` modifier controls the helper name on the runtime call:
+        //   when     EXPR       { body } → require("@lyku/para-signals").when(() => EXPR, () => { body });
+        //   when not EXPR       { body } → require("@lyku/para-signals").when(() => !(EXPR), () => { body });
+        //   when     EXPR start { body } → require("@lyku/para-signals").whenStart(() => EXPR, () => { body });
+        //   when not EXPR start { body } → require("@lyku/para-signals").whenStart(() => !(EXPR), () => { body });
+        //
+        // Both helpers fire the body on each rising (false→true) transition
+        // of the predicate. The `start` modifier ALSO fires once on
+        // registration if the predicate is initially truthy — for "the
+        // dangerous state is the noteworthy one" alerts where you don't
+        // want to silently miss a boot already in the bad state.
+        //
+        // The `not` form is the rising edge of the negated predicate, which
+        // is the falling edge of EXPR; the negation is pushed into the
+        // arrow body so the runtime helper has only one direction per name.
+        //
+        // At entry: the keyword has already been consumed; p.lexer is on
+        // the first token of the predicate (which may be `not`).
+        fn parseWhenBlockStmt(p: *P, when_range: logger.Range) anyerror!Stmt {
+            // Optional `not` for the falling form.
+            var negate = false;
+            if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
+                strings.eqlComptime(p.lexer.raw(), "not"))
+            {
+                try p.lexer.next();
+                negate = true;
+            }
+
+            // Parse the predicate at the outer scope. The expression-form
+            // arrow built around it later registers its scopes empty, the
+            // same way `~> ... when COND` does for the COND clause.
+            const pred_loc = p.lexer.loc();
+            const raw_predicate = try p.parseExpr(.assign);
+            const predicate = if (negate)
+                p.newExpr(E.Unary{ .op = .un_not, .value = raw_predicate }, pred_loc)
+            else
+                raw_predicate;
+
+            // Trailing `start` modifier: only valid when followed by `{`,
+            // so it never collides with `start` as an identifier inside the
+            // predicate (those are consumed by parseExpr). Presence flips
+            // the runtime helper from strict-edge `when` to initial-truthy
+            // `whenever` — ALSO fires once on registration if the predicate
+            // is truthy. Use for "dangerous state observed" alerts where a
+            // boot already in the bad state must not be silently missed.
+            var initial_truthy = false;
+            if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before and
+                strings.eqlComptime(p.lexer.raw(), "start"))
+            {
+                const before_start = p.lexer;
+                try p.lexer.next();
+                if (p.lexer.token == .t_open_brace) {
+                    initial_truthy = true;
+                } else {
+                    p.lexer.restore(&before_start);
+                }
+            }
+            const helper_name: []const u8 = if (initial_truthy) "whenStart" else "when";
+
+            // Synthesize distinct locs for the predicate arrow's two scopes
+            // — same loc-bumping trick `parseDeferStmt` uses (line 1388) so
+            // function_args and function_body don't collide.
+            const pred_arrow_loc = when_range.loc;
+            const pred_body_loc = logger.Loc{ .start = when_range.loc.start + 1 };
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, pred_arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, pred_body_loc) catch bun.outOfMemory();
+            p.popScope();
+            p.popScope();
+
+            const pred_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+            pred_stmts[0] = p.s(S.Return{ .value = predicate }, pred_loc);
+            const pred_arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = pred_body_loc, .stmts = pred_stmts },
+                .prefer_expr = true,
+                .is_async = false,
+            }, pred_arrow_loc);
+
+            // Body arrow — block-form, parsed inside its own scope pair.
+            // Use loc-bumping again so this arrow's two scopes are distinct
+            // and don't collide with the predicate arrow's scope locs.
+            const body_arrow_loc = logger.Loc{ .start = when_range.loc.start + 2 };
+            const body_loc = p.lexer.loc();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, body_arrow_loc) catch bun.outOfMemory();
+            _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, body_loc) catch bun.outOfMemory();
+
+            const old_fn_or_arrow_data = std.mem.toBytes(p.fn_or_arrow_data_parse);
+            var arrow_data = p.fn_or_arrow_data_parse;
+            arrow_data.allow_await = .allow_ident;
+            arrow_data.allow_yield = .allow_ident;
+            p.fn_or_arrow_data_parse = arrow_data;
+
+            try p.lexer.expect(.t_open_brace);
+            var body_opts = ParseStatementOptions{};
+            const body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts);
+            try p.lexer.expect(.t_close_brace);
+
+            p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data);
+            p.popScope();
+            p.popScope();
+
+            const body_arrow = p.newExpr(E.Arrow{
+                .args = &.{},
+                .body = .{ .loc = body_loc, .stmts = body_stmts },
+                .prefer_expr = false,
+                .is_async = false,
+            }, body_arrow_loc);
+
+            // require("@lyku/para-signals").<helper_name>(pred_arrow, body_arrow)
+            const require_ref = p.storeNameInRef("require") catch unreachable;
+            const require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+            require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, when_range.loc);
+            const require_call = p.newExpr(E.Call{
+                .target = p.newExpr(E.Identifier{ .ref = require_ref }, when_range.loc),
+                .args = js_ast.ExprNodeList.fromOwnedSlice(require_args),
+            }, when_range.loc);
+            const helper_dot = p.newExpr(E.Dot{
+                .target = require_call,
+                .name = helper_name,
+                .name_loc = when_range.loc,
+            }, when_range.loc);
+            const helper_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+            helper_args[0] = pred_arrow;
+            helper_args[1] = body_arrow;
+            const helper_call = p.newExpr(E.Call{
+                .target = helper_dot,
+                .args = js_ast.ExprNodeList.fromOwnedSlice(helper_args),
+            }, when_range.loc);
+
+            const first_stmt = p.s(S.SExpr{ .value = helper_call }, when_range.loc);
+
+            // Parabun: paired-edge form. After `when EXPR { body }` (or `when
+            // not EXPR { body }`), if the immediately-following statement is a
+            // bare `when stop { body }` — the word `stop` followed directly
+            // by `{` with no predicate — pair the two as opposite-edge
+            // handlers sharing this when's predicate. Adjacency is enforced
+            // by parsing both arms in the same call; intervening statements
+            // break it. `stop` is paired with the `start` modifier on the
+            // first arm — symmetric "fire when X starts" / "fire when X
+            // stops" naming.
+            //
+            //   when     X       { a } when stop { b }  →  when(X,a)      + when(!X,b)
+            //   when not X       { a } when stop { b }  →  when(!X,a)     + when(X,b)
+            //   when     X start { a } when stop { b }  →  whenStart(X,a) + when(!X,b)
+            //   when not X start { a } when stop { b }  →  whenStart(!X,a) + when(X,b)
+            //
+            // The bare-paired arm ALWAYS emits `when` (strict edge) — that's
+            // typically what you want when pairing with the `start` form:
+            // the dangerous-state arm catches a boot-already-bad state via
+            // `start`, the recovery arm stays strict-edge so a healthy boot
+            // doesn't fake a recovery alert. Users who want symmetric
+            // boot-truthy behavior on both arms write two explicit blocks.
+            //
+            // The shared predicate is deep-cloned so the visit pass walks two
+            // independent identifier trees instead of double-walking one.
+            if (p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "when")) {
+                const saved_after_first = p.lexer;
+                const second_when_loc = p.lexer.loc();
+                try p.lexer.next();
+                const is_paired = p.lexer.token == .t_identifier and strings.eqlComptime(p.lexer.raw(), "stop");
+                if (is_paired) {
+                    try p.lexer.next();
+                    if (p.lexer.token == .t_open_brace) {
+                        // Confirmed paired form. Build the inverse-edge handler.
+                        // Both arms call `when`; the second arm's predicate is
+                        // the logical inverse of the first arm's effective
+                        // predicate. Clone the RAW (pre-negation) predicate
+                        // and choose negation based on this arm's direction:
+                        //   first  `when X { … }`     (negate=false) →  second predicate = !X
+                        //   first  `when not X { … }` (negate=true)  →  second predicate = X
+                        // (avoids `!!X` you'd get cloning the already-negated form).
+                        const second_helper_name: []const u8 = "when";
+                        const cloned_raw = bun.handleOom(raw_predicate.deepClone(p.allocator));
+                        const cloned_predicate = if (!negate)
+                            p.newExpr(E.Unary{ .op = .un_not, .value = cloned_raw }, second_when_loc)
+                        else
+                            cloned_raw;
+
+                        const second_pred_arrow_loc = second_when_loc;
+                        const second_pred_body_loc = logger.Loc{ .start = second_when_loc.start + 1 };
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, second_pred_arrow_loc) catch bun.outOfMemory();
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, second_pred_body_loc) catch bun.outOfMemory();
+                        p.popScope();
+                        p.popScope();
+
+                        const second_pred_stmts = bun.handleOom(p.allocator.alloc(Stmt, 1));
+                        second_pred_stmts[0] = p.s(S.Return{ .value = cloned_predicate }, second_pred_body_loc);
+                        const second_pred_arrow = p.newExpr(E.Arrow{
+                            .args = &.{},
+                            .body = .{ .loc = second_pred_body_loc, .stmts = second_pred_stmts },
+                            .prefer_expr = true,
+                            .is_async = false,
+                        }, second_pred_arrow_loc);
+
+                        const second_body_arrow_loc = logger.Loc{ .start = second_when_loc.start + 2 };
+                        const second_body_loc = p.lexer.loc();
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_args, second_body_arrow_loc) catch bun.outOfMemory();
+                        _ = p.pushScopeForParsePass(js_ast.Scope.Kind.function_body, second_body_loc) catch bun.outOfMemory();
+
+                        const old_fn_or_arrow_data2 = std.mem.toBytes(p.fn_or_arrow_data_parse);
+                        var arrow_data2 = p.fn_or_arrow_data_parse;
+                        arrow_data2.allow_await = .allow_ident;
+                        arrow_data2.allow_yield = .allow_ident;
+                        p.fn_or_arrow_data_parse = arrow_data2;
+
+                        try p.lexer.expect(.t_open_brace);
+                        var body_opts2 = ParseStatementOptions{};
+                        const second_body_stmts = try p.parseStmtsUpTo(.t_close_brace, &body_opts2);
+                        try p.lexer.expect(.t_close_brace);
+
+                        p.fn_or_arrow_data_parse = std.mem.bytesToValue(@TypeOf(p.fn_or_arrow_data_parse), &old_fn_or_arrow_data2);
+                        p.popScope();
+                        p.popScope();
+
+                        const second_body_arrow = p.newExpr(E.Arrow{
+                            .args = &.{},
+                            .body = .{ .loc = second_body_loc, .stmts = second_body_stmts },
+                            .prefer_expr = false,
+                            .is_async = false,
+                        }, second_body_arrow_loc);
+
+                        const second_require_ref = p.storeNameInRef("require") catch unreachable;
+                        const second_require_args = bun.handleOom(p.allocator.alloc(Expr, 1));
+                        second_require_args[0] = p.newExpr(E.String{ .data = "@lyku/para-signals" }, second_when_loc);
+                        const second_require_call = p.newExpr(E.Call{
+                            .target = p.newExpr(E.Identifier{ .ref = second_require_ref }, second_when_loc),
+                            .args = js_ast.ExprNodeList.fromOwnedSlice(second_require_args),
+                        }, second_when_loc);
+                        const second_helper_dot = p.newExpr(E.Dot{
+                            .target = second_require_call,
+                            .name = second_helper_name,
+                            .name_loc = second_when_loc,
+                        }, second_when_loc);
+                        const second_helper_args = bun.handleOom(p.allocator.alloc(Expr, 2));
+                        second_helper_args[0] = second_pred_arrow;
+                        second_helper_args[1] = second_body_arrow;
+                        const second_helper_call = p.newExpr(E.Call{
+                            .target = second_helper_dot,
+                            .args = js_ast.ExprNodeList.fromOwnedSlice(second_helper_args),
+                        }, second_when_loc);
+
+                        // Combine both helpers as a comma expression at
+                        // statement position. The printer normalizes
+                        // statement-level commas back into separate stmts,
+                        // and there's no extra scope to register (avoiding
+                        // the scope-collision issues a wrapping `S.Block`
+                        // would introduce at the same loc as the predicate
+                        // arrow's function_args scope).
+                        const combined = p.newExpr(E.Binary{
+                            .op = .bin_comma,
+                            .left = helper_call,
+                            .right = second_helper_call,
+                        }, when_range.loc);
+                        return p.s(S.SExpr{ .value = combined }, when_range.loc);
+                    }
+                }
+                // Not paired form — restore lexer for the outer dispatch.
+                p.lexer.restore(&saved_after_first);
+            }
+
+            return first_stmt;
+        }
+
+        fn parseStmtFallthrough(p: *P, opts: *ParseStatementOptions, loc: logger.Loc) anyerror!Stmt {
+            const is_identifier = p.lexer.token == .t_identifier;
+            const name = p.lexer.identifier;
+            // Parse either a pure function, an async function, an async expression, or a normal expression
+            var expr: Expr = Expr{ .loc = loc, .data = Expr.Data{ .e_missing = .{} } };
+            // Parabun: "memo name(...)" / "memo async name(...)" statements —
+            // desugars to `const <name> = __parabunMemo(<anonymous fn>, <arity>);`.
+            // `memo` alone is a memoized-function declarator; it implies purity
+            // and function-ness (no `pure` / `function` / `fun` keyword).
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "memo")) {
+                const memo_range = p.lexer.range();
+                // Tentatively consume `memo`; if what follows doesn't look like
+                // a statement-form declaration, restore and treat as expression
+                // (the prefix parser handles `memo (x) => ...` arrow form).
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and try isMemoStmtForm(p)) {
+                    return try parseMemoFnStmt(p, opts, memo_range);
+                }
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "defer <expr>;" / "defer await <expr>;" statements —
+            // desugars to `using __parabun_defer_N$ = __parabunDefer0(() => <expr>);`.
+            // Only triggers when `defer` is immediately followed (no newline) by a
+            // non-operator token that could start an expression — if the next
+            // token is `=`, `.`, `;`, etc., `defer` is a plain identifier.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "defer")) {
+                const defer_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                // Heuristic: if the token after `defer` starts a statement-level
+                // expression (no newline, not a punctuator that'd bind `defer`
+                // as a normal identifier), treat this as a defer declaration.
+                // An identifier, keyword-expr (`await`, `new`, `function`,
+                // `throw`, `class`, `this`), literal, prefix op, or open paren /
+                // bracket all qualify.
+                if (!p.lexer.has_newline_before) {
+                    const t = p.lexer.token;
+                    const starts_expr = switch (t) {
+                        .t_identifier,
+                        .t_open_paren,
+                        .t_open_bracket,
+                        .t_open_brace,
+                        .t_new,
+                        .t_function,
+                        .t_throw,
+                        .t_class,
+                        .t_this,
+                        .t_null,
+                        .t_true,
+                        .t_false,
+                        .t_void,
+                        .t_typeof,
+                        .t_delete,
+                        .t_plus,
+                        .t_minus,
+                        .t_tilde,
+                        .t_exclamation,
+                        .t_plus_plus,
+                        .t_minus_minus,
+                        .t_numeric_literal,
+                        .t_big_integer_literal,
+                        .t_string_literal,
+                        .t_no_substitution_template_literal,
+                        .t_template_head,
+                        .t_super,
+                        .t_import,
+                        => true,
+                        else => false,
+                    };
+                    if (starts_expr) {
+                        return try parseDeferStmt(p, opts, defer_range);
+                    }
+                }
+                // Not a defer declaration — rewind and fall through so `defer`
+                // works as a plain identifier (`const defer = 1; defer + 1;`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "parallel let|const NAME = …, NAME = …;" — fan-out
+            // promise composition with name preservation. Each RHS runs in
+            // parallel via Promise.all and is array-destructured back into
+            // the surface-syntax names. Only triggers when `parallel` is
+            // immediately followed (no newline) by `let` or `const` —
+            // otherwise `parallel` is a plain identifier (the expression
+            // form `parallel { … }` is handled by the prefix parser).
+            // `para` is an interchangeable shorthand (mirrors the `fun` /
+            // `function` precedent).
+            if (is_identifier and (strings.eqlComptime(p.lexer.raw(), "parallel") or strings.eqlComptime(p.lexer.raw(), "para"))) {
+                const parallel_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                const is_let_form = !p.lexer.has_newline_before and
+                    p.lexer.token == .t_identifier and
+                    (strings.eqlComptime(p.lexer.raw(), "let") or strings.eqlComptime(p.lexer.raw(), "const"));
+                const is_const_form = !p.lexer.has_newline_before and p.lexer.token == .t_const;
+                if (is_let_form or is_const_form) {
+                    try p.lexer.next();
+                    return try parseParallelLetStmt(p, parallel_range, opts);
+                }
+                // Parabun: `parallel using NAME = …` and
+                // `parallel await using NAME = …`. Each RHS runs via
+                // Promise.all, but the resolved values are bound as
+                // `using`/`await using` so Symbol.dispose / asyncDispose
+                // run at scope exit. `await using` is the safer default
+                // for resources that may need async cleanup.
+                const is_using_form = !p.lexer.has_newline_before and
+                    p.lexer.token == .t_identifier and
+                    strings.eqlComptime(p.lexer.raw(), "using");
+                const is_await_using_form = !p.lexer.has_newline_before and
+                    p.lexer.token == .t_identifier and
+                    strings.eqlComptime(p.lexer.raw(), "await");
+                if (is_using_form) {
+                    try p.lexer.next();
+                    return try parseParallelUsingStmt(p, parallel_range, opts, false);
+                }
+                if (is_await_using_form) {
+                    const await_saved = p.lexer;
+                    try p.lexer.next();
+                    if (!p.lexer.has_newline_before and
+                        p.lexer.token == .t_identifier and
+                        strings.eqlComptime(p.lexer.raw(), "using"))
+                    {
+                        try p.lexer.next();
+                        return try parseParallelUsingStmt(p, parallel_range, opts, true);
+                    }
+                    // Was just `parallel await foo` — not a using form.
+                    p.lexer.restore(&await_saved);
+                }
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "arena { ...body... }" block statement — desugars to
+            //   __parabunArena(() => { ...body... });
+            // Only triggers when `arena` is immediately followed (no newline) by
+            // `{`. Any other token (`.`, `(`, `=`, `++`, etc.) means `arena` is
+            // a plain identifier.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "arena")) {
+                const arena_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
+                    return try parseArenaStmt(p, arena_range);
+                }
+                // Not an arena block — rewind so `arena` works as a plain
+                // identifier (`const arena = 1; arena + 1;`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "signal NAME = RHS" declaration — each RHS is wrapped
+            // in `require("@lyku/para-signals").signal(RHS)` and the declared ref is
+            // marked as signal-bound so the visit pass rewrites reads/assigns
+            // accordingly. `signal` implies `const` — there's no `signal let`
+            // or `signal var`.
+            //
+            // Only triggers when `signal` is immediately followed (no newline)
+            // by an identifier. Any other continuation leaves `signal` as a
+            // plain identifier.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "signal")) {
+                const signal_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseSignalStmt(p, signal_range, opts, false);
+                }
+                // Not a signal declaration — rewind so `signal` works as a
+                // plain identifier (`import { signal } from "@lyku/para-signals"; signal(0);`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "derived NAME = RHS" declaration — the explicit form
+            // of what `signal NAME = EXPR` does automatically when EXPR reads
+            // other signals. The RHS is ALWAYS wrapped as
+            //   require("@lyku/para-signals").derived(() => RHS)
+            // ignoring the @parabun-strict-signals pragma. The declared ref
+            // is signal-bound so reads of NAME elsewhere lower to NAME.get().
+            //
+            // Only triggers when `derived` is immediately followed (no
+            // newline) by an identifier. Any other continuation leaves
+            // `derived` as a plain identifier (`import { derived } from
+            // "@lyku/para-signals"; derived(() => …);`).
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "derived")) {
+                const derived_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseSignalStmt(p, derived_range, opts, true);
+                }
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "when EXPR { body }" / "when not EXPR { body }" — rising
+            // and falling edge handlers. Both desugar to require("@lyku/para-signals")
+            // .when(() => EXPR, () => { body }); the `not` form negates the
+            // predicate inside the arrow.
+            //
+            // Block-form `when` is distinct from the suffix `when` clause used in
+            // `A ~> B when C` and `A -> fn when C`: position disambiguates. The
+            // suffix form is an every-truthy guard; the block form is an
+            // edge-triggered handler.
+            //
+            // Dispatch: `when` at statement-start, followed by `not` OR by anything
+            // that can start an expression and is NOT `(` or `;` or end-of-line,
+            // is treated as block form. `when(x)` and bare `when;` keep the
+            // identifier reading.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "when")) {
+                const when_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                const is_block_form = !p.lexer.has_newline_before and switch (p.lexer.token) {
+                    // `when` as identifier reading: `when(x);`, `when;`, `when.foo`,
+                    // `when = ...`, etc. Any of these means it's a normal reference,
+                    // not the block form.
+                    .t_open_paren, .t_dot, .t_question_dot, .t_equals, .t_semicolon, .t_comma, .t_close_paren, .t_close_brace, .t_close_bracket, .t_end_of_file => false,
+                    else => true,
+                };
+                if (is_block_form) {
+                    return try parseWhenBlockStmt(p, when_range);
+                }
+                p.lexer.restore(&saved);
+            }
+            // Parabun: `schema NAME = <expr>` / `schema NAME from <expr>` /
+            // `schema NAME { ... }` — declares a JSON Schema binding.
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "schema")) {
+                const kw_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseModelStmt(p, kw_range, opts);
+                }
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "effect { ...body... }" block statement — desugars to
+            //   require("@lyku/para-signals").effect(() => { ...body... });
+            // Only triggers when `effect` is immediately followed (no newline)
+            // by `{`. Any other token means `effect` is a plain identifier
+            // (including `effect(fn)` — that's a regular call expression).
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "effect")) {
+                const effect_range = p.lexer.range();
+                const saved = p.lexer;
+                try p.lexer.next();
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_open_brace) {
+                    return try parseEffectStmt(p, effect_range);
+                }
+                // Single-statement form: `effect STMT;` ≡ `effect { STMT; }`.
+                // Triggers only when `effect` is followed (same line) by an
+                // identifier — i.e. the start of a statement that can't be
+                // `effect` used as an identifier-expression. `effect(` `effect.`
+                // `effect[` `effect=` `effect;` `effect:` all keep `effect` as a
+                // plain identifier (next token is not .t_identifier), so
+                // `effect(fn)` / `effect.x` / labels are unaffected.
+                if (!p.lexer.has_newline_before and p.lexer.token == .t_identifier) {
+                    return try parseEffectSingleStmt(p, effect_range);
+                }
+                // Not an effect block/statement — rewind so `effect` works as a
+                // plain identifier (`import { effect } from "@lyku/para-signals"; effect(fn);`).
+                p.lexer.restore(&saved);
+            }
+            // Parabun: "pure function" or "pure async function" statements
+            if (is_identifier and strings.eqlComptime(p.lexer.raw(), "pure")) {
+                const pure_range = p.lexer.range();
+                try p.lexer.next();
+
+                if (p.lexer.token == .t_function and !p.lexer.has_newline_before) {
+                    // "pure function foo() {}"
+                    try p.lexer.next();
+                    return try p.parseFnStmt(pure_range.loc, opts, null, true);
+                }
+
+                if (!p.lexer.has_newline_before and p.lexer.isContextualKeyword("async")) {
+                    const async_range = p.lexer.range();
+                    try p.lexer.next();
+                    if (p.lexer.token == .t_function and !p.lexer.has_newline_before) {
+                        // "pure async function foo() {}"
+                        try p.lexer.next();
+                        return try p.parseFnStmt(pure_range.loc, opts, async_range, true);
+                    }
+                    // "pure async () => {}" — expression statement
+                    expr = try p.parsePureAsyncPrefixExpr(pure_range, async_range, .lowest);
+                    try p.parseSuffix(&expr, .lowest, null, Expr.EFlags.none);
+                } else {
+                    // "pure () => x" or "pure x => x" — expression statement
+                    expr = try p.parsePurePrefixExpr(pure_range, .lowest);
+                    try p.parseSuffix(&expr, .lowest, null, Expr.EFlags.none);
+                }
+            } else if (is_identifier and strings.eqlComptime(p.lexer.raw(), "async")) {
+                const async_range = p.lexer.range();
+                try p.lexer.next();
+                if (p.lexer.token == .t_function and !p.lexer.has_newline_before) {
+                    try p.lexer.next();
+
+                    return try p.parseFnStmt(async_range.loc, opts, async_range, false);
+                }
+
+                expr = try p.parseAsyncPrefixExpr(async_range, .lowest);
+                try p.parseSuffix(&expr, .lowest, null, Expr.EFlags.none);
+            } else {
+                const exprOrLet = try p.parseExprOrLetStmt(opts);
+                switch (exprOrLet.stmt_or_expr) {
+                    .stmt => |stmt| {
+                        try p.lexer.expectOrInsertSemicolon();
+                        return stmt;
+                    },
+                    .expr => |_expr| {
+                        expr = _expr;
+                    },
+                }
+            }
+            if (is_identifier) {
+                switch (expr.data) {
+                    .e_identifier => |ident| {
+                        if (p.lexer.token == .t_colon and !opts.hasDecorators()) {
+                            _ = try p.pushScopeForParsePass(.label, loc);
+                            defer p.popScope();
+
+                            // Parse a labeled statement
+                            try p.lexer.next();
+
+                            const _name = LocRef{ .loc = expr.loc, .ref = ident.ref };
+                            var nestedOpts = ParseStatementOptions{};
+
+                            switch (opts.lexical_decl) {
+                                .allow_all, .allow_fn_inside_label => {
+                                    nestedOpts.lexical_decl = .allow_fn_inside_label;
+                                },
+                                else => {},
+                            }
+                            const stmt = try p.parseStmt(&nestedOpts);
+                            return p.s(S.Label{ .name = _name, .stmt = stmt }, loc);
+                        }
+                    },
+                    else => {},
+                }
+
+                if (is_typescript_enabled) {
+                    if (js_lexer.TypescriptStmtKeyword.List.get(name)) |ts_stmt| {
+                        switch (ts_stmt) {
+                            .ts_stmt_type => {
+                                if (p.lexer.token == .t_identifier and !p.lexer.has_newline_before) {
+                                    // "type Foo = any"
+                                    var stmtOpts = ParseStatementOptions{ .is_module_scope = opts.is_module_scope };
+                                    try p.skipTypeScriptTypeStmt(&stmtOpts);
+                                    return p.s(S.TypeScript{}, loc);
+                                }
+                            },
+                            .ts_stmt_namespace, .ts_stmt_module => {
+                                // "namespace Foo {}"
+                                // "module Foo {}"
+                                // "declare module 'fs' {}"
+                                // "declare module 'fs';"
+                                if (!p.lexer.has_newline_before and
+                                    (opts.is_module_scope or opts.is_namespace_scope) and
+                                    (p.lexer.token == .t_identifier or (p.lexer.token == .t_string_literal and opts.is_typescript_declare)))
+                                {
+                                    return p.parseTypeScriptNamespaceStmt(loc, opts);
+                                }
+                            },
+                            .ts_stmt_interface => {
+                                // "interface Foo {}"
+                                var stmtOpts = ParseStatementOptions{ .is_module_scope = opts.is_module_scope };
+
+                                try p.skipTypeScriptInterfaceStmt(&stmtOpts);
+                                return p.s(S.TypeScript{}, loc);
+                            },
+                            .ts_stmt_abstract => {
+                                if (p.lexer.token == .t_class or opts.ts_decorators != null) {
+                                    return try p.parseClassStmt(loc, opts);
+                                }
+                            },
+                            .ts_stmt_global => {
+                                // "declare module 'fs' { global { namespace NodeJS {} } }"
+                                if (opts.is_namespace_scope and opts.is_typescript_declare and p.lexer.token == .t_open_brace) {
+                                    try p.lexer.next();
+                                    _ = try p.parseStmtsUpTo(.t_close_brace, opts);
+                                    try p.lexer.next();
+                                    return p.s(S.TypeScript{}, loc);
+                                }
+                            },
+                            .ts_stmt_declare => {
+                                opts.lexical_decl = .allow_all;
+                                opts.is_typescript_declare = true;
+
+                                // "@decorator declare class Foo {}"
+                                // "@decorator declare abstract class Foo {}"
+                                if (opts.ts_decorators != null and p.lexer.token != .t_class and !p.lexer.isContextualKeyword("abstract")) {
+                                    try p.lexer.expected(.t_class);
+                                }
+
+                                // "declare global { ... }"
+                                if (p.lexer.isContextualKeyword("global")) {
+                                    try p.lexer.next();
+                                    try p.lexer.expect(.t_open_brace);
+                                    _ = try p.parseStmtsUpTo(.t_close_brace, opts);
+                                    try p.lexer.next();
+                                    return p.s(S.TypeScript{}, loc);
+                                }
+
+                                // "declare const x: any"
+                                const stmt = try p.parseStmt(opts);
+                                if (opts.ts_decorators) |decs| {
+                                    p.discardScopesUpTo(decs.scope_index);
+                                }
+
+                                // Unlike almost all uses of "declare", statements that use
+                                // "export declare" with "var/let/const" inside a namespace affect
+                                // code generation. They cause any declared bindings to be
+                                // considered exports of the namespace. Identifier references to
+                                // those names must be converted into property accesses off the
+                                // namespace object:
+                                //
+                                //   namespace ns {
+                                //     export declare const x
+                                //     export function y() { return x }
+                                //   }
+                                //
+                                //   (ns as any).x = 1
+                                //   console.log(ns.y())
+                                //
+                                // In this example, "return x" must be replaced with "return ns.x".
+                                // This is handled by replacing each "export declare" statement
+                                // inside a namespace with an "export var" statement containing all
+                                // of the declared bindings. That "export var" statement will later
+                                // cause identifiers to be transformed into property accesses.
+                                if (opts.is_namespace_scope and opts.is_export) {
+                                    var decls: G.Decl.List = .{};
+                                    switch (stmt.data) {
+                                        .s_local => |local| {
+                                            var _decls = try ListManaged(G.Decl).initCapacity(p.allocator, local.decls.len);
+                                            for (local.decls.slice()) |decl| {
+                                                try extractDeclsForBinding(decl.binding, &_decls);
+                                            }
+                                            decls = .moveFromList(&_decls);
+                                        },
+                                        else => {},
+                                    }
+
+                                    if (decls.len > 0) {
+                                        return p.s(S.Local{
+                                            .kind = .k_var,
+                                            .is_export = true,
+                                            .decls = decls,
+                                        }, loc);
+                                    }
+                                }
+
+                                return p.s(S.TypeScript{}, loc);
+                            },
+                        }
+                    }
+                }
+            }
+            // Output.print("\n\nmVALUE {s}:{s}\n", .{ expr, name });
+            try p.lexer.expectOrInsertSemicolon();
+            return p.s(S.SExpr{ .value = expr }, loc);
+        }
+
+        pub fn parseStmt(p: *P, opts: *ParseStatementOptions) anyerror!Stmt {
+            if (!p.stack_check.isSafeToRecurse()) {
+                try bun.throwStackOverflow();
+            }
+
+            return switch (p.lexer.token) {
+                .t_semicolon => t_semicolon(p),
+                .t_at => t_at(p, opts),
+
+                inline .t_export,
+                .t_function,
+                .t_enum,
+                .t_class,
+                .t_var,
+                .t_const,
+                .t_if,
+                .t_do,
+                .t_while,
+                .t_with,
+                .t_switch,
+                .t_try,
+                .t_for,
+                .t_import,
+                .t_break,
+                .t_continue,
+                .t_return,
+                .t_throw,
+                .t_debugger,
+                .t_open_brace,
+                => |function| @field(@This(), @tagName(function))(p, opts, p.lexer.loc()),
+
+                else => parseStmtFallthrough(p, opts, p.lexer.loc()),
+            };
+        }
+    };
+}
+
+const bun = @import("bun");
+const Output = bun.Output;
+const logger = bun.logger;
+const strings = bun.strings;
+
+const js_ast = bun.ast;
+const B = js_ast.B;
+const Binding = js_ast.Binding;
+const E = js_ast.E;
+const Expr = js_ast.Expr;
+const LocRef = js_ast.LocRef;
+const S = js_ast.S;
+const Stmt = js_ast.Stmt;
+const Symbol = js_ast.Symbol;
+
+const G = js_ast.G;
+const Decl = G.Decl;
+
+const Op = js_ast.Op;
+const Level = js_ast.Op.Level;
+
+const js_lexer = bun.js_lexer;
+const T = js_lexer.T;
+
+const js_parser = bun.js_parser;
+const DeferredTsDecorators = js_parser.DeferredTsDecorators;
+const ImportKind = js_parser.ImportKind;
+const JSXTransformType = js_parser.JSXTransformType;
+const ParseStatementOptions = js_parser.ParseStatementOptions;
+const ParsedPath = js_parser.ParsedPath;
+const Ref = js_parser.Ref;
+const StmtList = js_parser.StmtList;
+const TypeScript = js_parser.TypeScript;
+const fs = js_parser.fs;
+
+const std = @import("std");
+const List = std.ArrayListUnmanaged;
+const ListManaged = std.array_list.Managed;

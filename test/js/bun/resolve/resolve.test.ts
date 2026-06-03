@@ -1,6 +1,6 @@
 import { pathToFileURL } from "bun";
 import { describe, expect, it } from "bun:test";
-import { chmodSync, chownSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, chownSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { bunEnv, bunExe, bunRun, isLinux, isWindows, joinP, tempDir, tempDirWithFiles } from "harness";
 import { join, resolve, sep } from "path";
 
@@ -485,6 +485,168 @@ it.skipIf(isWindows)("browser map resolution handles relative paths longer than 
   expect(exitCode).toBe(0);
 });
 
+// ESModule.Package.parse scanned the entire specifier for an `@` to split off a
+// version. For wildcard `exports` maps the matched substring can contain `@`
+// (e.g. `ember-source/@ember/renderer/...`, `pkg/@scope/sub`) — those `@`s
+// aren't version delimiters, they're subpath content. The version split must
+// be bounded to the package-name portion of the specifier.
+// https://github.com/oven-sh/bun/issues/30187
+describe("wildcard exports with @ in matched subpath", () => {
+  it.concurrent("resolves a subpath whose wildcard match starts with @", () => {
+    using dir = tempDir("resolver-wildcard-at-scoped", {
+      "package.json": JSON.stringify({ name: "host" }),
+      "node_modules/test-pkg/package.json": JSON.stringify({
+        name: "test-pkg",
+        version: "1.0.0",
+        exports: { "./*": "./dist/packages/*" },
+      }),
+      "node_modules/test-pkg/dist/packages/plain/index.js": "export default 'plain';",
+      "node_modules/test-pkg/dist/packages/@scope/sub/index.js": "export default 'scoped';",
+    });
+    const root = String(dir);
+
+    expect(Bun.resolveSync("test-pkg/plain/index.js", root)).toBe(
+      join(root, "node_modules/test-pkg/dist/packages/plain/index.js"),
+    );
+    expect(Bun.resolveSync("test-pkg/@scope/sub/index.js", root)).toBe(
+      join(root, "node_modules/test-pkg/dist/packages/@scope/sub/index.js"),
+    );
+  });
+
+  it.concurrent("resolves a subpath that contains `@` mid-segment", () => {
+    using dir = tempDir("resolver-wildcard-at-mid", {
+      "package.json": JSON.stringify({ name: "host" }),
+      "node_modules/test-pkg/package.json": JSON.stringify({
+        name: "test-pkg",
+        version: "1.0.0",
+        exports: { "./*": "./dist/packages/*" },
+      }),
+      "node_modules/test-pkg/dist/packages/with@sign/sub/index.js": "export default 'sign';",
+    });
+    const root = String(dir);
+
+    expect(Bun.resolveSync("test-pkg/with@sign/sub/index.js", root)).toBe(
+      join(root, "node_modules/test-pkg/dist/packages/with@sign/sub/index.js"),
+    );
+  });
+
+  it.concurrent("resolves an @-prefixed subpath under a scoped package", () => {
+    using dir = tempDir("resolver-wildcard-at-scoped-pkg", {
+      "package.json": JSON.stringify({ name: "host" }),
+      "node_modules/@my/pkg/package.json": JSON.stringify({
+        name: "@my/pkg",
+        version: "1.0.0",
+        exports: { "./*": "./dist/*" },
+      }),
+      "node_modules/@my/pkg/dist/@inner/bar/index.js": "export default 'inner';",
+    });
+    const root = String(dir);
+
+    expect(Bun.resolveSync("@my/pkg/@inner/bar/index.js", root)).toBe(
+      join(root, "node_modules/@my/pkg/dist/@inner/bar/index.js"),
+    );
+  });
+
+  // Regression guard: `@version` specifiers immediately following the package
+  // name must still be stripped. We don't install alternative versions; we just
+  // verify `pkg@1.0.0/subpath` still resolves to the same file as `pkg/subpath`.
+  it.concurrent("still strips a trailing @version after the package name", () => {
+    using dir = tempDir("resolver-wildcard-versioned", {
+      "package.json": JSON.stringify({ name: "host" }),
+      "node_modules/test-pkg/package.json": JSON.stringify({
+        name: "test-pkg",
+        version: "1.0.0",
+        exports: { "./*": "./dist/packages/*" },
+      }),
+      "node_modules/test-pkg/dist/packages/plain/index.js": "export default 'plain';",
+    });
+    const root = String(dir);
+
+    expect(Bun.resolveSync("test-pkg@1.0.0/plain/index.js", root)).toBe(
+      join(root, "node_modules/test-pkg/dist/packages/plain/index.js"),
+    );
+  });
+
+  // Regression guard for the scoped-package version split: the `@version`
+  // delimiter still falls inside the name span `parseName` returns (between
+  // the leading `@` and the second `/`), so the version branch must still
+  // fire for `@scope/pkg@ver/sub`.
+  it.concurrent("still strips @version after a scoped package name", () => {
+    using dir = tempDir("resolver-wildcard-scoped-versioned", {
+      "package.json": JSON.stringify({ name: "host" }),
+      "node_modules/@my/pkg/package.json": JSON.stringify({
+        name: "@my/pkg",
+        version: "1.0.0",
+        exports: { "./*": "./dist/*" },
+      }),
+      "node_modules/@my/pkg/dist/sub/index.js": "export default 'sub';",
+    });
+    const root = String(dir);
+
+    expect(Bun.resolveSync("@my/pkg@1.0.0/sub/index.js", root)).toBe(
+      join(root, "node_modules/@my/pkg/dist/sub/index.js"),
+    );
+  });
+});
+
+// A package.json `imports` entry whose value is a bare package specifier
+// (e.g. `"#res": "@myproject/resolver"`) is handed back to package-resolve
+// for a second pass. Per the Node.js packages spec these are URL-like
+// specifiers and must always use forward slashes. On Windows, the join that
+// feeds the second pass was going through `platform::Auto` which normalizes
+// `/` to `\`, turning `@myproject/resolver` into `@myproject\resolver` —
+// the scoped-package match fails and Bun falls back to the legacy `main`
+// field instead of `exports`. Linux/macOS aren't affected because `Auto`
+// is already `Posix` there; this test is therefore Windows-only.
+// https://github.com/oven-sh/bun/issues/30839
+describe.if(isWindows)("#30839 - imports entry pointing at a scoped package", () => {
+  it("resolves via the target's exports, not its main", async () => {
+    using dir = tempDir("resolver-imports-scoped-pkg", {
+      "package.json": JSON.stringify({ name: "root", private: true, workspaces: ["packages/*"] }),
+      "packages/resolver/package.json": JSON.stringify({
+        name: "@myproject/resolver",
+        type: "module",
+        main: "./index.cjs",
+        exports: { ".": "./index.mjs" },
+      }),
+      "packages/resolver/index.mjs": "export const type = 'esm (from exports)';",
+      "packages/resolver/index.cjs": "module.exports = { type: 'cjs (from main)' };",
+      "packages/app/package.json": JSON.stringify({
+        name: "app",
+        type: "module",
+        dependencies: { "@myproject/resolver": "workspace:*" },
+        imports: { "#res": "@myproject/resolver" },
+      }),
+      "packages/app/test.mjs": `import { type } from "#res";\nconsole.log(type);`,
+    });
+    const root = String(dir);
+
+    // Wire up @myproject/resolver into app/node_modules so the second pass
+    // through the resolver (the one this fix repairs) can find it — without
+    // invoking `bun install`. `"junction"` is the Windows-appropriate symlink
+    // kind for directories.
+    mkdirSync(join(root, "packages/app/node_modules/@myproject"), { recursive: true });
+    symlinkSync(
+      join(root, "packages/resolver"),
+      join(root, "packages/app/node_modules/@myproject/resolver"),
+      "junction",
+    );
+
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "test.mjs"],
+      env: bunEnv,
+      cwd: join(root, "packages/app"),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+
+    expect(stderr).toBe("");
+    expect(stdout).toBe("esm (from exports)\n");
+    expect(exitCode).toBe(0);
+  });
+});
+
 // dirInfoCachedMaybeLog reads the rfs.entries cache without checking the union
 // tag. If readDirectory() previously failed with a non-ENOENT error (e.g.
 // EACCES), a `.err` variant is stored there; re-resolving the directory after
@@ -579,3 +741,41 @@ it.skipIf(isWindows)("browser map resolution handles relative paths longer than 
     }
   });
 }
+
+describe("resolving external URL specifiers with non-ASCII characters", () => {
+  // The resolver returns http://, https://, and // specifiers as-is (marked external).
+  // When the specifier contains non-ASCII characters, the intermediate UTF-8 buffer
+  // is heap-allocated and freed before the caller reads the result, so the resolved
+  // path must be cloned rather than borrowed.
+  it.each([
+    ["http://localhost/path?query=´5&foo=bar"],
+    ["http://localhost/´path?query=a"],
+    ["http://localhost/´path"],
+    ["https://example/´"],
+    ["//example/´?q"],
+  ])("Bun.resolveSync(%j)", specifier => {
+    expect(Bun.resolveSync(specifier, import.meta.dir)).toBe(specifier);
+  });
+
+  it("import.meta.resolveSync", () => {
+    const specifier = "http://localhost/path?query=´5&foo=bar";
+    expect(import.meta.resolveSync(specifier)).toBe(specifier);
+  });
+
+  it("require with non-ASCII http specifier does not crash", async () => {
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `try { require("http://localhost/path?query=´5&foo=bar"); } catch (e) { console.log("caught", e.constructor.name); }`,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("caught");
+    expect(exitCode).toBe(0);
+  });
+});
