@@ -3802,8 +3802,13 @@ lexer_impl_header! {
                 self.step_with(contents);
             }
 
-            // Fractional digits;
-            if first != 0x2E && self.code_point == 0x2E {
+            // Fractional digits. Parabun: a `.` immediately followed by another
+            // `.` is the range operator (`1..5`), not a decimal point — leave
+            // both dots for the `..` lexer rather than consuming `1.` as a float.
+            if first != 0x2E
+                && self.code_point == 0x2E
+                && !(self.current < contents.len() && contents[self.current] == b'.')
+            {
                 // An underscore must not come last;
                 if last_underscore_end > 0 && self.end == last_underscore_end + 1 {
                     self.end -= 1;

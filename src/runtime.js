@@ -353,6 +353,18 @@ var __parabunMemoTerminal = Symbol("parabun.memo.terminal");
 //                             when the caller wants a guaranteed-fresh
 //                             result without invalidating state other
 //                             callers may still rely on.
+// Parabun: `a..b` exclusive / `a..=b` inclusive integer ranges → arrays.
+// Ascending only (Python-like): an empty array when a > b.
+export var __parabunRange = (a, b) => {
+  var out = [];
+  for (var i = a; i < b; i++) out.push(i);
+  return out;
+};
+export var __parabunRangeInclusive = (a, b) => {
+  var out = [];
+  for (var i = a; i <= b; i++) out.push(i);
+  return out;
+};
 export var __parabunMemo = (fn, arity) => {
   if (arity === 0) {
     var __has = false,
