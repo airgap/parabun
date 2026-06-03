@@ -1813,12 +1813,17 @@ lexer_impl_header! {
                         );
                     }
 
-                    // '|' or '|=' or '||' or '||='
+                    // '|' or '|=' or '||' or '||=' or '|>' (Parabun pipe)
                     self.step_with(contents);
                     match self.code_point {
                         0x3D => {
                             self.step_with(contents);
                             self.token = T::TBarEquals;
+                        }
+                        0x3E => {
+                            // Parabun: "|>"
+                            self.step_with(contents);
+                            self.token = T::TBarGreaterThan;
                         }
                         0x7C => {
                             self.step_with(contents);

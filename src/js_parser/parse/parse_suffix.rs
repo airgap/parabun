@@ -1,5 +1,6 @@
 #![allow(clippy::single_match)]
 #![warn(unused_must_use)]
+use bun_collections::VecExt;
 use bun_core::{Error, err};
 
 use crate::lexer::T;
@@ -8,7 +9,7 @@ use crate::parser::DeferredErrors;
 use crate::scan::scan_side_effects::SideEffects;
 use bun_ast::expr::EFlags;
 use bun_ast::op::Level;
-use bun_ast::{E, Expr, ExprData, OpCode, OptionalChain};
+use bun_ast::{E, Expr, ExprData, ExprNodeList, OpCode, OptionalChain};
 
 // Zig: `fn ParseSuffix(comptime ts, comptime jsx, comptime scan_only) type { return struct { ... } }`
 // — file-split mixin pattern. Round-C lowered `const JSX: JSXTransformType` → `J: JsxT`, so this is
@@ -1262,6 +1263,56 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(Continuation::Next)
     }
 
+    // Parabun: `|>` pipe operator. `expr |> fn` desugars to `fn(expr)`;
+    // `expr |> .m()` to `expr.m()` (leading-dot method shorthand). Placeholder
+    // (`x |> f(_, 2)`) and stream/inline fusion are not yet ported.
+    fn sfx_t_bar_greater_than(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
+        if level.gte(Level::NullishCoalescing) {
+            return Ok(Continuation::Done);
+        }
+        p.lexer.next()?;
+
+        // Method shorthand — `x |> .foo` builds `x.foo` directly. Any trailing
+        // `(args)` / `.prop` / `[idx]` is handled by the regular suffix loop
+        // because the member expression lands back in `left`.
+        if p.lexer.token == T::TDot {
+            p.lexer.next()?;
+            if !p.lexer.is_identifier_or_keyword() {
+                p.lexer.expect(T::TIdentifier)?;
+            }
+            let name = E::Str::new(p.lexer.identifier);
+            let name_loc = p.lexer.loc();
+            p.lexer.next()?;
+            let loc = left.loc;
+            let target = *left;
+            *left = p.new_expr(
+                E::Dot {
+                    target,
+                    name,
+                    name_loc,
+                    ..Default::default()
+                },
+                loc,
+            );
+            return Ok(Continuation::Next);
+        }
+
+        // `expr |> rhs` → `rhs(expr)`
+        let loc = left.loc;
+        let piped = *left;
+        let rhs = p.parse_expr(Level::NullishCoalescing)?;
+        *left = p.new_expr(
+            E::Call {
+                target: rhs,
+                args: ExprNodeList::init_one(piped),
+                close_paren_loc: p.lexer.loc(),
+                ..Default::default()
+            },
+            loc,
+        );
+        Ok(Continuation::Next)
+    }
+
     fn sfx_t_bar_equals(p: &mut Self, level: Level, left: &mut Expr) -> CResult {
         if level.gte(Level::Assign) {
             return Ok(Continuation::Done);
@@ -1515,6 +1566,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 T::TAsteriskAsteriskEquals => Self::sfx_t_asterisk_asterisk_equals(p, level, left),
                 T::TAsteriskEquals => Self::sfx_t_asterisk_equals(p, level, left),
                 T::TBar => Self::sfx_t_bar(p, level, left),
+                T::TBarGreaterThan => Self::sfx_t_bar_greater_than(p, level, left),
                 T::TBarBarEquals => Self::sfx_t_bar_bar_equals(p, level, left),
                 T::TBarEquals => Self::sfx_t_bar_equals(p, level, left),
                 T::TCaret => Self::sfx_t_caret(p, level, left),

@@ -130,6 +130,9 @@ pub enum T {
     TVoid,
     TWhile,
     TWith,
+    // Parabun: `|>` pipe operator. Appended at the end so existing variant
+    // discriminants are unchanged (repr(u8); the array is sized by Enum::LENGTH).
+    TBarGreaterThan,
 }
 
 impl T {
@@ -487,6 +490,7 @@ pub static TOKEN_TO_STRING: TokenEnumType = TokenEnumType({
     token_enums[T::TAt as usize] = b"\"@\"";
     token_enums[T::TBar as usize] = b"\"|\"";
     token_enums[T::TBarBar as usize] = b"\"||\"";
+    token_enums[T::TBarGreaterThan as usize] = b"\"|>\""; // Parabun pipe
     token_enums[T::TCaret as usize] = b"\"^\"";
     token_enums[T::TCloseBrace as usize] = b"\"}\"";
     token_enums[T::TCloseBracket as usize] = b"\"]\"";
