@@ -9,6 +9,8 @@ pub mod parse_skip_typescript;
 pub mod parse_stmt;
 pub mod parse_suffix;
 pub mod parse_typescript;
+pub mod purity;
+pub mod schema;
 
 use bun_collections::VecExt;
 
@@ -362,6 +364,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let mut arg = p.parse_expr(Level::Comma)?;
             if is_spread {
                 arg = p.new_expr(E::Spread { value: arg }, loc);
+            } else {
+                // Parabun: expression-context `_` lambda shorthand
+                // (`f(_ > 0)` → `f((__pu) => __pu > 0)`).
+                arg = Self::maybe_wrap_underscore_lambda(p, arg, loc);
             }
             args.push(arg);
             if p.lexer.token != T::TComma {
@@ -1627,6 +1633,43 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         p.pop_scope();
                         return Ok(p.new_expr(arrow_body, async_range.loc));
                     }
+                }
+
+                // Parabun: "async { … }" block expression → (async () => {
+                // … })(). Runs an async block from a sync context and
+                // evaluates to the resulting Promise. Safe to claim because
+                // `async {` is otherwise a syntax error.
+                T::TOpenBrace => {
+                    let _ = p.push_scope_for_parse_pass(
+                        js_ast::scope::Kind::FunctionArgs,
+                        async_range.loc,
+                    )?;
+                    let mut data = FnOrArrowDataParse {
+                        allow_await: AwaitOrYield::AllowExpr,
+                        needs_async_loc: async_range.loc,
+                        ..Default::default()
+                    };
+                    let body = p.parse_fn_body(&mut data)?;
+                    p.pop_scope();
+                    let no_args: &'a mut [G::Arg] =
+                        p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
+                    let arrow = p.new_expr(
+                        E::Arrow {
+                            args: bun_ast::StoreSlice::new_mut(no_args),
+                            body,
+                            is_async: true,
+                            ..Default::default()
+                        },
+                        async_range.loc,
+                    );
+                    return Ok(p.new_expr(
+                        E::Call {
+                            target: arrow,
+                            args: ExprNodeList::from_slice(&[]),
+                            ..Default::default()
+                        },
+                        async_range.loc,
+                    ));
                 }
 
                 // "async()"

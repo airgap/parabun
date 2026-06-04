@@ -775,7 +775,58 @@ impl BinaryExpressionVisitor {
                     );
                 }
             }
+            // Parabun: `x OP= v` where x is signal-bound → `x.set(x.get() OP v)`.
+            Op::Code::BinAddAssign
+            | Op::Code::BinSubAssign
+            | Op::Code::BinMulAssign
+            | Op::Code::BinDivAssign
+            | Op::Code::BinRemAssign
+            | Op::Code::BinPowAssign
+            | Op::Code::BinShlAssign
+            | Op::Code::BinShrAssign
+            | Op::Code::BinUShrAssign
+            | Op::Code::BinBitwiseOrAssign
+            | Op::Code::BinBitwiseAndAssign
+            | Op::Code::BinBitwiseXorAssign
+            | Op::Code::BinLogicalAndAssign => {
+                if let ExprData::EIdentifier(ident) = e_.left.data {
+                    if !p.signal_bound_refs.is_empty()
+                        && p.signal_bound_refs.contains_key(&ident.ref_)
+                    {
+                        let base_op = match e_.op {
+                            Op::Code::BinAddAssign => Op::Code::BinAdd,
+                            Op::Code::BinSubAssign => Op::Code::BinSub,
+                            Op::Code::BinMulAssign => Op::Code::BinMul,
+                            Op::Code::BinDivAssign => Op::Code::BinDiv,
+                            Op::Code::BinRemAssign => Op::Code::BinRem,
+                            Op::Code::BinPowAssign => Op::Code::BinPow,
+                            Op::Code::BinShlAssign => Op::Code::BinShl,
+                            Op::Code::BinShrAssign => Op::Code::BinShr,
+                            Op::Code::BinUShrAssign => Op::Code::BinUShr,
+                            Op::Code::BinBitwiseOrAssign => Op::Code::BinBitwiseOr,
+                            Op::Code::BinBitwiseAndAssign => Op::Code::BinBitwiseAnd,
+                            Op::Code::BinBitwiseXorAssign => Op::Code::BinBitwiseXor,
+                            Op::Code::BinLogicalAndAssign => Op::Code::BinLogicalAnd,
+                            _ => unreachable!(),
+                        };
+                        return Self::signal_compound_set(p, e_.left, e_.right, base_op);
+                    }
+                }
+            }
             Op::Code::BinNullishCoalescingAssign | Op::Code::BinLogicalOrAssign => {
+                // Parabun: signal-bound `x ||= v` / `x ??= v`.
+                if let ExprData::EIdentifier(ident) = e_.left.data {
+                    if !p.signal_bound_refs.is_empty()
+                        && p.signal_bound_refs.contains_key(&ident.ref_)
+                    {
+                        let base_op = if e_.op == Op::Code::BinLogicalOrAssign {
+                            Op::Code::BinLogicalOr
+                        } else {
+                            Op::Code::BinNullishCoalescing
+                        };
+                        return Self::signal_compound_set(p, e_.left, e_.right, base_op);
+                    }
+                }
                 // Special case `{}.field ??= value` to minify to `value`
                 // This optimization is specifically to target this pattern in HMR:
                 //    `import.meta.hot.data.etc ??= init()`
@@ -797,6 +848,59 @@ impl BinaryExpressionVisitor {
             // Same arena slot Zig threads as `*E.Binary` — re-wrap the handle.
             data: ExprData::EBinary(e_handle),
         }
+    }
+
+    /// Build `left.set(left.get() <base_op> right)` for a signal-bound
+    /// compound assignment. `left` is the bare signal identifier (reused for
+    /// both `.get()` and `.set()` — already visited, so no re-visit hazard).
+    fn signal_compound_set<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool>(
+        p: &mut P<'a, TYPESCRIPT, SCAN_ONLY>,
+        left: Expr,
+        right: Expr,
+        base_op: Op::Code,
+    ) -> Expr {
+        let loc = left.loc;
+        let get_dot = p.new_expr(
+            E::Dot {
+                target: left,
+                name: E::Str::new(b"get"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        let get_call = p.new_expr(
+            E::Call {
+                target: get_dot,
+                ..Default::default()
+            },
+            loc,
+        );
+        let combined = p.new_expr(
+            E::Binary {
+                op: base_op,
+                left: get_call,
+                right,
+            },
+            loc,
+        );
+        let set_dot = p.new_expr(
+            E::Dot {
+                target: left,
+                name: E::Str::new(b"set"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        p.new_expr(
+            E::Call {
+                target: set_dot,
+                args: ExprNodeList::init_one(combined),
+                ..Default::default()
+            },
+            loc,
+        )
     }
 
     pub fn check_and_prepare<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool>(

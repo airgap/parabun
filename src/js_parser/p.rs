@@ -225,6 +225,21 @@ pub enum ReactRefreshExportKind {
     Default,
 }
 
+/// One field of a captured TS `interface`/`type` shape (LYK-814 `::` markers).
+#[derive(Copy, Clone)]
+pub struct ParaTsTypeField<'a> {
+    pub name: &'a [u8],
+    pub type_name: &'a [u8],
+    pub optional: bool,
+}
+
+/// A captured TS type shape. `unsupported` is set for `extends`/method-sig/etc
+/// interfaces that can't be inline-validated (fall back to `Type.parse`).
+pub struct ParaTsTypeShape<'a> {
+    pub fields: std::vec::Vec<ParaTsTypeField<'a>>,
+    pub unsupported: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // P — the parser struct.
 // `'a` covers borrowed init() params (log/define/source) AND the arena (`bump`).
@@ -261,6 +276,23 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// parse time to decide whether a `signal NAME = RHS` initializer references
     /// another signal and should therefore be promoted to a `derived(() => …)`.
     pub signal_bound_names: std::collections::HashSet<&'a [u8]>,
+    /// Set while visiting the identifier target of an allowlisted signal method
+    /// (`x.get()`/`.set()`/…) so the e_identifier read-rewrite does not turn the
+    /// already-spelled cell access into `x.get().get()`.
+    pub signal_suppress_get_rewrite: bool,
+    /// Lazily-computed `// @parabun-strict-signals` pragma: when present,
+    /// `signal X = <reads a signal>` stays a writable `signal()` snapshot
+    /// instead of auto-promoting to `derived(() => …)`.
+    pub strict_signals_pragma: Option<bool>,
+    /// `::`-marked args awaiting a validation prelude — `(arg:: Type)`.
+    /// Tuple: (arg ref, arg name, capitalized model type name, loc). Captured
+    /// during arg parse, drained at the function body.
+    pub para_arg_validations:
+        std::vec::Vec<(js_ast::base::Ref, &'a [u8], &'a [u8], bun_ast::Loc)>,
+    /// TS `interface`/`type` shapes captured during type-skipping, so a
+    /// `(arg:: Iface)` marker can emit inline typeof checks instead of
+    /// `Iface.parse(arg)` (no runtime model exists for a TS-only type).
+    pub para_ts_type_registry: std::collections::HashMap<&'a [u8], ParaTsTypeShape<'a>>,
 
     pub has_top_level_return: bool,
     pub latest_return_had_semicolon: bool,
@@ -6492,6 +6524,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 S::Block {
                     stmts: block_stmts.into(),
                     close_brace_loc: bun_ast::Loc::EMPTY,
+                    is_transparent: false,
                 },
                 body.loc,
             ));
@@ -7756,6 +7789,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             S::Block {
                 stmts: bun_ast::StoreSlice::new_mut(stmts),
                 close_brace_loc: bun_ast::Loc::EMPTY,
+                is_transparent: false,
             },
             loc,
         )
@@ -9242,6 +9276,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             in_chain_op_arrow_rhs: false,
             signal_bound_refs: RefMap::default(),
             signal_bound_names: std::collections::HashSet::new(),
+            signal_suppress_get_rewrite: false,
+            strict_signals_pragma: None,
+            para_arg_validations: std::vec::Vec::new(),
+            para_ts_type_registry: std::collections::HashMap::new(),
 
             call_target: null_expr_data(),
             delete_target: null_expr_data(),

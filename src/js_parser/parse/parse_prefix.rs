@@ -20,6 +20,18 @@ use bun_ast::{
 // TODO(port): narrow error set — Zig used `anyerror!Expr` throughout
 type PResult<T> = core::result::Result<T, bun_core::Error>;
 
+/// One arm of a `match` expression, carrying both lowering forms so the final
+/// pass can pick ternary vs. switch. `literals` is `Some` only for pure-literal
+/// patterns (usable as switch case labels); `tag` is `Some` for Result/Option
+/// constructor patterns; `is_wildcard` marks `_`/`else`/bare bind.
+struct MatchArmMeta<'a> {
+    test_expr: Option<bun_ast::Expr>,
+    result: bun_ast::Expr,
+    literals: Option<&'a [bun_ast::Expr]>,
+    is_wildcard: bool,
+    tag: Option<&'a [u8]>,
+}
+
 // Zig: `fn ParsePrefix(comptime ts, comptime jsx, comptime scan_only) type { return struct { ... } }`
 // — file-split mixin pattern. Round-C lowered `const JSX: JSXTransformType` → `J: JsxT`, so this is
 // a direct `impl P` block. The 30+ per-token `t_*` helpers are private; only `parse_prefix` is
@@ -55,6 +67,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let loc = p.lexer.loc();
         p.lexer.next()?;
 
+        // Parens are an explicit escape from chain-op RHS terminator behavior:
+        // `p ..! err => (recover() ..! fb)` keeps the inner `..!` inside the
+        // arrow body rather than terminating it.
+        let prev_chain = p.in_chain_op_arrow_rhs;
+        p.in_chain_op_arrow_rhs = false;
+
         // Arrow functions aren't allowed in the middle of expressions
         if level.gt(Level::Assign) {
             // Allow "in" inside parentheses
@@ -66,10 +84,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.expect(T::TCloseParen)?;
 
             p.allow_in = old_allow_in;
+            p.in_chain_op_arrow_rhs = prev_chain;
             return Ok(value);
         }
 
-        p.parse_paren_expr(loc, level, ParenExprOpts::default())
+        let result = p.parse_paren_expr(loc, level, ParenExprOpts::default());
+        p.in_chain_op_arrow_rhs = prev_chain;
+        result
     }
 
     #[inline]
@@ -270,10 +291,15 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         while p.lexer.token != T::TCloseBrace {
             let key_loc = p.lexer.loc();
             let key = match p.lexer.token {
-                T::TIdentifier | T::TStringLiteral => {
+                T::TIdentifier => {
                     let id = p.lexer.identifier;
                     p.lexer.next()?;
                     p.new_expr(E::EString::init(id), key_loc)
+                }
+                T::TStringLiteral => {
+                    let s = p.lexer.to_e_string()?;
+                    p.lexer.next()?;
+                    p.new_expr(s, key_loc)
                 }
                 T::TNumericLiteral => {
                     let num = p.lexer.number;
@@ -424,7 +450,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // (`x ..! null`) folds into the awaited operand. The lexer is positioned
     // at `let`.
     pub(crate) fn t_parallel_let(p: &mut Self, loc: bun_ast::Loc) -> PResult<Stmt> {
-        p.lexer.next()?; // consume `let`
+        p.lexer.next()?; // consume `let` / `const`
         let mut items: bun_alloc::ArenaVec<'_, ArrayBinding> = bun_alloc::ArenaVec::new_in(p.arena);
         let mut values: bun_alloc::ArenaVec<'_, Expr> = bun_alloc::ArenaVec::new_in(p.arena);
         loop {
@@ -435,6 +461,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let name = p.lexer.identifier;
             let binding_ref = p.declare_symbol(symbol::Kind::Constant, name_loc, name)?;
             p.lexer.next()?;
+            // `parallel let x: T = …` — skip the TS annotation.
+            if Self::IS_TYPESCRIPT_ENABLED && p.lexer.token == T::TColon {
+                p.lexer.expect(T::TColon)?;
+                p.skip_type_script_type(Level::Lowest)?;
+            }
             p.lexer.expect(T::TEquals)?;
             let value = p.parse_expr(Level::Comma)?;
             let id_binding = p.b(B::Identifier { r#ref: binding_ref }, name_loc);
@@ -499,28 +530,185 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         ))
     }
 
+    // Parabun: `parallel using a = f(), b = g();` (or `await using`) →
+    //   const [__pu_0, __pu_1] = await Promise.all([f(), g()]);
+    //   using a = __pu_0, b = __pu_1;
+    // wrapped in a transparent block so both decls bind in the caller's scope.
+    pub(crate) fn parse_parallel_using_stmt(
+        p: &mut Self,
+        loc: bun_ast::Loc,
+        is_export: bool,
+        is_await_using: bool,
+    ) -> PResult<Stmt> {
+        p.lexer.next()?; // consume `using`
+
+        let mut names: smallvec::SmallVec<[(bun_ast::Loc, bun_ast::base::Ref); 4]> =
+            smallvec::SmallVec::new();
+        let mut values: bun_alloc::ArenaVec<'_, Expr> = bun_alloc::ArenaVec::new_in(p.arena);
+        loop {
+            if p.lexer.token != T::TIdentifier {
+                p.lexer.expect(T::TIdentifier)?;
+            }
+            let name_loc = p.lexer.loc();
+            let name = p.lexer.identifier;
+            p.lexer.next()?;
+            if Self::IS_TYPESCRIPT_ENABLED && p.lexer.token == T::TColon {
+                p.lexer.next()?;
+                p.skip_type_script_type(Level::Lowest)?;
+            }
+            p.lexer.expect(T::TEquals)?;
+            let rhs = p.parse_expr(Level::Comma)?;
+            let r = p.declare_symbol(symbol::Kind::Constant, name_loc, name)?;
+            names.push((name_loc, r));
+            values.push(rhs);
+            if p.lexer.token != T::TComma {
+                break;
+            }
+            p.lexer.next()?;
+        }
+        p.lexer.expect_or_insert_semicolon()?;
+
+        // One temp per binding: __pu_<i>.
+        let mut temps: smallvec::SmallVec<[bun_ast::base::Ref; 4]> = smallvec::SmallVec::new();
+        for i in 0..names.len() {
+            let temp_name: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__pu_{}", i)
+                .into_bump_str()
+                .as_bytes();
+            temps.push(p.declare_symbol(symbol::Kind::Constant, loc, temp_name)?);
+        }
+
+        // await Promise.all([rhs0, rhs1, ...])
+        let promise_ref = p.store_name_in_ref(b"Promise")?;
+        let promise_id = p.new_expr(E::Identifier::init(promise_ref), loc);
+        let all_dot = p.new_expr(
+            E::Dot {
+                target: promise_id,
+                name: E::Str::new(b"all"),
+                name_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        );
+        let values_array = p.new_expr(
+            E::Array {
+                items: ExprNodeList::from_slice(values.as_slice()),
+                ..Default::default()
+            },
+            loc,
+        );
+        let all_call = p.new_expr(
+            E::Call {
+                target: all_dot,
+                args: ExprNodeList::init_one(values_array),
+                ..Default::default()
+            },
+            loc,
+        );
+        let await_expr = p.new_expr(E::Await { value: all_call }, loc);
+
+        // Statement 1: const [__pu_0, …] = await Promise.all(…)
+        let mut items: bun_alloc::ArenaVec<'_, ArrayBinding> = bun_alloc::ArenaVec::new_in(p.arena);
+        for t in &temps {
+            let b = p.b(B::Identifier { r#ref: *t }, loc);
+            items.push(ArrayBinding {
+                binding: b,
+                default_value: None,
+            });
+        }
+        let array_binding = p.b(
+            js_ast::b::Array {
+                items: bun_ast::StoreSlice::from_bump(items),
+                has_spread: false,
+                is_single_line: true,
+            },
+            loc,
+        );
+        let const_decl = G::Decl {
+            binding: array_binding,
+            value: Some(await_expr),
+        };
+        let const_stmt = p.s(
+            S::Local {
+                kind: js_ast::s::Kind::KConst,
+                decls: G::DeclList::from_arena_slice(&[const_decl]),
+                ..Default::default()
+            },
+            loc,
+        );
+
+        // Statement 2: using NAME0 = __pu_0, … (or await using …)
+        let mut using_decls: smallvec::SmallVec<[G::Decl; 4]> = smallvec::SmallVec::new();
+        for ((nloc, nref), t) in names.iter().zip(temps.iter()) {
+            let binding = p.b(B::Identifier { r#ref: *nref }, *nloc);
+            let val = p.new_expr(E::Identifier::init(*t), *nloc);
+            using_decls.push(G::Decl {
+                binding,
+                value: Some(val),
+            });
+        }
+        let using_stmt = p.s(
+            S::Local {
+                kind: if is_await_using {
+                    js_ast::s::Kind::KAwaitUsing
+                } else {
+                    js_ast::s::Kind::KUsing
+                },
+                decls: G::DeclList::from_arena_slice(&using_decls),
+                is_export,
+                ..Default::default()
+            },
+            loc,
+        );
+
+        let inner: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[const_stmt, using_stmt]);
+        Ok(p.s(
+            S::Block {
+                stmts: bun_ast::StoreSlice::new_mut(inner),
+                is_transparent: true,
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
     // Parabun: `match SUBJECT { lit => res, ..., else => res }` → an IIFE
     // ternary: `((__pm) => __pm === lit1 ? res1 : ... : elseRes)(SUBJECT)`.
     // Subset: literal patterns + `else`/`_` wildcard. Bindings, OR patterns,
     // Ok/Err/Some/None patterns, `is Type` guards, and the switch (jump-table)
     // lowering are not yet ported.
+    #[allow(clippy::too_many_arguments)]
     fn parse_match_expr(p: &mut Self, match_loc: bun_ast::Loc) -> PResult<Expr> {
         let subject = p.parse_expr(Level::Lowest)?;
         p.lexer.expect(T::TOpenBrace)?;
 
+        // Unique IIFE param name per match (so nested matches don't collide).
+        p.temp_ref_count += 1;
+        let counter = p.temp_ref_count;
+        let m_name: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__pm_{:x}$", counter)
+            .into_bump_str()
+            .as_bytes();
+
         // Synthesize the IIFE arrow whose single param is the matched value.
         // Scope locs must strictly increase: args at the `match` loc, body one
-        // past it. Arm-body scopes (inside the braces, after the subject) land
-        // strictly later, so the monotonic check holds for literal/identifier
-        // subjects (which push no scopes of their own).
+        // past it, the wrapping block two past it.
         let args_loc = match_loc;
         let body_loc = bun_ast::Loc {
             start: match_loc.start + 1,
         };
+        let switch_body_loc = bun_ast::Loc {
+            start: match_loc.start + 2,
+        };
 
         p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, args_loc)?;
-        let m_ref = p.declare_symbol(symbol::Kind::Hoisted, args_loc, b"__pm")?;
+        let m_ref = p.declare_symbol(symbol::Kind::Hoisted, args_loc, m_name)?;
         p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, body_loc)?;
+        // Push the block that wraps the arrow body BEFORE arm parsing and keep
+        // it current while arms parse. visit's `s_block`/`s_switch` handler
+        // pushes this block right after function_body; if we delayed the push,
+        // a nested `match` in an arm RHS would inject scopes BETWEEN body and
+        // block at parse-time and visit would diverge (panic "Scope mismatch").
+        // Keeping it current also parents inner-arm scopes into the block.
+        p.push_scope_for_parse_pass(js_ast::scope::Kind::Block, switch_body_loc)?;
 
         let arg_binding = p.b(B::Identifier { r#ref: m_ref }, args_loc);
         let args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(1, |_| G::Arg {
@@ -528,208 +716,261 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             ..Default::default()
         });
 
-        // Collect arms: (test = `__pm === lit` | None for wildcard, result).
-        let mut arms: bun_alloc::ArenaVec<'_, (Option<Expr>, Expr)> =
-            bun_alloc::ArenaVec::new_in(p.arena);
+        // What identifier to substitute in the arm result post-parse:
+        //   Plain     → bind_name → __pm
+        //   DotValue  → bind_name → __pm.value     (Ok(x)/Some(x))
+        //   DotError  → bind_name → __pm.error     (Err(e))
+        #[derive(Clone, Copy)]
+        enum SubKind {
+            None,
+            Plain,
+            DotValue,
+            DotError,
+        }
+        let mut arms: std::vec::Vec<MatchArmMeta<'a>> = std::vec::Vec::new();
+
         while p.lexer.token != T::TCloseBrace {
-            // Pattern: wildcard (`else`/`_`), Result/Option tag
-            // (`Ok`/`Err`/`Some`/`None` + optional `(binding)`), or literal.
-            let is_wildcard = p.lexer.token == T::TElse
-                || (p.lexer.token == T::TIdentifier && p.lexer.raw() == b"_");
+            let mut test_expr: Option<Expr> = None;
+            let mut bind_name: Option<&'a [u8]> = None;
+            let mut sub_kind = SubKind::None;
+            let mut literals: Option<&'a [Expr]> = None;
+            let mut is_wildcard = false;
+            let mut tag: Option<&'a [u8]> = None;
 
-            // (bind_name, field): `Some(k)` extracts `__pm.k` (tag binding like
-            // `Ok(v)`), `None` binds the whole subject (`n => ...`).
-            let mut bind: Option<(&'a [u8], Option<&'static [u8]>)> = None;
-
-            let test = if is_wildcard {
-                p.lexer.next()?;
-                None
-            } else if p.lexer.token == T::TIdentifier
-                && matches!(p.lexer.raw(), b"Ok" | b"Err" | b"Some" | b"None")
+            if (p.lexer.token == T::TIdentifier && p.lexer.raw() == b"_")
+                || p.lexer.token == T::TElse
             {
-                let tag_loc = p.lexer.loc();
-                let tag: &'a [u8] = p.lexer.raw();
-                let value_key: &'static [u8] = if tag == b"Err" { b"error" } else { b"value" };
                 p.lexer.next()?;
-                // Optional binding: `Ok(v)`.
-                if p.lexer.token == T::TOpenParen {
-                    p.lexer.next()?;
-                    if p.lexer.token == T::TIdentifier {
-                        bind = Some((p.lexer.identifier, Some(value_key)));
-                        p.lexer.next()?;
+                // `_ is Type` / `_ is not Type` — runtime type-guard arm.
+                if p.lexer.token == T::TIdentifier
+                    && p.lexer.raw() == b"is"
+                    && !p.lexer.has_newline_before
+                {
+                    test_expr = Self::parse_is_type_test(p, m_ref, args_loc)?;
+                    if test_expr.is_none() {
+                        is_wildcard = true;
                     }
-                    p.lexer.expect(T::TCloseParen)?;
+                } else {
+                    is_wildcard = true;
                 }
-                // `__pm.tag === "<tag>"`
-                let m_ident = p.new_expr(E::Identifier::init(m_ref), tag_loc);
-                let tag_dot = p.new_expr(
-                    E::Dot {
-                        target: m_ident,
-                        name: E::Str::new(b"tag"),
-                        name_loc: tag_loc,
-                        ..Default::default()
-                    },
-                    tag_loc,
-                );
-                let tag_str = p.new_expr(E::EString::init(tag), tag_loc);
-                Some(p.new_expr(
-                    E::Binary {
-                        op: OpCode::BinStrictEq,
-                        left: tag_dot,
-                        right: tag_str,
-                    },
-                    tag_loc,
-                ))
-            } else if p.lexer.token == T::TIdentifier {
-                // Identifier-bind: `n => ...` binds the whole subject to `n` and
-                // always matches (catch-all, like `else` but named).
-                bind = Some((p.lexer.identifier, None));
+            } else if p.lexer.token == T::TIdentifier
+                && matches!(p.lexer.raw(), b"Ok" | b"Some" | b"Err" | b"None")
+            {
+                let ctor: &'a [u8] = p.lexer.raw();
                 p.lexer.next()?;
-                None
-            } else {
-                // Literal pattern, optionally OR-chained: `1 | 2 | 3 => ...`.
-                // Each alternative parses at BitwiseOr level so the `|`
-                // separator isn't swallowed as a bitwise-or expression;
-                // builds `__pm === a || __pm === b || ...`.
-                let lit_loc = p.lexer.loc();
-                let first = p.parse_expr(Level::BitwiseOr)?;
-                let m_ident = p.new_expr(E::Identifier::init(m_ref), lit_loc);
-                let mut test_expr = p.new_expr(
-                    E::Binary {
-                        op: OpCode::BinStrictEq,
-                        left: m_ident,
-                        right: first,
-                    },
-                    lit_loc,
-                );
-                while p.lexer.token == T::TBar {
-                    p.lexer.next()?;
-                    let alt_loc = p.lexer.loc();
-                    let alt = p.parse_expr(Level::BitwiseOr)?;
-                    let m_alt = p.new_expr(E::Identifier::init(m_ref), alt_loc);
-                    let eq = p.new_expr(
-                        E::Binary {
-                            op: OpCode::BinStrictEq,
-                            left: m_alt,
-                            right: alt,
-                        },
-                        alt_loc,
-                    );
-                    test_expr = p.new_expr(
-                        E::Binary {
-                            op: OpCode::BinLogicalOr,
-                            left: test_expr,
-                            right: eq,
-                        },
-                        alt_loc,
-                    );
+                test_expr = Some(Self::build_tag_test_expr(p, m_ref, args_loc, ctor));
+                tag = Some(ctor);
+                if ctor != b"None" {
+                    if let Some(bn) = Self::parse_ctor_arg_ident(p)? {
+                        bind_name = Some(bn);
+                        sub_kind = if ctor == b"Err" {
+                            SubKind::DotError
+                        } else {
+                            SubKind::DotValue
+                        };
+                    }
                 }
-                Some(test_expr)
-            };
-            p.lexer.expect(T::TEqualsGreaterThan)?;
-
-            // For a bound tag pattern, wrap the result in a per-arm IIFE arrow
-            // `((bind) => result)(__pm.value|error)` so the binding resolves to
-            // the extracted field with no AST-substitution pass. Same scope
-            // recipe as the outer match arrow.
-            let result = if let Some((bind_name, value_key)) = bind {
-                let arm_loc = p.lexer.loc();
-                let arm_body_loc = bun_ast::Loc {
-                    start: arm_loc.start + 1,
-                };
-                p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, arm_loc)?;
-                let param_ref = p.declare_symbol(symbol::Kind::Hoisted, arm_loc, bind_name)?;
-                p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionBody, arm_body_loc)?;
-                let body = p.parse_expr(Level::Comma)?;
-                p.pop_scope();
-                p.pop_scope();
-
-                let ret = p.s(S::Return { value: Some(body) }, arm_loc);
-                let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
-                let binding = p.b(B::Identifier { r#ref: param_ref }, arm_loc);
-                let arm_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(1, |_| G::Arg {
-                    binding,
-                    ..Default::default()
-                });
-                let arrow = p.new_expr(
-                    E::Arrow {
-                        args: bun_ast::StoreSlice::new_mut(arm_args),
-                        prefer_expr: true,
-                        body: G::FnBody {
-                            loc: arm_body_loc,
-                            stmts: bun_ast::StoreSlice::new_mut(stmts),
-                        },
-                        ..Default::default()
-                    },
-                    arm_loc,
-                );
-                let m_ident = p.new_expr(E::Identifier::init(m_ref), arm_loc);
-                // `Some(k)` → `__pm.k` (tag binding); `None` → whole `__pm`.
-                let extracted = match value_key {
-                    Some(k) => p.new_expr(
-                        E::Dot {
-                            target: m_ident,
-                            name: E::Str::new(k),
-                            name_loc: arm_loc,
-                            ..Default::default()
-                        },
-                        arm_loc,
-                    ),
-                    None => m_ident,
-                };
-                p.new_expr(
-                    E::Call {
-                        target: arrow,
-                        args: ExprNodeList::init_one(extracted),
-                        ..Default::default()
-                    },
-                    arm_loc,
-                )
+            } else if p.lexer.token == T::TIdentifier {
+                // Identifier-bind: `n => ...`, optionally `u is Type => ...`.
+                bind_name = Some(p.lexer.identifier);
+                sub_kind = SubKind::Plain;
+                p.lexer.next()?;
+                if p.lexer.token == T::TIdentifier
+                    && p.lexer.raw() == b"is"
+                    && !p.lexer.has_newline_before
+                {
+                    if let Some(t) = Self::parse_is_type_test(p, m_ref, args_loc)? {
+                        test_expr = Some(t);
+                    }
+                }
             } else {
-                p.parse_expr(Level::Comma)?
-            };
-            arms.push((test, result));
+                // Literal pattern, optionally OR-chained (`1 | 2 | 3`).
+                let (test, lits) = Self::build_arm_test_literals(p, m_ref, args_loc)?;
+                test_expr = Some(test);
+                literals = Some(lits);
+            }
+
+            p.lexer.expect(T::TEqualsGreaterThan)?;
+            let mut result = p.parse_expr(Level::Comma)?;
+
+            // Substitute the binding name with the captured subject.
+            if let Some(bname) = bind_name {
+                let replacement = match sub_kind {
+                    SubKind::Plain => p.new_expr(E::Identifier::init(m_ref), args_loc),
+                    SubKind::DotValue => {
+                        let t = p.new_expr(E::Identifier::init(m_ref), args_loc);
+                        p.new_expr(
+                            E::Dot {
+                                target: t,
+                                name: E::Str::new(b"value"),
+                                name_loc: args_loc,
+                                ..Default::default()
+                            },
+                            args_loc,
+                        )
+                    }
+                    SubKind::DotError => {
+                        let t = p.new_expr(E::Identifier::init(m_ref), args_loc);
+                        p.new_expr(
+                            E::Dot {
+                                target: t,
+                                name: E::Str::new(b"error"),
+                                name_loc: args_loc,
+                                ..Default::default()
+                            },
+                            args_loc,
+                        )
+                    }
+                    SubKind::None => p.new_expr(E::Undefined {}, args_loc),
+                };
+                if let Some(subbed) = Self::match_substitute_ident(p, result, bname, replacement) {
+                    result = subbed;
+                }
+            }
+
+            arms.push(MatchArmMeta {
+                test_expr,
+                result,
+                literals,
+                is_wildcard,
+                tag,
+            });
+
             if p.lexer.token == T::TComma {
                 p.lexer.next()?;
+            } else {
+                break;
             }
         }
         p.lexer.expect(T::TCloseBrace)?;
 
+        // Decide lowering form.
+        let mut all_literal = true;
+        let mut all_tag = true;
+        let mut saw_tag = false;
+        for arm in &arms {
+            if !arm.is_wildcard && arm.literals.is_none() {
+                all_literal = false;
+            }
+            if !arm.is_wildcard && arm.tag.is_none() {
+                all_tag = false;
+            }
+            if arm.tag.is_some() {
+                saw_tag = true;
+            }
+        }
+        if !saw_tag {
+            all_tag = false;
+        }
+
+        p.pop_scope(); // Block
         p.pop_scope(); // FunctionBody
         p.pop_scope(); // FunctionArgs
 
-        // Right-fold the arms into a ternary chain. A wildcard arm's result
-        // becomes the chain tail; with none, fall through to `undefined`.
-        let mut acc = p.new_expr(E::Undefined {}, match_loc);
-        for &(test, result) in arms.iter().rev() {
-            acc = match test {
-                Some(t) => p.new_expr(
-                    E::If {
-                        test_: t,
-                        yes: result,
-                        no: acc,
-                    },
-                    match_loc,
-                ),
-                None => result,
-            };
-        }
+        let inline = all_literal && Self::is_simple_subject(&subject);
 
-        let ret_stmt = p.s(S::Return { value: Some(acc) }, match_loc);
-        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret_stmt]);
+        // Build the arrow body's single statement.
+        let body_stmt: Stmt = if inline {
+            // Discriminated-union narrowing: test the SUBJECT directly at each
+            // site so tsc narrows the parent value.
+            let mut fallback = p.new_expr(E::Undefined {}, args_loc);
+            let mut first_test = arms.len();
+            for (i, arm) in arms.iter().enumerate() {
+                if arm.is_wildcard {
+                    fallback = arm.result;
+                    first_test = i;
+                    break;
+                }
+            }
+            let mut chain = fallback;
+            let mut i = first_test;
+            while i > 0 {
+                i -= 1;
+                let lits = arms[i].literals.unwrap();
+                let mut test = Self::build_subject_eq_lit(p, &subject, lits[0], args_loc);
+                for lit in &lits[1..] {
+                    let eq = Self::build_subject_eq_lit(p, &subject, *lit, args_loc);
+                    test = p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinLogicalOr,
+                            left: test,
+                            right: eq,
+                        },
+                        args_loc,
+                    );
+                }
+                chain = p.new_expr(
+                    E::If {
+                        test_: test,
+                        yes: arms[i].result,
+                        no: chain,
+                    },
+                    args_loc,
+                );
+            }
+            let ret = p.s(S::Return { value: Some(chain) }, switch_body_loc);
+            let inner: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+            p.s(
+                S::Block {
+                    stmts: bun_ast::StoreSlice::new_mut(inner),
+                    ..Default::default()
+                },
+                switch_body_loc,
+            )
+        } else if all_literal {
+            Self::build_match_switch_stmt(p, m_ref, args_loc, switch_body_loc, &arms)
+        } else if all_tag {
+            Self::build_match_tag_switch_stmt(p, m_ref, args_loc, switch_body_loc, &arms)
+        } else {
+            // Capture-`__pm` ternary chain, wrapped in a block so visit
+            // consumes the block scope pushed before arms.
+            let mut fallback = p.new_expr(E::Undefined {}, args_loc);
+            let mut first_test = arms.len();
+            for (i, arm) in arms.iter().enumerate() {
+                if arm.test_expr.is_none() {
+                    fallback = arm.result;
+                    first_test = i;
+                    break;
+                }
+            }
+            let mut chain = fallback;
+            let mut i = first_test;
+            while i > 0 {
+                i -= 1;
+                chain = p.new_expr(
+                    E::If {
+                        test_: arms[i].test_expr.unwrap(),
+                        yes: arms[i].result,
+                        no: chain,
+                    },
+                    args_loc,
+                );
+            }
+            let ret = p.s(S::Return { value: Some(chain) }, switch_body_loc);
+            let inner: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+            p.s(
+                S::Block {
+                    stmts: bun_ast::StoreSlice::new_mut(inner),
+                    ..Default::default()
+                },
+                switch_body_loc,
+            )
+        };
+
+        let body_stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[body_stmt]);
         let arrow = p.new_expr(
             E::Arrow {
                 args: bun_ast::StoreSlice::new_mut(args),
-                prefer_expr: true,
-                // body.loc must equal the parse-time FunctionBody scope loc
-                // (body_loc); the visit pass pushes FunctionBody at e.body.loc.
+                // Body is always a block-style statement (S::Switch or S::Block)
+                // so the arrow prints braces and visit consumes the scope.
+                prefer_expr: false,
                 body: G::FnBody {
                     loc: body_loc,
-                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                    stmts: bun_ast::StoreSlice::new_mut(body_stmts),
                 },
                 ..Default::default()
             },
-            match_loc,
+            args_loc,
         );
 
         Ok(p.new_expr(
@@ -738,8 +979,383 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 args: ExprNodeList::init_one(subject),
                 ..Default::default()
             },
-            match_loc,
+            args_loc,
         ))
+    }
+
+    /// Parse `is [not] Type` after `_`/bind and return `Type.parse(__pm).tag
+    /// === "Ok"` (or `!==` for `not`). Returns `Ok(None)` if no valid Type
+    /// followed (caller falls back to wildcard / plain bind).
+    fn parse_is_type_test(
+        p: &mut Self,
+        m_ref: bun_ast::base::Ref,
+        m_loc: bun_ast::Loc,
+    ) -> PResult<Option<Expr>> {
+        p.lexer.next()?; // consume `is`
+        let negate = p.lexer.token == T::TIdentifier && p.lexer.raw() == b"not";
+        if negate {
+            p.lexer.next()?;
+        }
+        if p.lexer.token != T::TIdentifier
+            || !p.lexer.raw().first().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            return Ok(None);
+        }
+        let type_name = p.lexer.identifier;
+        let type_loc = p.lexer.loc();
+        p.lexer.next()?;
+        let type_ref = p.store_name_in_ref(type_name)?;
+        let type_ident = p.new_expr(E::Identifier::init(type_ref), type_loc);
+        let parse_dot = p.new_expr(
+            E::Dot {
+                target: type_ident,
+                name: E::Str::new(b"parse"),
+                name_loc: type_loc,
+                ..Default::default()
+            },
+            type_loc,
+        );
+        let m_ident = p.new_expr(E::Identifier::init(m_ref), m_loc);
+        let parse_call = p.new_expr(
+            E::Call {
+                target: parse_dot,
+                args: ExprNodeList::init_one(m_ident),
+                ..Default::default()
+            },
+            type_loc,
+        );
+        let tag_dot = p.new_expr(
+            E::Dot {
+                target: parse_call,
+                name: E::Str::new(b"tag"),
+                name_loc: type_loc,
+                ..Default::default()
+            },
+            type_loc,
+        );
+        let ok_str = p.new_expr(E::EString::init(b"Ok"), type_loc);
+        Ok(Some(p.new_expr(
+            E::Binary {
+                op: if negate {
+                    OpCode::BinStrictNe
+                } else {
+                    OpCode::BinStrictEq
+                },
+                left: tag_dot,
+                right: ok_str,
+            },
+            type_loc,
+        )))
+    }
+
+    /// `__pm.tag === "<ctor>"` for a Result/Option pattern.
+    fn build_tag_test_expr(
+        p: &mut Self,
+        m_ref: bun_ast::base::Ref,
+        m_loc: bun_ast::Loc,
+        ctor: &[u8],
+    ) -> Expr {
+        let m_ident = p.new_expr(E::Identifier::init(m_ref), m_loc);
+        let tag_dot = p.new_expr(
+            E::Dot {
+                target: m_ident,
+                name: E::Str::new(b"tag"),
+                name_loc: m_loc,
+                ..Default::default()
+            },
+            m_loc,
+        );
+        let tag_str = p.new_expr(E::EString::init(ctor), m_loc);
+        p.new_expr(
+            E::Binary {
+                op: OpCode::BinStrictEq,
+                left: tag_dot,
+                right: tag_str,
+            },
+            m_loc,
+        )
+    }
+
+    /// Parse the optional `(name)` / `(_)` of a ctor pattern. Returns the bound
+    /// name on identifier; `None` on `_` or no parens.
+    fn parse_ctor_arg_ident(p: &mut Self) -> PResult<Option<&'a [u8]>> {
+        if p.lexer.token != T::TOpenParen {
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        let mut name: Option<&'a [u8]> = None;
+        if p.lexer.token == T::TIdentifier {
+            if p.lexer.raw() != b"_" {
+                name = Some(p.lexer.identifier);
+            }
+            p.lexer.next()?;
+        }
+        p.lexer.expect(T::TCloseParen)?;
+        Ok(name)
+    }
+
+    /// Parse a literal pattern (with optional `|` OR chain) → the test
+    /// `__pm === lit (|| __pm === lit2)*` plus the collected literals (for
+    /// switch lowering).
+    fn build_arm_test_literals(
+        p: &mut Self,
+        m_ref: bun_ast::base::Ref,
+        m_loc: bun_ast::Loc,
+    ) -> PResult<(Expr, &'a [Expr])> {
+        let mut lits: std::vec::Vec<Expr> = std::vec::Vec::new();
+        let first = p.parse_expr(Level::BitwiseOr)?;
+        lits.push(first);
+        let m0 = p.new_expr(E::Identifier::init(m_ref), m_loc);
+        let mut test = p.new_expr(
+            E::Binary {
+                op: OpCode::BinStrictEq,
+                left: m0,
+                right: first,
+            },
+            m_loc,
+        );
+        while p.lexer.token == T::TBar {
+            p.lexer.next()?;
+            let alt = p.parse_expr(Level::BitwiseOr)?;
+            lits.push(alt);
+            let m_alt = p.new_expr(E::Identifier::init(m_ref), m_loc);
+            let eq = p.new_expr(
+                E::Binary {
+                    op: OpCode::BinStrictEq,
+                    left: m_alt,
+                    right: alt,
+                },
+                m_loc,
+            );
+            test = p.new_expr(
+                E::Binary {
+                    op: OpCode::BinLogicalOr,
+                    left: test,
+                    right: eq,
+                },
+                m_loc,
+            );
+        }
+        Ok((test, p.arena.alloc_slice_copy(&lits)))
+    }
+
+    fn is_simple_subject(e: &Expr) -> bool {
+        match &e.data {
+            ExprData::EIdentifier(_) => true,
+            ExprData::EDot(d) => Self::is_simple_subject(&d.target),
+            _ => false,
+        }
+    }
+
+    /// `<subject> === <lit>`, cloning the subject so each test site owns its
+    /// nodes (visit mutates Expr in place).
+    fn build_subject_eq_lit(p: &mut Self, subject: &Expr, lit: Expr, loc: bun_ast::Loc) -> Expr {
+        let left = Self::clone_simple_subject(p, subject);
+        p.new_expr(
+            E::Binary {
+                op: OpCode::BinStrictEq,
+                left,
+                right: lit,
+            },
+            loc,
+        )
+    }
+
+    fn clone_simple_subject(p: &mut Self, e: &Expr) -> Expr {
+        match &e.data {
+            ExprData::EIdentifier(id) => p.new_expr(E::Identifier::init(id.ref_), e.loc),
+            ExprData::EDot(d) => {
+                let target = Self::clone_simple_subject(p, &d.target);
+                p.new_expr(
+                    E::Dot {
+                        target,
+                        name: d.name,
+                        name_loc: d.name_loc,
+                        optional_chain: d.optional_chain,
+                        ..Default::default()
+                    },
+                    e.loc,
+                )
+            }
+            _ => p.new_expr(E::Undefined {}, e.loc),
+        }
+    }
+
+    /// Substitute every identifier named `name` in `e` with `replacement`.
+    /// Returns `None` on an unsupported shape (caller keeps the original).
+    fn match_substitute_ident(
+        p: &mut Self,
+        e: Expr,
+        name: &[u8],
+        replacement: Expr,
+    ) -> Option<Expr> {
+        let loc = e.loc;
+        Some(match e.data {
+            ExprData::EIdentifier(id) => {
+                if p.load_name_from_ref(id.ref_) == name {
+                    replacement
+                } else {
+                    e
+                }
+            }
+            ExprData::ENumber(_)
+            | ExprData::EString(_)
+            | ExprData::ENull(_)
+            | ExprData::EUndefined(_)
+            | ExprData::EMissing(_)
+            | ExprData::EBoolean(_)
+            | ExprData::EBigInt(_) => e,
+            ExprData::EBinary(b) => {
+                let left = Self::match_substitute_ident(p, b.left, name, replacement)?;
+                let right = Self::match_substitute_ident(p, b.right, name, replacement)?;
+                p.new_expr(E::Binary { op: b.op, left, right }, loc)
+            }
+            ExprData::EUnary(u) => {
+                let value = Self::match_substitute_ident(p, u.value, name, replacement)?;
+                p.new_expr(E::Unary { op: u.op, value, flags: u.flags }, loc)
+            }
+            ExprData::EDot(d) => {
+                let target = Self::match_substitute_ident(p, d.target, name, replacement)?;
+                p.new_expr(
+                    E::Dot {
+                        target,
+                        name: d.name,
+                        name_loc: d.name_loc,
+                        optional_chain: d.optional_chain,
+                        ..Default::default()
+                    },
+                    loc,
+                )
+            }
+            ExprData::EIndex(ix) => {
+                let target = Self::match_substitute_ident(p, ix.target, name, replacement)?;
+                let index = Self::match_substitute_ident(p, ix.index, name, replacement)?;
+                p.new_expr(
+                    E::Index {
+                        target,
+                        index,
+                        optional_chain: ix.optional_chain,
+                    },
+                    loc,
+                )
+            }
+            ExprData::ECall(c) => {
+                let target = Self::match_substitute_ident(p, c.target, name, replacement)?;
+                let mut new_args: std::vec::Vec<Expr> = std::vec::Vec::with_capacity(c.args.len());
+                for a in c.args.slice() {
+                    new_args.push(Self::match_substitute_ident(p, *a, name, replacement)?);
+                }
+                p.new_expr(
+                    E::Call {
+                        target,
+                        args: ExprNodeList::from_arena_slice(&new_args),
+                        close_paren_loc: c.close_paren_loc,
+                        optional_chain: c.optional_chain,
+                        ..Default::default()
+                    },
+                    loc,
+                )
+            }
+            ExprData::EIf(f) => {
+                let test_ = Self::match_substitute_ident(p, f.test_, name, replacement)?;
+                let yes = Self::match_substitute_ident(p, f.yes, name, replacement)?;
+                let no = Self::match_substitute_ident(p, f.no, name, replacement)?;
+                p.new_expr(E::If { test_, yes, no }, loc)
+            }
+            _ => return None,
+        })
+    }
+
+    fn build_match_switch_stmt(
+        p: &mut Self,
+        m_ref: bun_ast::base::Ref,
+        m_loc: bun_ast::Loc,
+        body_loc: bun_ast::Loc,
+        arms: &[MatchArmMeta<'a>],
+    ) -> Stmt {
+        let mut cases = bun_alloc::ArenaVec::<js_ast::Case>::new_in(p.arena);
+        for arm in arms {
+            if arm.is_wildcard {
+                let ret = p.s(S::Return { value: Some(arm.result) }, body_loc);
+                let body: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+                cases.push(js_ast::Case {
+                    loc: body_loc,
+                    value: None,
+                    body: bun_ast::StoreSlice::new_mut(body),
+                });
+                continue;
+            }
+            let lits = arm.literals.unwrap();
+            let last = lits.len() - 1;
+            for (i, lit) in lits.iter().enumerate() {
+                if i < last {
+                    cases.push(js_ast::Case {
+                        loc: body_loc,
+                        value: Some(*lit),
+                        body: bun_ast::StoreSlice::EMPTY,
+                    });
+                } else {
+                    let ret = p.s(S::Return { value: Some(arm.result) }, body_loc);
+                    let body: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+                    cases.push(js_ast::Case {
+                        loc: body_loc,
+                        value: Some(*lit),
+                        body: bun_ast::StoreSlice::new_mut(body),
+                    });
+                }
+            }
+        }
+        let test_ = p.new_expr(E::Identifier::init(m_ref), m_loc);
+        p.s(
+            S::Switch {
+                test_,
+                body_loc,
+                cases: bun_ast::StoreSlice::from_bump(cases),
+            },
+            body_loc,
+        )
+    }
+
+    fn build_match_tag_switch_stmt(
+        p: &mut Self,
+        m_ref: bun_ast::base::Ref,
+        m_loc: bun_ast::Loc,
+        body_loc: bun_ast::Loc,
+        arms: &[MatchArmMeta<'a>],
+    ) -> Stmt {
+        let mut cases = bun_alloc::ArenaVec::<js_ast::Case>::new_in(p.arena);
+        for arm in arms {
+            let ret = p.s(S::Return { value: Some(arm.result) }, body_loc);
+            let body: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+            let value = if arm.is_wildcard {
+                None
+            } else {
+                Some(p.new_expr(E::EString::init(arm.tag.unwrap()), m_loc))
+            };
+            cases.push(js_ast::Case {
+                loc: body_loc,
+                value,
+                body: bun_ast::StoreSlice::new_mut(body),
+            });
+        }
+        let m_ident = p.new_expr(E::Identifier::init(m_ref), m_loc);
+        let tag_dot = p.new_expr(
+            E::Dot {
+                target: m_ident,
+                name: E::Str::new(b"tag"),
+                name_loc: m_loc,
+                ..Default::default()
+            },
+            m_loc,
+        );
+        p.s(
+            S::Switch {
+                test_: tag_dot,
+                body_loc,
+                cases: bun_ast::StoreSlice::from_bump(cases),
+            },
+            body_loc,
+        )
     }
 
     // Parabun: bare `None` → `{ tag: "None" }`.
@@ -787,21 +1403,47 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         if name == b"pure" && !p.lexer.has_newline_before {
             // `pure function ...`
             if p.lexer.token == T::TFunction {
-                return p.parse_fn_expr(loc, false, bun_ast::Range::NONE);
+                let expr = p.parse_fn_expr(loc, false, bun_ast::Range::NONE)?;
+                return p.enforce_purity_on_expr(expr);
             }
             // `pure x => ...` — single-param arrow (a bare `pure IDENT` is not
-            // valid JS otherwise, so delegating is safe).
+            // valid JS otherwise, so delegating is safe). Also covers
+            // `pure async x => …` / `pure async (x) => …`, which the identifier
+            // prefix recognises as an async arrow.
             if p.lexer.token == T::TIdentifier {
-                return Self::pfx_t_identifier(p, level);
+                let expr = Self::pfx_t_identifier(p, level)?;
+                return p.enforce_purity_on_expr(expr);
+            }
+            // `pure <T>(params): R => ...` — generic arrow. Skip the TS type
+            // parameters, then parse the paren-arrow.
+            if Self::IS_TYPESCRIPT_ENABLED
+                && p.lexer.token == T::TLessThan
+                && (!p.is_jsx_enabled() || p.is_ts_arrow_fn_jsx()?)
+            {
+                match p.try_skip_type_script_type_parameters_then_open_paren_with_backtracking() {
+                    SkipTypeParameterResult::DidNotSkipAnything => {}
+                    result => {
+                        p.lexer.next()?;
+                        let expr = p.parse_paren_expr(
+                            loc,
+                            level,
+                            ParenExprOpts {
+                                force_arrow_fn: result
+                                    == SkipTypeParameterResult::DefinitelyTypeParameters,
+                                ..Default::default()
+                            },
+                        )?;
+                        return p.enforce_purity_on_expr(expr);
+                    }
+                }
             }
             // `pure (params) => ...` — keep only if it's actually an arrow, so a
             // call to a `pure` binding (`pure(x)`) is left for the suffix loop.
-            // Purity enforcement is deferred, so the `pure` marker is dropped.
             if p.lexer.token == T::TOpenParen {
                 let snap = p.lexer.snapshot();
                 let result = Self::pfx_t_open_paren(p, level)?;
                 if matches!(result.data, ExprData::EArrow(_)) {
-                    return Ok(result);
+                    return p.enforce_purity_on_expr(result);
                 }
                 p.lexer.restore(&snap);
             }
@@ -826,10 +1468,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             };
             if let Some(arrow) = arrow {
                 if let ExprData::EArrow(a) = arrow.data {
-                    let arity: f64 = match a.args.len() {
-                        0 => 0.0,
-                        1 => 1.0,
-                        _ => 2.0,
+                    let arity: f64 = if a.has_rest_arg {
+                        2.0
+                    } else {
+                        match a.args.len() {
+                            0 => 0.0,
+                            1 => 1.0,
+                            _ => 2.0,
+                        }
                     };
                     let arity_expr = p.new_expr(E::Number { value: arity }, loc);
                     return Ok(p.call_runtime(
@@ -1087,18 +1733,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let raw = p.lexer.raw(); // includes the trailing `d`
         let text = &raw[..raw.len() - 1];
         let str_expr = p.new_expr(E::EString::init(text), loc);
-        let dec_ref = p.store_name_in_ref(b"__paraDec")?;
-        let dec_ident = p.new_expr(E::Identifier::init(dec_ref), loc);
         p.lexer.next()?;
-        Ok(p.new_expr(
-            E::Call {
-                target: dec_ident,
-                args: ExprNodeList::init_one(str_expr),
-                close_paren_loc: p.lexer.loc(),
-                ..Default::default()
-            },
-            loc,
-        ))
+        // `__paraDec` imported from bun:wrap (matches the @lyku/para-transpile
+        // mirror, and makes the literal runnable on a host that resolves the
+        // runtime).
+        Ok(p.call_runtime(loc, b"__paraDec", ExprNodeList::init_one(str_expr)))
     }
 
     #[inline]
@@ -1811,6 +2450,65 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     }
 
     // Before splitting this up, this used 3 KB of stack space per call.
+    /// Parabun: `throw E` as an expression. Desugars to `(() => { throw E; })()`
+    /// so `throw` can appear on the RHS of `??`, `||`, `&&`, `?:`, etc.
+    /// Ported from `parse_prefix.zig::t_throw_expr`.
+    fn pfx_t_throw_expr(p: &mut Self) -> PResult<Expr> {
+        let loc = p.lexer.loc();
+        p.lexer.next()?;
+        if p.lexer.has_newline_before {
+            p.log().add_error(
+                Some(p.source),
+                bun_ast::Loc {
+                    start: loc.start + 5,
+                },
+                b"Unexpected newline after \"throw\"" as &[u8],
+            );
+            return Err(bun_core::err!("SyntaxError"));
+        }
+
+        // The synthesized IIFE needs the same two scopes a real arrow gets in
+        // the parse pass. Push them BEFORE parsing the operand so scope
+        // locations stay monotonically increasing even if the thrown
+        // expression contains nested arrows. function_args at the `throw`
+        // keyword; function_body at the operand start (always later — `throw`
+        // is 5 chars).
+        let body_loc = p.lexer.loc();
+        let _ = p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
+        let _ = p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+
+        // Assign level per the TC39 throw-expression proposal — don't absorb a
+        // trailing comma operator.
+        let value = p.parse_expr(Level::Assign)?;
+
+        p.pop_scope();
+        p.pop_scope();
+
+        let throw_stmt = p.s(S::Throw { value }, loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[throw_stmt]);
+        let no_args: &'a mut [Arg] = p.arena.alloc_slice_fill_with(0, |_| Arg::default());
+        let arrow = p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(no_args),
+                is_async: false,
+                body: G::FnBody {
+                    loc: body_loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            loc,
+        );
+        Ok(p.new_expr(
+            E::Call {
+                target: arrow,
+                args: ExprNodeList::from_slice(&[]),
+                ..Default::default()
+            },
+            loc,
+        ))
+    }
+
     pub fn parse_prefix(
         &mut self,
         level: Level,
@@ -1852,6 +2550,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             T::TAt => Self::pfx_t_at(p),
             T::TNew => Self::pfx_t_new(p, flags),
             T::TSuper => Self::pfx_t_super(p, level),
+            // Parabun extension: throw in expression position.
+            T::TThrow => Self::pfx_t_throw_expr(p),
             _ => {
                 // PERF(port): @branchHint(.cold)
                 p.lexer.unexpected()?;

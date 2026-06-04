@@ -1456,7 +1456,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let ok = p.new_expr(E::EString::init(b"Ok"), loc);
             *left = p.new_expr(
                 E::Binary {
-                    op: OpCode::BinStrictEq,
+                    op: if negate {
+                        OpCode::BinStrictNe
+                    } else {
+                        OpCode::BinStrictEq
+                    },
                     left: tag_dot,
                     right: ok,
                 },
@@ -1507,20 +1511,256 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(())
     }
 
-    fn build_reactive_effect(
+    // ─── LYK-827: expression-context `_` lambda shorthand ───────────────
+    // `arr.filter(_ > 0)` → `arr.filter((__pu) => __pu > 0)`. Applied per
+    // call-arg in `parse_call_args` after the arg is parsed: an arg that
+    // contains a free `_` (not nested under an arrow / function literal) and
+    // isn't itself bare `_` (that's the pipeline-placeholder slot, handled by
+    // the `|>` suffix) becomes the body of a synthetic single-arg arrow whose
+    // param is `__pu`. Ported from parse_suffix.zig.
+
+    fn is_bare_underscore(p: &Self, e: &Expr) -> bool {
+        matches!(&e.data, ExprData::EIdentifier(id) if p.load_name_from_ref(id.ref_) == b"_")
+    }
+
+    /// True if `e` reads a `_` identifier somewhere not nested under an arrow /
+    /// function literal. Conservative: unsupported shapes return false.
+    fn contains_free_underscore(p: &Self, e: &Expr) -> bool {
+        match &e.data {
+            ExprData::EIdentifier(id) => p.load_name_from_ref(id.ref_) == b"_",
+            ExprData::EBinary(b) => {
+                Self::contains_free_underscore(p, &b.left)
+                    || Self::contains_free_underscore(p, &b.right)
+            }
+            ExprData::EUnary(u) => Self::contains_free_underscore(p, &u.value),
+            ExprData::EDot(d) => Self::contains_free_underscore(p, &d.target),
+            ExprData::EIndex(ix) => {
+                Self::contains_free_underscore(p, &ix.target)
+                    || Self::contains_free_underscore(p, &ix.index)
+            }
+            ExprData::ECall(c) => {
+                Self::contains_free_underscore(p, &c.target)
+                    || c.args.iter().any(|a| Self::contains_free_underscore(p, a))
+            }
+            ExprData::ENew(n) => {
+                Self::contains_free_underscore(p, &n.target)
+                    || n.args.iter().any(|a| Self::contains_free_underscore(p, a))
+            }
+            ExprData::EIf(f) => {
+                Self::contains_free_underscore(p, &f.test_)
+                    || Self::contains_free_underscore(p, &f.yes)
+                    || Self::contains_free_underscore(p, &f.no)
+            }
+            ExprData::ESpread(s) => Self::contains_free_underscore(p, &s.value),
+            ExprData::EAwait(a) => Self::contains_free_underscore(p, &a.value),
+            ExprData::EYield(y) => y.value.is_some_and(|v| Self::contains_free_underscore(p, &v)),
+            // Arrow / function literals introduce a new scope — stop.
+            _ => false,
+        }
+    }
+
+    /// Substitute every free `_` with a reference to `repl`. Mirrors
+    /// `contains_free_underscore`'s scope rule. Returns `None` on an
+    /// unsupported shape so the caller bails rather than emit a broken AST.
+    fn substitute_free_underscore(p: &mut Self, e: Expr, repl: bun_ast::base::Ref) -> Option<Expr> {
+        let loc = e.loc;
+        Some(match e.data {
+            ExprData::EIdentifier(id) => {
+                if p.load_name_from_ref(id.ref_) == b"_" {
+                    p.new_expr(E::Identifier::init(repl), loc)
+                } else {
+                    e
+                }
+            }
+            ExprData::EBinary(b) => {
+                let left = Self::substitute_free_underscore(p, b.left, repl)?;
+                let right = Self::substitute_free_underscore(p, b.right, repl)?;
+                p.new_expr(E::Binary { op: b.op, left, right }, loc)
+            }
+            ExprData::EUnary(u) => {
+                let value = Self::substitute_free_underscore(p, u.value, repl)?;
+                p.new_expr(E::Unary { op: u.op, value, flags: u.flags }, loc)
+            }
+            ExprData::EDot(d) => {
+                let target = Self::substitute_free_underscore(p, d.target, repl)?;
+                p.new_expr(
+                    E::Dot {
+                        target,
+                        name: d.name,
+                        name_loc: d.name_loc,
+                        optional_chain: d.optional_chain,
+                        ..Default::default()
+                    },
+                    loc,
+                )
+            }
+            ExprData::EIndex(ix) => {
+                let target = Self::substitute_free_underscore(p, ix.target, repl)?;
+                let index = Self::substitute_free_underscore(p, ix.index, repl)?;
+                p.new_expr(
+                    E::Index {
+                        target,
+                        index,
+                        optional_chain: ix.optional_chain,
+                    },
+                    loc,
+                )
+            }
+            ExprData::ECall(c) => {
+                let target = Self::substitute_free_underscore(p, c.target, repl)?;
+                let mut new_args: std::vec::Vec<Expr> = std::vec::Vec::with_capacity(c.args.len());
+                for a in c.args.slice() {
+                    new_args.push(Self::substitute_free_underscore(p, *a, repl)?);
+                }
+                p.new_expr(
+                    E::Call {
+                        target,
+                        args: ExprNodeList::from_arena_slice(&new_args),
+                        close_paren_loc: c.close_paren_loc,
+                        optional_chain: c.optional_chain,
+                        ..Default::default()
+                    },
+                    loc,
+                )
+            }
+            ExprData::ENew(n) => {
+                let target = Self::substitute_free_underscore(p, n.target, repl)?;
+                let mut new_args: std::vec::Vec<Expr> = std::vec::Vec::with_capacity(n.args.len());
+                for a in n.args.slice() {
+                    new_args.push(Self::substitute_free_underscore(p, *a, repl)?);
+                }
+                p.new_expr(
+                    E::New {
+                        target,
+                        args: ExprNodeList::from_arena_slice(&new_args),
+                        close_parens_loc: n.close_parens_loc,
+                        ..Default::default()
+                    },
+                    loc,
+                )
+            }
+            ExprData::EIf(f) => {
+                let test_ = Self::substitute_free_underscore(p, f.test_, repl)?;
+                let yes = Self::substitute_free_underscore(p, f.yes, repl)?;
+                let no = Self::substitute_free_underscore(p, f.no, repl)?;
+                p.new_expr(E::If { test_, yes, no }, loc)
+            }
+            ExprData::ESpread(s) => {
+                let value = Self::substitute_free_underscore(p, s.value, repl)?;
+                p.new_expr(E::Spread { value }, loc)
+            }
+            ExprData::EAwait(a) => {
+                let value = Self::substitute_free_underscore(p, a.value, repl)?;
+                p.new_expr(E::Await { value }, loc)
+            }
+            ExprData::EYield(y) => {
+                let value = match y.value {
+                    Some(v) => Some(Self::substitute_free_underscore(p, v, repl)?),
+                    None => None,
+                };
+                p.new_expr(E::Yield { value, is_star: y.is_star }, loc)
+            }
+            // Arrow / function bodies aren't ours; leaves have no `_`.
+            ExprData::EArrow(_)
+            | ExprData::EFunction(_)
+            | ExprData::ENumber(_)
+            | ExprData::EString(_)
+            | ExprData::EBoolean(_)
+            | ExprData::ENull(_)
+            | ExprData::EUndefined(_)
+            | ExprData::EMissing(_)
+            | ExprData::EBigInt(_)
+            | ExprData::ERegExp(_)
+            | ExprData::EThis(_)
+            | ExprData::ESuper(_) => e,
+            // Anything else: bail.
+            _ => return None,
+        })
+    }
+
+    /// Wrap an arg expression containing a free `_` in `(__pu) => <expr>`.
+    /// Returns `None` if the wrap can't be built (unsupported shape / scope
+    /// conflict), so the caller keeps the original arg.
+    fn try_wrap_underscore_lambda(p: &mut Self, body: Expr, arrow_loc_in: bun_ast::Loc) -> Option<Expr> {
+        // Guarantee strictly-increasing scope locations. If the caller's loc is
+        // ≥ body.loc, step back one byte (matches the leading-dot arg trick).
+        let arrow_loc = if arrow_loc_in.start < body.loc.start {
+            arrow_loc_in
+        } else if body.loc.start > 0 {
+            bun_ast::Loc {
+                start: body.loc.start - 1,
+            }
+        } else {
+            arrow_loc_in
+        };
+
+        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, arrow_loc)
+            .ok()?;
+        if p
+            .push_scope_for_parse_pass(scope::Kind::FunctionBody, body.loc)
+            .is_err()
+        {
+            p.pop_scope();
+            return None;
+        }
+
+        let param_ref = match p.declare_symbol(bun_ast::symbol::Kind::Constant, body.loc, b"__pu") {
+            Ok(r) => r,
+            Err(_) => {
+                p.pop_scope();
+                p.pop_scope();
+                return None;
+            }
+        };
+
+        let subst = Self::substitute_free_underscore(p, body, param_ref);
+
+        p.pop_scope();
+        p.pop_scope();
+
+        let subst_body = subst?;
+        let ret = p.s(S::Return { value: Some(subst_body) }, body.loc);
+        let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
+        let binding = p.b(bun_ast::b::Identifier { r#ref: param_ref }, body.loc);
+        let arg = G::Arg {
+            binding,
+            ..Default::default()
+        };
+        let args: &'a mut [G::Arg] = core::slice::from_mut(p.arena.alloc(arg));
+        Some(p.new_expr(
+            E::Arrow {
+                args: bun_ast::StoreSlice::new_mut(args),
+                prefer_expr: true,
+                is_async: false,
+                body: G::FnBody {
+                    loc: body.loc,
+                    stmts: bun_ast::StoreSlice::new_mut(stmts),
+                },
+                ..Default::default()
+            },
+            arrow_loc,
+        ))
+    }
+
+    /// Wrap `arg` in a `_`-lambda when it contains a free `_` and isn't itself
+    /// bare `_`. Returns the original arg when there's nothing to do.
+    pub(crate) fn maybe_wrap_underscore_lambda(p: &mut Self, arg: Expr, arrow_loc: bun_ast::Loc) -> Expr {
+        if Self::is_bare_underscore(p, &arg) {
+            return arg;
+        }
+        if !Self::contains_free_underscore(p, &arg) {
+            return arg;
+        }
+        Self::try_wrap_underscore_lambda(p, arg, arrow_loc).unwrap_or(arg)
+    }
+
+    fn build_reactive_effect_from_stmt(
         p: &mut Self,
         op_loc: bun_ast::Loc,
         body_loc: bun_ast::Loc,
-        body_value: Expr,
+        stmt: Stmt,
         outer_loc: bun_ast::Loc,
     ) -> Result<Expr, Error> {
-        let stmt = p.s(
-            S::SExpr {
-                value: body_value,
-                ..Default::default()
-            },
-            body_loc,
-        );
         let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[stmt]);
 
         // The FunctionArgs@op_loc / FunctionBody@body_loc scopes are pushed and
@@ -1588,6 +1828,20 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let rhs = p.parse_expr(Level::Assign)?;
+        // The RHS must be an assignable target (identifier / member / index).
+        if !matches!(
+            rhs.data,
+            ExprData::EIdentifier(_) | ExprData::EDot(_) | ExprData::EIndex(_)
+        ) {
+            p.pop_scope();
+            p.pop_scope();
+            p.log().add_error(
+                Some(p.source),
+                op_loc,
+                b"`~>` requires an assignable target on the right" as &[u8],
+            );
+            return Err(err!("SyntaxError"));
+        }
         let lhs = *left;
         let assign = p.new_expr(
             E::Binary {
@@ -1597,9 +1851,43 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             body_loc,
         );
+        // Optional `when COND` guard (LYK-767): wrap the assignment in
+        // `if (COND) { … }` so it only fires when the guard holds.
+        let when_cond: Option<Expr> = if p.lexer.is_contextual_keyword(b"when") {
+            p.lexer.next()?;
+            Some(p.parse_expr(Level::Assign)?)
+        } else {
+            None
+        };
         p.pop_scope();
         p.pop_scope();
-        *left = Self::build_reactive_effect(p, op_loc, body_loc, assign, loc)?;
+        let body_stmt = match when_cond {
+            Some(cond) => {
+                let assign_stmt = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                p.s(
+                    S::If {
+                        test_: cond,
+                        yes: assign_stmt,
+                        no: None,
+                    },
+                    body_loc,
+                )
+            }
+            None => p.s(
+                S::SExpr {
+                    value: assign,
+                    ..Default::default()
+                },
+                body_loc,
+            ),
+        };
+        *left = Self::build_reactive_effect_from_stmt(p, op_loc, body_loc, body_stmt, loc)?;
         Ok(Continuation::Next)
     }
 
@@ -1618,6 +1906,21 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let rhs = p.parse_expr(Level::Assign)?;
+        // The RHS must be a callable target (identifier / member / index) — not
+        // a bare call, literal, or arrow.
+        if !matches!(
+            rhs.data,
+            ExprData::EIdentifier(_) | ExprData::EDot(_) | ExprData::EIndex(_)
+        ) {
+            p.pop_scope();
+            p.pop_scope();
+            p.log().add_error(
+                Some(p.source),
+                op_loc,
+                b"`->` requires a callable target on the right" as &[u8],
+            );
+            return Err(err!("SyntaxError"));
+        }
         let lhs = *left;
         let call = p.new_expr(
             E::Call {
@@ -1627,9 +1930,42 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             body_loc,
         );
+        // Optional `when COND` guard: wrap the call in `if (COND) { … }`.
+        let when_cond: Option<Expr> = if p.lexer.is_contextual_keyword(b"when") {
+            p.lexer.next()?;
+            Some(p.parse_expr(Level::Assign)?)
+        } else {
+            None
+        };
         p.pop_scope();
         p.pop_scope();
-        *left = Self::build_reactive_effect(p, op_loc, body_loc, call, loc)?;
+        let body_stmt = match when_cond {
+            Some(cond) => {
+                let call_stmt = p.s(
+                    S::SExpr {
+                        value: call,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                p.s(
+                    S::If {
+                        test_: cond,
+                        yes: call_stmt,
+                        no: None,
+                    },
+                    body_loc,
+                )
+            }
+            None => p.s(
+                S::SExpr {
+                    value: call,
+                    ..Default::default()
+                },
+                body_loc,
+            ),
+        };
+        *left = Self::build_reactive_effect_from_stmt(p, op_loc, body_loc, body_stmt, loc)?;
         Ok(Continuation::Next)
     }
 

@@ -203,6 +203,27 @@ pub enum HardcodedModule {
     ParabunVideo,
     #[strum(serialize = "parabun:vision")]
     ParabunVision,
+    // Parabun para-lib JS builtins (@lyku/para-*). Pure-JS modules bundled
+    // from src/js/bun/<name>.ts; resolved to the InternalModuleRegistry by the
+    // loader. Kept in sync with the Zig HardcodedModule enum.
+    #[strum(serialize = "@lyku/para-arena")]
+    ParaArena,
+    #[strum(serialize = "@lyku/para-arrow")]
+    ParaArrow,
+    #[strum(serialize = "@lyku/para-lifecycle")]
+    ParaLifecycle,
+    #[strum(serialize = "@lyku/para-mcp")]
+    ParaMcp,
+    #[strum(serialize = "@lyku/para-parallel")]
+    ParaParallel,
+    #[strum(serialize = "@lyku/para-pipeline")]
+    ParaPipeline,
+    #[strum(serialize = "@lyku/para-rtp")]
+    ParaRtp,
+    #[strum(serialize = "@lyku/para-signals")]
+    ParaSignals,
+    #[strum(serialize = "@lyku/para-simd")]
+    ParaSimd,
 }
 
 impl HardcodedModule {
@@ -236,6 +257,16 @@ impl HardcodedModule {
         b"parabun:spi" => HardcodedModule::ParabunSpi,
         b"parabun:video" => HardcodedModule::ParabunVideo,
         b"parabun:vision" => HardcodedModule::ParabunVision,
+        // Parabun para-lib JS builtins (@lyku/para-*)
+        b"@lyku/para-arena" => HardcodedModule::ParaArena,
+        b"@lyku/para-arrow" => HardcodedModule::ParaArrow,
+        b"@lyku/para-lifecycle" => HardcodedModule::ParaLifecycle,
+        b"@lyku/para-mcp" => HardcodedModule::ParaMcp,
+        b"@lyku/para-parallel" => HardcodedModule::ParaParallel,
+        b"@lyku/para-pipeline" => HardcodedModule::ParaPipeline,
+        b"@lyku/para-rtp" => HardcodedModule::ParaRtp,
+        b"@lyku/para-signals" => HardcodedModule::ParaSignals,
+        b"@lyku/para-simd" => HardcodedModule::ParaSimd,
         // Node.js
         b"node:assert" => HardcodedModule::NodeAssert,
         b"node:assert/strict" => HardcodedModule::NodeAssertStrict,
@@ -743,6 +774,99 @@ const BUN_EXTRA_ALIAS_KVS: &[AliasKv] = &[
     entry!("parabun:spi"),
     entry!("parabun:video"),
     entry!("parabun:vision"),
+    // Para libraries — canonical @lyku/para-* JS builtins (self-resolving).
+    entry!("@lyku/para-arena"),
+    entry!("@lyku/para-arrow"),
+    entry!("@lyku/para-lifecycle"),
+    entry!("@lyku/para-mcp"),
+    entry!("@lyku/para-parallel"),
+    entry!("@lyku/para-pipeline"),
+    entry!("@lyku/para-rtp"),
+    entry!("@lyku/para-signals"),
+    entry!("@lyku/para-simd"),
+    // LYK-805 deprecation aliases — `para:*` import strings route to the
+    // canonical @lyku/para-* builtin during the deprecation window.
+    (
+        b"para:arena",
+        Alias {
+            path: zstr!("@lyku/para-arena"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:arrow",
+        Alias {
+            path: zstr!("@lyku/para-arrow"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:lifecycle",
+        Alias {
+            path: zstr!("@lyku/para-lifecycle"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:mcp",
+        Alias {
+            path: zstr!("@lyku/para-mcp"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:parallel",
+        Alias {
+            path: zstr!("@lyku/para-parallel"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:pipeline",
+        Alias {
+            path: zstr!("@lyku/para-pipeline"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:rtp",
+        Alias {
+            path: zstr!("@lyku/para-rtp"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:signals",
+        Alias {
+            path: zstr!("@lyku/para-signals"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
+    (
+        b"para:simd",
+        Alias {
+            path: zstr!("@lyku/para-simd"),
+            tag: import_record::Tag::Builtin,
+            node_builtin: false,
+            node_only_prefix: false,
+        },
+    ),
     // LYK-804: legacy aliases for the native parabun:csv builtin.
     (
         b"@lyku/para-csv",

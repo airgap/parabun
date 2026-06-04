@@ -1330,6 +1330,33 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         )?;
 
         self.lexer.expect(T::TEquals)?;
+        // Parabun (LYK-814): `type Name = { … }` object aliases capture their
+        // shape for `::` inline validation, same as interfaces.
+        if opts.is_module_scope && self.lexer.token == T::TOpenBrace {
+            let snap = self.lexer.snapshot();
+            if let Some(fields) = self.capture_ts_object_fields()? {
+                // Only a *single* object literal is capturable — if a union /
+                // intersection / other continuation follows the `}`, this was
+                // just the first member; restore and skip the whole type.
+                let ends_cleanly = self.lexer.has_newline_before
+                    || matches!(
+                        self.lexer.token,
+                        T::TSemicolon | T::TCloseBrace | T::TEndOfFile
+                    );
+                if ends_cleanly {
+                    self.para_ts_type_registry.insert(
+                        name,
+                        crate::p::ParaTsTypeShape {
+                            fields,
+                            unsupported: false,
+                        },
+                    );
+                    self.lexer.expect_or_insert_semicolon()?;
+                    return Ok(());
+                }
+            }
+            self.lexer.restore(&snap);
+        }
         self.skip_type_script_type(Level::Lowest)?;
         self.lexer.expect_or_insert_semicolon()?;
         Ok(())
@@ -1351,7 +1378,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 | TypeParameterFlag::ALLOW_EMPTY_TYPE_PARAMETERS,
         )?;
 
+        let mut had_heritage = false;
         if self.lexer.token == T::TExtends {
+            had_heritage = true;
             self.lexer.next()?;
 
             loop {
@@ -1364,6 +1393,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
 
         if self.lexer.is_contextual_keyword(b"implements") {
+            had_heritage = true;
             self.lexer.next()?;
             loop {
                 self.skip_type_script_type(Level::Lowest)?;
@@ -1374,8 +1404,87 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
         }
 
+        // Parabun (LYK-814): capture the interface body shape so a
+        // `(arg:: ThisIface)` marker can emit inline typeof checks. `extends`/
+        // `implements` interfaces aren't capturable — they fall back to
+        // `Type.parse` (the registry simply has no entry).
+        if !had_heritage && opts.is_module_scope {
+            let snap = self.lexer.snapshot();
+            if let Some(fields) = self.capture_ts_object_fields()? {
+                self.para_ts_type_registry.insert(
+                    name,
+                    crate::p::ParaTsTypeShape {
+                        fields,
+                        unsupported: false,
+                    },
+                );
+                return Ok(());
+            }
+            self.lexer.restore(&snap);
+        }
+
         self.skip_type_script_object_type()?;
         Ok(())
+    }
+
+    /// Capture a `{ field: type, … }` TS object body into a list of fields, or
+    /// `None` if the shape is unsupported (index signatures, method sigs,
+    /// generics, computed/modifier keys). On `None` the lexer is left mid-body;
+    /// the caller restores and skips normally.
+    fn capture_ts_object_fields(
+        &mut self,
+    ) -> Result<Option<std::vec::Vec<crate::p::ParaTsTypeField<'a>>>, Error> {
+        self.lexer.expect(T::TOpenBrace)?;
+        let mut fields: std::vec::Vec<crate::p::ParaTsTypeField<'a>> = std::vec::Vec::new();
+        while self.lexer.token != T::TCloseBrace {
+            if matches!(
+                self.lexer.token,
+                T::TPlus | T::TMinus | T::TOpenBracket
+            ) {
+                return Ok(None);
+            }
+            if self.lexer.token != T::TIdentifier && self.lexer.token != T::TStringLiteral {
+                return Ok(None);
+            }
+            let field_name = self.lexer.identifier;
+            self.lexer.next()?;
+            let optional = self.lexer.token == T::TQuestion;
+            if optional {
+                self.lexer.next()?;
+            }
+            if matches!(self.lexer.token, T::TOpenParen | T::TLessThan) {
+                // Method signature / generic — unsupported.
+                return Ok(None);
+            }
+            if self.lexer.token != T::TColon {
+                return Ok(None);
+            }
+            self.lexer.next()?;
+            let field_type: &'a [u8] = if self.lexer.token == T::TIdentifier {
+                self.lexer.identifier
+            } else {
+                b""
+            };
+            self.skip_type_script_type(Level::Lowest)?;
+            fields.push(crate::p::ParaTsTypeField {
+                name: field_name,
+                type_name: field_type,
+                optional,
+            });
+            match self.lexer.token {
+                T::TCloseBrace => {}
+                T::TComma | T::TSemicolon => {
+                    self.lexer.next()?;
+                }
+                _ => {
+                    if !self.lexer.has_newline_before {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        self.lexer.expect(T::TCloseBrace)?;
+        Ok(Some(fields))
     }
 
     pub fn skip_type_script_type_arguments<const IS_INSIDE_JSX_ELEMENT: bool>(

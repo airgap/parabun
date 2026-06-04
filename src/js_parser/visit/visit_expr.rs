@@ -350,6 +350,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         if !p.signal_bound_refs.is_empty()
             && in_.assign_target == js_ast::AssignTarget::None
             && !is_delete_target
+            && !p.signal_suppress_get_rewrite
             && matches!(e.data.tag(), Tag::EIdentifier)
         {
             let id_ref = e.data.e_identifier().unwrap().ref_;
@@ -1556,6 +1557,24 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
         }
 
+        // Parabun: a signal-bound identifier read is normally rewritten to
+        // `NAME.get()`. When the read is itself the target of an allowlisted
+        // signal method (`.get`/`.set`/`.peek`/`.subscribe`/`.update`) the user
+        // already spelled the cell access, so suppress the auto-`.get()` for
+        // that one target (otherwise `x.get()` becomes `x.get().get()`). The
+        // target's ref isn't symbol-resolved until it's visited, so flag it for
+        // the e_identifier rewrite to honour rather than checking the map here.
+        let suppress_get = !p.signal_bound_refs.is_empty()
+            && matches!(
+                e_.name.slice(),
+                b"get" | b"set" | b"peek" | b"subscribe" | b"update" | b"stop"
+            )
+            && matches!(e_.target.data, Data::EIdentifier(_));
+        let prev_suppress = p.signal_suppress_get_rewrite;
+        if suppress_get {
+            p.signal_suppress_get_rewrite = true;
+        }
+
         p.visit_expr_in_out(
             &mut e_.target,
             ExprIn {
@@ -1564,6 +1583,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 ..Default::default()
             },
         );
+
+        if suppress_get {
+            p.signal_suppress_get_rewrite = prev_suppress;
+        }
 
         // 'require.resolve' -> .e_require_resolve_call_target
         if matches!(e_.target.data, Data::ERequireCallTarget) && e_.name == b"resolve" {

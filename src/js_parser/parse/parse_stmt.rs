@@ -332,12 +332,61 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // `x.set(v)`). An initializer that reads another signal is promoted to
     // `derived(() => RHS)` (auto-derive). The `derived`/`effect`/`when`
     // keywords share these builders.
+    /// `// @parabun-strict-signals` pragma — scanned once per source, cached.
+    fn strict_signals(p: &mut Self) -> bool {
+        if let Some(v) = p.strict_signals_pragma {
+            return v;
+        }
+        const NEEDLE: &[u8] = b"@parabun-strict-signals";
+        let found = p
+            .source
+            .contents
+            .windows(NEEDLE.len())
+            .any(|w| w == NEEDLE);
+        p.strict_signals_pragma = Some(found);
+        found
+    }
+
     fn t_signal(p: &mut Self, opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
         let mut decls = p.parse_and_declare_decls(js_ast::symbol::Kind::Constant, opts)?;
-        for decl in decls.slice_mut() {
+
+        // `signal X = EXPR every MS` → `signalEvery(() => EXPR, MS)`. Applies to
+        // the final declarator; `every` is only valid for a single decl.
+        let every_ms: Option<Expr> = if p.lexer.is_contextual_keyword(b"every") {
+            p.lexer.next()?;
+            Some(p.parse_expr(Level::Comma)?)
+        } else {
+            None
+        };
+
+        let strict = Self::strict_signals(p);
+        let last = decls.len().saturating_sub(1);
+        for (i, decl) in decls.slice_mut().iter_mut().enumerate() {
             if let Some(value) = decl.value {
                 let vloc = value.loc;
-                let derived = Self::expr_uses_signal(p, &value);
+                // `every` wraps the RHS in an interval-driven cell.
+                if i == last {
+                    if let Some(ms) = every_ms {
+                        let body_loc = bun_ast::Loc { start: vloc.start + 1 };
+                        p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, vloc)?;
+                        p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
+                        let thunk = Self::zero_arg_thunk_expr(p, vloc, body_loc, value, false);
+                        p.pop_scope();
+                        p.pop_scope();
+                        decl.value = Some(Self::para_signals_call(
+                            p,
+                            b"signalEvery",
+                            ExprNodeList::from_slice(&[thunk, ms]),
+                            vloc,
+                        )?);
+                        if let js_ast::b::B::BIdentifier(ident) = decl.binding.data {
+                            p.signal_bound_refs.insert(ident.r#ref, ());
+                            p.signal_bound_names.insert(p.load_name_from_ref(ident.r#ref));
+                        }
+                        continue;
+                    }
+                }
+                let derived = !strict && Self::expr_uses_signal(p, &value);
                 decl.value = Some(if derived {
                     // Post-hoc wrap: the RHS was already parsed (no wrapper
                     // scopes), so this is only sound when the RHS introduced no
@@ -383,6 +432,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let name = p.lexer.identifier;
             let binding_ref = p.declare_symbol(symbol::Kind::Constant, name_loc, name)?;
             p.lexer.next()?;
+            // `derived NAME: Type = …` — skip the TS annotation.
+            if Self::IS_TYPESCRIPT_ENABLED && p.lexer.token == T::TColon {
+                p.lexer.expect(T::TColon)?;
+                p.skip_type_script_type(Level::Lowest)?;
+            }
             p.lexer.expect(T::TEquals)?;
             let body_loc = bun_ast::Loc { start: name_loc.start + 1 };
             p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, name_loc)?;
@@ -466,24 +520,26 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         if negate {
             p.lexer.next()?;
         }
-        // Condition thunk: () => COND.
+        // Condition thunk: () => COND. Keep the raw (pre-negation) predicate so
+        // a paired `when stop { … }` arm can clone + flip it.
         let cond_body_loc = bun_ast::Loc { start: loc.start + 1 };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, cond_body_loc)?;
-        let mut cond = p.parse_expr(Level::Lowest)?;
+        let raw_cond = p.parse_expr(Level::Lowest)?;
         p.pop_scope();
         p.pop_scope();
-        if negate {
-            let cloc = cond.loc;
-            cond = p.new_expr(
+        let cond = if negate {
+            p.new_expr(
                 E::Unary {
                     op: OpCode::UnNot,
-                    value: cond,
+                    value: raw_cond,
                     flags: bun_ast::e::UnaryFlags::default(),
                 },
-                cloc,
-            );
-        }
+                raw_cond.loc,
+            )
+        } else {
+            raw_cond
+        };
         let cond_thunk = Self::zero_arg_thunk_expr(p, loc, cond_body_loc, cond, false);
 
         // Body thunk: () => { … }.
@@ -498,16 +554,98 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.pop_scope();
         let body_thunk = Self::zero_arg_thunk_block(p, brace_loc, body_fnbody_loc, stmts);
 
-        let call = Self::para_signals_call(
+        let first_call = Self::para_signals_call(
             p,
             b"when",
             ExprNodeList::from_slice(&[cond_thunk, body_thunk]),
             loc,
         )?;
+
+        // Parabun: paired-edge form — `when X { … } when stop { … }`. The
+        // bare `when stop { … }` arm shares the inverse of X. Adjacency only:
+        // any intervening statement breaks the pairing.
+        if p.lexer.token == T::TIdentifier && p.lexer.raw() == b"when" {
+            let saved = p.lexer.snapshot();
+            let second_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TIdentifier && p.lexer.raw() == b"stop" {
+                p.lexer.next()?;
+                if p.lexer.token == T::TOpenBrace {
+                    // Second predicate = inverse of this arm's effective one:
+                    //   first `when X`      → second `!X`
+                    //   first `when not X`  → second `X`
+                    let cloned_raw = raw_cond.deep_clone(p.arena).expect("oom");
+                    let second_pred = if !negate {
+                        p.new_expr(
+                            E::Unary {
+                                op: OpCode::UnNot,
+                                value: cloned_raw,
+                                flags: bun_ast::e::UnaryFlags::default(),
+                            },
+                            second_loc,
+                        )
+                    } else {
+                        cloned_raw
+                    };
+                    let second_cond_body_loc = bun_ast::Loc {
+                        start: second_loc.start + 1,
+                    };
+                    p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, second_loc)?;
+                    p.push_scope_for_parse_pass(scope::Kind::FunctionBody, second_cond_body_loc)?;
+                    p.pop_scope();
+                    p.pop_scope();
+                    let second_cond_thunk =
+                        Self::zero_arg_thunk_expr(p, second_loc, second_cond_body_loc, second_pred, false);
+
+                    let second_brace_loc = p.lexer.loc();
+                    let second_body_fnbody_loc = bun_ast::Loc {
+                        start: second_brace_loc.start + 1,
+                    };
+                    p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, second_brace_loc)?;
+                    p.push_scope_for_parse_pass(scope::Kind::FunctionBody, second_body_fnbody_loc)?;
+                    let second_stmts = Self::parse_thunk_block_stmts(p)?;
+                    p.pop_scope();
+                    p.pop_scope();
+                    let second_body_thunk = Self::zero_arg_thunk_block(
+                        p,
+                        second_brace_loc,
+                        second_body_fnbody_loc,
+                        second_stmts,
+                    );
+
+                    let second_call = Self::para_signals_call(
+                        p,
+                        b"when",
+                        ExprNodeList::from_slice(&[second_cond_thunk, second_body_thunk]),
+                        second_loc,
+                    )?;
+                    // `first, second` — the printer splits a statement-level
+                    // comma back into two expression statements.
+                    let combined = p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinComma,
+                            left: first_call,
+                            right: second_call,
+                        },
+                        loc,
+                    );
+                    p.lexer.expect_or_insert_semicolon()?;
+                    return Ok(p.s(
+                        S::SExpr {
+                            value: combined,
+                            ..Default::default()
+                        },
+                        loc,
+                    ));
+                }
+            }
+            p.lexer.restore(&saved);
+        }
+
         p.lexer.expect_or_insert_semicolon()?;
         Ok(p.s(
             S::SExpr {
-                value: call,
+                value: first_call,
                 ..Default::default()
             },
             loc,
@@ -571,11 +709,21 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     fn t_defer(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
         let is_async = p.lexer.is_contextual_keyword(b"await");
         if is_async {
+            // `defer await` is only valid inside an async function.
+            if p.fn_or_arrow_data_parse.allow_await != AwaitOrYield::AllowExpr {
+                p.log().add_error(
+                    Some(p.source),
+                    loc,
+                    b"`defer await` is only allowed inside an async function" as &[u8],
+                );
+                return Err(err!("SyntaxError"));
+            }
             p.lexer.next()?;
         }
-        let gensym: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__paraDefer{}", loc.start)
-            .into_bump_str()
-            .as_bytes();
+        let gensym: &'a [u8] =
+            bun_alloc::arena_format!(in p.arena, "__parabun_defer_{}$", loc.start)
+                .into_bump_str()
+                .as_bytes();
         let binding_ref = p.declare_symbol(symbol::Kind::Constant, loc, gensym)?;
 
         let body_loc = bun_ast::Loc { start: loc.start + 1 };
@@ -586,22 +734,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.pop_scope();
         let thunk = Self::zero_arg_thunk_expr(p, loc, body_loc, expr, is_async);
 
+        // The disposer helper is imported from bun:wrap (matches the mirror and
+        // resolves at runtime) rather than referenced as a bare global.
         let helper_name: &[u8] = if is_async {
             b"__parabunAsyncDefer0"
         } else {
             b"__parabunDefer0"
         };
-        let helper_ref = p.store_name_in_ref(helper_name)?;
-        let helper_ident = p.new_expr(E::Identifier::init(helper_ref), loc);
-        let call = p.new_expr(
-            E::Call {
-                target: helper_ident,
-                args: ExprNodeList::init_one(thunk),
-                close_paren_loc: p.lexer.loc(),
-                ..Default::default()
-            },
-            loc,
-        );
+        let call = p.call_runtime(loc, helper_name, ExprNodeList::init_one(thunk));
 
         let binding = p.b(B::Identifier { r#ref: binding_ref }, loc);
         let decl = G::Decl {
@@ -1213,6 +1353,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 S::Block {
                     stmts: bun_ast::StoreSlice::from_bump(stmts),
                     close_brace_loc,
+                    is_transparent: false,
                 },
                 loc,
             ))
@@ -1283,6 +1424,31 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
             T::TIdentifier => {
                 if p.lexer.is_contextual_keyword(b"let") {
+                    opts.is_export = true;
+                    return p.parse_stmt(opts);
+                }
+
+                // Parabun: `export schema NAME …` → exported schema decl.
+                if p.lexer.is_contextual_keyword(b"schema") {
+                    let kw_loc = p.lexer.loc();
+                    p.lexer.next()?;
+                    if !p.lexer.has_newline_before && p.lexer.token == T::TIdentifier {
+                        return Self::parse_model_stmt(p, kw_loc, true);
+                    }
+                    // `export schema` not followed by a name — fall through.
+                    p.lexer.unexpected()?;
+                    return Err(err!("SyntaxError"));
+                }
+
+                // Parabun: `export memo NAME(...) { … }` → exported const.
+                if p.lexer.is_contextual_keyword(b"memo") {
+                    opts.is_export = true;
+                    return p.parse_stmt(opts);
+                }
+
+                // Parabun: `export pure function …` / `export pure async
+                // function …` → exported function declaration.
+                if p.lexer.is_contextual_keyword(b"pure") {
                     opts.is_export = true;
                     return p.parse_stmt(opts);
                 }
@@ -2112,7 +2278,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.next()?;
             if p.lexer.token == T::TFunction && !p.lexer.has_newline_before {
                 p.lexer.next()?;
-                return p.parse_fn_stmt(pure_loc, opts, None);
+                let stmt = p.parse_fn_stmt(pure_loc, opts, None)?;
+                return p.enforce_purity_on_stmt(stmt);
             }
             // `pure async function NAME(...) { ... }` → `async function …`.
             if p.lexer.token == T::TIdentifier
@@ -2123,7 +2290,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 p.lexer.next()?;
                 if p.lexer.token == T::TFunction && !p.lexer.has_newline_before {
                     p.lexer.next()?;
-                    return p.parse_fn_stmt(async_range.loc, opts, Some(async_range));
+                    let stmt = p.parse_fn_stmt(async_range.loc, opts, Some(async_range))?;
+                    return p.enforce_purity_on_stmt(stmt);
                 }
             }
             p.lexer.restore(&snapshot);
@@ -2186,8 +2354,30 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
-            let after_memo = p.lexer.snapshot();
             let same_line = !p.lexer.has_newline_before;
+            // Reject the legacy spellings with a migration hint. `memo` is a
+            // standalone declarator — it implies both purity and function-ness.
+            if same_line {
+                if p.lexer.token == T::TFunction
+                    || (p.lexer.token == T::TIdentifier && p.lexer.raw() == b"fun")
+                {
+                    p.log().add_error(
+                        Some(p.source),
+                        kw_loc,
+                        b"`memo` already declares a function - drop the `function` keyword" as &[u8],
+                    );
+                    return Err(err!("SyntaxError"));
+                }
+                if p.lexer.token == T::TIdentifier && p.lexer.raw() == b"pure" {
+                    p.log().add_error(
+                        Some(p.source),
+                        kw_loc,
+                        b"`memo` already implies pure - drop the `pure` keyword" as &[u8],
+                    );
+                    return Err(err!("SyntaxError"));
+                }
+            }
+            let after_memo = p.lexer.snapshot();
             let is_async = p.lexer.token == T::TIdentifier
                 && p.lexer.raw() == b"async"
                 && !p.lexer.has_newline_before;
@@ -2200,7 +2390,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             };
             p.lexer.restore(&after_memo);
             if same_line && looks_like_fn {
-                return p.t_memo(kw_loc, is_async);
+                return p.t_memo(kw_loc, is_async, opts.is_export);
             }
             p.lexer.restore(&snapshot);
         }
@@ -2212,8 +2402,24 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
-            if !p.lexer.has_newline_before && p.lexer.is_contextual_keyword(b"let") {
+            if !p.lexer.has_newline_before
+                && (p.lexer.is_contextual_keyword(b"let") || p.lexer.token == T::TConst)
+            {
                 return Self::t_parallel_let(p, kw_loc);
+            }
+            // `parallel using …` / `para using …`.
+            if !p.lexer.has_newline_before && p.lexer.is_contextual_keyword(b"using") {
+                return Self::parse_parallel_using_stmt(p, kw_loc, opts.is_export, false);
+            }
+            // `parallel await using …` / `para await using …`.
+            if !p.lexer.has_newline_before
+                && p.lexer.token == T::TIdentifier
+                && p.lexer.raw() == b"await"
+            {
+                p.lexer.next()?;
+                if !p.lexer.has_newline_before && p.lexer.is_contextual_keyword(b"using") {
+                    return Self::parse_parallel_using_stmt(p, kw_loc, opts.is_export, true);
+                }
             }
             p.lexer.restore(&snapshot);
         }
@@ -2229,13 +2435,61 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.restore(&snapshot);
         }
 
+        // Parabun: `schema NAME = <expr>` / `schema NAME from <expr>` /
+        // `schema NAME { field: type, … }` — schema-DSL declaration. The
+        // `schema { … }` expression literal (no name) stays in the prefix
+        // parser; this only fires when an identifier name follows.
+        if is_identifier && p.lexer.raw() == b"schema" {
+            let snapshot = p.lexer.snapshot();
+            let kw_loc = p.lexer.loc();
+            p.lexer.next()?;
+            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
+                return Self::parse_model_stmt(p, kw_loc, opts.is_export);
+            }
+            p.lexer.restore(&snapshot);
+        }
+
         // Parabun: `defer EXPR;` / `defer await EXPR;`. `defer(…)` / `defer.x` /
         // `defer = …` keep `defer` as a plain identifier.
         if is_identifier && p.lexer.raw() == b"defer" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
-            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
+            // `defer EXPR` triggers when the next token starts a statement-level
+            // expression (`defer cleanup()`, `defer throw e`, `defer await x`, …);
+            // otherwise `defer` stays a plain identifier.
+            let starts_expr = matches!(
+                p.lexer.token,
+                T::TIdentifier
+                    | T::TOpenParen
+                    | T::TOpenBracket
+                    | T::TOpenBrace
+                    | T::TNew
+                    | T::TFunction
+                    | T::TThrow
+                    | T::TClass
+                    | T::TThis
+                    | T::TNull
+                    | T::TTrue
+                    | T::TFalse
+                    | T::TVoid
+                    | T::TTypeof
+                    | T::TDelete
+                    | T::TPlus
+                    | T::TMinus
+                    | T::TTilde
+                    | T::TExclamation
+                    | T::TPlusPlus
+                    | T::TMinusMinus
+                    | T::TNumericLiteral
+                    | T::TBigIntegerLiteral
+                    | T::TStringLiteral
+                    | T::TNoSubstitutionTemplateLiteral
+                    | T::TTemplateHead
+                    | T::TSuper
+                    | T::TImport
+            );
+            if starts_expr && !p.lexer.has_newline_before {
                 return Self::t_defer(p, opts, kw_loc);
             }
             p.lexer.restore(&snapshot);

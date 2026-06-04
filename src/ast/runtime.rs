@@ -179,10 +179,13 @@ pub struct Imports {
     pub __parabunRange: Option<Ref>,
     pub __parabunRangeInclusive: Option<Ref>,
     pub __paraFromSchema: Option<Ref>,
+    pub __paraDec: Option<Ref>,
+    pub __parabunAsyncDefer0: Option<Ref>,
+    pub __parabunDefer0: Option<Ref>,
 }
 
 impl Imports {
-    pub const ALL: [&'static [u8]; 29] = [
+    pub const ALL: [&'static [u8]; 32] = [
         b"__name",
         b"__require",
         b"__export",
@@ -212,12 +215,15 @@ impl Imports {
         b"__parabunRange",
         b"__parabunRangeInclusive",
         b"__paraFromSchema",
+        b"__paraDec",
+        b"__parabunAsyncDefer0",
+        b"__parabunDefer0",
     ];
 
     /// Zig computed this at comptime via `std.sort.pdq`. Rust stable cannot sort in
     /// `const`; precomputed here and verified by `tests::all_sorted_matches_zig_comptime`.
     #[cfg_attr(not(test), allow(dead_code))]
-    const ALL_SORTED: [&'static [u8]; 29] = [
+    const ALL_SORTED: [&'static [u8]; 32] = [
         b"$$typeof",
         b"__callDispose",
         b"__decorateElement",
@@ -232,7 +238,10 @@ impl Imports {
         b"__legacyMetadataTS",
         b"__merge",
         b"__name",
+        b"__paraDec",
         b"__paraFromSchema",
+        b"__parabunAsyncDefer0",
+        b"__parabunDefer0",
         b"__parabunMemo",
         b"__parabunRange",
         b"__parabunRangeInclusive",
@@ -251,36 +260,39 @@ impl Imports {
 
     /// When generating the list of runtime imports, we sort it for determinism.
     /// This is a lookup table so we don't need to resort the strings each time
-    pub const ALL_SORTED_INDEX: [usize; 29] = [
+    pub const ALL_SORTED_INDEX: [usize; 32] = [
         13, // __name
-        26, // __require
+        29, // __require
         5,  // __export
-        25, // __reExport
+        28, // __reExport
         7,  // __exportValue
         6,  // __exportDefault
         12, // __merge
         9,  // __legacyDecorateClassTS
         10, // __legacyDecorateParamTS
         11, // __legacyMetadataTS
-        24, // __publicField
-        20, // __privateIn
-        19, // __privateGet
-        18, // __privateAdd
-        22, // __privateSet
-        21, // __privateMethod
+        27, // __publicField
+        23, // __privateIn
+        22, // __privateGet
+        21, // __privateAdd
+        25, // __privateSet
+        24, // __privateMethod
         4,  // __decoratorStart
         3,  // __decoratorMetadata
-        27, // __runInitializers
+        30, // __runInitializers
         2,  // __decorateElement
         0,  // $$typeof
-        28, // __using
+        31, // __using
         1,  // __callDispose
         8,  // __jsonParse
-        23, // __promiseAll
-        15, // __parabunMemo
-        16, // __parabunRange
-        17, // __parabunRangeInclusive
-        14, // __paraFromSchema
+        26, // __promiseAll
+        18, // __parabunMemo
+        19, // __parabunRange
+        20, // __parabunRangeInclusive
+        15, // __paraFromSchema
+        14, // __paraDec
+        16, // __parabunAsyncDefer0
+        17, // __parabunDefer0
     ];
 
     pub const NAME: &'static [u8] = b"bun:wrap";
@@ -318,6 +330,9 @@ impl Imports {
             26 => self.__parabunRange,
             27 => self.__parabunRangeInclusive,
             28 => self.__paraFromSchema,
+            29 => self.__paraDec,
+            30 => self.__parabunAsyncDefer0,
+            31 => self.__parabunDefer0,
             _ => None,
         }
     }
@@ -354,6 +369,9 @@ impl Imports {
             26 => Some(&mut self.__parabunRange),
             27 => Some(&mut self.__parabunRangeInclusive),
             28 => Some(&mut self.__paraFromSchema),
+            29 => Some(&mut self.__paraDec),
+            30 => Some(&mut self.__parabunAsyncDefer0),
+            31 => Some(&mut self.__parabunDefer0),
             _ => None,
         }
     }

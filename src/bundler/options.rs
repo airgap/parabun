@@ -696,6 +696,10 @@ const DEFAULT_LOADERS_POSIX: &[(&[u8], Loader)] = &[
     (b".json5", Loader::Json5),
     (b".md", Loader::Md),
     (b".markdown", Loader::Md),
+    (b".pts", Loader::Ts),
+    (b".pjs", Loader::Jsx),
+    (b".ptsx", Loader::Tsx),
+    (b".pjsx", Loader::Jsx),
 ];
 
 #[cfg(all(windows, test))]
@@ -744,6 +748,9 @@ impl DefaultLoaders {
                 b".css" => Some(&Loader::Css),
                 b".yml" => Some(&Loader::Yaml),
                 b".txt" => Some(&Loader::Text),
+                // Parabun: `.pts`/`.pjs` source extensions.
+                b".pts" => Some(&Loader::Ts),
+                b".pjs" => Some(&Loader::Jsx),
                 _ => None,
             },
             5 => match ext {
@@ -754,6 +761,9 @@ impl DefaultLoaders {
                 b".node" => Some(&Loader::Napi),
                 b".text" => Some(&Loader::Text),
                 b".html" => Some(&Loader::Html),
+                // Parabun: `.ptsx`/`.pjsx` source extensions.
+                b".ptsx" => Some(&Loader::Tsx),
+                b".pjsx" => Some(&Loader::Jsx),
                 _ => None,
             },
             6 => match ext {
@@ -1075,6 +1085,8 @@ const DEFAULT_LOADER_EXT: &[&[u8]] = &[
     // https://devblogs.microsoft.com/typescript/announcing-typescript-4-5-beta/#new-file-extensions
     b".ts", b".tsx", b".mts", b".cts", b".toml", b".yaml", b".yml", b".wasm", b".txt", b".text",
     b".jsonc", b".json5",
+    // Parabun source extensions.
+    b".pts", b".pjs", b".ptsx", b".pjsx",
 ];
 
 // Only set it for browsers by default.

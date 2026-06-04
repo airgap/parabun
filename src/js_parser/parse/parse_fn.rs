@@ -300,6 +300,26 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 // "function foo(a: any) {}"
                 if p.lexer.token == T::TColon {
                     p.lexer.next()?;
+                    // Parabun (LYK-814): `::` marks the arg for runtime
+                    // validation against a Para model — `(req:: User)` runs
+                    // `User.parse(req)` (and throws on Err) at fn entry. The
+                    // type after `::` is still skip-typed below as a normal
+                    // annotation.
+                    if !rest_arg && p.lexer.token == T::TColon {
+                        p.lexer.next()?;
+                        if p.lexer.token == T::TIdentifier {
+                            let vtype = p.lexer.identifier;
+                            let vloc = p.lexer.loc();
+                            if vtype.first().is_some_and(|c| c.is_ascii_uppercase())
+                                && !Self::is_js_builtin_type_name(vtype)
+                            {
+                                if let js_ast::b::B::BIdentifier(id) = &arg.data {
+                                    p.para_arg_validations
+                                        .push((id.r#ref, text, vtype, vloc));
+                                }
+                            }
+                        }
+                    }
                     if !rest_arg {
                         if p.options.features.emit_decorator_metadata
                             && opts.allow_ts_decorators
@@ -417,10 +437,348 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             func.flags.insert(Flags::Function::IsForwardDeclaration);
             return Ok(func);
         }
+        // Capture this fn's `::` validations before parsing the body (nested
+        // fn parses reuse the same list).
+        let my_validations = core::mem::take(&mut p.para_arg_validations);
+
         let mut temp_opts = opts;
         func.body = p.parse_fn_body(&mut temp_opts)?;
 
+        // Prepend the validation prelude for any `::`-marked args:
+        //   const __paraCheck_<arg> = <Type>.parse(<arg>);
+        //   if (__paraCheck_<arg>.tag === "Err") throw new Error(__paraCheck_<arg>.error);
+        if !my_validations.is_empty() {
+            let mut prelude: std::vec::Vec<Stmt> = std::vec::Vec::new();
+            for (arg_ref, arg_name, type_name, vloc) in my_validations {
+                // Path 2: the type is a captured TS interface/alias → emit
+                // inline typeof checks instead of `Type.parse(arg)`.
+                let ts_fields = p.para_ts_type_registry.get(type_name).and_then(|s| {
+                    if !s.unsupported && !s.fields.is_empty() {
+                        Some(s.fields.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(fields) = ts_fields {
+                    Self::append_ts_shape_validator(
+                        p, &mut prelude, arg_ref, arg_name, type_name, &fields, vloc,
+                    );
+                    continue;
+                }
+                // Path 1: Para model → Type.parse(arg) + throw on Err.
+                let check_name: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__paraCheck_{}", std::str::from_utf8(arg_name).unwrap_or(""))
+                    .into_bump_str()
+                    .as_bytes();
+                let check_ref = p.declare_symbol(js_ast::symbol::Kind::Hoisted, vloc, check_name)?;
+                let type_ref = p.store_name_in_ref(type_name)?;
+                let type_id = p.new_expr(E::Identifier::init(type_ref), vloc);
+                let parse_dot = p.new_expr(
+                    E::Dot {
+                        target: type_id,
+                        name: E::Str::new(b"parse"),
+                        name_loc: vloc,
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                let arg_id = p.new_expr(E::Identifier::init(arg_ref), vloc);
+                let parse_call = p.new_expr(
+                    E::Call {
+                        target: parse_dot,
+                        args: js_ast::ExprNodeList::init_one(arg_id),
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                let check_binding = p.b(js_ast::b::Identifier { r#ref: check_ref }, vloc);
+                let decl = G::Decl {
+                    binding: check_binding,
+                    value: Some(parse_call),
+                };
+                prelude.push(p.s(
+                    S::Local {
+                        kind: js_ast::s::Kind::KConst,
+                        decls: G::DeclList::from_arena_slice(&[decl]),
+                        ..Default::default()
+                    },
+                    vloc,
+                ));
+
+                let check_id = p.new_expr(E::Identifier::init(check_ref), vloc);
+                let tag_dot = p.new_expr(
+                    E::Dot {
+                        target: check_id,
+                        name: E::Str::new(b"tag"),
+                        name_loc: vloc,
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                let err_str = p.new_expr(E::EString::init(b"Err"), vloc);
+                let tag_test = p.new_expr(
+                    E::Binary {
+                        op: js_ast::OpCode::BinStrictEq,
+                        left: tag_dot,
+                        right: err_str,
+                    },
+                    vloc,
+                );
+                let check_id2 = p.new_expr(E::Identifier::init(check_ref), vloc);
+                let err_access = p.new_expr(
+                    E::Dot {
+                        target: check_id2,
+                        name: E::Str::new(b"error"),
+                        name_loc: vloc,
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                let error_ref = p.store_name_in_ref(b"Error")?;
+                let error_id = p.new_expr(E::Identifier::init(error_ref), vloc);
+                let new_err = p.new_expr(
+                    E::New {
+                        target: error_id,
+                        args: js_ast::ExprNodeList::init_one(err_access),
+                        close_parens_loc: vloc,
+                        ..Default::default()
+                    },
+                    vloc,
+                );
+                let throw_stmt = p.s(S::Throw { value: new_err }, vloc);
+                prelude.push(p.s(
+                    S::If {
+                        test_: tag_test,
+                        yes: throw_stmt,
+                        no: None,
+                    },
+                    vloc,
+                ));
+            }
+            // prelude ++ original body.
+            for s in func.body.stmts.slice() {
+                prelude.push(*s);
+            }
+            let combined: &'a mut [Stmt] = p.arena.alloc_slice_copy(&prelude);
+            func.body.stmts = bun_ast::StoreSlice::new_mut(combined);
+        }
+
         Ok(func)
+    }
+
+    /// Capitalized JS/TS builtin type names — `(s:: String)` must not try to
+    /// call `String.parse(s)`, so they're excluded from `::`-marker validation.
+    fn is_js_builtin_type_name(tn: &[u8]) -> bool {
+        matches!(
+            tn,
+            b"String"
+                | b"Number"
+                | b"Boolean"
+                | b"Object"
+                | b"Array"
+                | b"Function"
+                | b"Date"
+                | b"RegExp"
+                | b"Error"
+                | b"Map"
+                | b"Set"
+                | b"WeakMap"
+                | b"WeakSet"
+                | b"Promise"
+                | b"Symbol"
+                | b"BigInt"
+                | b"Buffer"
+                | b"ArrayBuffer"
+                | b"Uint8Array"
+                | b"Int8Array"
+                | b"Uint16Array"
+                | b"Int16Array"
+                | b"Uint32Array"
+                | b"Int32Array"
+                | b"Float32Array"
+                | b"Float64Array"
+                | b"DataView"
+                | b"Iterator"
+                | b"AsyncIterator"
+                | b"Generator"
+                | b"AsyncGenerator"
+                | b"JSON"
+                | b"Math"
+                | b"Reflect"
+                | b"Proxy"
+        )
+    }
+
+    fn primitive_typeof_string(tn: &[u8]) -> Option<&'static [u8]> {
+        match tn {
+            b"number" => Some(b"number"),
+            b"string" => Some(b"string"),
+            b"boolean" => Some(b"boolean"),
+            b"bigint" => Some(b"bigint"),
+            _ => None,
+        }
+    }
+
+    fn make_new_error(p: &mut Self, msg: &'a [u8], loc: js_ast::Loc) -> Expr {
+        let error_ref = p
+            .store_name_in_ref(b"Error")
+            .unwrap_or(js_ast::base::Ref::NONE);
+        let error_id = p.new_expr(E::Identifier::init(error_ref), loc);
+        let msg_str = p.new_expr(E::EString::init(msg), loc);
+        p.new_expr(
+            E::New {
+                target: error_id,
+                args: js_ast::ExprNodeList::init_one(msg_str),
+                close_parens_loc: loc,
+                ..Default::default()
+            },
+            loc,
+        )
+    }
+
+    /// Inline typeof validator for a `::`-marked arg whose type is a captured
+    /// TS interface/alias: an object check plus per-primitive-field typeof
+    /// checks, each throwing on mismatch.
+    fn append_ts_shape_validator(
+        p: &mut Self,
+        prelude: &mut std::vec::Vec<Stmt>,
+        arg_ref: js_ast::base::Ref,
+        arg_name: &'a [u8],
+        type_name: &'a [u8],
+        fields: &[crate::p::ParaTsTypeField<'a>],
+        loc: js_ast::Loc,
+    ) {
+        // typeof arg !== "object" || arg === null → throw.
+        let arg0 = p.new_expr(E::Identifier::init(arg_ref), loc);
+        let typeof_arg = p.new_expr(
+            E::Unary {
+                op: js_ast::OpCode::UnTypeof,
+                value: arg0,
+                flags: Default::default(),
+            },
+            loc,
+        );
+        let obj_str = p.new_expr(E::EString::init(b"object"), loc);
+        let not_object = p.new_expr(
+            E::Binary {
+                op: js_ast::OpCode::BinStrictNe,
+                left: typeof_arg,
+                right: obj_str,
+            },
+            loc,
+        );
+        let arg1 = p.new_expr(E::Identifier::init(arg_ref), loc);
+        let null_e = p.new_expr(E::Null {}, loc);
+        let arg_null = p.new_expr(
+            E::Binary {
+                op: js_ast::OpCode::BinStrictEq,
+                left: arg1,
+                right: null_e,
+            },
+            loc,
+        );
+        let obj_test = p.new_expr(
+            E::Binary {
+                op: js_ast::OpCode::BinLogicalOr,
+                left: not_object,
+                right: arg_null,
+            },
+            loc,
+        );
+        let obj_msg: &'a [u8] = bun_alloc::arena_format!(in p.arena, "{}: expected {}", std::str::from_utf8(arg_name).unwrap_or(""), std::str::from_utf8(type_name).unwrap_or(""))
+            .into_bump_str()
+            .as_bytes();
+        let obj_err = Self::make_new_error(p, obj_msg, loc);
+        let obj_throw = p.s(S::Throw { value: obj_err }, loc);
+        prelude.push(p.s(
+            S::If {
+                test_: obj_test,
+                yes: obj_throw,
+                no: None,
+            },
+            loc,
+        ));
+
+        for f in fields {
+            let Some(expected) = Self::primitive_typeof_string(f.type_name) else {
+                continue;
+            };
+            let arg = p.new_expr(E::Identifier::init(arg_ref), loc);
+            let field_access = p.new_expr(
+                E::Dot {
+                    target: arg,
+                    name: E::Str::new(f.name),
+                    name_loc: loc,
+                    ..Default::default()
+                },
+                loc,
+            );
+            let typeof_field = p.new_expr(
+                E::Unary {
+                    op: js_ast::OpCode::UnTypeof,
+                    value: field_access,
+                    flags: Default::default(),
+                },
+                loc,
+            );
+            let exp_str = p.new_expr(E::EString::init(expected), loc);
+            let mut test = p.new_expr(
+                E::Binary {
+                    op: js_ast::OpCode::BinStrictNe,
+                    left: typeof_field,
+                    right: exp_str,
+                },
+                loc,
+            );
+            if f.optional {
+                let undef = p.new_expr(E::Undefined {}, loc);
+                let not_undef = p.new_expr(
+                    E::Binary {
+                        op: js_ast::OpCode::BinStrictNe,
+                        left: field_access,
+                        right: undef,
+                    },
+                    loc,
+                );
+                let null_e = p.new_expr(E::Null {}, loc);
+                let not_null = p.new_expr(
+                    E::Binary {
+                        op: js_ast::OpCode::BinStrictNe,
+                        left: field_access,
+                        right: null_e,
+                    },
+                    loc,
+                );
+                let present = p.new_expr(
+                    E::Binary {
+                        op: js_ast::OpCode::BinLogicalAnd,
+                        left: not_undef,
+                        right: not_null,
+                    },
+                    loc,
+                );
+                test = p.new_expr(
+                    E::Binary {
+                        op: js_ast::OpCode::BinLogicalAnd,
+                        left: present,
+                        right: test,
+                    },
+                    loc,
+                );
+            }
+            let msg: &'a [u8] = bun_alloc::arena_format!(in p.arena, "{}.{}: expected {}", std::str::from_utf8(arg_name).unwrap_or(""), std::str::from_utf8(f.name).unwrap_or(""), std::str::from_utf8(f.type_name).unwrap_or(""))
+                .into_bump_str()
+                .as_bytes();
+            let err = Self::make_new_error(p, msg, loc);
+            let throw = p.s(S::Throw { value: err }, loc);
+            prelude.push(p.s(
+                S::If {
+                    test_: test,
+                    yes: throw,
+                    no: None,
+                },
+                loc,
+            ));
+        }
     }
 
     pub fn parse_fn_expr(
@@ -500,7 +858,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // The function expression is anonymous so recursion resolves through the
     // `const NAME` binding (matching the canonical lowering). The lexer is
     // positioned at the optional `async` / the function name.
-    pub fn t_memo(&mut self, loc: bun_ast::Loc, is_async: bool) -> Result<Stmt, Error> {
+    pub fn t_memo(
+        &mut self,
+        loc: bun_ast::Loc,
+        is_async: bool,
+        is_export: bool,
+    ) -> Result<Stmt, Error> {
         let p = self;
         let async_range = if is_async {
             let r = p.lexer.range();
@@ -533,10 +896,15 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
         )?;
         p.pop_scope();
-        let arity: f64 = match func.args.slice().len() {
-            0 => 0.0,
-            1 => 1.0,
-            _ => 2.0,
+        // Rest args always route through the nested-map (arity 2) path.
+        let arity: f64 = if func.flags.contains(js_ast::flags::Function::HasRestArg) {
+            2.0
+        } else {
+            match func.args.slice().len() {
+                0 => 0.0,
+                1 => 1.0,
+                _ => 2.0,
+            }
         };
         let fn_expr = p.new_expr(E::Function { func }, fn_loc);
         let arity_expr = p.new_expr(E::Number { value: arity }, loc);
@@ -555,6 +923,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             S::Local {
                 kind: js_ast::s::Kind::KConst,
                 decls: G::DeclList::from_arena_slice(&[decl]),
+                is_export,
                 ..Default::default()
             },
             loc,

@@ -1617,6 +1617,17 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         stmt: &mut Stmt,
         data: &mut S::Block,
     ) -> Result<(), Error> {
+        // Parabun: a transparent block (e.g. `parallel using`) was synthesized
+        // with no parse-time block scope; visit its children directly in the
+        // enclosing scope and splice them into the parent statement list.
+        if data.is_transparent {
+            let mut inner = stmts_to_list(p.arena, data.stmts);
+            p.visit_stmts(&mut inner, StmtsKind::None)?;
+            for s in inner.iter() {
+                stmts.push(*s);
+            }
+            return Ok(());
+        }
         {
             p.push_scope_for_visit_pass(js_ast::scope::Kind::Block, stmt.loc)
                 .expect("unreachable");

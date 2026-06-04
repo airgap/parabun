@@ -729,6 +729,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             S::Block {
                 stmts: bun_ast::StoreSlice::new_mut(stmts),
                 close_brace_loc: bun_ast::Loc::EMPTY,
+                is_transparent: false,
             },
             loc,
         )

@@ -15,6 +15,11 @@ use crate::{StoreSlice, StoreStr};
 pub struct Block {
     pub stmts: StmtNodeList,
     pub close_brace_loc: crate::Loc, // = crate::Loc::EMPTY
+    /// Parabun: a synthesized block whose statements the visit pass splices
+    /// into the enclosing scope (no new scope, no printed braces). Used by
+    /// `parallel using` to emit a const-destructure + `using` pair that bind
+    /// in the caller's scope.
+    pub is_transparent: bool,
 }
 
 impl Default for Block {
@@ -22,6 +27,7 @@ impl Default for Block {
         Self {
             stmts: StmtNodeList::EMPTY,
             close_brace_loc: crate::Loc::EMPTY,
+            is_transparent: false,
         }
     }
 }
