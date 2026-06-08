@@ -3316,6 +3316,9 @@ pub mod flags {
 
         /// Only applicable to function statements.
         IsExport,
+
+        /// Parabun: `pure function …` — eligible for pipeline inline fusion.
+        IsPure,
     }
     pub type FunctionSet = EnumSet<Function>;
     pub const FUNCTION_NONE: FunctionSet = EnumSet::empty();

@@ -383,6 +383,11 @@ pub struct Arrow {
     pub has_rest_arg: bool,
     /// Use shorthand if true and "Body" is a single return statement
     pub prefer_expr: bool,
+    /// Parabun: `pure (x) => expr` arrows are eligible for pipeline inlining.
+    pub is_pure: bool,
+    /// Parabun: marks the synthetic IIFE arrow produced by stream fusion so the
+    /// SExpr visitor can unwrap it back to bare statements (no call frame).
+    pub is_para_fusion_iife: bool,
 }
 impl Arrow {
     // Zig `pub const noop_return_undefined: Arrow = .{ .body = .{ .stmts = &.{} } };`
@@ -395,6 +400,8 @@ impl Arrow {
         is_async: false,
         has_rest_arg: false,
         prefer_expr: false,
+        is_pure: false,
+        is_para_fusion_iife: false,
     };
 }
 impl Default for Arrow {
@@ -408,6 +415,8 @@ impl Default for Arrow {
             is_async: false,
             has_rest_arg: false,
             prefer_expr: false,
+            is_pure: false,
+            is_para_fusion_iife: false,
         }
     }
 }

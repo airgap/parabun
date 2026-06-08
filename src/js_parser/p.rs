@@ -276,6 +276,13 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// parse time to decide whether a `signal NAME = RHS` initializer references
     /// another signal and should therefore be promoted to a `derived(() => …)`.
     pub signal_bound_names: std::collections::HashSet<&'a [u8]>,
+    /// Parabun: `pure function NAME(x){return e}` / `const NAME = pure (x)=>e`
+    /// registered for pipeline inline fusion. The `|>` desugar inlines the body
+    /// at call sites (`src |> NAME` → substituted body).
+    pub pure_inline_fns: Vec<crate::PureInlineInfo<'a>>,
+    /// Parabun: names of `pure_inline_fns` actually consumed by fusion. The
+    /// import/decl scanner can DCE such a decl when no other reference survives.
+    pub pure_fusion_consumed_names: std::collections::HashSet<&'a [u8]>,
     /// Set while visiting the identifier target of an allowlisted signal method
     /// (`x.get()`/`.set()`/…) so the e_identifier read-rewrite does not turn the
     /// already-spelled cell access into `x.get().get()`.
@@ -9272,6 +9279,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             in_chain_op_arrow_rhs: false,
             signal_bound_refs: RefMap::default(),
             signal_bound_names: std::collections::HashSet::new(),
+            pure_inline_fns: Vec::new(),
+            pure_fusion_consumed_names: std::collections::HashSet::new(),
             signal_suppress_get_rewrite: false,
             strict_signals_pragma: None,
             para_arg_validations: std::vec::Vec::new(),

@@ -2486,6 +2486,8 @@ impl Data {
                     is_async: el.is_async,
                     has_rest_arg: el.has_rest_arg,
                     prefer_expr: el.prefer_expr,
+                    is_pure: el.is_pure,
+                    is_para_fusion_iife: el.is_para_fusion_iife,
                 });
                 Ok(Data::EArrow(StoreRef::from_bump(item)))
             }

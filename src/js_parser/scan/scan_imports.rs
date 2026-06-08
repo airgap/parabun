@@ -658,10 +658,70 @@ impl<'a> ImportScanner<'a> {
                         }
                     }
                 }
-                js_ast::StmtData::SLocal(st) => {
+                js_ast::StmtData::SLocal(mut st) => {
                     if st.is_export {
                         for decl in st.decls.slice() {
                             p.record_exported_binding(decl.binding);
+                        }
+                    }
+
+                    // Parabun: DCE a `const NAME = pure (x) => e` decl that was
+                    // consumed by pipeline fusion and has no remaining refs.
+                    // Mirrors scan_imports.zig:405-432. The fusion-consumed
+                    // requirement keeps this from acting as a generic
+                    // unused-pure-arrow DCE.
+                    if st.kind == js_ast::s::Kind::KConst
+                        && !st.is_export
+                        && st.decls.len() > 0
+                        && !p.pure_fusion_consumed_names.is_empty()
+                    {
+                        st.decls.retain(|decl| {
+                            let js_ast::b::B::BIdentifier(b_id) = decl.binding.data else {
+                                return true;
+                            };
+                            let sym = &p.symbols[b_id.r#ref.inner_index() as usize];
+                            let name = sym.original_name.slice();
+                            if !p.pure_fusion_consumed_names.contains(name) {
+                                return true;
+                            }
+                            if sym.use_count_estimate != 0 {
+                                return true;
+                            }
+                            let Some(value) = decl.value else {
+                                return true;
+                            };
+                            let js_ast::ExprData::EArrow(arrow) = value.data else {
+                                return true;
+                            };
+                            if !arrow.is_pure {
+                                return true;
+                            }
+                            if arrow.args.len() != 1 {
+                                return true;
+                            }
+                            if arrow.args.slice()[0].default.is_some() {
+                                return true;
+                            }
+                            if !matches!(
+                                arrow.args.slice()[0].binding.data,
+                                js_ast::b::B::BIdentifier(_)
+                            ) {
+                                return true;
+                            }
+                            if arrow.body.stmts.len() != 1 {
+                                return true;
+                            }
+                            if !matches!(
+                                arrow.body.stmts.slice()[0].data,
+                                js_ast::StmtData::SReturn(_)
+                            ) {
+                                return true;
+                            }
+                            // Drop this decl.
+                            false
+                        });
+                        if st.decls.is_empty() {
+                            continue;
                         }
                     }
 

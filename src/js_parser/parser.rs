@@ -1524,6 +1524,15 @@ pub struct ScopeOrder<'arena> {
     pub scope: *mut Scope,
     _phantom: core::marker::PhantomData<&'arena Scope>,
 }
+
+/// Parabun: a `pure function NAME(x){return e}` / `const NAME = pure (x)=>e`
+/// registered for pipeline inline fusion. Zig: `p.zig:619 PureInlineInfo`.
+#[derive(Clone, Copy)]
+pub struct PureInlineInfo<'a> {
+    pub fn_name: &'a [u8],
+    pub param_name: &'a [u8],
+    pub body_expr: bun_ast::Expr,
+}
 impl<'arena> ScopeOrder<'arena> {
     #[inline]
     pub fn new(loc: bun_ast::Loc, scope: *mut Scope) -> Self {

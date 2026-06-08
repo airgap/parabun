@@ -189,6 +189,48 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.require_initializers(js_ast::s::Kind::KConst, decls.slice())?;
         }
 
+        // Parabun: register `const NAME = pure (x) => expr` arrows as
+        // pipeline-fusable, mirroring the `pure function NAME(x){return expr}`
+        // path. let/var are excluded — inlining is only sound when the binding
+        // can't be reassigned. Zig: parse_stmt.zig:575-597.
+        for decl in decls.slice() {
+            let js_ast::b::B::BIdentifier(bind) = &decl.binding.data else {
+                continue;
+            };
+            let Some(value) = decl.value else { continue };
+            let ExprData::EArrow(arrow) = &value.data else {
+                continue;
+            };
+            if !arrow.is_pure {
+                continue;
+            }
+            if arrow.args.len() != 1 {
+                continue;
+            }
+            let arg = &arrow.args.slice()[0];
+            if arg.default.is_some() {
+                continue;
+            }
+            let js_ast::b::B::BIdentifier(param) = &arg.binding.data else {
+                continue;
+            };
+            let body_stmts = arrow.body.stmts.slice();
+            if body_stmts.len() != 1 {
+                continue;
+            }
+            let js_ast::StmtData::SReturn(ret) = &body_stmts[0].data else {
+                continue;
+            };
+            let Some(body_expr) = ret.value else { continue };
+            let fn_name = p.load_name_from_ref(bind.r#ref);
+            let param_name = p.load_name_from_ref(param.r#ref);
+            p.pure_inline_fns.push(crate::PureInlineInfo {
+                fn_name,
+                param_name,
+                body_expr,
+            });
+        }
+
         Ok(p.s(
             S::Local {
                 kind: js_ast::s::Kind::KConst,

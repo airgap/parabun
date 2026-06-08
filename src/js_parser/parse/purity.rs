@@ -177,26 +177,69 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     /// Enforce purity on a parsed `pure function` statement, returning the
     /// statement unchanged (valid bodies) or an `Err` after logging the first
     /// batch of violations.
-    pub(crate) fn enforce_purity_on_stmt(&mut self, stmt: Stmt) -> PurityResult<Stmt> {
+    pub(crate) fn enforce_purity_on_stmt(&mut self, mut stmt: Stmt) -> PurityResult<Stmt> {
         let is_nested = self.purity_is_nested();
-        if let StmtData::SFunction(f) = &stmt.data {
+        if let StmtData::SFunction(f) = &mut stmt.data {
             let name = f.func.name.and_then(|n| n.ref_).map(|r| self.load_name_from_ref(r));
             let args = f.func.args;
             let body = f.func.body.stmts;
             self.enforce_purity(args.slice(), body.slice(), name, is_nested)?;
+            // Parabun: mark the function pure (Zig `func.flags is_pure`) and
+            // register it for pipeline inline fusion.
+            f.func.flags |= js_ast::flags::Function::IsPure;
+            self.register_pure_inline_fn_from_func(&f.func);
         }
         Ok(stmt)
     }
 
+    /// Parabun: register an eligible `pure function NAME(x) { return e }` for
+    /// pipeline inline fusion. Mirrors Zig parse_fn.zig:256-269. Only single
+    /// param-identifier, single-return-statement bodies qualify.
+    pub(crate) fn register_pure_inline_fn_from_func(&mut self, func: &js_ast::g::Fn) {
+        let Some(name_ref) = func.name.and_then(|n| n.ref_) else {
+            return;
+        };
+        if func.args.len() != 1 {
+            return;
+        }
+        let arg = &func.args.slice()[0];
+        if arg.default.is_some() {
+            return;
+        }
+        let BData::BIdentifier(param) = &arg.binding.data else {
+            return;
+        };
+        let stmts = func.body.stmts.slice();
+        if stmts.len() != 1 {
+            return;
+        }
+        let StmtData::SReturn(ret) = &stmts[0].data else {
+            return;
+        };
+        let Some(body_expr) = ret.value else {
+            return;
+        };
+        let fn_name = self.load_name_from_ref(name_ref);
+        let param_name = self.load_name_from_ref(param.r#ref);
+        self.pure_inline_fns.push(crate::PureInlineInfo {
+            fn_name,
+            param_name,
+            body_expr,
+        });
+    }
+
     /// Enforce purity on a parsed `pure (…) => …` / `pure function () {}`
     /// expression.
-    pub(crate) fn enforce_purity_on_expr(&mut self, expr: Expr) -> PurityResult<Expr> {
+    pub(crate) fn enforce_purity_on_expr(&mut self, mut expr: Expr) -> PurityResult<Expr> {
         let is_nested = self.purity_is_nested();
-        match &expr.data {
+        match &mut expr.data {
             ExprData::EArrow(a) => {
                 let args = a.args;
                 let body = a.body.stmts;
                 self.enforce_purity(args.slice(), body.slice(), None, is_nested)?;
+                // Parabun: flag the arrow so pipeline-inline fusion can recognise
+                // it (mirrors Zig `data.is_pure = true`).
+                a.is_pure = true;
             }
             ExprData::EFunction(f) => {
                 let name =
@@ -204,6 +247,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 let args = f.func.args;
                 let body = f.func.body.stmts;
                 self.enforce_purity(args.slice(), body.slice(), name, is_nested)?;
+                // Parabun: mark the function pure (Zig `func.flags is_pure`).
+                f.func.flags |= js_ast::flags::Function::IsPure;
             }
             _ => {}
         }

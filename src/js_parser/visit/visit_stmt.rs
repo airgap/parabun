@@ -1434,6 +1434,71 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             };
         }
 
+        // Parabun: stmt-level stream-fusion unwrap. When the visited value is
+        // `(synth_iife_arrow)(srcExpr)` in expression-statement position, splice
+        // the arrow body's stmts directly into the parent list — the for-loop
+        // sits where the IIFE call would, no wrapper call frame. (Zig:
+        // visit_stmt.zig:833-889.)
+        if let js_ast::ExprData::ECall(call) = data.value.data {
+            if let js_ast::ExprData::EArrow(arrow) = call.target.data {
+                let call_args = call.args.slice();
+                if arrow.is_para_fusion_iife
+                    && call_args.len() == arrow.args.len()
+                    && (call_args.len() == 1 || call_args.len() == 2)
+                {
+                    let mut ok = true;
+                    for arg in arrow.args.slice() {
+                        if !matches!(arg.binding.data, js_ast::b::B::BIdentifier(_)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        let src_loc = arrow.body.loc;
+                        // Materialize each `let __param = call_arg;` pair.
+                        for (i, arg) in arrow.args.slice().iter().enumerate() {
+                            let js_ast::b::B::BIdentifier(bind) = &arg.binding.data else {
+                                continue;
+                            };
+                            let binding =
+                                p.b(js_ast::b::Identifier { r#ref: bind.r#ref }, src_loc);
+                            let decl = js_ast::G::Decl {
+                                binding,
+                                value: Some(call_args[i]),
+                            };
+                            let local = p.s(
+                                S::Local {
+                                    kind: js_ast::s::Kind::KLet,
+                                    decls: js_ast::G::DeclList::from_arena_slice(&[decl]),
+                                    ..Default::default()
+                                },
+                                src_loc,
+                            );
+                            stmts.push(local);
+                        }
+
+                        // Splice the arrow body's stmts (already visited via
+                        // visit_expr above). Drop a trailing `return`.
+                        let body_stmts = arrow.body.stmts.slice();
+                        let upper = if !body_stmts.is_empty()
+                            && matches!(
+                                body_stmts[body_stmts.len() - 1].data,
+                                js_ast::StmtData::SReturn(_)
+                            ) {
+                            body_stmts.len() - 1
+                        } else {
+                            body_stmts.len()
+                        };
+                        for inner_stmt in &body_stmts[0..upper] {
+                            stmts.push(*inner_stmt);
+                        }
+                        restore_stmt_expr!();
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         if should_trim_primitive && data.value.is_primitive_literal() {
             restore_stmt_expr!();
             return Ok(());
