@@ -1981,12 +1981,12 @@ impl<'a> BundleOptions<'a> {
                 if transform.extension_order.is_empty() {
                     // we must also support require'ing .node files
                     static EXT_WITH_NODE: &[&[u8]] = &[
-                        b".tsx", b".ts", b".jsx", b".cts", b".cjs", b".js", b".mjs", b".mts",
-                        b".json", b".node",
+                        b".tsx", b".ts", b".pts", b".ptsx", b".jsx", b".cts", b".cjs", b".js",
+                        b".pjs", b".pjsx", b".mjs", b".mts", b".json", b".node",
                     ];
                     static NM_EXT_WITH_NODE: &[&[u8]] = &[
-                        b".jsx", b".cjs", b".js", b".mjs", b".mts", b".tsx", b".ts", b".cts",
-                        b".json", b".node",
+                        b".jsx", b".cjs", b".js", b".pjs", b".pjsx", b".mjs", b".mts", b".tsx",
+                        b".ts", b".pts", b".ptsx", b".cts", b".json", b".node",
                     ];
                     opts.extension_order.default.default = owned_string_list(EXT_WITH_NODE);
                     opts.extension_order.node_modules.default = owned_string_list(NM_EXT_WITH_NODE);
@@ -2087,25 +2087,33 @@ pub enum ImportPathFormat {
 
 pub mod bundle_options_defaults {
     pub const EXTENSION_ORDER: &[&[u8]] = &[
-        b".tsx", b".ts", b".jsx", b".cts", b".cjs", b".js", b".mjs", b".mts", b".json",
+        // Parabun .pts/.ptsx/.pjs/.pjsx interleaved with .ts/.js (matches options.zig
+        // Defaults.ExtensionOrder) so bare imports of `.pts` files resolve.
+        b".tsx", b".ts", b".pts", b".ptsx", b".jsx", b".cts", b".cjs", b".js", b".pjs", b".pjsx",
+        b".mjs", b".mts", b".json",
     ];
 
-    pub const MAIN_FIELD_EXTENSION_ORDER: &[&[u8]] =
-        &[b".js", b".cjs", b".cts", b".tsx", b".ts", b".jsx", b".json"];
+    pub const MAIN_FIELD_EXTENSION_ORDER: &[&[u8]] = &[
+        b".js", b".pjs", b".pjsx", b".cjs", b".cts", b".tsx", b".ts", b".pts", b".ptsx", b".jsx",
+        b".json",
+    ];
 
     pub const MODULE_EXTENSION_ORDER: &[&[u8]] = &[
-        b".tsx", b".jsx", b".mts", b".ts", b".mjs", b".js", b".cts", b".cjs", b".json",
+        b".tsx", b".jsx", b".mts", b".ts", b".pts", b".ptsx", b".mjs", b".js", b".pjs", b".pjsx",
+        b".cts", b".cjs", b".json",
     ];
 
     pub const CSS_EXTENSION_ORDER: &[&[u8]] = &[b".css"];
 
     pub mod node_modules {
         pub const EXTENSION_ORDER: &[&[u8]] = &[
-            b".jsx", b".cjs", b".js", b".mjs", b".mts", b".tsx", b".ts", b".cts", b".json",
+            b".jsx", b".cjs", b".js", b".pjs", b".pjsx", b".mjs", b".mts", b".tsx", b".ts",
+            b".pts", b".ptsx", b".cts", b".json",
         ];
 
         pub const MODULE_EXTENSION_ORDER: &[&[u8]] = &[
-            b".mjs", b".jsx", b".mts", b".js", b".cjs", b".tsx", b".ts", b".cts", b".json",
+            b".mjs", b".jsx", b".mts", b".js", b".pjs", b".pjsx", b".cjs", b".tsx", b".ts",
+            b".pts", b".ptsx", b".cts", b".json",
         ];
     }
 }

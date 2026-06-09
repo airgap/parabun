@@ -2194,8 +2194,26 @@ lexer_impl_header! {
                         // this code is so hot that if you save lexer.raw() into a temporary variable
                         // it shows up in profiling
                         self.identifier = self.raw();
-                        self.token =
-                            tables::keyword(self.identifier).unwrap_or(T::TIdentifier);
+                        self.token = match tables::keyword(self.identifier) {
+                            Some(kw) => kw,
+                            // Parabun: `fun` → `function` in .pts/.pjs/.ptsx/.pjsx
+                            // files (mirrors lexer.zig + fs.zig isParabunFile). The
+                            // `== b"fun"` guard runs first so the hot identifier path
+                            // is untouched; `fun` stays a plain identifier elsewhere.
+                            None if self.identifier == b"fun" => {
+                                let ext = self.source.path.name().ext;
+                                if ext == b".pts"
+                                    || ext == b".pjs"
+                                    || ext == b".ptsx"
+                                    || ext == b".pjsx"
+                                {
+                                    T::TFunction
+                                } else {
+                                    T::TIdentifier
+                                }
+                            }
+                            None => T::TIdentifier,
+                        };
                     } else {
                         // @branchHint(.unlikely)
                         let scan_result = self

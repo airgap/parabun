@@ -175,18 +175,22 @@ pub mod bundle_options {
         // / `MODULE_EXTENSION_ORDER` — duplicated so `Default for BundleOptions`
         // below is self-contained (resolver sits below bundler in the dep graph).
         pub(crate) const EXTENSION_ORDER: &[&[u8]] = &[
-            b".tsx", b".ts", b".jsx", b".cts", b".cjs", b".js", b".mjs", b".mts", b".json",
+            b".tsx", b".ts", b".pts", b".ptsx", b".jsx", b".cts", b".cjs", b".js", b".pjs",
+            b".pjsx", b".mjs", b".mts", b".json",
         ];
         pub(crate) const MODULE_EXTENSION_ORDER: &[&[u8]] = &[
-            b".tsx", b".jsx", b".mts", b".ts", b".mjs", b".js", b".cts", b".cjs", b".json",
+            b".tsx", b".jsx", b".mts", b".ts", b".pts", b".ptsx", b".mjs", b".js", b".pjs",
+            b".pjsx", b".cts", b".cjs", b".json",
         ];
         /// Mirrors `bun_bundler::options::bundle_options_defaults::node_modules`.
         pub mod node_modules {
             pub(crate) const EXTENSION_ORDER: &[&[u8]] = &[
-                b".jsx", b".cjs", b".js", b".mjs", b".mts", b".tsx", b".ts", b".cts", b".json",
+                b".jsx", b".cjs", b".js", b".pjs", b".pjsx", b".mjs", b".mts", b".tsx", b".ts",
+                b".pts", b".ptsx", b".cts", b".json",
             ];
             pub(crate) const MODULE_EXTENSION_ORDER: &[&[u8]] = &[
-                b".mjs", b".jsx", b".js", b".mts", b".tsx", b".ts", b".cjs", b".cts", b".json",
+                b".mjs", b".jsx", b".js", b".pjs", b".pjsx", b".mts", b".tsx", b".ts", b".pts",
+                b".ptsx", b".cjs", b".cts", b".json",
             ];
         }
     }
