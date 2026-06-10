@@ -879,6 +879,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let name = p.lexer.identifier;
         let binding_ref = p.declare_symbol(js_ast::symbol::Kind::Constant, name_loc, name)?;
         p.lexer.next()?;
+        // Parabun: a `memo` statement can carry TS type parameters —
+        // `memo NAME<T extends U>(...)`. Skip them (type-erased) before parsing the
+        // function signature, mirroring the normal function-statement path. Without
+        // this, `<` is lexed as a less-than operator and the generic list fails
+        // ("Expected ; but found extends").
+        if Self::IS_TYPESCRIPT_ENABLED {
+            let _ = p.skip_type_script_type_parameters(TypeParameterFlag::ALLOW_CONST_MODIFIER)?;
+        }
         let fn_loc = name_loc;
         let _ = p.push_scope_for_parse_pass(js_ast::scope::Kind::FunctionArgs, fn_loc)?;
         let func = p.parse_fn(

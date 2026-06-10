@@ -2427,7 +2427,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
             let looks_like_fn = p.lexer.token == T::TIdentifier && {
                 p.lexer.next()?;
-                p.lexer.token == T::TOpenParen
+                // `memo NAME(...)` or, with TS generics, `memo NAME<T extends U>(...)`.
+                p.lexer.token == T::TOpenParen || p.lexer.token == T::TLessThan
             };
             p.lexer.restore(&after_memo);
             if same_line && looks_like_fn {
