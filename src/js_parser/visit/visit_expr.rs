@@ -68,6 +68,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             Tag::EImportMeta => Self::e_import_meta(self, e, in_),
             Tag::ESpread => Self::e_spread(self, e, in_),
             Tag::EIdentifier => Self::e_identifier(self, e, in_),
+            Tag::EImportIdentifier => Self::e_import_identifier(self, e, in_),
             Tag::EJsxElement => Self::e_jsx_element(self, e, in_),
             Tag::ETemplate => Self::e_template(self, e, in_),
             Tag::EBinary => Self::e_binary(self, e, in_),
@@ -103,6 +104,21 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     fn e_string(_: &mut Self, _e: &mut Expr, _: ExprIn) {
         // If you're using this, you're probably not using 0-prefixed legacy octal notation
         // if e.LegacyOctalLoc.Start > 0 {
+    }
+
+    fn e_import_identifier(p: &mut Self, e: &mut Expr, _: ExprIn) {
+        // Parabun: PARSE-time emitted runtime calls (e.g. the `memo`/range/etc.
+        // desugaring in parse_stmt/parse_fn/parse_prefix) call `call_runtime`,
+        // which records usage into p.symbol_uses immediately. But `append_part`
+        // clears symbol_uses before the visit pass populates the part's
+        // symbol_uses, so the parse-time record_usage is lost. Re-record here so
+        // bundler tree-shaking sees this part's dependency on the runtime helper —
+        // otherwise the runtime export (e.g. __parabunMemo) is tree-shaken away
+        // and the emitted call ReferenceErrors at runtime. Mirrors visit_expr.zig.
+        if let Data::EImportIdentifier(ident) = &e.data {
+            let ref_ = ident.ref_;
+            p.record_usage(ref_);
+        }
     }
 
     fn e_number(_: &mut Self, _e: &mut Expr, _: ExprIn) {
