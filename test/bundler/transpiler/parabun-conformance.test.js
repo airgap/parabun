@@ -116,15 +116,21 @@ async function runViaZigParser(source) {
 }
 
 /** Run `source` through the ts-plugin's regex transform, then through
- *  Bun (TS handling) — simulates what the IDE / type-checker sees
- *  going through. Validates the ts-plugin output is at least
- *  syntactically + semantically equivalent to what the Zig parser
- *  would emit. */
+ *  Bun — validates the ts-plugin output is at least syntactically +
+ *  semantically equivalent to what the Zig parser would emit.
+ *
+ *  The output runs as `.pts`, not `.ts`: since para syntax was gated
+ *  to para files (LYK-1128), plain `.ts` no longer gets para
+ *  semantics at runtime. The ts-plugin transform is the
+ *  type-checker's VIEW of a para file (e.g. it injects
+ *  `declare const _: any;` rather than desugaring `_`-lambdas), so
+ *  its output is still para source and the runtime that executes it
+ *  in production is always the para parser. */
 async function runViaTsPlugin(source) {
   const ts = transformParabunToTS(source);
-  using dir = tempDir("para-conformance-ts", { "index.ts": ts });
+  using dir = tempDir("para-conformance-ts", { "index.pts": ts });
   await using proc = Bun.spawn({
-    cmd: [bunExe(), "index.ts"],
+    cmd: [bunExe(), "index.pts"],
     env: bunEnv,
     cwd: String(dir),
     stdout: "pipe",
