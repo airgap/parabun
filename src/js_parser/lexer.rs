@@ -343,6 +343,11 @@ pub struct LexerType<
     /// for the whole token loop, matching Zig codegen. `source` is kept for
     /// error-reporting paths that need `path` / `identifier_name`.
     pub contents: &'a [u8],
+    /// Parabun: true when the source file is a para-syntax file
+    /// (`.pts`/`.pjs`/`.ptsx`/`.pjsx`/`.pui`). Every para-specific lexer
+    /// token and parser branch is gated on this so plain js/ts/jsx/tsx
+    /// (including node_modules) parses exactly like stock bun.
+    pub is_para: bool,
     pub current: usize,
     pub start: usize,
     pub end: usize,
@@ -1717,7 +1722,7 @@ lexer_impl_header! {
                             .add_unsupported_syntax_error(b"~ is not allowed in JSON");
                     }
                     self.step_with(contents);
-                    if self.code_point == 0x3E {
+                    if self.code_point == 0x3E && self.is_para {
                         // Parabun: `~>` reactive-binding operator.
                         self.step_with(contents);
                         self.token = T::TTildeGreaterThan;
@@ -1826,7 +1831,7 @@ lexer_impl_header! {
                             self.step_with(contents);
                             self.token = T::TBarEquals;
                         }
-                        0x3E => {
+                        0x3E if self.is_para => {
                             // Parabun: "|>"
                             self.step_with(contents);
                             self.token = T::TBarGreaterThan;
@@ -1923,7 +1928,7 @@ lexer_impl_header! {
 
                             self.token = T::TMinusMinus;
                         }
-                        0x3E => {
+                        0x3E if self.is_para => {
                             // Parabun: `->` reactive function-call binding.
                             if IS_JSON {
                                 return self.add_unsupported_syntax_error(
@@ -2201,12 +2206,7 @@ lexer_impl_header! {
                             // `== b"fun"` guard runs first so the hot identifier path
                             // is untouched; `fun` stays a plain identifier elsewhere.
                             None if self.identifier == b"fun" => {
-                                let ext = self.source.path.name().ext;
-                                if ext == b".pts"
-                                    || ext == b".pjs"
-                                    || ext == b".ptsx"
-                                    || ext == b".pjsx"
-                                {
+                                if self.is_para {
                                     T::TFunction
                                 } else {
                                     T::TIdentifier
@@ -2732,10 +2732,22 @@ lexer_impl_header! {
         // `*source` (lifetime `'a`) regardless of Cow arm, so it is sound to
         // cache for the lexer's lifetime.
         let contents: &'a [u8] = source.contents();
+        let ext = source.path.name().ext;
+        let is_para = ext == b".pts"
+            || ext == b".pjs"
+            || ext == b".ptsx"
+            || ext == b".pjsx"
+            || ext == b".pui"
+            // The interactive REPL and `-e`/`exec` eval snippets are
+            // user-typed parabun input, so they always speak para. Piped
+            // stdin and real files stay extension-gated.
+            || source.path.text == b"[repl]"
+            || source.path.text.ends_with(b"[eval]");
         Self {
             log: core::ptr::NonNull::from(log),
             source,
             contents,
+            is_para,
             current: 0,
             start: 0,
             end: 0,
@@ -3609,7 +3621,7 @@ lexer_impl_header! {
                     self.step_with(contents);
                     self.token = T::TDotDotDot;
                     return Ok(());
-                } else if !IS_JSON {
+                } else if !IS_JSON && self.is_para {
                     // Parabun "..X" operators
                     let two_char = match third {
                         b'=' => Some(T::TDotDotEquals),
@@ -3822,7 +3834,9 @@ lexer_impl_header! {
             // both dots for the `..` lexer rather than consuming `1.` as a float.
             if first != 0x2E
                 && self.code_point == 0x2E
-                && !(self.current < contents.len() && contents[self.current] == b'.')
+                && !(self.is_para
+                    && self.current < contents.len()
+                    && contents[self.current] == b'.')
             {
                 // An underscore must not come last;
                 if last_underscore_end > 0 && self.end == last_underscore_end + 1 {
@@ -3957,7 +3971,7 @@ lexer_impl_header! {
         // Parabun: arbitrary-precision decimal suffix `d` (`0.1d`, `1d`,
         // `100.25d`). Only when the `d` is not part of a longer identifier, so
         // base-prefixed literals (hex `0x1d`) and invalid `1dx` are unaffected.
-        if self.code_point == 0x64 {
+        if self.code_point == 0x64 && self.is_para {
             let next = if self.current < contents.len() {
                 contents[self.current]
             } else {

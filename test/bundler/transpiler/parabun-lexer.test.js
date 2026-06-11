@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 describe("Parabun Lexer", () => {
   const transpiler = new Bun.Transpiler({
-    loader: "ts",
+    loader: "pts",
   });
 
   // Helper: transpile and check it doesn't throw a parse error

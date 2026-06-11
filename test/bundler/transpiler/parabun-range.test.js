@@ -23,7 +23,7 @@ async function runFixture(prefix, source) {
 
 describe("Parabun range literals", () => {
   describe("parse-time desugar", () => {
-    const transpiler = new Bun.Transpiler({ loader: "ts" });
+    const transpiler = new Bun.Transpiler({ loader: "pts" });
 
     it("desugars a..b to __parabunRange", () => {
       const out = transpiler.transformSync(`const xs = 0..5;`);

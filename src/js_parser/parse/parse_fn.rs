@@ -305,7 +305,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     // `User.parse(req)` (and throws on Err) at fn entry. The
                     // type after `::` is still skip-typed below as a normal
                     // annotation.
-                    if !rest_arg && p.lexer.token == T::TColon {
+                    if !rest_arg && p.lexer.token == T::TColon && p.lexer.is_para {
                         p.lexer.next()?;
                         if p.lexer.token == T::TIdentifier {
                             let vtype = p.lexer.identifier;

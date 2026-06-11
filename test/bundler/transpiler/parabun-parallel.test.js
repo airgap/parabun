@@ -2,7 +2,7 @@ import { describe, expect, it, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
 describe("Parabun parallel — expression form", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   it("desugars single-key parallel { … }", () => {
     const out = transpiler.transformSync("const x = parallel { user: fetchUser(id) };");
@@ -57,7 +57,7 @@ describe("Parabun parallel — expression form", () => {
 });
 
 describe("Parabun parallel — statement form", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   it("single decl with let", () => {
     const out = transpiler.transformSync("async function f() { parallel let x = g(); return x; }");
@@ -105,7 +105,7 @@ describe("Parabun parallel — using statement form", () => {
   // path rewrites them as try/finally + __using helper which moves the
   // bindings into the inner try block. The desugaring is correct in
   // either case; the bun-target output is just easier to assert against.
-  const transpiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
+  const transpiler = new Bun.Transpiler({ loader: "pts", target: "bun" });
 
   it("`parallel using` lowers to const-destructure + using", () => {
     const out = transpiler.transformSync("async function f() { parallel using a = g(), b = h(); return a; }");
@@ -299,7 +299,7 @@ describe("Parabun parallel — runtime end-to-end", () => {
 });
 
 describe("Parabun para — shorthand for parallel", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   it("statement form: `para let` lowers identically to `parallel let`", () => {
     const a = transpiler.transformSync("async function f() { para let a = f1(), b = f2(); return a + b; }");

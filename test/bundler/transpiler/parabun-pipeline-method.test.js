@@ -8,7 +8,7 @@ import { describe, expect, it } from "bun:test";
 // loop, so any combination of `.prop`, `[idx]`, `(args)` that follows
 // works without additional wiring.
 describe("Parabun pipeline method shorthand", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   describe("parse-time desugar", () => {
     it("desugars x |> .json() to x.json()", () => {

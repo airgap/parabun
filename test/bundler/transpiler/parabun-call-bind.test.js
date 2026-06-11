@@ -11,7 +11,7 @@ import { bunEnv, bunExe, tempDir } from "harness";
 // guard, same scope-marker dance.
 
 function transform(source) {
-  return new Bun.Transpiler({ loader: "ts" }).transformSync(source).trim();
+  return new Bun.Transpiler({ loader: "pts" }).transformSync(source).trim();
 }
 
 async function runFixture(prefix, source) {

@@ -3510,6 +3510,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     /// Wrap `arg` in a `_`-lambda when it contains a free `_` and isn't itself
     /// bare `_`. Returns the original arg when there's nothing to do.
     pub(crate) fn maybe_wrap_underscore_lambda(p: &mut Self, arg: Expr, arrow_loc: bun_ast::Loc) -> Expr {
+        if !p.lexer.is_para {
+            return arg;
+        }
         if Self::is_bare_underscore(p, &arg) {
             return arg;
         }
@@ -3986,7 +3989,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
             // Parabun: `LHS is …` membership operator (contextual keyword,
             // relational precedence).
-            if !p.lexer.has_newline_before
+            if p.lexer.is_para
+                && !p.lexer.has_newline_before
                 && level.lt(Level::Compare)
                 && p.lexer.is_contextual_keyword(b"is")
             {

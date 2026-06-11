@@ -401,7 +401,7 @@ describe(".pjsx extension (JSX + Parabun)", () => {
 
 describe("transpiler API with .pts/.pjs", () => {
   it("transpiles .pts content via Bun.Transpiler", () => {
-    const transpiler = new Bun.Transpiler({ loader: "ts" });
+    const transpiler = new Bun.Transpiler({ loader: "pts" });
     const code = `pure function add(a: number, b: number): number { return a + b; }`;
     const out = transpiler.transformSync(code);
     expect(out).toContain("function add");
@@ -409,7 +409,7 @@ describe("transpiler API with .pts/.pjs", () => {
   });
 
   it("transpiles .pjs content via Bun.Transpiler", () => {
-    const transpiler = new Bun.Transpiler({ loader: "jsx" });
+    const transpiler = new Bun.Transpiler({ loader: "pjsx" });
     const code = `pure function square(x) { return x * x; }`;
     const out = transpiler.transformSync(code);
     expect(out).toContain("function square");

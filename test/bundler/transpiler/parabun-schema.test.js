@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 const RUNTIME_PATH = resolve(import.meta.dir, "../../../src/runtime.bun.js");
 
 function transpileAndImport(code) {
-  const out = new Bun.Transpiler({ loader: "tsx" })
+  const out = new Bun.Transpiler({ loader: "ptsx" })
     .transformSync(code)
     .replace(/from\s+["']bun:wrap["']/g, `from "${RUNTIME_PATH}"`);
   const dir = mkdtempSync(join(tmpdir(), "para-schema-rt-"));

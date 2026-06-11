@@ -1639,7 +1639,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 // … })(). Runs an async block from a sync context and
                 // evaluates to the resulting Promise. Safe to claim because
                 // `async {` is otherwise a syntax error.
-                T::TOpenBrace => {
+                T::TOpenBrace if p.lexer.is_para => {
                     let _ = p.push_scope_for_parse_pass(
                         js_ast::scope::Kind::FunctionArgs,
                         async_range.loc,

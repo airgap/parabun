@@ -3,7 +3,7 @@ import { bunEnv, bunExe } from "harness";
 
 function ts(code, options = {}) {
   return new Bun.Transpiler({
-    loader: "tsx",
+    loader: "ptsx",
     ...options,
   }).transformSync(code);
 }

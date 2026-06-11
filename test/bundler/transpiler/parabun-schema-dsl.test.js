@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 
 function ts(code, options = {}) {
   return new Bun.Transpiler({
-    loader: "tsx",
+    loader: "ptsx",
     ...options,
   }).transformSync(code);
 }

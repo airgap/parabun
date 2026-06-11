@@ -1471,7 +1471,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 }
 
                 // Parabun: `export schema NAME …` → exported schema decl.
-                if p.lexer.is_contextual_keyword(b"schema") {
+                if p.lexer.is_para && p.lexer.is_contextual_keyword(b"schema") {
                     let kw_loc = p.lexer.loc();
                     p.lexer.next()?;
                     if !p.lexer.has_newline_before && p.lexer.token == T::TIdentifier {
@@ -1483,14 +1483,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 }
 
                 // Parabun: `export memo NAME(...) { … }` → exported const.
-                if p.lexer.is_contextual_keyword(b"memo") {
+                if p.lexer.is_para && p.lexer.is_contextual_keyword(b"memo") {
                     opts.is_export = true;
                     return p.parse_stmt(opts);
                 }
 
                 // Parabun: `export pure function …` / `export pure async
                 // function …` → exported function declaration.
-                if p.lexer.is_contextual_keyword(b"pure") {
+                if p.lexer.is_para && p.lexer.is_contextual_keyword(b"pure") {
                     opts.is_export = true;
                     return p.parse_stmt(opts);
                 }
@@ -2308,12 +2308,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     ) -> Result<Stmt> {
         let is_identifier = p.lexer.token == T::TIdentifier;
         let name = p.lexer.identifier;
+        // Parabun contextual keywords only fire in para files.
+        let is_para_kw = is_identifier && p.lexer.is_para;
 
         // Parabun: "pure function NAME(...) { ... }" statement → function
         // declaration. Peek past `pure`; restore if it isn't `pure function`
         // so `pure` stays usable as a plain identifier. Purity *enforcement*
         // (rejecting impure ops) is not yet ported.
-        if is_identifier && p.lexer.raw() == b"pure" {
+        if is_para_kw && p.lexer.raw() == b"pure" {
             let snapshot = p.lexer.snapshot();
             let pure_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2341,7 +2343,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // Parabun: `signal NAME = RHS` reactive declaration. `signal x` (a name
         // follows) is a declaration; `signal = …` / `signal(…)` / `signal.x`
         // keep `signal` as a plain identifier.
-        if is_identifier && p.lexer.raw() == b"signal" {
+        if is_para_kw && p.lexer.raw() == b"signal" {
             let snapshot = p.lexer.snapshot();
             let signal_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2352,7 +2354,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
 
         // Parabun: `derived NAME = RHS` reactive declaration.
-        if is_identifier && p.lexer.raw() == b"derived" {
+        if is_para_kw && p.lexer.raw() == b"derived" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2364,7 +2366,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Parabun: `effect { … }` / `effect EXPR;`. `effect(…)` / `effect.x` /
         // `effect = …` keep `effect` as a plain identifier.
-        if is_identifier && p.lexer.raw() == b"effect" {
+        if is_para_kw && p.lexer.raw() == b"effect" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2378,7 +2380,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Parabun: `when COND { … }` / `when not COND { … }`. `when(…)` /
         // `when.x` / `when = …` keep `when` as a plain identifier.
-        if is_identifier && p.lexer.raw() == b"when" {
+        if is_para_kw && p.lexer.raw() == b"when" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2391,7 +2393,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // Parabun: `memo NAME(params) { … }` statement-form memoized function.
         // `memo (x) => …` / `memo x => …` stay expression-form (handled in the
         // prefix parser), so only the named-function shape triggers here.
-        if is_identifier && p.lexer.raw() == b"memo" {
+        if is_para_kw && p.lexer.raw() == b"memo" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2440,7 +2442,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // Parabun: `parallel let …` / `para let …` → destructured
         // `const [..] = await Promise.all([..])`. The `parallel { … }`
         // expression forms are handled in the prefix parser.
-        if is_identifier && (p.lexer.raw() == b"parallel" || p.lexer.raw() == b"para") {
+        if is_para_kw && (p.lexer.raw() == b"parallel" || p.lexer.raw() == b"para") {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2467,7 +2469,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
 
         // Parabun: `arena { … }` scoped-allocation block.
-        if is_identifier && p.lexer.raw() == b"arena" {
+        if is_para_kw && p.lexer.raw() == b"arena" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2481,7 +2483,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // `schema NAME { field: type, … }` — schema-DSL declaration. The
         // `schema { … }` expression literal (no name) stays in the prefix
         // parser; this only fires when an identifier name follows.
-        if is_identifier && p.lexer.raw() == b"schema" {
+        if is_para_kw && p.lexer.raw() == b"schema" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
@@ -2493,7 +2495,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Parabun: `defer EXPR;` / `defer await EXPR;`. `defer(…)` / `defer.x` /
         // `defer = …` keep `defer` as a plain identifier.
-        if is_identifier && p.lexer.raw() == b"defer" {
+        if is_para_kw && p.lexer.raw() == b"defer" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;

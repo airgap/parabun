@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 describe("Parabun Parser", () => {
   const transpiler = new Bun.Transpiler({
-    loader: "ts",
+    loader: "pts",
   });
 
   describe("..! (catch operator)", () => {

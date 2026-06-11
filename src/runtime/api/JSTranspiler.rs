@@ -70,6 +70,9 @@ fn default_transform_options() -> api::TransformOptions {
 pub struct Config {
     pub transform: api::TransformOptions,
     pub default_loader: Loader,
+    /// Parabun: the configured loader used a para spelling (pts/pjs/…), so
+    /// synthetic sources get a para stdin name and para syntax enabled.
+    pub default_para: bool,
     pub macro_map: MacroMap,
     pub tsconfig: Option<Box<TSConfigJSON>>,
     pub tsconfig_buf: Box<[u8]>,
@@ -93,6 +96,7 @@ impl Default for Config {
         Self {
             transform: default_transform_options(),
             default_loader: Loader::Jsx,
+            default_para: false,
             macro_map: MacroMap::default(),
             tsconfig: None,
             tsconfig_buf: Box::default(),
@@ -287,7 +291,7 @@ impl Config {
         }
 
         if let Some(loader) = object.get(global, "loader")? {
-            if let Some(resolved) = loader_from_js(global, loader)? {
+            if let Some((resolved, para)) = loader_from_js(global, loader)? {
                 if !resolved.is_java_script_like() {
                     return Err(global.throw_invalid_arguments(format_args!(
                         "only JavaScript-like loaders supported for now",
@@ -295,6 +299,7 @@ impl Config {
                 }
 
                 self.default_loader = resolved;
+                self.default_para = para;
             }
         }
 
@@ -684,6 +689,8 @@ pub(crate) struct TransformTask<'a> {
     pub macro_map: MacroMap,
     pub tsconfig: Option<&'a TSConfigJSON>,
     pub loader: Loader,
+    /// Parabun: synthetic source gets a para stdin name.
+    pub para: bool,
     pub global: &'a JSGlobalObject,
     pub replace_exports: bun_ast::runtime::ReplaceableExportMap,
 }
@@ -709,6 +716,7 @@ impl<'a> TransformTask<'a> {
         input_code: bun_jsc::ThreadSafe<StringOrBuffer>,
         global: &'a JSGlobalObject,
         loader: Loader,
+        para: bool,
     ) -> Box<AsyncTransformTask<'a>> {
         let config = transpiler.config.get();
         let mut log = bun_ast::Log::init();
@@ -732,6 +740,7 @@ impl<'a> TransformTask<'a> {
             log,
             err: None,
             loader,
+            para,
             replace_exports: bun_ast::runtime::ReplaceableExportMap {
                 entries: config.runtime.replace_exports.entries.clone().expect("OOM"),
             },
@@ -759,7 +768,11 @@ impl<'a> TransformTask<'a> {
     }
 
     pub(crate) fn run(&mut self) {
-        let name = self.loader.stdin_name();
+        let name = if self.para {
+            self.loader.para_stdin_name()
+        } else {
+            self.loader.stdin_name()
+        };
 
         // PERF(port): was MimallocArena bulk-free — profile if hot.
         let arena = Arena::new();
@@ -1262,11 +1275,19 @@ impl JSTranspiler {
         &self,
         arena: &'static Arena,
         code: &[u8],
-        loader: Option<Loader>,
+        loader: Option<(Loader, bool)>,
         macro_js_ctx: MacroJSCtx,
     ) -> Option<ParseResult<'static>> {
         let config = self.config.get();
-        let name = config.default_loader.stdin_name();
+        let (eff_loader, eff_para) =
+            loader.unwrap_or((config.default_loader, config.default_para));
+        // The interactive REPL always speaks para.
+        let eff_para = eff_para || config.repl_mode;
+        let name = if eff_para {
+            eff_loader.para_stdin_name()
+        } else {
+            config.default_loader.stdin_name()
+        };
 
         // In REPL mode, wrap potential object literals in parentheses
         // If code starts with { and doesn't end with ; it might be an object literal
@@ -1299,7 +1320,7 @@ impl JSTranspiler {
             macro_remappings: clone_macro_map(&config.macro_map),
             dirname_fd: bun_sys::Fd::INVALID,
             file_descriptor: None,
-            loader: loader.unwrap_or(config.default_loader),
+            loader: eff_loader,
             jsx,
             path: source.path,
             virtual_source: Some(source),
@@ -1349,7 +1370,7 @@ impl JSTranspiler {
         let code = code_holder.slice();
         args.eat();
 
-        let loader: Option<Loader> = 'brk: {
+        let loader: Option<(Loader, bool)> = 'brk: {
             if let Some(arg) = args.next() {
                 args.eat();
                 break 'brk loader_from_js(global, arg)?;
@@ -1462,7 +1483,7 @@ impl JSTranspiler {
         let code = bun_jsc::ThreadSafe::adopt(code);
 
         args.eat();
-        let loader: Option<Loader> = 'brk: {
+        let loader: Option<(Loader, bool)> = 'brk: {
             if let Some(arg) = args.next() {
                 args.eat();
                 break 'brk loader_from_js(global, arg)?;
@@ -1470,8 +1491,9 @@ impl JSTranspiler {
             break 'brk None;
         };
 
-        let default_loader = self.config.get().default_loader;
-        let mut task = TransformTask::create(self, code, global, loader.unwrap_or(default_loader));
+        let config = self.config.get();
+        let (loader, para) = loader.unwrap_or((config.default_loader, config.default_para));
+        let mut task = TransformTask::create(self, code, global, loader, para);
         let promise = task.promise.value();
         task.schedule();
         // Ownership passes to the work pool / event loop; freed via
@@ -1517,7 +1539,7 @@ impl JSTranspiler {
 
         args.eat();
         let mut js_ctx_value: JSValue = JSValue::ZERO;
-        let loader: Option<Loader> = 'brk: {
+        let loader: Option<(Loader, bool)> = 'brk: {
             if let Some(arg) = args.next() {
                 args.eat();
                 if arg.is_number() || arg.is_string() {
@@ -1736,9 +1758,11 @@ impl JSTranspiler {
         let code = code_holder.slice();
 
         let mut loader: Loader = self.config.get().default_loader;
+        let mut para: bool = self.config.get().default_para;
         if let Some(arg) = args.next() {
-            if let Some(l) = loader_from_js(global, arg)? {
+            if let Some((l, p)) = loader_from_js(global, arg)? {
                 loader = l;
+                para = p;
             }
             args.eat();
         }
@@ -1775,7 +1799,14 @@ impl JSTranspiler {
         let mut ast_memory_allocator = bun_ast::ASTMemoryAllocator::borrowing(&arena);
         let _ast_scope = ast_memory_allocator.enter();
 
-        let source = bun_ast::Source::init_path_string(loader.stdin_name(), code);
+        let source = bun_ast::Source::init_path_string(
+            if para {
+                loader.para_stdin_name()
+            } else {
+                loader.stdin_name()
+            },
+            code,
+        );
         let jsx = match self.config.get().tsconfig.as_deref() {
             Some(ts) => ts.merge_jsx(self.transpiler.get().options.jsx.clone()),
             None => self.transpiler.get().options.jsx.clone(),

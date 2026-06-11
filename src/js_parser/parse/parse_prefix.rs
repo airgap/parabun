@@ -1400,7 +1400,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // Purity *enforcement* (rejecting impure ops / this / free vars) is not
         // yet ported — this makes `pure function f(){}` parse and run. Arrow
         // forms (`pure x =>`, `pure () =>`) are also not yet ported.
-        if name == b"pure" && !p.lexer.has_newline_before {
+        if p.lexer.is_para && name == b"pure" && !p.lexer.has_newline_before {
             // `pure function ...`
             if p.lexer.token == T::TFunction {
                 let expr = p.parse_fn_expr(loc, false, bun_ast::Range::NONE)?;
@@ -1451,7 +1451,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Parabun: `memo (params) => ...` / `memo x => ...` → memoized arrow
         //   __parabunMemo(arrow, arity). `memo(x)` (a call) is left alone.
-        if name == b"memo" && !p.lexer.has_newline_before {
+        if p.lexer.is_para && name == b"memo" && !p.lexer.has_newline_before {
             let arrow = if p.lexer.token == T::TIdentifier {
                 Some(Self::pfx_t_identifier(p, level)?)
             } else if p.lexer.token == T::TOpenParen {
@@ -1493,7 +1493,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         //   Some(x) → {tag:"Some",value:x}; None → {tag:"None"}
         // Ok/Err/Some only trigger before `(`, so `import { Ok }` and plain
         // identifier uses are unaffected.
-        if p.lexer.token == T::TOpenParen {
+        if p.lexer.is_para && p.lexer.token == T::TOpenParen {
             if name == b"Ok" {
                 return Self::parse_result_ctor(p, b"Ok", b"value", loc);
             }
@@ -1504,7 +1504,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 return Self::parse_result_ctor(p, b"Some", b"value", loc);
             }
         }
-        if name == b"None" {
+        if p.lexer.is_para && name == b"None" {
             // Bare `None` — desugar unless a continuation would treat it as a
             // plain identifier (`(` / `.` / `[` / `=`).
             match p.lexer.token {
@@ -1515,7 +1515,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Parabun: `parallel { k: v, … }` / `para { … }` → fan-out promise
         // composition: `Promise.all([v…]).then(([__pb…]) => ({ k: __pb… }))`.
-        if (name == b"parallel" || name == b"para")
+        if p.lexer.is_para
+            && (name == b"parallel" || name == b"para")
             && !p.lexer.has_newline_before
             && p.lexer.token == T::TOpenBrace
         {
@@ -1524,7 +1525,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Parabun: `schema { ... }` → `__paraFromSchema(() => ({ ... }))` —
         // inline schema literal wrapped in a thunk.
-        if name == b"schema" && !p.lexer.has_newline_before && p.lexer.token == T::TOpenBrace {
+        if p.lexer.is_para
+            && name == b"schema"
+            && !p.lexer.has_newline_before
+            && p.lexer.token == T::TOpenBrace
+        {
             return Self::parse_schema_object_expr(p, loc);
         }
 
@@ -1544,7 +1549,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // identifier reading is consistent with how `match(x)`/`match[i]` are
         // already treated. A subject that must start with `+`/`-` can be
         // written with an explicit unary/grouping the parser can't confuse.
-        if name == b"match" && !p.lexer.has_newline_before {
+        if p.lexer.is_para && name == b"match" && !p.lexer.has_newline_before {
             match p.lexer.token {
                 T::TIdentifier
                 | T::TNumericLiteral
@@ -2531,7 +2536,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             T::TOpenBracket => Self::pfx_t_open_bracket(p, errors),
             T::TOpenBrace => Self::pfx_t_open_brace(p, errors),
             // Parabun: leading-dot sugar `.member` at expression position.
-            T::TDot => Self::pfx_t_dot(p, level),
+            T::TDot if p.lexer.is_para => Self::pfx_t_dot(p, level),
             T::TLessThan => Self::pfx_t_less_than(p, level, errors, flags),
             T::TImport => Self::pfx_t_import(p, level),
             T::TOpenParen => Self::pfx_t_open_paren(p, level),
@@ -2562,7 +2567,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             T::TNew => Self::pfx_t_new(p, flags),
             T::TSuper => Self::pfx_t_super(p, level),
             // Parabun extension: throw in expression position.
-            T::TThrow => Self::pfx_t_throw_expr(p),
+            T::TThrow if p.lexer.is_para => Self::pfx_t_throw_expr(p),
             _ => {
                 // PERF(port): @branchHint(.cold)
                 p.lexer.unexpected()?;

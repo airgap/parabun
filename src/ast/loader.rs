@@ -213,7 +213,39 @@ impl Loader {
         b"html" => Loader::Html,
         b"md" => Loader::Md,
         b"markdown" => Loader::Md,
+        // Parabun: para spellings collapse to the matching JS loaders (same
+        // mapping as the .pts/.pjs/.ptsx/.pjsx extension table). Para-ness is
+        // carried separately via `is_para_spelling` so synthetic sources get a
+        // para stdin name.
+        b"pts" => Loader::Ts,
+        b"pjs" => Loader::Jsx,
+        b"ptsx" => Loader::Tsx,
+        b"pjsx" => Loader::Jsx,
+        b"pui" => Loader::Ts,
     };
+
+    /// Parabun: whether a loader spelling opts a synthetic (path-less) source
+    /// into para syntax — `new Bun.Transpiler({ loader: "pts" })` etc.
+    pub fn is_para_spelling(slice_: &[u8]) -> bool {
+        let slice = if !slice_.is_empty() && slice_[0] == b'.' {
+            &slice_[1..]
+        } else {
+            slice_
+        };
+        matches!(slice, b"pts" | b"pjs" | b"ptsx" | b"pjsx" | b"pui")
+    }
+
+    /// Parabun: stdin/synthetic-source name that the lexer recognises as para.
+    #[inline]
+    pub fn para_stdin_name(self) -> &'static str {
+        match self {
+            Loader::Jsx => "input.pjsx",
+            Loader::Js => "input.pjs",
+            Loader::Ts => "input.pts",
+            Loader::Tsx => "input.ptsx",
+            other => other.stdin_name(),
+        }
+    }
 
     pub fn from_string(slice_: &[u8]) -> Option<Loader> {
         let slice = if !slice_.is_empty() && slice_[0] == b'.' {

@@ -6,7 +6,7 @@ import { describe, expect, it } from "bun:test";
 // throw-expression proposal (binds at AssignmentExpression level — does
 // not absorb trailing `,`).
 describe("Parabun throw expression", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   describe("parse-time desugar", () => {
     it("desugars throw-expr on RHS of ?? to an IIFE", () => {

@@ -2,7 +2,7 @@ import { describe, expect, it, test } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
 
 describe("Parabun ..> (then operator)", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   describe("desugaring", () => {
     it("desugars ..> to .then()", () => {

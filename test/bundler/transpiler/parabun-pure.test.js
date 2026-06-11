@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 describe("Parabun Pure Keyword", () => {
   const transpiler = new Bun.Transpiler({
-    loader: "ts",
+    loader: "pts",
   });
 
   describe("pure function declarations", () => {

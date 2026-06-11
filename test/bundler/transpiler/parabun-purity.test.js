@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 describe("Parabun Purity Validator", () => {
   const transpiler = new Bun.Transpiler({
-    loader: "ts",
+    loader: "pts",
   });
 
   describe("this restriction in pure functions", () => {

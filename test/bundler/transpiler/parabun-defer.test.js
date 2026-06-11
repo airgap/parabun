@@ -14,7 +14,7 @@ import { bunEnv, bunExe } from "harness";
 // Function(js)` in-process can't resolve the `bun:wrap` runtime import that
 // parse-time desugaring injects.
 describe("Parabun defer", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   describe("parse-time desugar", () => {
     it("desugars sync defer to a using declaration", () => {

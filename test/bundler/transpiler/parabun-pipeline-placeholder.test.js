@@ -9,7 +9,7 @@ import { describe, expect, it } from "bun:test";
 // When the RHS is NOT a call, or has no `_`, the existing behavior is
 // preserved: `x |> f` still desugars to `f(x)`.
 describe("Parabun pipeline placeholder", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   describe("parse-time desugar", () => {
     it("substitutes a single _ in a call", () => {

@@ -25,7 +25,7 @@ async function runFixture(prefix, source) {
 
 describe("Parabun decimal literals", () => {
   describe("parse-time desugar", () => {
-    const transpiler = new Bun.Transpiler({ loader: "ts" });
+    const transpiler = new Bun.Transpiler({ loader: "pts" });
 
     it('desugars 0.1d to __paraDec("0.1")', () => {
       const out = transpiler.transformSync(`const x = 0.1d;`);

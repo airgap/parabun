@@ -15,7 +15,7 @@ import { bunEnv, bunExe } from "harness";
 // `bun:wrap` — `new Function(js)` evaluation in-process would fail on the
 // injected import.
 describe("Parabun memo", () => {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpiler = new Bun.Transpiler({ loader: "pts" });
 
   describe("parse-time desugar", () => {
     it("desugars zero-arg memo to arity 0", () => {

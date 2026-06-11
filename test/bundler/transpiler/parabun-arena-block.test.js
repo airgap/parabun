@@ -24,7 +24,7 @@ async function runFixture(prefix, source) {
 
 describe("Parabun arena blocks", () => {
   describe("parse-time desugar", () => {
-    const transpiler = new Bun.Transpiler({ loader: "ts" });
+    const transpiler = new Bun.Transpiler({ loader: "pts" });
 
     it("desugars `arena { body }` to a @lyku/para-arena scope call", () => {
       const out = transpiler.transformSync(`arena { let x = 1; console.log(x); }`);
