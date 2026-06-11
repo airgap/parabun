@@ -3400,6 +3400,34 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         })
     }
 
+    /// Loc of the most recent scope recorded in parse order, if any.
+    fn last_recorded_scope_loc(p: &Self) -> Option<bun_ast::Loc> {
+        let len = p.scopes_in_order.len();
+        for i in (0..len).rev() {
+            if let Some(loc) = p.scopes_in_order[i].as_ref().map(|s| s.loc) {
+                return Some(loc);
+            }
+        }
+        None
+    }
+
+    /// True when `_` is already a declared member somewhere in the current
+    /// scope chain. Parse-pass view: only declarations seen so far count, so
+    /// a function-scoped `var _` declared *after* the use is missed — that's
+    /// the conservative direction (we skip the wrap and keep plain-JS
+    /// semantics) only when `_` is provably a real variable.
+    fn underscore_is_declared(p: &Self) -> bool {
+        let name: &[u8] = b"_";
+        let mut scope = Some(p.current_scope);
+        while let Some(s) = scope {
+            if s.members.get(name).is_some() {
+                return true;
+            }
+            scope = s.parent;
+        }
+        false
+    }
+
     /// Wrap an arg expression containing a free `_` in `(__pu) => <expr>`.
     /// Returns `None` if the wrap can't be built (unsupported shape / scope
     /// conflict), so the caller keeps the original arg.
@@ -3415,6 +3443,21 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         } else {
             arrow_loc_in
         };
+
+        // Both pushes below must extend `scopes_in_order` in strictly
+        // increasing loc order or the visit pass replays scopes out of sync
+        // (debug builds assert on it inside `push_scope_for_parse_pass`
+        // rather than returning Err). A nested arrow/function literal inside
+        // `body` has already recorded a scope at a later loc than the wrap
+        // point, so the synthetic lambda can't be threaded in — keep the
+        // original arg. Broke on prettier's minified bundle (`t(e[_])` where
+        // `_` is a loop variable).
+        if Self::last_recorded_scope_loc(p).is_some_and(|prev| prev.start >= arrow_loc.start) {
+            return None;
+        }
+        if arrow_loc.start >= body.loc.start {
+            return None;
+        }
 
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, arrow_loc)
             .ok()?;
@@ -3471,6 +3514,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             return arg;
         }
         if !Self::contains_free_underscore(p, &arg) {
+            return arg;
+        }
+        // A `_` that resolves to a real declaration is a plain variable, not
+        // the lambda placeholder — rewriting would change the program's
+        // semantics. Minified bundles hit this constantly (prettier uses `_`
+        // as a loop counter: `t(e[_])`).
+        if Self::underscore_is_declared(p) {
             return arg;
         }
         Self::try_wrap_underscore_lambda(p, arg, arrow_loc).unwrap_or(arg)

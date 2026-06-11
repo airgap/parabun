@@ -1531,6 +1531,19 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // Parabun: `match SUBJECT { lit => res, ..., else => res }`. Triggers
         // when `match` is followed (no newline) by an expression-starting token;
         // `match(x)`/`match[i]` stay plain identifier uses (excluded below).
+        //
+        // `+`/`-` are deliberately NOT triggers: they are the only tokens that
+        // are both unary and binary, so `match + x` / `match - x` is ambiguous
+        // with ordinary identifier use of a variable named `match` (which is
+        // legal — `match` is contextual, not reserved). Real code uses `match`
+        // as an identifier far more often than it heads a match-expression
+        // whose subject is a bare signed literal, and committing to the
+        // match-expression path here mis-parses the binary form (the subject
+        // greedily swallows `+ x` and then the expected `{` is never found —
+        // this broke prettier's bundle, e.g. `match + subpath`). Favoring the
+        // identifier reading is consistent with how `match(x)`/`match[i]` are
+        // already treated. A subject that must start with `+`/`-` can be
+        // written with an explicit unary/grouping the parser can't confuse.
         if name == b"match" && !p.lexer.has_newline_before {
             match p.lexer.token {
                 T::TIdentifier
@@ -1539,8 +1552,6 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 | T::TTrue
                 | T::TFalse
                 | T::TNull
-                | T::TMinus
-                | T::TPlus
                 | T::TExclamation
                 | T::TTilde
                 | T::TTypeof

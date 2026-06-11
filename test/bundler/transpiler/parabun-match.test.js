@@ -108,6 +108,28 @@ describe("Parabun match expression", () => {
     expect(out).toContain("match.foo");
   });
 
+  test("`match + x` / `match - x` keep match as an identifier (binary op, not a match-expr)", () => {
+    // `+`/`-` are both unary and binary, so `match + x` is ambiguous with a
+    // match-expression whose subject is `+x`. We favor the identifier reading
+    // (consistent with `match(x)`/`match[i]`). Regression: this used to mis-fire
+    // into match-expr parsing and fail with `Expected "{"` — it broke prettier's
+    // bundle (`const request = pattern ? match.replace(...) : match + subpath;`).
+    const add = ts(`
+      const match = "x";
+      declare const pattern: boolean;
+      const r = pattern ? match.replace("*", () => match) : match + "z";
+    `);
+    expect(add).toContain('match + "z"');
+    expect(add).not.toContain("__pm");
+
+    const sub = ts(`
+      let match = 5;
+      const r = match - 1;
+    `);
+    expect(sub).toContain("match - 1");
+    expect(sub).not.toContain("__pm");
+  });
+
   test("subject is evaluated once via the IIFE param", () => {
     const out = ts(`
       const r = match expensive() {
