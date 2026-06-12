@@ -1348,6 +1348,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // `expr |> rhs` → `rhs(expr)`.
         let loc = left.loc;
+        let left_start = left.loc.start;
+        let rhs_scope_start = p.scopes_in_order.len();
         let rhs = p.parse_expr(Level::NullishCoalescing)?;
 
         // Placeholder form: when `rhs` is a call whose argument list contains
@@ -1380,7 +1382,55 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             loc,
         );
+        Self::reorder_pipe_rhs_scopes(p, left_start, rhs_scope_start);
         Ok(Continuation::Next)
+    }
+
+    /// `expr |> rhs` desugars to `rhs(expr)`, so the visit pass reaches the
+    /// RHS's scopes (the call target) BEFORE the scopes inside `expr` (the
+    /// call argument), while `scopes_in_order` still holds parse order
+    /// (expr's scopes first). Move the RHS's entries in front of expr's so
+    /// the sequential scope replay matches the post-desugar AST — same
+    /// surgery `try_fuse_stream_pipeline` does for its synth scopes.
+    ///
+    /// Release builds only assert scope KINDS during replay, which is how
+    /// this went unnoticed (LYK-1129): for `x.map(v => v) |> (a => …)` both
+    /// sides are arrows with identical kind sequences, so the visit pass
+    /// silently ran each arrow under the other's scope. Debug builds assert
+    /// locs and panicked "Scope mismatch while visiting".
+    ///
+    /// No re-parenting is needed: the desugar leaves both sides evaluated in
+    /// the enclosing scope (the LHS becomes an argument, not part of the
+    /// arrow body), so only the replay ORDER changes.
+    fn reorder_pipe_rhs_scopes(p: &mut Self, left_start: i32, rhs_scope_start: usize) {
+        let len = p.scopes_in_order.len();
+        if len <= rhs_scope_start {
+            return; // RHS recorded no scopes
+        }
+        let mut insert_at = rhs_scope_start;
+        for i in 0..rhs_scope_start {
+            if let Some(entry) = p.scopes_in_order[i] {
+                if entry.loc.start >= left_start {
+                    insert_at = i;
+                    break;
+                }
+            }
+        }
+        if insert_at >= rhs_scope_start {
+            return; // LHS recorded no scopes — order already matches
+        }
+        let block: std::vec::Vec<_> = (rhs_scope_start..len)
+            .map(|i| p.scopes_in_order[i])
+            .collect();
+        let count = block.len();
+        let mut j = len;
+        while j > insert_at + count {
+            p.scopes_in_order[j - 1] = p.scopes_in_order[j - 1 - count];
+            j -= 1;
+        }
+        for (k, entry) in block.into_iter().enumerate() {
+            p.scopes_in_order[insert_at + k] = entry;
+        }
     }
 
     // ─── Parabun pipeline inline + stream fusion ───────────────────────────
