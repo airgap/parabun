@@ -383,6 +383,13 @@ var __paraSchemaEscapeCheck = decl => {
     if (s.items) {
       visitEdge(s.items, base, !(s.minItems >= 1));
     }
+    if (Array.isArray(s.anyOf)) {
+      // A union arm is an escape node whenever another arm exists —
+      // "union with a non-recursive arm" (§1.5).
+      for (var a = 0; a < s.anyOf.length; a++) {
+        visitEdge(s.anyOf[a], base, s.anyOf.length > 1);
+      }
+    }
     if (s.properties && typeof s.properties === "object") {
       var req = {};
       if (Array.isArray(s.required)) for (var i = 0; i < s.required.length; i++) req[s.required[i]] = true;
@@ -1090,6 +1097,14 @@ var __paraFromSchemaEager = (schema, baseUrl) => {
       // consumption (it's a first crossing, not a recursive re-entry).
       return __paraValidateDecl(s, v, false);
     }
+    if (Array.isArray(s.anyOf)) {
+      // Union: any arm accepting the value accepts it. Emitted by the TS
+      // extractor for structural unions (literal unions become `enum`).
+      for (var ai = 0; ai < s.anyOf.length; ai++) {
+        if (validate(s.anyOf[ai], v) === null) return null;
+      }
+      return "no anyOf arm matched";
+    }
     if (s.enum) {
       for (var i = 0; i < s.enum.length; i++) if (v === s.enum[i]) return null;
       return "expected one of " + JSON.stringify(s.enum);
@@ -1130,6 +1145,7 @@ var __paraFromSchemaEager = (schema, baseUrl) => {
       return null;
     }
     if (t === "boolean") return typeof v === "boolean" ? null : "expected boolean";
+    if (t === "function") return typeof v === "function" ? null : "expected function";
     if (t === "timestamptz") return typeof v === "string" || v instanceof Date ? null : "expected timestamp";
     if (t === "array") {
       if (!Array.isArray(v)) return "expected array";

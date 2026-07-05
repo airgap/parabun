@@ -237,6 +237,56 @@ describe("schema validator: DAGs and memo soundness", () => {
   });
 });
 
+describe("schema validator: anyOf and function arms (TS-extractor dialect)", () => {
+  test("anyOf accepts any matching arm, rejects when none match", async () => {
+    const m = await transpileAndImport(`
+      export schema V = {
+        type: "object",
+        properties: { x: { anyOf: [{ type: "string" }, { type: "number" }] } },
+        required: ["x"],
+      };
+      export const s = V.parse({ x: "str" });
+      export const n = V.parse({ x: 42 });
+      export const b = V.parse({ x: true });
+    `);
+    expect(m.s.tag).toBe("Ok");
+    expect(m.n.tag).toBe("Ok");
+    expect(m.b.tag).toBe("Err");
+    expect(m.b.error).toContain("no anyOf arm matched");
+  });
+
+  test("type: function validates function values", async () => {
+    const m = await transpileAndImport(`
+      export schema H = {
+        type: "object",
+        properties: { handler: { type: "function" } },
+        required: ["handler"],
+      };
+      export const ok = H.parse({ handler: () => {} });
+      export const bad = H.parse({ handler: "nope" });
+    `);
+    expect(m.ok.tag).toBe("Ok");
+    expect(m.bad.tag).toBe("Err");
+  });
+
+  test("recursion through an anyOf arm: multi-arm union is an escape node, cycles still detected", async () => {
+    const m = await transpileAndImport(`
+      export schema Node = {
+        type: "object",
+        properties: { next: { anyOf: [Node, { enum: [null] }] } },
+        required: [],
+      };
+      export const tree = Node.parse({ next: { next: { } } });
+      const loop = {};
+      loop.next = loop;
+      export const cyc = Node.parse(loop);
+    `);
+    expect(m.tree.tag).toBe("Ok");
+    expect(m.cyc.tag).toBe("Err");
+    expect(m.cyc.error).toContain("no anyOf arm matched");
+  });
+});
+
 describe("schema escape-node check (§1.5)", () => {
   test("plain recursive schema with no escape node throws on first parse", async () => {
     const m = await transpileAndImport(`
