@@ -273,6 +273,234 @@ var __paraSchemaResolve = (ref, baseUrl) => {
   return target;
 };
 
+var __paraHide = (obj, key, value) =>
+  Object.defineProperty(obj, key, {
+    value,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+
+// Does a (plain, acyclic) schema body contain any registry `$ref`?
+// Declarations without refs are non-recursive and pay ZERO cycle/depth
+// machinery at validation time (plan §4.3 — `containsRecursiveNodes`).
+var __paraSchemaHasRefs = s => {
+  if (!s || typeof s !== "object") return false;
+  if (typeof s.$ref === "string") return true;
+  if (Array.isArray(s)) {
+    for (var i = 0; i < s.length; i++) if (__paraSchemaHasRefs(s[i])) return true;
+    return false;
+  }
+  for (var k in s) if (__paraSchemaHasRefs(s[k])) return true;
+  return false;
+};
+
+// ── Validator cycle/depth machinery (plan §4) ──────────────────────────────
+//
+// Validation is synchronous and single-threaded, so the per-root-call
+// context lives in a module slot: the outermost parse() creates it and
+// tears it down; nested declaration entries (crossing `$ref`s or embedded
+// wrapped schemas) join it. Torn down after the root call — never
+// persisted (mutation between calls would poison the memo).
+//
+//   inflight  WeakMap<object, Map<declId, pathDepth>> — values currently
+//             being validated on this path; a hit means a cycle closed.
+//   done      WeakMap<object, Set<declId>> — (value, declaration) pairs
+//             already validated OK. Pair-keyed: the same object at two
+//             different schema positions must be checked against both
+//             (memoizing on the object alone is a soundness hole).
+//             Prevents exponential re-validation on DAGs, not cycles.
+//   depths    Map<declId, count> — per-declaration counters of
+//             `$ref`-mediated entries on the current path (decremented on
+//             return, so siblings don't accumulate).
+//   pathDepth running count of declaration entries — stored per inflight
+//             entry so cycle length is O(1) (currentDepth − storedDepth).
+//   path      declaration names for the cycle diagnostic.
+var __paraValCtx = null;
+var __paraInlineId = 0;
+
+// Escape-node check (plan §1.5): every recursion loop in the SCHEMA graph
+// of a plain (non-cyclic) declaration must pass through an escape node —
+// an optional field, or an items edge on a possibly-empty array. Without
+// one the schema has no finite inhabitants: `schema T = { next: T }` with
+// `next` required can never be satisfied by a finite acyclic value.
+// Loops that pass through a `cyclic` declaration are exempt (their values
+// are legally cyclic). Walks the plain-JSON schema graph only — cheap,
+// one-shot per declaration.
+var __paraSchemaEscapeCheck = decl => {
+  var frames = new Map(); // declId → { escapeAtEntry, cyclic }
+  var order = []; // path of declIds, for loop-segment cyclic scan
+  var escapes = 0;
+
+  var enterDecl = t => {
+    var tid = t.$id || t.$vid;
+    if (frames.has(tid)) {
+      var f = frames.get(tid);
+      if (escapes > f.escapeAtEntry) return true; // escaped loop — fine
+      // No escape on the loop: legal only if some declaration on the
+      // loop segment (including the target) is cyclic.
+      var idx = order.indexOf(tid);
+      for (var i = idx; i < order.length; i++) {
+        if (frames.get(order[i]).cyclic) return true;
+      }
+      if (t.$cyclic !== undefined) return true;
+      throw new Error(
+        "recursive schema '" +
+          (t.$name || "(schema)") +
+          "' has no finite inhabitants (every recursion loop needs an optional field or a possibly-empty array — or declare the schema cyclic)",
+      );
+    }
+    frames.set(tid, { escapeAtEntry: escapes, cyclic: t.$cyclic !== undefined });
+    order.push(tid);
+    visit(t.schema, t.$base);
+    order.pop();
+    frames.delete(tid);
+    return true;
+  };
+
+  var visitEdge = (sub, base, escapable) => {
+    if (escapable) escapes++;
+    visit(sub, base);
+    if (escapable) escapes--;
+  };
+
+  var visit = (s, base) => {
+    if (!s || typeof s !== "object") return;
+    if (typeof s.$ref === "string") {
+      var t;
+      try {
+        t = __paraSchemaResolve(s.$ref, base);
+      } catch (_) {
+        return; // unresolved — surfaces with its own diagnostic at validation
+      }
+      enterDecl(t);
+      return;
+    }
+    if (typeof s.$walk === "function") {
+      enterDecl(s); // embedded wrapped declaration — same boundary rules
+      return;
+    }
+    if (s.items) {
+      visitEdge(s.items, base, !(s.minItems >= 1));
+    }
+    if (s.properties && typeof s.properties === "object") {
+      var req = {};
+      if (Array.isArray(s.required)) for (var i = 0; i < s.required.length; i++) req[s.required[i]] = true;
+      for (var k in s.properties) {
+        visitEdge(s.properties[k], base, req[k] !== true);
+      }
+    }
+  };
+
+  enterDecl(decl);
+};
+
+var __paraValidateDecl = (decl, v, viaRef) => {
+  var walk = decl.$walk;
+  // Legacy-wrapped values (or bare fragments) have no walker — nothing to do.
+  if (!walk) {
+    var r = decl.parse ? decl.parse(v) : { tag: "Ok" };
+    return r.tag === "Ok" ? null : r.error;
+  }
+  // Zero-overhead fast path: no refs anywhere, no enclosing context.
+  if (!decl.$hasRefs && !__paraValCtx) return walk(v);
+
+  var ctx = __paraValCtx;
+  var owner = false;
+  if (!ctx) {
+    ctx = __paraValCtx = {
+      inflight: new WeakMap(),
+      done: new WeakMap(),
+      depths: new Map(),
+      pathDepth: 0,
+      path: [],
+    };
+    owner = true;
+  }
+  try {
+    return __paraValidateDeclInCtx(decl, v, viaRef, ctx, walk);
+  } finally {
+    if (owner) __paraValCtx = null;
+  }
+};
+
+var __paraValidateDeclInCtx = (decl, v, viaRef, ctx, walk) => {
+  // Primitives can't participate in reference cycles and terminate
+  // recursion by themselves — skip straight to the walker.
+  if (v === null || typeof v !== "object") return walk(v);
+
+  var id = decl.$id || decl.$vid;
+  var name = decl.$name || "(schema)";
+
+  var doneSet = ctx.done.get(v);
+  if (doneSet && doneSet.has(id)) return null;
+
+  var m = ctx.inflight.get(v);
+  if (m && m.has(id)) {
+    // A reference cycle just closed through this declaration.
+    var cy = decl.$cyclic;
+    if (cy === undefined) {
+      return (
+        "cycle detected in acyclic type '" +
+        name +
+        "' (path: " +
+        ctx.path.join(" → ") +
+        " → " +
+        name +
+        ")"
+      );
+    }
+    if (cy !== true) {
+      var k = ctx.pathDepth - m.get(id);
+      if (k > cy) {
+        return "cycle exceeds declared length cyclic(" + cy + ") on '" + name + "' (actual: " + k + ")";
+      }
+    }
+    return null; // coinductive accept — no descent, no depth consumed
+  }
+
+  // Depth cap: counts `$ref`-mediated entries of THIS declaration on the
+  // current path. Recursive declarations default to 128 (plan §1.4); the
+  // back-edge case above returns before ever reaching this check.
+  var dc = ctx.depths.get(id) || 0;
+  if (viaRef) {
+    var cap = decl.$depth;
+    cap = cap === "unbounded" ? Infinity : cap === undefined ? (decl.$hasRefs ? 128 : Infinity) : cap;
+    if (dc + 1 > cap) {
+      return "nesting exceeds declared depth(" + cap + ") on '" + name + "'";
+    }
+    ctx.depths.set(id, dc + 1);
+  }
+
+  if (!m) {
+    m = new Map();
+    ctx.inflight.set(v, m);
+  }
+  m.set(id, ctx.pathDepth);
+  ctx.pathDepth++;
+  ctx.path.push(name);
+
+  var err;
+  try {
+    err = walk(v);
+  } finally {
+    ctx.path.pop();
+    ctx.pathDepth--;
+    m.delete(id);
+    if (viaRef) ctx.depths.set(id, dc);
+  }
+
+  if (!err) {
+    var ds = ctx.done.get(v);
+    if (!ds) {
+      ds = new Set();
+      ctx.done.set(v, ds);
+    }
+    ds.add(id);
+  }
+  return err;
+};
+
 // Parabun: `schema NAME = <body>` desugars to
 //   `const NAME = __paraSchemaDecl(import.meta.url, "NAME", <body>[, caps])`.
 // Decorates the body (same as __paraFromSchema) and registers it under
@@ -284,27 +512,11 @@ var __paraSchemaResolve = (ref, baseUrl) => {
 // build step 3) consumes them.
 export var __paraSchemaDecl = (baseUrl, name, schema, caps) => {
   var wrapped = __paraFromSchemaEager(schema, baseUrl);
-  Object.defineProperty(wrapped, "$id", {
-    value: baseUrl + "#" + name,
-    enumerable: false,
-    writable: false,
-    configurable: true,
-  });
+  __paraHide(wrapped, "$id", baseUrl + "#" + name);
+  __paraHide(wrapped, "$name", name);
   if (caps) {
-    if (caps.cyclic !== undefined)
-      Object.defineProperty(wrapped, "$cyclic", {
-        value: caps.cyclic,
-        enumerable: false,
-        writable: false,
-        configurable: true,
-      });
-    if (caps.depth !== undefined)
-      Object.defineProperty(wrapped, "$depth", {
-        value: caps.depth,
-        enumerable: false,
-        writable: false,
-        configurable: true,
-      });
+    if (caps.cyclic !== undefined) __paraHide(wrapped, "$cyclic", caps.cyclic);
+    if (caps.depth !== undefined) __paraHide(wrapped, "$depth", caps.depth);
   }
   __paraSchemaRegistry.set(baseUrl + "#" + name, wrapped);
   return wrapped;
@@ -383,13 +595,19 @@ var __paraFromSchemaEager = (schema, baseUrl) => {
   };
   var validate = (s, v) => {
     if (typeof s.$ref === "string") {
-      // Registry reference — delegate to the target declaration's own
-      // parse. Crossing a `$ref` IS the declaration boundary: the target
+      // Registry reference — delegate to the target declaration.
+      // Crossing a `$ref` IS the declaration boundary: the target
       // validates under its own base URL and capabilities (plan §1.4
-      // non-propagation falls out of this delegation).
+      // non-propagation falls out of this delegation), and the cycle/
+      // depth machinery hooks exactly here (viaRef entry).
       var target = __paraSchemaResolve(s.$ref, baseUrl);
-      var r = target.parse(v);
-      return r.tag === "Ok" ? null : r.error;
+      return __paraValidateDecl(target, v, true);
+    }
+    if (s !== schema && s && typeof s.$walk === "function") {
+      // Embedded wrapped declaration (cross-module composition, `from`
+      // ingests) — same boundary semantics as a `$ref`, minus the depth
+      // consumption (it's a first crossing, not a recursive re-entry).
+      return __paraValidateDecl(s, v, false);
     }
     if (s.enum) {
       for (var i = 0; i < s.enum.length; i++) if (v === s.enum[i]) return null;
@@ -475,8 +693,24 @@ var __paraFromSchemaEager = (schema, baseUrl) => {
   // copy them — important when downstream code spreads model fields
   // into other schema literals (e.g. `aiSettings: { ...aiSettings }`).
   var result = Object.assign({}, schema);
+  // Internal hooks for the cycle/depth machinery (__paraValidateDecl):
+  // the raw walker, the containsRecursiveNodes flag, and a fallback
+  // identity for anonymous (inline) schemas so memo entries never
+  // collide across two distinct inline literals.
+  __paraHide(result, "$walk", v => validate(schema, v));
+  __paraHide(result, "$hasRefs", __paraSchemaHasRefs(schema));
+  __paraHide(result, "$vid", "(inline#" + __paraInlineId++ + ")");
+  __paraHide(result, "$base", baseUrl);
+  // Escape-node check (plan §1.5) — runs once, on first parse: the
+  // earliest point where forward/mutual references are all registered.
+  // Success is memoized; a failing schema keeps throwing.
+  var escapeChecked = false;
   var parseFn = v => {
-    var e = validate(schema, v);
+    if (!escapeChecked) {
+      if (result.$hasRefs) __paraSchemaEscapeCheck(result);
+      escapeChecked = true;
+    }
+    var e = __paraValidateDecl(result, v, false);
     return e ? { tag: "Err", error: e } : { tag: "Ok", value: v };
   };
   Object.defineProperty(result, "parse", {
