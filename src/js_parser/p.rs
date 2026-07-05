@@ -294,12 +294,21 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// `::`-marked args awaiting a validation prelude — `(arg:: Type)`.
     /// Tuple: (arg ref, arg name, capitalized model type name, loc). Captured
     /// during arg parse, drained at the function body.
-    pub para_arg_validations:
-        std::vec::Vec<(js_ast::base::Ref, &'a [u8], &'a [u8], bun_ast::Loc)>,
+    pub para_arg_validations: std::vec::Vec<(js_ast::base::Ref, &'a [u8], &'a [u8], bun_ast::Loc)>,
     /// TS `interface`/`type` shapes captured during type-skipping, so a
     /// `(arg:: Iface)` marker can emit inline typeof checks instead of
     /// `Iface.parse(arg)` (no runtime model exists for a TS-only type).
     pub para_ts_type_registry: std::collections::HashMap<&'a [u8], ParaTsTypeShape<'a>>,
+    /// Symbols declared by `schema NAME = …` / `schema NAME from …` in this
+    /// file. At visit time, a bare reference to one of these in a schema-value
+    /// position (object property value / array element inside a schema body)
+    /// lowers to a registry reference `{ $ref: "#NAME" }` instead of a live
+    /// object reference — see para-schema-recursion-plan.md §1.7/§2.1.
+    pub para_schema_symbols: std::collections::HashMap<js_ast::base::Ref, ()>,
+    /// > 0 while visiting the body argument of a parser-generated
+    /// `__paraSchemaDecl` / `__paraFromSchema` call (schema-body context for
+    /// the `$ref` rewrite). Counter, not bool: schema literals can nest.
+    pub para_schema_body_depth: u32,
 
     pub has_top_level_return: bool,
     pub latest_return_had_semicolon: bool,
@@ -9285,6 +9294,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             strict_signals_pragma: None,
             para_arg_validations: std::vec::Vec::new(),
             para_ts_type_registry: std::collections::HashMap::new(),
+            para_schema_symbols: std::collections::HashMap::new(),
+            para_schema_body_depth: 0,
 
             call_target: null_expr_data(),
             delete_target: null_expr_data(),

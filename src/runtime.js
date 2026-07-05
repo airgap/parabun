@@ -579,10 +579,22 @@ export var __parabunRangeInclusive = (a, b) => {
   for (var i = a; i <= b; i++) out.push(i);
   return out;
 };
-// Parabun: `schema { ... }` → __paraFromSchema(() => ({ ... })). The thunk is
-// invoked once (after surrounding bindings exist, so self/mutual recursion
-// works) and its object is returned as the schema value.
-export var __paraFromSchema = (thunk) => thunk();
+// Parabun: `schema { ... }` → __paraFromSchema({ ... }, import.meta.url).
+// Bundled output keeps schemas as plain objects (no runtime validator).
+export var __paraFromSchema = (schema) => schema;
+// Parabun: `schema NAME = <body>` / `schema NAME from <expr>` /
+// `schema NAME { field: type }` →
+// __paraSchemaDecl/__paraSchemaIngest/__paraSchemaRegister(
+//   import.meta.url, "NAME", <body>).
+// The registry lets `{ $ref: "#NAME" }` registry references inside schema
+// bodies resolve back to the declared value (recursive/mutual schemas).
+var __paraSchemaRegistry = new Map();
+export var __paraSchemaDecl = (baseUrl, name, schema) => {
+  __paraSchemaRegistry.set(baseUrl + "#" + name, schema);
+  return schema;
+};
+export var __paraSchemaIngest = (baseUrl, name, schema) => __paraSchemaDecl(baseUrl, name, schema);
+export var __paraSchemaRegister = (baseUrl, name, model) => __paraSchemaDecl(baseUrl, name, model);
 export var __parabunMemo = (fn, arity) => {
   if (arity === 0) {
     var __has = false,

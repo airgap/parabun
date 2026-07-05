@@ -253,64 +253,818 @@ class Decimal {
 export var __paraDec = source => Decimal.from(source);
 __paraDec.Decimal = Decimal;
 
-// Parabun: `model X from <expr>` desugars to `const X = __paraFromSchema(<expr>)`.
+// ── Para schema registry (para-schema-recursion-plan.md §2.1) ─────────────
+//
+// Every `schema NAME = …` / `schema NAME from …` declaration registers its
+// decorated value here under a stable ID: `<import.meta.url>#NAME`. Recursive
+// references inside schema bodies compile to module-relative registry refs
+// (`{ $ref: "#NAME" }`) resolved lazily against the declaring module's URL —
+// so schema values are plain acyclic JSON, and mutual recursion needs no
+// TDZ dance, no thunks, no Proxies.
+var __paraSchemaRegistry = new Map();
+
+// Resolve a `$ref` string against the registry. Module-relative form
+// (`#Name`) joins with the declaring module's URL; any other form is
+// looked up verbatim (reserved for cross-module stable IDs).
+var __paraSchemaResolve = (ref, baseUrl) => {
+  var id = ref.charCodeAt(0) === 35 /* '#' */ && baseUrl ? baseUrl + ref : ref;
+  var target = __paraSchemaRegistry.get(id);
+  if (!target) throw new Error("unresolved schema reference '" + id + "'");
+  return target;
+};
+
+var __paraHide = (obj, key, value) =>
+  Object.defineProperty(obj, key, {
+    value,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+
+// Does a (plain, acyclic) schema body contain any registry `$ref`?
+// Declarations without refs are non-recursive and pay ZERO cycle/depth
+// machinery at validation time (plan §4.3 — `containsRecursiveNodes`).
+var __paraSchemaHasRefs = s => {
+  if (!s || typeof s !== "object") return false;
+  if (typeof s.$ref === "string") return true;
+  if (Array.isArray(s)) {
+    for (var i = 0; i < s.length; i++) if (__paraSchemaHasRefs(s[i])) return true;
+    return false;
+  }
+  for (var k in s) if (__paraSchemaHasRefs(s[k])) return true;
+  return false;
+};
+
+// ── Validator cycle/depth machinery (plan §4) ──────────────────────────────
+//
+// Validation is synchronous and single-threaded, so the per-root-call
+// context lives in a module slot: the outermost parse() creates it and
+// tears it down; nested declaration entries (crossing `$ref`s or embedded
+// wrapped schemas) join it. Torn down after the root call — never
+// persisted (mutation between calls would poison the memo).
+//
+//   inflight  WeakMap<object, Map<declId, pathDepth>> — values currently
+//             being validated on this path; a hit means a cycle closed.
+//   done      WeakMap<object, Set<declId>> — (value, declaration) pairs
+//             already validated OK. Pair-keyed: the same object at two
+//             different schema positions must be checked against both
+//             (memoizing on the object alone is a soundness hole).
+//             Prevents exponential re-validation on DAGs, not cycles.
+//   depths    Map<declId, count> — per-declaration counters of
+//             `$ref`-mediated entries on the current path (decremented on
+//             return, so siblings don't accumulate).
+//   pathDepth running count of declaration entries — stored per inflight
+//             entry so cycle length is O(1) (currentDepth − storedDepth).
+//   path      declaration names for the cycle diagnostic.
+var __paraValCtx = null;
+var __paraInlineId = 0;
+
+// Escape-node check (plan §1.5): every recursion loop in the SCHEMA graph
+// of a plain (non-cyclic) declaration must pass through an escape node —
+// an optional field, or an items edge on a possibly-empty array. Without
+// one the schema has no finite inhabitants: `schema T = { next: T }` with
+// `next` required can never be satisfied by a finite acyclic value.
+// Loops that pass through a `cyclic` declaration are exempt (their values
+// are legally cyclic). Walks the plain-JSON schema graph only — cheap,
+// one-shot per declaration.
+var __paraSchemaEscapeCheck = decl => {
+  var frames = new Map(); // declId → { escapeAtEntry, cyclic }
+  var order = []; // path of declIds, for loop-segment cyclic scan
+  var escapes = 0;
+
+  var enterDecl = t => {
+    var tid = t.$id || t.$vid;
+    if (frames.has(tid)) {
+      var f = frames.get(tid);
+      if (escapes > f.escapeAtEntry) return true; // escaped loop — fine
+      // No escape on the loop: legal only if some declaration on the
+      // loop segment (including the target) is cyclic.
+      var idx = order.indexOf(tid);
+      for (var i = idx; i < order.length; i++) {
+        if (frames.get(order[i]).cyclic) return true;
+      }
+      if (t.$cyclic !== undefined) return true;
+      throw new Error(
+        "recursive schema '" +
+          (t.$name || "(schema)") +
+          "' has no finite inhabitants (every recursion loop needs an optional field or a possibly-empty array — or declare the schema cyclic)",
+      );
+    }
+    frames.set(tid, { escapeAtEntry: escapes, cyclic: t.$cyclic !== undefined });
+    order.push(tid);
+    visit(t.schema, t.$base);
+    order.pop();
+    frames.delete(tid);
+    return true;
+  };
+
+  var visitEdge = (sub, base, escapable) => {
+    if (escapable) escapes++;
+    visit(sub, base);
+    if (escapable) escapes--;
+  };
+
+  var visit = (s, base) => {
+    if (!s || typeof s !== "object") return;
+    if (typeof s.$ref === "string") {
+      var t;
+      try {
+        t = __paraSchemaResolve(s.$ref, base);
+      } catch (_) {
+        return; // unresolved — surfaces with its own diagnostic at validation
+      }
+      enterDecl(t);
+      return;
+    }
+    if (typeof s.$walk === "function") {
+      enterDecl(s); // embedded wrapped declaration — same boundary rules
+      return;
+    }
+    if (s.items) {
+      visitEdge(s.items, base, !(s.minItems >= 1));
+    }
+    if (s.properties && typeof s.properties === "object") {
+      var req = {};
+      if (Array.isArray(s.required)) for (var i = 0; i < s.required.length; i++) req[s.required[i]] = true;
+      for (var k in s.properties) {
+        visitEdge(s.properties[k], base, req[k] !== true);
+      }
+    }
+  };
+
+  enterDecl(decl);
+};
+
+var __paraValidateDecl = (decl, v, viaRef) => {
+  var walk = decl.$walk;
+  // No walker ⇒ the declaration validates itself (DSL braces form —
+  // registered via __paraSchemaRegister with its own inline parse).
+  if (!walk) {
+    var r = decl.parse ? decl.parse(v) : { tag: "Ok" };
+    return r.tag === "Ok" ? null : r.error;
+  }
+  // Zero-overhead fast path: no refs anywhere, no enclosing context.
+  if (!decl.$hasRefs && !__paraValCtx) return walk(v);
+
+  var ctx = __paraValCtx;
+  var owner = false;
+  if (!ctx) {
+    ctx = __paraValCtx = {
+      inflight: new WeakMap(),
+      done: new WeakMap(),
+      depths: new Map(),
+      pathDepth: 0,
+      path: [],
+    };
+    owner = true;
+  }
+  try {
+    return __paraValidateDeclInCtx(decl, v, viaRef, ctx, walk);
+  } finally {
+    if (owner) __paraValCtx = null;
+  }
+};
+
+var __paraValidateDeclInCtx = (decl, v, viaRef, ctx, walk) => {
+  // Primitives can't participate in reference cycles and terminate
+  // recursion by themselves — skip straight to the walker.
+  if (v === null || typeof v !== "object") return walk(v);
+
+  var id = decl.$id || decl.$vid;
+  var name = decl.$name || "(schema)";
+
+  var doneSet = ctx.done.get(v);
+  if (doneSet && doneSet.has(id)) return null;
+
+  var m = ctx.inflight.get(v);
+  if (m && m.has(id)) {
+    // A reference cycle just closed through this declaration.
+    var cy = decl.$cyclic;
+    if (cy === undefined) {
+      return (
+        "cycle detected in acyclic type '" +
+        name +
+        "' (path: " +
+        ctx.path.join(" → ") +
+        " → " +
+        name +
+        ")"
+      );
+    }
+    if (cy !== true) {
+      var k = ctx.pathDepth - m.get(id);
+      if (k > cy) {
+        return "cycle exceeds declared length cyclic(" + cy + ") on '" + name + "' (actual: " + k + ")";
+      }
+    }
+    return null; // coinductive accept — no descent, no depth consumed
+  }
+
+  // Depth cap: counts `$ref`-mediated entries of THIS declaration on the
+  // current path. Recursive declarations default to 128 (plan §1.4); the
+  // back-edge case above returns before ever reaching this check.
+  var dc = ctx.depths.get(id) || 0;
+  if (viaRef) {
+    var cap = decl.$depth;
+    cap = cap === "unbounded" ? Infinity : cap === undefined ? (decl.$hasRefs ? 128 : Infinity) : cap;
+    if (dc + 1 > cap) {
+      return "nesting exceeds declared depth(" + cap + ") on '" + name + "'";
+    }
+    ctx.depths.set(id, dc + 1);
+  }
+
+  if (!m) {
+    m = new Map();
+    ctx.inflight.set(v, m);
+  }
+  m.set(id, ctx.pathDepth);
+  ctx.pathDepth++;
+  ctx.path.push(name);
+
+  var err;
+  try {
+    err = walk(v);
+  } finally {
+    ctx.path.pop();
+    ctx.pathDepth--;
+    m.delete(id);
+    if (viaRef) ctx.depths.set(id, dc);
+  }
+
+  if (!err) {
+    var ds = ctx.done.get(v);
+    if (!ds) {
+      ds = new Set();
+      ctx.done.set(v, ds);
+    }
+    ds.add(id);
+  }
+  return err;
+};
+
+// ── Schema-driven MessagePack codec with REF backreferences (plan §5) ──────
+//
+// Wrapped schemas expose non-enumerable `.encode(v) → Uint8Array` and
+// `.decode(bytes) → value`. Plain values use standard MessagePack; the
+// schema drives the WALK (declaration boundaries, refTracking positions,
+// bounds) — it does not re-validate (the validator is a separate oracle).
+//
+// REF ext type: 0x50 ('P') — reserved in para repo
+// packages/para-schema/msgpack-ext-ids.md. Payload: msgpack-encoded
+// unsigned int = backreference index in encounter order.
+//
+// refTracking (v1) = declaration has `cyclic` capability. Only objects
+// encoded at refTracking declaration boundaries enter the identity table
+// (plain DTO encoding pays zero overhead). Indexes are assigned in
+// PREORDER, before children encode, so cycles always resolve to already-
+// assigned indexes — only backreferences ever occur. The decoder replays
+// the identical schema walk, so encoder/decoder counters agree; at
+// refTracking positions it allocates the shell FIRST, registers it, then
+// fills fields (a backref may point at an ancestor mid-construction).
+// Bounds are enforced DURING decode, before allocating each recursive
+// descent — that is the actual DoS guard.
+var __PARA_MSGPACK_REF = 0x50;
+var __paraTextEnc = new TextEncoder();
+var __paraTextDec = new TextDecoder();
+
+var __paraMsgWriter = () => {
+  var buf = new Uint8Array(256);
+  var view = new DataView(buf.buffer);
+  var len = 0;
+  var ensure = n => {
+    if (len + n <= buf.length) return;
+    var cap = buf.length * 2;
+    while (cap < len + n) cap *= 2;
+    var nb = new Uint8Array(cap);
+    nb.set(buf.subarray(0, len));
+    buf = nb;
+    view = new DataView(buf.buffer);
+  };
+  return {
+    u8: b => {
+      ensure(1);
+      buf[len++] = b;
+    },
+    u16: x => {
+      ensure(2);
+      view.setUint16(len, x);
+      len += 2;
+    },
+    u32: x => {
+      ensure(4);
+      view.setUint32(len, x);
+      len += 4;
+    },
+    u64: x => {
+      ensure(8);
+      view.setBigUint64(len, x);
+      len += 8;
+    },
+    i64: x => {
+      ensure(8);
+      view.setBigInt64(len, x);
+      len += 8;
+    },
+    f64: x => {
+      ensure(8);
+      view.setFloat64(len, x);
+      len += 8;
+    },
+    raw: bytes => {
+      ensure(bytes.length);
+      buf.set(bytes, len);
+      len += bytes.length;
+    },
+    take: () => buf.slice(0, len),
+  };
+};
+
+var __paraMsgUint = n => {
+  // msgpack-encode a standalone unsigned int (REF payloads).
+  var w = __paraMsgWriter();
+  if (n < 128) w.u8(n);
+  else if (n < 256) {
+    w.u8(0xcc);
+    w.u8(n);
+  } else if (n < 65536) {
+    w.u8(0xcd);
+    w.u16(n);
+  } else {
+    w.u8(0xce);
+    w.u32(n);
+  }
+  return w.take();
+};
+
+var __paraEncStr = (w, s) => {
+  var bytes = __paraTextEnc.encode(s);
+  var n = bytes.length;
+  if (n < 32) w.u8(0xa0 | n);
+  else if (n < 256) {
+    w.u8(0xd9);
+    w.u8(n);
+  } else if (n < 65536) {
+    w.u8(0xda);
+    w.u16(n);
+  } else {
+    w.u8(0xdb);
+    w.u32(n);
+  }
+  w.raw(bytes);
+};
+
+// Encode `v` at schema position `s` (null = schema-less region). `base`
+// resolves module-relative $refs of the enclosing declaration body.
+var __paraEncVal = (w, s, base, v, ctx) => {
+  if (s && typeof s.$ref === "string") {
+    return __paraEncDecl(w, __paraSchemaResolve(s.$ref, base), v, ctx, true);
+  }
+  if (s && typeof s.$walk === "function") {
+    return __paraEncDecl(w, s, v, ctx, false);
+  }
+  if (v === null || v === undefined) return w.u8(0xc0);
+  var t = typeof v;
+  if (t === "boolean") return w.u8(v ? 0xc3 : 0xc2);
+  if (t === "number") {
+    if (Number.isInteger(v) && v >= -2147483648 && v <= 4294967295) {
+      if (v >= 0) {
+        if (v < 128) return w.u8(v);
+        if (v < 256) {
+          w.u8(0xcc);
+          return w.u8(v);
+        }
+        if (v < 65536) {
+          w.u8(0xcd);
+          return w.u16(v);
+        }
+        w.u8(0xce);
+        return w.u32(v);
+      }
+      if (v >= -32) return w.u8(0x100 + v);
+      if (v >= -128) {
+        w.u8(0xd0);
+        return w.u8(v & 0xff);
+      }
+      if (v >= -32768) {
+        w.u8(0xd1);
+        return w.u16(v & 0xffff);
+      }
+      w.u8(0xd2);
+      return w.u32(v >>> 0);
+    }
+    w.u8(0xcb);
+    return w.f64(v);
+  }
+  if (t === "bigint") {
+    if (v >= 0n) {
+      if (v > 0xffffffffffffffffn) throw new Error("bigint too large for msgpack uint64");
+      w.u8(0xcf);
+      return w.u64(v);
+    }
+    if (v < -0x8000000000000000n) throw new Error("bigint too small for msgpack int64");
+    w.u8(0xd3);
+    return w.i64(v);
+  }
+  if (t === "string") return __paraEncStr(w, v);
+  if (Array.isArray(v)) {
+    var n = v.length;
+    if (n < 16) w.u8(0x90 | n);
+    else if (n < 65536) {
+      w.u8(0xdc);
+      w.u16(n);
+    } else {
+      w.u8(0xdd);
+      w.u32(n);
+    }
+    var items = s && s.items ? s.items : null;
+    for (var i = 0; i < n; i++) __paraEncVal(w, items, base, v[i], ctx);
+    return;
+  }
+  if (t === "object") {
+    // Schema-less cycle guard: without declaration boundaries there is
+    // no refTracking, so a loop here would recurse forever.
+    if (ctx.rawStack.has(v)) throw new Error("cycle detected outside schema-tracked positions");
+    ctx.rawStack.add(v);
+    try {
+      var keys = [];
+      for (var k in v) if (v[k] !== undefined) keys.push(k);
+      var kn = keys.length;
+      if (kn < 16) w.u8(0x80 | kn);
+      else if (kn < 65536) {
+        w.u8(0xde);
+        w.u16(kn);
+      } else {
+        w.u8(0xdf);
+        w.u32(kn);
+      }
+      var props = s && s.properties && typeof s.properties === "object" ? s.properties : null;
+      for (var j = 0; j < kn; j++) {
+        __paraEncStr(w, keys[j]);
+        __paraEncVal(w, props ? props[keys[j]] : null, base, v[keys[j]], ctx);
+      }
+    } finally {
+      ctx.rawStack.delete(v);
+    }
+    return;
+  }
+  throw new Error("unsupported value type in schema codec: " + t);
+};
+
+// Enter declaration `decl` with value `v` — identity table registration
+// (refTracking), cycle detection for acyclic declarations, depth caps.
+var __paraEncDecl = (w, decl, v, ctx, viaRef) => {
+  var isObj = v !== null && typeof v === "object";
+  if (!isObj) return __paraEncVal(w, decl.schema, decl.$base, v, ctx);
+
+  // refTracking = cyclic || identity:preserve (plan §2.2/§5.4). Identity
+  // buys DAG aliasing through REFs; only cyclic additionally licenses
+  // backrefs onto in-flight ancestors (reference cycles).
+  var refTracking = decl.$cyclic !== undefined || decl.$identity === "preserve";
+  var id = decl.$id || decl.$vid;
+  var name = decl.$name || "(schema)";
+  var m = ctx.inflight.get(v);
+
+  if (refTracking) {
+    var idx = ctx.ids.get(v);
+    if (idx !== undefined) {
+      if (decl.$cyclic === undefined && m && m.has(id)) {
+        // Revisiting an in-flight ancestor = a cycle; identity:preserve
+        // alone does not license cycles.
+        throw new Error("cycle detected in acyclic type '" + name + "' (encode)");
+      }
+      // Revisit (DAG share or cycle) → REF backreference.
+      var payload = __paraMsgUint(idx);
+      w.u8(0xc7); // ext8
+      w.u8(payload.length);
+      w.u8(__PARA_MSGPACK_REF);
+      w.raw(payload);
+      return;
+    }
+  }
+
+  if (m && m.has(id)) {
+    // Cycle through an acyclic declaration — same diagnostic family as
+    // the validator; encoding cannot represent it without refTracking.
+    throw new Error("cycle detected in acyclic type '" + name + "' (encode)");
+  }
+
+  var dc = ctx.depths.get(id) || 0;
+  if (viaRef) {
+    var cap = decl.$depth;
+    cap = cap === "unbounded" ? Infinity : cap === undefined ? (decl.$hasRefs ? 128 : Infinity) : cap;
+    if (dc + 1 > cap) throw new Error("nesting exceeds declared depth(" + cap + ") on '" + name + "'");
+    ctx.depths.set(id, dc + 1);
+  }
+  if (!m) {
+    m = new Map();
+    ctx.inflight.set(v, m);
+  }
+  m.set(id, 0);
+  if (refTracking) ctx.ids.set(v, ctx.nextId++); // preorder, before children
+
+  try {
+    __paraEncVal(w, decl.schema, decl.$base, v, ctx);
+  } finally {
+    m.delete(id);
+    if (viaRef) ctx.depths.set(id, dc);
+  }
+};
+
+var __paraSchemaEncode = (decl, v) => {
+  var w = __paraMsgWriter();
+  var ctx = {
+    ids: new Map(),
+    nextId: 0,
+    inflight: new WeakMap(),
+    depths: new Map(),
+    rawStack: new Set(),
+  };
+  __paraEncDecl(w, decl, v, ctx, false);
+  return w.take();
+};
+
+var __paraMsgReader = bytes => {
+  var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  var pos = 0;
+  var need = n => {
+    if (pos + n > bytes.length) throw new Error("unexpected end of msgpack stream");
+  };
+  return {
+    peek: () => {
+      need(1);
+      return bytes[pos];
+    },
+    u8: () => {
+      need(1);
+      return bytes[pos++];
+    },
+    u16: () => {
+      need(2);
+      var x = view.getUint16(pos);
+      pos += 2;
+      return x;
+    },
+    u32: () => {
+      need(4);
+      var x = view.getUint32(pos);
+      pos += 4;
+      return x;
+    },
+    u64: () => {
+      need(8);
+      var x = view.getBigUint64(pos);
+      pos += 8;
+      return x;
+    },
+    i64: () => {
+      need(8);
+      var x = view.getBigInt64(pos);
+      pos += 8;
+      return x;
+    },
+    f64: () => {
+      need(8);
+      var x = view.getFloat64(pos);
+      pos += 8;
+      return x;
+    },
+    str: n => {
+      need(n);
+      var s = __paraTextDec.decode(bytes.subarray(pos, pos + n));
+      pos += n;
+      return s;
+    },
+    done: () => pos >= bytes.length,
+  };
+};
+
+// Read one REF payload (a msgpack uint) if the next token is our ext;
+// returns the index or -1 when the next token is not a REF.
+var __paraDecMaybeRef = r => {
+  var b = r.peek();
+  var extLen = -1;
+  if (b === 0xd4) extLen = 1;
+  else if (b === 0xd5) extLen = 2;
+  else if (b === 0xd6) extLen = 4;
+  else if (b === 0xd7) extLen = 8;
+  else if (b === 0xc7) extLen = -2; // length byte follows
+  if (extLen === -1) return -1;
+  r.u8();
+  if (extLen === -2) extLen = r.u8();
+  var type = r.u8();
+  if (type !== __PARA_MSGPACK_REF) throw new Error("unknown msgpack ext type " + type + " in schema codec");
+  // Payload: msgpack uint.
+  var pb = r.u8();
+  if (pb < 128) return pb;
+  if (pb === 0xcc) return r.u8();
+  if (pb === 0xcd) return r.u16();
+  if (pb === 0xce) return r.u32();
+  throw new Error("malformed REF payload");
+};
+
+var __paraDecVal = (r, s, base, ctx, shell) => {
+  if (s && typeof s.$ref === "string") {
+    return __paraDecDecl(r, __paraSchemaResolve(s.$ref, base), ctx, true);
+  }
+  if (s && typeof s.$walk === "function") {
+    return __paraDecDecl(r, s, ctx, false);
+  }
+  var b = r.peek();
+  if ((b >= 0xd4 && b <= 0xd8) || b === 0xc7 || b === 0xc8 || b === 0xc9) {
+    // A REF outside a refTracking declaration position is malformed —
+    // the encoder only emits them at refTracking boundaries.
+    var probe = __paraDecMaybeRef(r);
+    throw new Error(
+      "REF at non-refTracking schema position (index " + probe + ", " + ctx.objs.length + " objects seen)",
+    );
+  }
+  if (ctx.rawDepth > 1024) throw new Error("nesting exceeds schema-less decode limit (1024)");
+
+  r.u8();
+  if (b === 0xc0) return null;
+  if (b === 0xc2) return false;
+  if (b === 0xc3) return true;
+  if (b < 0x80) return b; // positive fixint
+  if (b >= 0xe0) return b - 0x100; // negative fixint
+  if (b === 0xcc) return r.u8();
+  if (b === 0xcd) return r.u16();
+  if (b === 0xce) return r.u32();
+  if (b === 0xcf) return r.u64(); // bigint by construction (encoder)
+  if (b === 0xd0) {
+    var x8 = r.u8();
+    return x8 > 127 ? x8 - 256 : x8;
+  }
+  if (b === 0xd1) {
+    var x16 = r.u16();
+    return x16 > 32767 ? x16 - 65536 : x16;
+  }
+  if (b === 0xd2) {
+    var x32 = r.u32();
+    return x32 > 2147483647 ? x32 - 4294967296 : x32;
+  }
+  if (b === 0xd3) return r.i64(); // bigint
+  if (b === 0xcb) return r.f64();
+  if ((b & 0xe0) === 0xa0) return r.str(b & 0x1f);
+  if (b === 0xd9) return r.str(r.u8());
+  if (b === 0xda) return r.str(r.u16());
+  if (b === 0xdb) return r.str(r.u32());
+
+  var n;
+  if ((b & 0xf0) === 0x90 || b === 0xdc || b === 0xdd) {
+    n = (b & 0xf0) === 0x90 ? b & 0x0f : b === 0xdc ? r.u16() : r.u32();
+    var arr = shell || [];
+    var items = s && s.items ? s.items : null;
+    ctx.rawDepth++;
+    for (var i = 0; i < n; i++) arr.push(__paraDecVal(r, items, base, ctx, null));
+    ctx.rawDepth--;
+    return arr;
+  }
+  if ((b & 0xf0) === 0x80 || b === 0xde || b === 0xdf) {
+    n = (b & 0xf0) === 0x80 ? b & 0x0f : b === 0xde ? r.u16() : r.u32();
+    var obj = shell || {};
+    var props = s && s.properties && typeof s.properties === "object" ? s.properties : null;
+    ctx.rawDepth++;
+    for (var j = 0; j < n; j++) {
+      var kb = r.u8();
+      var key;
+      if ((kb & 0xe0) === 0xa0) key = r.str(kb & 0x1f);
+      else if (kb === 0xd9) key = r.str(r.u8());
+      else if (kb === 0xda) key = r.str(r.u16());
+      else if (kb === 0xdb) key = r.str(r.u32());
+      else throw new Error("malformed msgpack map key");
+      obj[key] = __paraDecVal(r, props ? props[key] : null, base, ctx, null);
+    }
+    ctx.rawDepth--;
+    return obj;
+  }
+  throw new Error("unsupported msgpack token 0x" + b.toString(16));
+};
+
+var __paraDecDecl = (r, decl, ctx, viaRef) => {
+  var refTracking = decl.$cyclic !== undefined || decl.$identity === "preserve";
+  var id = decl.$id || decl.$vid;
+  var name = decl.$name || "(schema)";
+
+  var refIdx = __paraDecMaybeRef(r);
+  if (refIdx !== -1) {
+    if (!refTracking) {
+      throw new Error(
+        "REF at non-refTracking schema position (index " + refIdx + ", " + ctx.objs.length + " objects seen)",
+      );
+    }
+    if (refIdx >= ctx.objs.length) {
+      throw new Error(
+        "invalid backreference in msgpack stream (index " + refIdx + ", " + ctx.objs.length + " objects seen)",
+      );
+    }
+    var entry = ctx.objs[refIdx];
+    if (entry.inflight) {
+      // Backref onto an ancestor still under construction — a cycle.
+      var cy = decl.$cyclic;
+      if (cy === undefined) throw new Error("cycle detected in acyclic type '" + name + "' (decode)");
+      if (cy !== true) {
+        var k = ctx.pathDepth - entry.pathDepth;
+        if (k > cy) {
+          throw new Error("cycle exceeds declared length cyclic(" + cy + ") on '" + name + "' (actual: " + k + ")");
+        }
+      }
+    }
+    return entry.v;
+  }
+
+  // Depth cap BEFORE allocating the descent — the actual DoS guard.
+  var dc = ctx.depths.get(id) || 0;
+  if (viaRef) {
+    var cap = decl.$depth;
+    cap = cap === "unbounded" ? Infinity : cap === undefined ? (decl.$hasRefs ? 128 : Infinity) : cap;
+    if (dc + 1 > cap) throw new Error("nesting exceeds declared depth(" + cap + ") on '" + name + "'");
+    ctx.depths.set(id, dc + 1);
+  }
+
+  var b = r.peek();
+  var entry2 = null;
+  var shell = null;
+  if (refTracking && (((b & 0xf0) === 0x80 || b === 0xde || b === 0xdf) || ((b & 0xf0) === 0x90 || b === 0xdc || b === 0xdd))) {
+    // Shell-first: allocate + register before filling, so backrefs can
+    // land on this object while it is still mid-construction.
+    shell = (b & 0xf0) === 0x90 || b === 0xdc || b === 0xdd ? [] : {};
+    entry2 = { v: shell, inflight: true, pathDepth: ctx.pathDepth };
+    ctx.objs.push(entry2);
+  }
+
+  ctx.pathDepth++;
+  try {
+    var out = __paraDecVal(r, decl.schema, decl.$base, ctx, shell);
+    if (entry2) entry2.inflight = false;
+    return out;
+  } finally {
+    ctx.pathDepth--;
+    if (viaRef) ctx.depths.set(id, dc);
+  }
+};
+
+var __paraSchemaDecode = (decl, bytes) => {
+  var r = __paraMsgReader(bytes);
+  var ctx = { objs: [], pathDepth: 0, depths: new Map(), rawDepth: 0 };
+  return __paraDecDecl(r, decl, ctx, false);
+};
+
+// Parabun: `schema NAME = <body>` desugars to
+//   `const NAME = __paraSchemaDecl(import.meta.url, "NAME", <body>[, caps])`.
+// Decorates the body (same as __paraFromSchema) and registers it under
+// its stable ID so `$ref`s from this and other schemas can reach it.
+// `caps` carries declaration capability bits (plan §1.4/§2.2):
+//   { cyclic: true | x }   — cycles permitted (any length / ≤ x hops)
+//   { depth: n | "unbounded" } — recursive-nesting cap / explicit opt-out
+// Stored non-enumerably as $cyclic / $depth; the validator (plan §4,
+// build step 3) consumes them.
+export var __paraSchemaDecl = (baseUrl, name, schema, caps) => {
+  var wrapped = __paraFromSchemaEager(schema, baseUrl);
+  __paraHide(wrapped, "$id", baseUrl + "#" + name);
+  __paraHide(wrapped, "$name", name);
+  if (caps) {
+    if (caps.cyclic !== undefined) __paraHide(wrapped, "$cyclic", caps.cyclic);
+    if (caps.depth !== undefined) __paraHide(wrapped, "$depth", caps.depth);
+    if (caps.identity !== undefined) __paraHide(wrapped, "$identity", caps.identity);
+  }
+  __paraSchemaRegistry.set(baseUrl + "#" + name, wrapped);
+  return wrapped;
+};
+
+// Parabun: `schema NAME { field: type }` (DSL braces form) desugars its
+// model object through
+//   `const NAME = __paraSchemaRegister(import.meta.url, "NAME", <model>)`.
+// Registers AS-IS (no re-decoration — the DSL's inline parse/validate
+// stay authoritative) so `$ref`s from JSON-literal schema bodies resolve
+// to it; the validator delegates to the model's own .parse.
+export var __paraSchemaRegister = (baseUrl, name, model) => {
+  __paraHide(model, "$id", baseUrl + "#" + name);
+  __paraHide(model, "$name", name);
+  __paraSchemaRegistry.set(baseUrl + "#" + name, model);
+  return model;
+};
+
+// Parabun: `schema NAME from <expr>` desugars to
+//   `const NAME = __paraSchemaIngest(import.meta.url, "NAME", <expr>[, caps])`.
+// Same registration + decoration as __paraSchemaDecl today; kept as a
+// separate entry point so ingestion-time checks (escape-node,
+// shell-constructibility — plan §1.5) can land here without touching
+// the literal-declaration path.
+export var __paraSchemaIngest = (baseUrl, name, schema, caps) =>
+  __paraSchemaDecl(baseUrl, name, schema, caps);
+
 // Takes a JSON Schema 2020-12 object and returns `{ parse, schema }`.
 // Runtime-interpreted (slower than a parse-time inline validator, but
 // works for any JSON Schema regardless of source — file imports,
 // runtime-built schemas, etc.). Validates a covering subset of JSON
 // Schema: type, properties, required, enum, items, minItems/maxItems,
 // minimum/maximum/exclusive*, minLength/maxLength, pattern, format
-// (email/uuid/uri/date/date-time/ipv4/ipv6).
-export var __paraFromSchema = schemaOrThunk => {
-  // Accept either a schema VALUE or a thunk returning a schema. The
-  // parser always wraps `model X = body` and `api X = body` bodies in
-  // `() => body` so self-referencing schemas (e.g. `Comment` whose
-  // `replies.items` points back at `Comment`) can evaluate without
-  // hitting TDZ on the const binding.
-  //
-  // Eager attempt: run the thunk now. If it throws ReferenceError,
-  // the body references an identifier that's still in TDZ — typically
-  // the const we're being assigned to. Fall back to the lazy/Proxy
-  // path so evaluation defers until first use, by which time the
-  // const binding is established.
-  if (typeof schemaOrThunk === "function") {
-    try {
-      return __paraFromSchemaEager(schemaOrThunk());
-    } catch (e) {
-      if (e instanceof ReferenceError) return __paraFromSchemaLazy(schemaOrThunk);
-      throw e;
-    }
-  }
-  return __paraFromSchemaEager(schemaOrThunk);
-};
+// (email/uuid/uri/date/date-time/ipv4/ipv6), plus registry `$ref`s.
+// `baseUrl` (optional) is the base for module-relative `$ref`s; inline
+// `schema { … }` literals pass their module URL.
+export var __paraFromSchema = (schema, baseUrl) => __paraFromSchemaEager(schema, baseUrl);
 
-// Lazy-evaluating model wrapper for recursive schemas. Returns a Proxy
-// that defers thunk evaluation to first access. The Proxy traps
-// reproduce the surface area of the eager model: `parse`, `schema`,
-// spread keys, navigation accessors, JSON.stringify, Object.keys.
-var __paraFromSchemaLazy = thunk => {
-  var inner = null;
-  var get = () => inner ?? (inner = __paraFromSchemaEager(thunk()));
-  return new Proxy(
-    {},
-    {
-      get: (_t, prop) => get()[prop],
-      has: (_t, prop) => prop in get(),
-      ownKeys: _t => Reflect.ownKeys(get()),
-      // Proxy invariant: descriptors for keys the *target* doesn't own
-      // must be `configurable: true`. Force configurability on all
-      // forwarded descriptors so the proxy stays consistent regardless
-      // of how the inner schema's keys were defined.
-      getOwnPropertyDescriptor: (_t, prop) => {
-        var d = Reflect.getOwnPropertyDescriptor(get(), prop);
-        return d ? Object.assign({}, d, { configurable: true }) : undefined;
-      },
-      getPrototypeOf: _t => Reflect.getPrototypeOf(get()),
-    },
-  );
-};
-
-var __paraFromSchemaEager = schema => {
+var __paraFromSchemaEager = (schema, baseUrl) => {
   var FORMATS = {
     email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
     uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
@@ -321,6 +1075,21 @@ var __paraFromSchemaEager = schema => {
     ipv6: /^([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,7}:$|^::([0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,6}(:[0-9a-f]{1,4})+$/i,
   };
   var validate = (s, v) => {
+    if (typeof s.$ref === "string") {
+      // Registry reference — delegate to the target declaration.
+      // Crossing a `$ref` IS the declaration boundary: the target
+      // validates under its own base URL and capabilities (plan §1.4
+      // non-propagation falls out of this delegation), and the cycle/
+      // depth machinery hooks exactly here (viaRef entry).
+      var target = __paraSchemaResolve(s.$ref, baseUrl);
+      return __paraValidateDecl(target, v, true);
+    }
+    if (s !== schema && s && typeof s.$walk === "function") {
+      // Embedded wrapped declaration (cross-module composition, `from`
+      // ingests) — same boundary semantics as a `$ref`, minus the depth
+      // consumption (it's a first crossing, not a recursive re-entry).
+      return __paraValidateDecl(s, v, false);
+    }
     if (s.enum) {
       for (var i = 0; i < s.enum.length; i++) if (v === s.enum[i]) return null;
       return "expected one of " + JSON.stringify(s.enum);
@@ -405,8 +1174,24 @@ var __paraFromSchemaEager = schema => {
   // copy them — important when downstream code spreads model fields
   // into other schema literals (e.g. `aiSettings: { ...aiSettings }`).
   var result = Object.assign({}, schema);
+  // Internal hooks for the cycle/depth machinery (__paraValidateDecl):
+  // the raw walker, the containsRecursiveNodes flag, and a fallback
+  // identity for anonymous (inline) schemas so memo entries never
+  // collide across two distinct inline literals.
+  __paraHide(result, "$walk", v => validate(schema, v));
+  __paraHide(result, "$hasRefs", __paraSchemaHasRefs(schema));
+  __paraHide(result, "$vid", "(inline#" + __paraInlineId++ + ")");
+  __paraHide(result, "$base", baseUrl);
+  // Escape-node check (plan §1.5) — runs once, on first parse: the
+  // earliest point where forward/mutual references are all registered.
+  // Success is memoized; a failing schema keeps throwing.
+  var escapeChecked = false;
   var parseFn = v => {
-    var e = validate(schema, v);
+    if (!escapeChecked) {
+      if (result.$hasRefs) __paraSchemaEscapeCheck(result);
+      escapeChecked = true;
+    }
+    var e = __paraValidateDecl(result, v, false);
     return e ? { tag: "Err", error: e } : { tag: "Ok", value: v };
   };
   Object.defineProperty(result, "parse", {
@@ -432,36 +1217,50 @@ var __paraFromSchemaEager = schema => {
     writable: false,
     configurable: false,
   });
+  // Schema-driven MessagePack codec (plan §5). Structural, not
+  // validating — run .parse/.validate separately when needed.
+  __paraHide(result, "encode", v => __paraSchemaEncode(result, v));
+  __paraHide(result, "decode", bytes => __paraSchemaDecode(result, bytes));
   // Field navigation: for an object-shape schema, expose each property
   // as a non-enumerable accessor that returns the wrapped sub-schema.
   // Lets consumers walk the schema graph naturally:
   //   `User.profile.bio` ≡ `User.schema.properties.profile.properties.bio`
   // (only when `properties` exists; leaves don't get accessors).
-  __paraAddFieldAccessors(result, schema);
+  __paraAddFieldAccessors(result, schema, baseUrl);
 
   return result;
 };
 
 // Wrap a sub-schema value so it can be navigated like a model:
+//   - if `val` is a registry reference (`{ $ref: "#Name" }`), resolve it —
+//     navigation lands on the registered declaration itself, preserving
+//     identity (`Tree.children.element === Tree`);
 //   - if `val` is already a wrapped model (has `.parse` + `.schema`), return as-is;
 //   - if `val` is an object-shape schema (`{type:'object', properties:...}`),
 //     wrap recursively so its fields are navigable;
 //   - if `val` is an array schema (`{type:'array', items: <subSchema>}`),
-//     return the schema with a non-enumerable `.element` pointing at the
-//     wrapped item type — explicit descent per LYK-826's API design;
+//     return the schema with a non-enumerable `.element` getter pointing at
+//     the wrapped item type — explicit descent per LYK-826's API design.
+//     A getter (not a value) so `$ref` items resolve lazily: forward and
+//     self references aren't registered yet when the array wraps;
 //   - otherwise return `val` as-is — leaf JSON Schema fragments stay raw.
-var __paraWrapField = val => {
+var __paraWrapField = (val, baseUrl) => {
+  if (val && typeof val === "object" && typeof val.$ref === "string") {
+    return __paraSchemaResolve(val.$ref, baseUrl);
+  }
   if (val && typeof val === "object" && typeof val.parse === "function" && val.schema) return val;
   if (val && typeof val === "object" && !Array.isArray(val)) {
     if (val.properties && typeof val.properties === "object") {
-      return __paraFromSchema(val);
+      return __paraFromSchema(val, baseUrl);
     }
     if (val.type === "array" && val.items) {
       var result = Object.assign({}, val);
       Object.defineProperty(result, "element", {
-        value: __paraWrapField(val.items),
+        get: (
+          (items, base) => () =>
+            __paraWrapField(items, base)
+        )(val.items, baseUrl),
         enumerable: false,
-        writable: false,
         configurable: false,
       });
       return result;
@@ -475,7 +1274,7 @@ var __paraWrapField = val => {
 // result whose value is the wrapped sub-schema. We don't shadow keys
 // that already exist on the result (e.g. `type`, `properties`,
 // `required` are spread-copied keys of the parent schema).
-var __paraAddFieldAccessors = (result, schema) => {
+var __paraAddFieldAccessors = (result, schema, baseUrl) => {
   // Only add field-navigation accessors when the schema EXPLICITLY
   // declares itself an object schema. Lockstep-style records often
   // omit `type: 'object'` (the convention is "any schema with
@@ -488,9 +1287,9 @@ var __paraAddFieldAccessors = (result, schema) => {
     var sub = schema.properties[key];
     Object.defineProperty(result, key, {
       get: (
-        s => () =>
-          __paraWrapField(s)
-      )(sub),
+        (s, base) => () =>
+          __paraWrapField(s, base)
+      )(sub, baseUrl),
       enumerable: false,
       configurable: false,
     });

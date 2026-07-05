@@ -100,7 +100,7 @@ describe("Parabun schema DSL declaration", () => {
       export schema User from s
     `);
     expect(out).toContain("export const User =");
-    expect(out).toMatch(/__paraFromSchema(_\w+)?\(\(\) => s\)/);
+    expect(out).toMatch(/__paraSchemaIngest(_\w+)?\(import\.meta\.url, "User", s\)/);
   });
 
   test("schema can still be re-exported via export clause", () => {
@@ -235,20 +235,22 @@ describe("Parabun schema DSL declaration", () => {
 
   // ---- LYK-813: schema X from <expr> ----
 
-  test("`schema X from <expr>` lowers to __paraFromSchema runtime call", () => {
+  test("`schema X from <expr>` lowers to __paraSchemaIngest runtime call", () => {
     const out = ts(`
       const s = { type: "object", properties: { id: { type: "integer" } }, required: ["id"] }
       schema User from s
     `);
     expect(out).toContain("const User =");
-    expect(out).toMatch(/__paraFromSchema(_\w+)?\(\(\) => s\)/);
+    // Registered under a stable ID (module URL + name); the expr rides
+    // through eagerly — no thunk (para-schema-recursion-plan.md §2.1).
+    expect(out).toMatch(/__paraSchemaIngest(_\w+)?\(import\.meta\.url, "User", s\)/);
   });
 
   test("`from` accepts arbitrary expressions, not just identifiers", () => {
     const out = ts(`
       schema X from { type: "object", properties: { id: { type: "integer" } }, required: ["id"] }
     `);
-    expect(out).toMatch(/__paraFromSchema(_\w+)?\(/);
+    expect(out).toMatch(/__paraSchemaIngest(_\w+)?\(/);
     expect(out).toContain('type: "object"');
   });
 

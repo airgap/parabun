@@ -1470,16 +1470,30 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     return p.parse_stmt(opts);
                 }
 
-                // Parabun: `export schema NAME …` → exported schema decl.
+                // Parabun: `export schema NAME …` / `export schema(depth: n)
+                // NAME …` → exported schema decl.
                 if p.lexer.is_para && p.lexer.is_contextual_keyword(b"schema") {
                     let kw_loc = p.lexer.loc();
                     p.lexer.next()?;
-                    if !p.lexer.has_newline_before && p.lexer.token == T::TIdentifier {
-                        return Self::parse_model_stmt(p, kw_loc, true);
+                    if !p.lexer.has_newline_before
+                        && (p.lexer.token == T::TIdentifier || p.lexer.token == T::TOpenParen)
+                    {
+                        if let Some(stmt) = Self::parse_schema_decl_after_kw(p, kw_loc, true, None)?
+                        {
+                            return Ok(stmt);
+                        }
                     }
-                    // `export schema` not followed by a name — fall through.
+                    // `export schema` not followed by a declaration — error.
                     p.lexer.unexpected()?;
                     return Err(err!("SyntaxError"));
+                }
+
+                // Parabun: `export cyclic schema NAME …` — re-enter with the
+                // export flag; the statement-level `cyclic` dispatch handles
+                // the modifier (mirrors the `export memo`/`export pure` path).
+                if p.lexer.is_para && p.lexer.is_contextual_keyword(b"cyclic") {
+                    opts.is_export = true;
+                    return p.parse_stmt(opts);
                 }
 
                 // Parabun: `export memo NAME(...) { … }` → exported const.
@@ -2480,15 +2494,91 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
 
         // Parabun: `schema NAME = <expr>` / `schema NAME from <expr>` /
-        // `schema NAME { field: type, … }` — schema-DSL declaration. The
-        // `schema { … }` expression literal (no name) stays in the prefix
-        // parser; this only fires when an identifier name follows.
+        // `schema(depth: 8) NAME = <expr>` / `schema NAME { field: type, … }`
+        // — schema-DSL declaration. The `schema { … }` expression literal
+        // (no name) stays in the prefix parser; this only fires when an
+        // identifier name (optionally after a config paren group) follows —
+        // `schema(foo)` with no trailing name stays a plain call.
         if is_para_kw && p.lexer.raw() == b"schema" {
             let snapshot = p.lexer.snapshot();
             let kw_loc = p.lexer.loc();
             p.lexer.next()?;
-            if p.lexer.token == T::TIdentifier && !p.lexer.has_newline_before {
-                return Self::parse_model_stmt(p, kw_loc, opts.is_export);
+            if !p.lexer.has_newline_before
+                && (p.lexer.token == T::TIdentifier || p.lexer.token == T::TOpenParen)
+            {
+                if let Some(stmt) =
+                    Self::parse_schema_decl_after_kw(p, kw_loc, opts.is_export, None)?
+                {
+                    return Ok(stmt);
+                }
+            }
+            p.lexer.restore(&snapshot);
+        }
+
+        // Parabun: `cyclic schema NAME …` / `cyclic(x) schema(depth: n) NAME …`
+        // — cycle-capability modifier on a schema declaration (plan §1.1).
+        // `cyclic` NOT followed by (an optional int-literal paren group and)
+        // `schema` stays a plain identifier — `cyclic(1)` alone is a call.
+        if is_para_kw && p.lexer.raw() == b"cyclic" {
+            let snapshot = p.lexer.snapshot();
+            p.lexer.next()?;
+            let mut cyclic_param: Option<f64> = None;
+            let mut param_range = p.lexer.range();
+            let mut shape_ok = true;
+            if p.lexer.token == T::TOpenParen {
+                p.lexer.next()?;
+                if p.lexer.token == T::TNumericLiteral {
+                    cyclic_param = Some(p.lexer.number);
+                    param_range = p.lexer.range();
+                    p.lexer.next()?;
+                    if p.lexer.token == T::TCloseParen {
+                        p.lexer.next()?;
+                    } else {
+                        shape_ok = false;
+                    }
+                } else {
+                    shape_ok = false;
+                }
+            }
+            if shape_ok
+                && p.lexer.token == T::TIdentifier
+                && !p.lexer.has_newline_before
+                && p.lexer.raw() == b"schema"
+            {
+                let kw_loc = p.lexer.loc();
+                p.lexer.next()?;
+                if !p.lexer.has_newline_before
+                    && (p.lexer.token == T::TIdentifier || p.lexer.token == T::TOpenParen)
+                {
+                    // Definitely the modifier form — validate the parameter
+                    // (plan §1.2: cyclic(0) and non-integers are errors).
+                    if let Some(x) = cyclic_param {
+                        if x == 0.0 {
+                            p.log().add_range_error(
+                                Some(p.source),
+                                param_range,
+                                b"cyclic(0): if you don't want cycles, omit the cyclic modifier",
+                            );
+                            return Err(err!("SyntaxError"));
+                        }
+                        if x < 0.0 || x.fract() != 0.0 {
+                            p.log().add_range_error(
+                                Some(p.source),
+                                param_range,
+                                b"cyclic length must be a positive integer literal",
+                            );
+                            return Err(err!("SyntaxError"));
+                        }
+                    }
+                    if let Some(stmt) = Self::parse_schema_decl_after_kw(
+                        p,
+                        kw_loc,
+                        opts.is_export,
+                        Some(cyclic_param),
+                    )? {
+                        return Ok(stmt);
+                    }
+                }
             }
             p.lexer.restore(&snapshot);
         }
