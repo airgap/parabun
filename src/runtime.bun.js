@@ -397,7 +397,8 @@ var __paraSchemaEscapeCheck = decl => {
 
 var __paraValidateDecl = (decl, v, viaRef) => {
   var walk = decl.$walk;
-  // Legacy-wrapped values (or bare fragments) have no walker — nothing to do.
+  // No walker ⇒ the declaration validates itself (DSL braces form —
+  // registered via __paraSchemaRegister with its own inline parse).
   if (!walk) {
     var r = decl.parse ? decl.parse(v) : { tag: "Ok" };
     return r.tag === "Ok" ? null : r.error;
@@ -715,10 +716,22 @@ var __paraEncDecl = (w, decl, v, ctx, viaRef) => {
   var isObj = v !== null && typeof v === "object";
   if (!isObj) return __paraEncVal(w, decl.schema, decl.$base, v, ctx);
 
-  var refTracking = decl.$cyclic !== undefined;
+  // refTracking = cyclic || identity:preserve (plan §2.2/§5.4). Identity
+  // buys DAG aliasing through REFs; only cyclic additionally licenses
+  // backrefs onto in-flight ancestors (reference cycles).
+  var refTracking = decl.$cyclic !== undefined || decl.$identity === "preserve";
+  var id = decl.$id || decl.$vid;
+  var name = decl.$name || "(schema)";
+  var m = ctx.inflight.get(v);
+
   if (refTracking) {
     var idx = ctx.ids.get(v);
     if (idx !== undefined) {
+      if (decl.$cyclic === undefined && m && m.has(id)) {
+        // Revisiting an in-flight ancestor = a cycle; identity:preserve
+        // alone does not license cycles.
+        throw new Error("cycle detected in acyclic type '" + name + "' (encode)");
+      }
       // Revisit (DAG share or cycle) → REF backreference.
       var payload = __paraMsgUint(idx);
       w.u8(0xc7); // ext8
@@ -729,9 +742,6 @@ var __paraEncDecl = (w, decl, v, ctx, viaRef) => {
     }
   }
 
-  var id = decl.$id || decl.$vid;
-  var name = decl.$name || "(schema)";
-  var m = ctx.inflight.get(v);
   if (m && m.has(id)) {
     // Cycle through an acyclic declaration — same diagnostic family as
     // the validator; encoding cannot represent it without refTracking.
@@ -931,7 +941,7 @@ var __paraDecVal = (r, s, base, ctx, shell) => {
 };
 
 var __paraDecDecl = (r, decl, ctx, viaRef) => {
-  var refTracking = decl.$cyclic !== undefined;
+  var refTracking = decl.$cyclic !== undefined || decl.$identity === "preserve";
   var id = decl.$id || decl.$vid;
   var name = decl.$name || "(schema)";
 
@@ -1015,9 +1025,23 @@ export var __paraSchemaDecl = (baseUrl, name, schema, caps) => {
   if (caps) {
     if (caps.cyclic !== undefined) __paraHide(wrapped, "$cyclic", caps.cyclic);
     if (caps.depth !== undefined) __paraHide(wrapped, "$depth", caps.depth);
+    if (caps.identity !== undefined) __paraHide(wrapped, "$identity", caps.identity);
   }
   __paraSchemaRegistry.set(baseUrl + "#" + name, wrapped);
   return wrapped;
+};
+
+// Parabun: `schema NAME { field: type }` (DSL braces form) desugars its
+// model object through
+//   `const NAME = __paraSchemaRegister(import.meta.url, "NAME", <model>)`.
+// Registers AS-IS (no re-decoration — the DSL's inline parse/validate
+// stay authoritative) so `$ref`s from JSON-literal schema bodies resolve
+// to it; the validator delegates to the model's own .parse.
+export var __paraSchemaRegister = (baseUrl, name, model) => {
+  __paraHide(model, "$id", baseUrl + "#" + name);
+  __paraHide(model, "$name", name);
+  __paraSchemaRegistry.set(baseUrl + "#" + name, model);
+  return model;
 };
 
 // Parabun: `schema NAME from <expr>` desugars to
@@ -1038,48 +1062,7 @@ export var __paraSchemaIngest = (baseUrl, name, schema, caps) =>
 // (email/uuid/uri/date/date-time/ipv4/ipv6), plus registry `$ref`s.
 // `baseUrl` (optional) is the base for module-relative `$ref`s; inline
 // `schema { … }` literals pass their module URL.
-export var __paraFromSchema = (schemaOrThunk, baseUrl) => {
-  // LEGACY: accept a thunk returning a schema. Pre-$ref parabun output
-  // wrapped bodies in `() => body` so self-referencing schemas evaluate
-  // without hitting TDZ. Current output never passes thunks — recursion
-  // is `$ref`s through the registry. Delete the thunk/Proxy path once no
-  // compiled artifacts from pre-$ref parabun remain in circulation.
-  if (typeof schemaOrThunk === "function") {
-    try {
-      return __paraFromSchemaEager(schemaOrThunk(), baseUrl);
-    } catch (e) {
-      if (e instanceof ReferenceError) return __paraFromSchemaLazy(schemaOrThunk);
-      throw e;
-    }
-  }
-  return __paraFromSchemaEager(schemaOrThunk, baseUrl);
-};
-
-// Lazy-evaluating model wrapper for recursive schemas. Returns a Proxy
-// that defers thunk evaluation to first access. The Proxy traps
-// reproduce the surface area of the eager model: `parse`, `schema`,
-// spread keys, navigation accessors, JSON.stringify, Object.keys.
-var __paraFromSchemaLazy = thunk => {
-  var inner = null;
-  var get = () => inner ?? (inner = __paraFromSchemaEager(thunk()));
-  return new Proxy(
-    {},
-    {
-      get: (_t, prop) => get()[prop],
-      has: (_t, prop) => prop in get(),
-      ownKeys: _t => Reflect.ownKeys(get()),
-      // Proxy invariant: descriptors for keys the *target* doesn't own
-      // must be `configurable: true`. Force configurability on all
-      // forwarded descriptors so the proxy stays consistent regardless
-      // of how the inner schema's keys were defined.
-      getOwnPropertyDescriptor: (_t, prop) => {
-        var d = Reflect.getOwnPropertyDescriptor(get(), prop);
-        return d ? Object.assign({}, d, { configurable: true }) : undefined;
-      },
-      getPrototypeOf: _t => Reflect.getPrototypeOf(get()),
-    },
-  );
-};
+export var __paraFromSchema = (schema, baseUrl) => __paraFromSchemaEager(schema, baseUrl);
 
 var __paraFromSchemaEager = (schema, baseUrl) => {
   var FORMATS = {

@@ -215,6 +215,22 @@ describe("schema $ref lowering", () => {
     expect(m.Uses.parse({ ext: {} }).tag).toBe("Err");
   });
 
+  test("DSL braces declarations register: $refs delegate to the DSL's inline parse", async () => {
+    const m = await transpileAndImport(`
+      schema User { id: int, name: str }
+      export schema Wrap = {
+        type: "object",
+        properties: { u: User },
+        required: ["u"],
+      };
+      export const ok = Wrap.parse({ u: { id: 1, name: "a" } });
+      export const bad = Wrap.parse({ u: { id: "nope", name: "a" } });
+    `);
+    expect(m.Wrap.schema.properties.u).toEqual({ $ref: "#User" });
+    expect(m.ok.tag).toBe("Ok");
+    expect(m.bad.tag).toBe("Err");
+  });
+
   test("identifiers inside `from` expressions are NOT rewritten", async () => {
     const m = await transpileAndImport(`
       export schema Base = {

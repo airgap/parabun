@@ -581,12 +581,11 @@ export var __parabunRangeInclusive = (a, b) => {
 };
 // Parabun: `schema { ... }` → __paraFromSchema({ ... }, import.meta.url).
 // Bundled output keeps schemas as plain objects (no runtime validator).
-// LEGACY: a function argument is an old-style thunk (pre-$ref compiled
-// output) — invoke it once and return its object.
-export var __paraFromSchema = (schemaOrThunk) =>
-  typeof schemaOrThunk === "function" ? schemaOrThunk() : schemaOrThunk;
-// Parabun: `schema NAME = <body>` / `schema NAME from <expr>` →
-// __paraSchemaDecl/__paraSchemaIngest(import.meta.url, "NAME", <body>).
+export var __paraFromSchema = (schema) => schema;
+// Parabun: `schema NAME = <body>` / `schema NAME from <expr>` /
+// `schema NAME { field: type }` →
+// __paraSchemaDecl/__paraSchemaIngest/__paraSchemaRegister(
+//   import.meta.url, "NAME", <body>).
 // The registry lets `{ $ref: "#NAME" }` registry references inside schema
 // bodies resolve back to the declared value (recursive/mutual schemas).
 var __paraSchemaRegistry = new Map();
@@ -595,6 +594,7 @@ export var __paraSchemaDecl = (baseUrl, name, schema) => {
   return schema;
 };
 export var __paraSchemaIngest = (baseUrl, name, schema) => __paraSchemaDecl(baseUrl, name, schema);
+export var __paraSchemaRegister = (baseUrl, name, model) => __paraSchemaDecl(baseUrl, name, model);
 export var __parabunMemo = (fn, arity) => {
   if (arity === 0) {
     var __has = false,

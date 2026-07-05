@@ -180,6 +180,23 @@ describe("cyclic modifier + schema config list", () => {
     expect(m.out).toBe("fn:ok");
   });
 
+  test("`identity: preserve` sets $identity; bad values and duplicates error", async () => {
+    const m = await transpileAndImport(`
+      export schema(identity: preserve) Doc = { type: "object", properties: {}, required: [] };
+      export schema(identity: preserve, depth: 4) Both = { type: "object", properties: {}, required: [] };
+    `);
+    expect(m.Doc.$identity).toBe("preserve");
+    expect(m.Doc.$cyclic).toBeUndefined();
+    expect(m.Both.$identity).toBe("preserve");
+    expect(m.Both.$depth).toBe(4);
+    expect(() => transpile(`schema(identity: nah) X = { type: "string" };`)).toThrow(
+      /schema identity must be `preserve`/,
+    );
+    expect(() =>
+      transpile(`schema(identity: preserve, identity: preserve) X = { type: "string" };`),
+    ).toThrow(/duplicate schema config key `identity`/);
+  });
+
   test("cyclic applies to `from` declarations too", async () => {
     const m = await transpileAndImport(`
       const doc = { type: "object", properties: { next: {} }, required: [] };

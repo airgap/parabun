@@ -50,11 +50,14 @@ pub(crate) struct SchemaCaps {
     pub cyclic: Option<Option<f64>>,
     /// `Some(None)` = `depth: unbounded`; `Some(Some(n))` = `depth: n`.
     pub depth: Option<Option<f64>>,
+    /// `identity: preserve` — refTracking without cycle capability:
+    /// codec preserves DAG aliasing, but reference cycles stay illegal.
+    pub identity: bool,
 }
 
 impl SchemaCaps {
     pub(crate) fn is_empty(&self) -> bool {
-        self.cyclic.is_none() && self.depth.is_none()
+        self.cyclic.is_none() && self.depth.is_none() && !self.identity
     }
 }
 
@@ -193,6 +196,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let mut caps = SchemaCaps {
             cyclic,
             depth: None,
+            identity: false,
         };
 
         if p.lexer.token == T::TOpenParen {
@@ -247,34 +251,55 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
             // Declaration confirmed — strict validation.
             for (key, key_range, val) in entries {
-                if key != b"depth" {
-                    p.log().add_range_error(
-                        Some(p.source),
-                        key_range,
-                        b"unknown schema config key (v1 supports only `depth`)",
-                    );
-                    return Err(bun_core::err!("SyntaxError"));
-                }
-                if caps.depth.is_some() {
-                    p.log().add_range_error(
-                        Some(p.source),
-                        key_range,
-                        b"duplicate schema config key `depth`",
-                    );
-                    return Err(bun_core::err!("SyntaxError"));
-                }
-                caps.depth = match val {
-                    CfgVal::Num(n) if n >= 0.0 && n.fract() == 0.0 => Some(Some(n)),
-                    CfgVal::Ident(s) if s == b"unbounded" => Some(None),
-                    _ => {
+                if key == b"depth" {
+                    if caps.depth.is_some() {
                         p.log().add_range_error(
                             Some(p.source),
                             key_range,
-                            b"schema depth must be a non-negative integer literal or `unbounded`",
+                            b"duplicate schema config key `depth`",
                         );
                         return Err(bun_core::err!("SyntaxError"));
                     }
-                };
+                    caps.depth = match val {
+                        CfgVal::Num(n) if n >= 0.0 && n.fract() == 0.0 => Some(Some(n)),
+                        CfgVal::Ident(s) if s == b"unbounded" => Some(None),
+                        _ => {
+                            p.log().add_range_error(
+                                Some(p.source),
+                                key_range,
+                                b"schema depth must be a non-negative integer literal or `unbounded`",
+                            );
+                            return Err(bun_core::err!("SyntaxError"));
+                        }
+                    };
+                } else if key == b"identity" {
+                    if caps.identity {
+                        p.log().add_range_error(
+                            Some(p.source),
+                            key_range,
+                            b"duplicate schema config key `identity`",
+                        );
+                        return Err(bun_core::err!("SyntaxError"));
+                    }
+                    match val {
+                        CfgVal::Ident(s) if s == b"preserve" => caps.identity = true,
+                        _ => {
+                            p.log().add_range_error(
+                                Some(p.source),
+                                key_range,
+                                b"schema identity must be `preserve`",
+                            );
+                            return Err(bun_core::err!("SyntaxError"));
+                        }
+                    }
+                } else {
+                    p.log().add_range_error(
+                        Some(p.source),
+                        key_range,
+                        b"unknown schema config key (supported: `depth`, `identity`)",
+                    );
+                    return Err(bun_core::err!("SyntaxError"));
+                }
             }
         } else if p.lexer.token != T::TIdentifier || p.lexer.has_newline_before {
             return Ok(None);
@@ -347,6 +372,15 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         Some(n) => p.sx_num(n, model_loc),
                         None => p.sx_str(b"unbounded", model_loc),
                     };
+                    cap_props.push(G::Property {
+                        key: Some(key),
+                        value: Some(val),
+                        ..Default::default()
+                    });
+                }
+                if caps.identity {
+                    let key = p.sx_str(b"identity", model_loc);
+                    let val = p.sx_str(b"preserve", model_loc);
                     cap_props.push(G::Property {
                         key: Some(key),
                         value: Some(val),
@@ -734,6 +768,20 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         });
         let model_obj = p.sx_obj(model_props, model_loc);
 
+        // Register the DSL declaration in the runtime schema registry
+        // (same stable-ID scheme as the `=`/`from` forms) so `$ref`s from
+        // JSON-literal schema bodies can reach it — validation delegates
+        // to the DSL's own inline parse. Registration wraps the model
+        // object as-is; it does NOT re-decorate.
+        p.para_schema_symbols.insert(name_ref, ());
+        p.has_import_meta = true;
+        let import_meta = p.new_expr(E::ImportMeta {}, model_loc);
+        let url = p.sx_dot(import_meta, b"url", model_loc);
+        let name_arg = p.sx_str(name, name_loc);
+        let reg_args = [url, name_arg, model_obj];
+        let registered =
+            p.call_runtime(model_loc, b"__paraSchemaRegister", ExprNodeList::from_slice(&reg_args));
+
         let fn_binding = p.b(B::Identifier { r#ref: fn_ref }, name_loc);
         let name_binding = p.b(B::Identifier { r#ref: name_ref }, name_loc);
         let decls = [
@@ -743,7 +791,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             G::Decl {
                 binding: name_binding,
-                value: Some(model_obj),
+                value: Some(registered),
             },
         ];
         Ok(p.s(

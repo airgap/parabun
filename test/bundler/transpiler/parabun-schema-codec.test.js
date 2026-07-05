@@ -129,6 +129,22 @@ describe("schema codec: cycles and aliasing (REF)", () => {
     expect(m.plain.next[0].next[0]).toEqual(m.plain.next[1].next[0]);
   });
 
+  test("identity: preserve keeps DAG aliasing without licensing cycles", async () => {
+    const m = await transpileAndImport(`
+      export schema(identity: preserve) Node = ${NODE_BODY};
+      const shared = { name: "shared" };
+      const dag = { name: "root", next: [{ name: "l", next: [shared] }, { name: "r", next: [shared] }] };
+      export const back = Node.decode(Node.encode(dag));
+      const s = { name: "s" };
+      s.next = [s];
+      export const attempt = () => Node.encode(s);
+    `);
+    // DAG aliasing preserved through REF backreferences…
+    expect(m.back.next[0].next[0]).toBe(m.back.next[1].next[0]);
+    // …but a reference cycle is still illegal without cyclic.
+    expect(m.attempt).toThrow(/cycle detected in acyclic type 'Node' \(encode\)/);
+  });
+
   test("encoding a cyclic value through an acyclic declaration throws", async () => {
     const m = await transpileAndImport(`
       export schema Node = ${NODE_BODY};
