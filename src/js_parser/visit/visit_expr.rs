@@ -384,7 +384,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     },
                     loc,
                 );
-                *e = p.new_expr(E::Call { target: dot, ..Default::default() }, loc);
+                *e = p.new_expr(
+                    E::Call {
+                        target: dot,
+                        ..Default::default()
+                    },
+                    loc,
+                );
             }
         }
     }
@@ -1238,7 +1244,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             },
             loc,
         );
-        self.new_expr(E::Call { target: dot, ..Default::default() }, loc)
+        self.new_expr(
+            E::Call {
+                target: dot,
+                ..Default::default()
+            },
+            loc,
+        )
     }
 
     // Parabun: rewrite `++x`/`--x`/`x++`/`x--` on a signal-bound ref into a
@@ -1818,6 +1830,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                             ..Default::default()
                         },
                     );
+                    // Parabun: schema-body array elements that are bare
+                    // schema symbol references become registry `$ref`s
+                    // (union lists like `anyOf: [A, B]`).
+                    if p.para_schema_body_depth > 0
+                        && in_.assign_target == js_ast::AssignTarget::None
+                    {
+                        p.para_maybe_schema_ref(item);
+                    }
                 }
             }
         }
@@ -1931,6 +1951,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     },
                 );
                 p.decorator_class_name = None;
+
+                // Parabun: schema-body property values that are bare schema
+                // symbol references become registry `$ref`s (`items: Tree` →
+                // `items: { $ref: "#Tree" }`).
+                if p.para_schema_body_depth > 0 && in_.assign_target == js_ast::AssignTarget::None {
+                    p.para_maybe_schema_ref(value);
+                }
             }
 
             if property.initializer.is_some() {
@@ -2174,8 +2201,19 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 }
             }
 
+            // Parabun: inside the body argument of a parser-generated
+            // `__paraSchemaDecl` / `__paraFromSchema` call, bare references
+            // to `schema`-declared symbols lower to registry `$ref`s (see
+            // para_maybe_schema_ref). Track schema-body context here.
+            let para_is_schema_body = p.para_is_schema_body_call(&e_.target.data);
+            if para_is_schema_body {
+                p.para_schema_body_depth += 1;
+            }
             for arg in e_.args.slice_mut() {
                 p.visit_expr(arg);
+            }
+            if para_is_schema_body {
+                p.para_schema_body_depth -= 1;
             }
 
             // Restore deferred state (Zig `defer`).

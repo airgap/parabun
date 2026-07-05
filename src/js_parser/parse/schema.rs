@@ -4,8 +4,12 @@
 //!   const __pa_NAME = (v) => { …field checks…; return Ok(v) },
 //!         NAME = { ...<json-schema>, parse: __pa_NAME, validate: __pa_NAME, schema: <json-schema> };
 //!
-//! Also handles the JSON-Schema-ingest forms `schema NAME = <expr>` /
-//! `schema NAME from <expr>` → `const NAME = __paraFromSchema(() => <expr>)`.
+//! Also handles the JSON-Schema forms
+//!   `schema NAME = <expr>`    → `const NAME = __paraSchemaDecl(import.meta.url, "NAME", <expr>)`
+//!   `schema NAME from <expr>` → `const NAME = __paraSchemaIngest(import.meta.url, "NAME", <expr>)`
+//! Declarations register in the runtime schema registry under
+//! `<url>#NAME`; recursive references in `=` bodies lower to
+//! `{ $ref: "#Name" }` at visit time (para_maybe_schema_ref).
 //!
 //! Ported faithfully from `parse_stmt.zig::parseModelStmt` and the
 //! `build*Schema` / `build*MismatchTest` helper family. Spec:
@@ -15,7 +19,6 @@ use bun_collections::VecExt;
 
 use crate::lexer::T;
 use crate::p::P;
-use crate::parser::AwaitOrYield;
 use bun_ast as js_ast;
 use js_ast::g::PropertyKind;
 use js_ast::{B, E, Expr, ExprNodeList, G, OpCode, S, Stmt, scope, symbol};
@@ -90,6 +93,63 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(self.new_expr(E::Identifier::init(r), loc))
     }
 
+    // ── visit-time `$ref` rewrite (para-schema-recursion-plan.md §1.7) ─────
+
+    /// Inside a schema body (`para_schema_body_depth > 0`), rewrite a bare
+    /// reference to a `schema`-declared symbol into a registry reference:
+    /// `items: Tree` → `items: { $ref: "#Tree" }`. Called from the object-
+    /// property-value and array-element visit paths after the value has been
+    /// visited, so the identifier's ref is already resolved — shadowed names
+    /// resolve to the shadowing symbol and are correctly left alone. Only
+    /// bare identifiers in value positions rewrite; a schema symbol used any
+    /// other way (`Base.schema.properties`, `f(Base)`) keeps direct-object
+    /// semantics.
+    pub(crate) fn para_maybe_schema_ref(&mut self, value: &mut Expr) {
+        if self.para_schema_body_depth == 0 {
+            return;
+        }
+        let Some(ident) = value.data.e_identifier() else {
+            return;
+        };
+        if !self.para_schema_symbols.contains_key(&ident.ref_) {
+            return;
+        }
+        let name = self.symbols[ident.ref_.inner_index() as usize].original_name;
+        let ref_str: &'a [u8] = bun_alloc::arena_format!(
+            in self.arena,
+            "#{}",
+            std::str::from_utf8(name.slice()).unwrap_or("")
+        )
+        .into_bump_str()
+        .as_bytes();
+        let loc = value.loc;
+        let key = self.sx_str(b"$ref", loc);
+        let val = self.sx_str(ref_str, loc);
+        let mut props: bun_alloc::ArenaVec<'_, G::Property> =
+            bun_alloc::ArenaVec::new_in(self.arena);
+        props.push(G::Property {
+            key: Some(key),
+            value: Some(val),
+            ..Default::default()
+        });
+        *value = self.sx_obj(props, loc);
+    }
+
+    /// True when `target` is a parser-generated reference to a runtime helper
+    /// whose trailing argument is a schema-literal body (`__paraSchemaDecl`
+    /// for declarations, `__paraFromSchema` for inline `schema { … }`
+    /// literals). `__paraSchemaIngest` (`schema X from <expr>`) is
+    /// deliberately absent: `from` bodies are arbitrary runtime expressions,
+    /// not schema literals, and must not have identifiers rewritten.
+    pub(crate) fn para_is_schema_body_call(&self, target: &js_ast::ExprData) -> bool {
+        let js_ast::ExprData::EImportIdentifier(ident) = target else {
+            return false;
+        };
+        let r = ident.ref_;
+        self.runtime_imports.__paraSchemaDecl == Some(r)
+            || self.runtime_imports.__paraFromSchema == Some(r)
+    }
+
     // ── entry: `schema NAME …` ──────────────────────────────────────────────
 
     pub(crate) fn parse_model_stmt(
@@ -102,39 +162,35 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let name_ref = p.declare_symbol(symbol::Kind::Constant, name_loc, name)?;
         p.lexer.next()?;
 
-        // `schema NAME from <expr>` / `schema NAME = <expr>` — ingest an
-        // existing JSON Schema at runtime via __paraFromSchema.
+        // `schema NAME from <expr>` / `schema NAME = <expr>` — register the
+        // declaration in the runtime schema registry under a stable ID
+        // (`import.meta.url + "#NAME"`) and decorate it:
+        //   `=`    → __paraSchemaDecl(import.meta.url, "NAME", <body>)
+        //   `from` → __paraSchemaIngest(import.meta.url, "NAME", <expr>)
+        // `=` bodies are schema literals: bare references to other `schema`
+        // declarations in schema-value positions lower to `{ $ref: "#Name" }`
+        // at visit time (see para_maybe_schema_ref), so recursive schemas are
+        // acyclic JSON values resolved lazily through the registry — no
+        // thunks, no TDZ, no cyclic object graphs. `from` bodies are
+        // arbitrary runtime expressions and are left untouched.
         let is_from = p.lexer.token == T::TIdentifier && p.lexer.raw() == b"from";
         let is_eq = p.lexer.token == T::TEquals;
         if is_from || is_eq {
             p.lexer.next()?;
-            let body_loc = p.lexer.loc();
-            p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, model_loc)?;
-            p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
-            let saved = p.fn_or_arrow_data_parse.clone();
-            p.fn_or_arrow_data_parse.allow_await = AwaitOrYield::AllowIdent;
-            p.fn_or_arrow_data_parse.allow_yield = AwaitOrYield::AllowIdent;
             let schema_expr = p.parse_expr(js_ast::op::Level::Lowest)?;
-            p.fn_or_arrow_data_parse = saved;
-            p.pop_scope();
-            p.pop_scope();
 
-            let ret = p.s(S::Return { value: Some(schema_expr) }, body_loc);
-            let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
-            let no_args: &'a mut [G::Arg] = p.arena.alloc_slice_fill_with(0, |_| G::Arg::default());
-            let thunk = p.new_expr(
-                E::Arrow {
-                    args: js_ast::StoreSlice::new_mut(no_args),
-                    prefer_expr: true,
-                    body: G::FnBody {
-                        loc: body_loc,
-                        stmts: js_ast::StoreSlice::new_mut(stmts),
-                    },
-                    ..Default::default()
-                },
-                model_loc,
-            );
-            let call = p.call_runtime(model_loc, b"__paraFromSchema", ExprNodeList::init_one(thunk));
+            p.para_schema_symbols.insert(name_ref, ());
+            p.has_import_meta = true;
+            let import_meta = p.new_expr(E::ImportMeta {}, model_loc);
+            let url = p.sx_dot(import_meta, b"url", model_loc);
+            let name_arg = p.sx_str(name, name_loc);
+            let helper: &'static [u8] = if is_eq {
+                b"__paraSchemaDecl"
+            } else {
+                b"__paraSchemaIngest"
+            };
+            let args = [url, name_arg, schema_expr];
+            let call = p.call_runtime(model_loc, helper, ExprNodeList::from_slice(&args));
             let binding = p.b(B::Identifier { r#ref: name_ref }, name_loc);
             let decl = G::Decl {
                 binding,
@@ -935,7 +991,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 value: Some(type_val),
                 ..Default::default()
             });
-            let items_val = Self::build_base_type_schema(p, field.type_name, None, None, false, loc);
+            let items_val =
+                Self::build_base_type_schema(p, field.type_name, None, None, false, loc);
             let items_key = p.sx_str(b"items", loc);
             props.push(G::Property {
                 key: Some(items_key),
@@ -1013,12 +1070,15 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             ),
             _ if type_name.first().is_some_and(|c| c.is_ascii_uppercase()) => {
                 // Nested model reference → `<TypeName>.schema`.
-                let r = p.store_name_in_ref(type_name).unwrap_or(js_ast::base::Ref::NONE);
+                let r = p
+                    .store_name_in_ref(type_name)
+                    .unwrap_or(js_ast::base::Ref::NONE);
                 let id = p.new_expr(E::Identifier::init(r), loc);
                 p.sx_dot(id, b"schema", loc)
             }
             _ => {
-                let props: bun_alloc::ArenaVec<'_, G::Property> = bun_alloc::ArenaVec::new_in(p.arena);
+                let props: bun_alloc::ArenaVec<'_, G::Property> =
+                    bun_alloc::ArenaVec::new_in(p.arena);
                 p.sx_obj(props, loc)
             }
         }

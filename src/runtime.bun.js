@@ -253,35 +253,75 @@ class Decimal {
 export var __paraDec = source => Decimal.from(source);
 __paraDec.Decimal = Decimal;
 
-// Parabun: `model X from <expr>` desugars to `const X = __paraFromSchema(<expr>)`.
+// ── Para schema registry (para-schema-recursion-plan.md §2.1) ─────────────
+//
+// Every `schema NAME = …` / `schema NAME from …` declaration registers its
+// decorated value here under a stable ID: `<import.meta.url>#NAME`. Recursive
+// references inside schema bodies compile to module-relative registry refs
+// (`{ $ref: "#NAME" }`) resolved lazily against the declaring module's URL —
+// so schema values are plain acyclic JSON, and mutual recursion needs no
+// TDZ dance, no thunks, no Proxies.
+var __paraSchemaRegistry = new Map();
+
+// Resolve a `$ref` string against the registry. Module-relative form
+// (`#Name`) joins with the declaring module's URL; any other form is
+// looked up verbatim (reserved for cross-module stable IDs).
+var __paraSchemaResolve = (ref, baseUrl) => {
+  var id = ref.charCodeAt(0) === 35 /* '#' */ && baseUrl ? baseUrl + ref : ref;
+  var target = __paraSchemaRegistry.get(id);
+  if (!target) throw new Error("unresolved schema reference '" + id + "'");
+  return target;
+};
+
+// Parabun: `schema NAME = <body>` desugars to
+//   `const NAME = __paraSchemaDecl(import.meta.url, "NAME", <body>)`.
+// Decorates the body (same as __paraFromSchema) and registers it under
+// its stable ID so `$ref`s from this and other schemas can reach it.
+export var __paraSchemaDecl = (baseUrl, name, schema) => {
+  var wrapped = __paraFromSchemaEager(schema, baseUrl);
+  Object.defineProperty(wrapped, "$id", {
+    value: baseUrl + "#" + name,
+    enumerable: false,
+    writable: false,
+    configurable: true,
+  });
+  __paraSchemaRegistry.set(baseUrl + "#" + name, wrapped);
+  return wrapped;
+};
+
+// Parabun: `schema NAME from <expr>` desugars to
+//   `const NAME = __paraSchemaIngest(import.meta.url, "NAME", <expr>)`.
+// Same registration + decoration as __paraSchemaDecl today; kept as a
+// separate entry point so ingestion-time checks (escape-node,
+// shell-constructibility — plan §1.5) can land here without touching
+// the literal-declaration path.
+export var __paraSchemaIngest = (baseUrl, name, schema) => __paraSchemaDecl(baseUrl, name, schema);
+
 // Takes a JSON Schema 2020-12 object and returns `{ parse, schema }`.
 // Runtime-interpreted (slower than a parse-time inline validator, but
 // works for any JSON Schema regardless of source — file imports,
 // runtime-built schemas, etc.). Validates a covering subset of JSON
 // Schema: type, properties, required, enum, items, minItems/maxItems,
 // minimum/maximum/exclusive*, minLength/maxLength, pattern, format
-// (email/uuid/uri/date/date-time/ipv4/ipv6).
-export var __paraFromSchema = schemaOrThunk => {
-  // Accept either a schema VALUE or a thunk returning a schema. The
-  // parser always wraps `model X = body` and `api X = body` bodies in
-  // `() => body` so self-referencing schemas (e.g. `Comment` whose
-  // `replies.items` points back at `Comment`) can evaluate without
-  // hitting TDZ on the const binding.
-  //
-  // Eager attempt: run the thunk now. If it throws ReferenceError,
-  // the body references an identifier that's still in TDZ — typically
-  // the const we're being assigned to. Fall back to the lazy/Proxy
-  // path so evaluation defers until first use, by which time the
-  // const binding is established.
+// (email/uuid/uri/date/date-time/ipv4/ipv6), plus registry `$ref`s.
+// `baseUrl` (optional) is the base for module-relative `$ref`s; inline
+// `schema { … }` literals pass their module URL.
+export var __paraFromSchema = (schemaOrThunk, baseUrl) => {
+  // LEGACY: accept a thunk returning a schema. Older compiled output
+  // (para-preprocess ≤ current, pre-$ref parabun output) wraps bodies in
+  // `() => body` so self-referencing schemas evaluate without hitting
+  // TDZ. New parabun output never passes thunks — recursion is `$ref`s
+  // through the registry. Delete the thunk/Proxy path once
+  // para-preprocess emits registry refs too.
   if (typeof schemaOrThunk === "function") {
     try {
-      return __paraFromSchemaEager(schemaOrThunk());
+      return __paraFromSchemaEager(schemaOrThunk(), baseUrl);
     } catch (e) {
       if (e instanceof ReferenceError) return __paraFromSchemaLazy(schemaOrThunk);
       throw e;
     }
   }
-  return __paraFromSchemaEager(schemaOrThunk);
+  return __paraFromSchemaEager(schemaOrThunk, baseUrl);
 };
 
 // Lazy-evaluating model wrapper for recursive schemas. Returns a Proxy
@@ -310,7 +350,7 @@ var __paraFromSchemaLazy = thunk => {
   );
 };
 
-var __paraFromSchemaEager = schema => {
+var __paraFromSchemaEager = (schema, baseUrl) => {
   var FORMATS = {
     email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
     uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
@@ -321,6 +361,15 @@ var __paraFromSchemaEager = schema => {
     ipv6: /^([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,7}:$|^::([0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4}$|^([0-9a-f]{1,4}:){1,6}(:[0-9a-f]{1,4})+$/i,
   };
   var validate = (s, v) => {
+    if (typeof s.$ref === "string") {
+      // Registry reference — delegate to the target declaration's own
+      // parse. Crossing a `$ref` IS the declaration boundary: the target
+      // validates under its own base URL and capabilities (plan §1.4
+      // non-propagation falls out of this delegation).
+      var target = __paraSchemaResolve(s.$ref, baseUrl);
+      var r = target.parse(v);
+      return r.tag === "Ok" ? null : r.error;
+    }
     if (s.enum) {
       for (var i = 0; i < s.enum.length; i++) if (v === s.enum[i]) return null;
       return "expected one of " + JSON.stringify(s.enum);
@@ -437,31 +486,41 @@ var __paraFromSchemaEager = schema => {
   // Lets consumers walk the schema graph naturally:
   //   `User.profile.bio` ≡ `User.schema.properties.profile.properties.bio`
   // (only when `properties` exists; leaves don't get accessors).
-  __paraAddFieldAccessors(result, schema);
+  __paraAddFieldAccessors(result, schema, baseUrl);
 
   return result;
 };
 
 // Wrap a sub-schema value so it can be navigated like a model:
+//   - if `val` is a registry reference (`{ $ref: "#Name" }`), resolve it —
+//     navigation lands on the registered declaration itself, preserving
+//     identity (`Tree.children.element === Tree`);
 //   - if `val` is already a wrapped model (has `.parse` + `.schema`), return as-is;
 //   - if `val` is an object-shape schema (`{type:'object', properties:...}`),
 //     wrap recursively so its fields are navigable;
 //   - if `val` is an array schema (`{type:'array', items: <subSchema>}`),
-//     return the schema with a non-enumerable `.element` pointing at the
-//     wrapped item type — explicit descent per LYK-826's API design;
+//     return the schema with a non-enumerable `.element` getter pointing at
+//     the wrapped item type — explicit descent per LYK-826's API design.
+//     A getter (not a value) so `$ref` items resolve lazily: forward and
+//     self references aren't registered yet when the array wraps;
 //   - otherwise return `val` as-is — leaf JSON Schema fragments stay raw.
-var __paraWrapField = val => {
+var __paraWrapField = (val, baseUrl) => {
+  if (val && typeof val === "object" && typeof val.$ref === "string") {
+    return __paraSchemaResolve(val.$ref, baseUrl);
+  }
   if (val && typeof val === "object" && typeof val.parse === "function" && val.schema) return val;
   if (val && typeof val === "object" && !Array.isArray(val)) {
     if (val.properties && typeof val.properties === "object") {
-      return __paraFromSchema(val);
+      return __paraFromSchema(val, baseUrl);
     }
     if (val.type === "array" && val.items) {
       var result = Object.assign({}, val);
       Object.defineProperty(result, "element", {
-        value: __paraWrapField(val.items),
+        get: (
+          (items, base) => () =>
+            __paraWrapField(items, base)
+        )(val.items, baseUrl),
         enumerable: false,
-        writable: false,
         configurable: false,
       });
       return result;
@@ -475,7 +534,7 @@ var __paraWrapField = val => {
 // result whose value is the wrapped sub-schema. We don't shadow keys
 // that already exist on the result (e.g. `type`, `properties`,
 // `required` are spread-copied keys of the parent schema).
-var __paraAddFieldAccessors = (result, schema) => {
+var __paraAddFieldAccessors = (result, schema, baseUrl) => {
   // Only add field-navigation accessors when the schema EXPLICITLY
   // declares itself an object schema. Lockstep-style records often
   // omit `type: 'object'` (the convention is "any schema with
@@ -488,9 +547,9 @@ var __paraAddFieldAccessors = (result, schema) => {
     var sub = schema.properties[key];
     Object.defineProperty(result, key, {
       get: (
-        s => () =>
-          __paraWrapField(s)
-      )(sub),
+        (s, base) => () =>
+          __paraWrapField(s, base)
+      )(sub, baseUrl),
       enumerable: false,
       configurable: false,
     });
