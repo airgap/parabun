@@ -274,10 +274,15 @@ var __paraSchemaResolve = (ref, baseUrl) => {
 };
 
 // Parabun: `schema NAME = <body>` desugars to
-//   `const NAME = __paraSchemaDecl(import.meta.url, "NAME", <body>)`.
+//   `const NAME = __paraSchemaDecl(import.meta.url, "NAME", <body>[, caps])`.
 // Decorates the body (same as __paraFromSchema) and registers it under
 // its stable ID so `$ref`s from this and other schemas can reach it.
-export var __paraSchemaDecl = (baseUrl, name, schema) => {
+// `caps` carries declaration capability bits (plan §1.4/§2.2):
+//   { cyclic: true | x }   — cycles permitted (any length / ≤ x hops)
+//   { depth: n | "unbounded" } — recursive-nesting cap / explicit opt-out
+// Stored non-enumerably as $cyclic / $depth; the validator (plan §4,
+// build step 3) consumes them.
+export var __paraSchemaDecl = (baseUrl, name, schema, caps) => {
   var wrapped = __paraFromSchemaEager(schema, baseUrl);
   Object.defineProperty(wrapped, "$id", {
     value: baseUrl + "#" + name,
@@ -285,17 +290,34 @@ export var __paraSchemaDecl = (baseUrl, name, schema) => {
     writable: false,
     configurable: true,
   });
+  if (caps) {
+    if (caps.cyclic !== undefined)
+      Object.defineProperty(wrapped, "$cyclic", {
+        value: caps.cyclic,
+        enumerable: false,
+        writable: false,
+        configurable: true,
+      });
+    if (caps.depth !== undefined)
+      Object.defineProperty(wrapped, "$depth", {
+        value: caps.depth,
+        enumerable: false,
+        writable: false,
+        configurable: true,
+      });
+  }
   __paraSchemaRegistry.set(baseUrl + "#" + name, wrapped);
   return wrapped;
 };
 
 // Parabun: `schema NAME from <expr>` desugars to
-//   `const NAME = __paraSchemaIngest(import.meta.url, "NAME", <expr>)`.
+//   `const NAME = __paraSchemaIngest(import.meta.url, "NAME", <expr>[, caps])`.
 // Same registration + decoration as __paraSchemaDecl today; kept as a
 // separate entry point so ingestion-time checks (escape-node,
 // shell-constructibility — plan §1.5) can land here without touching
 // the literal-declaration path.
-export var __paraSchemaIngest = (baseUrl, name, schema) => __paraSchemaDecl(baseUrl, name, schema);
+export var __paraSchemaIngest = (baseUrl, name, schema, caps) =>
+  __paraSchemaDecl(baseUrl, name, schema, caps);
 
 // Takes a JSON Schema 2020-12 object and returns `{ parse, schema }`.
 // Runtime-interpreted (slower than a parse-time inline validator, but
@@ -307,12 +329,11 @@ export var __paraSchemaIngest = (baseUrl, name, schema) => __paraSchemaDecl(base
 // `baseUrl` (optional) is the base for module-relative `$ref`s; inline
 // `schema { … }` literals pass their module URL.
 export var __paraFromSchema = (schemaOrThunk, baseUrl) => {
-  // LEGACY: accept a thunk returning a schema. Older compiled output
-  // (para-preprocess ≤ current, pre-$ref parabun output) wraps bodies in
-  // `() => body` so self-referencing schemas evaluate without hitting
-  // TDZ. New parabun output never passes thunks — recursion is `$ref`s
-  // through the registry. Delete the thunk/Proxy path once
-  // para-preprocess emits registry refs too.
+  // LEGACY: accept a thunk returning a schema. Pre-$ref parabun output
+  // wrapped bodies in `() => body` so self-referencing schemas evaluate
+  // without hitting TDZ. Current output never passes thunks — recursion
+  // is `$ref`s through the registry. Delete the thunk/Proxy path once no
+  // compiled artifacts from pre-$ref parabun remain in circulation.
   if (typeof schemaOrThunk === "function") {
     try {
       return __paraFromSchemaEager(schemaOrThunk(), baseUrl);

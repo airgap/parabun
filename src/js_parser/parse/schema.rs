@@ -40,6 +40,31 @@ struct ModelField<'a> {
     loc: js_ast::Loc,
 }
 
+/// Capability modifiers on a schema declaration
+/// (para-schema-recursion-plan.md §1.1/§2.2):
+///   `cyclic [(x)] schema [(depth: n | unbounded)] NAME = …`
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SchemaCaps {
+    /// `Some(None)` = bare `cyclic` (cycles of any length);
+    /// `Some(Some(x))` = `cyclic(x)` (cycles must close within x hops).
+    pub cyclic: Option<Option<f64>>,
+    /// `Some(None)` = `depth: unbounded`; `Some(Some(n))` = `depth: n`.
+    pub depth: Option<Option<f64>>,
+}
+
+impl SchemaCaps {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.cyclic.is_none() && self.depth.is_none()
+    }
+}
+
+/// A config-list value scanned tolerantly before we know whether
+/// `schema(…)` is a declaration or a plain call.
+enum CfgVal<'a> {
+    Num(f64),
+    Ident(&'a [u8]),
+}
+
 impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_ONLY> {
     // ── small expr builders ─────────────────────────────────────────────────
 
@@ -152,10 +177,117 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
     // ── entry: `schema NAME …` ──────────────────────────────────────────────
 
+    /// After the `schema` keyword has been consumed: parse the optional
+    /// config list (`(depth: 8)`) and the declared name, then delegate to
+    /// `parse_model_stmt`. Returns `Ok(None)` when the token shape is NOT a
+    /// declaration — `schema(foo)` with no trailing name is a plain call —
+    /// so the caller restores its snapshot. Config VALIDATION errors
+    /// (unknown key, duplicate key, bad value) only fire once the trailing
+    /// identifier confirms the declaration shape (plan §1.2/§1.6).
+    pub(crate) fn parse_schema_decl_after_kw(
+        p: &mut Self,
+        kw_loc: js_ast::Loc,
+        is_export: bool,
+        cyclic: Option<Option<f64>>,
+    ) -> SResult<Option<Stmt>> {
+        let mut caps = SchemaCaps {
+            cyclic,
+            depth: None,
+        };
+
+        if p.lexer.token == T::TOpenParen {
+            p.lexer.next()?;
+            // Tolerant shape scan: `ident ":" (num | ident)` entries with
+            // optional trailing comma. Any deviation ⇒ not a config list ⇒
+            // not a declaration.
+            let mut entries: std::vec::Vec<(&'a [u8], js_ast::Range, CfgVal<'a>)> =
+                std::vec::Vec::new();
+            loop {
+                if p.lexer.token == T::TCloseParen {
+                    break;
+                }
+                if p.lexer.token != T::TIdentifier {
+                    return Ok(None);
+                }
+                let key = p.lexer.identifier;
+                let key_range = p.lexer.range();
+                p.lexer.next()?;
+                if p.lexer.token != T::TColon {
+                    return Ok(None);
+                }
+                p.lexer.next()?;
+                let val = match p.lexer.token {
+                    T::TNumericLiteral => {
+                        let v = CfgVal::Num(p.lexer.number);
+                        p.lexer.next()?;
+                        v
+                    }
+                    T::TIdentifier => {
+                        let v = CfgVal::Ident(p.lexer.identifier);
+                        p.lexer.next()?;
+                        v
+                    }
+                    _ => return Ok(None),
+                };
+                entries.push((key, key_range, val));
+                if p.lexer.token == T::TComma {
+                    p.lexer.next()?;
+                    continue;
+                }
+                if p.lexer.token == T::TCloseParen {
+                    break;
+                }
+                return Ok(None);
+            }
+            p.lexer.next()?; // consume `)`
+
+            if p.lexer.token != T::TIdentifier || p.lexer.has_newline_before {
+                return Ok(None);
+            }
+
+            // Declaration confirmed — strict validation.
+            for (key, key_range, val) in entries {
+                if key != b"depth" {
+                    p.log().add_range_error(
+                        Some(p.source),
+                        key_range,
+                        b"unknown schema config key (v1 supports only `depth`)",
+                    );
+                    return Err(bun_core::err!("SyntaxError"));
+                }
+                if caps.depth.is_some() {
+                    p.log().add_range_error(
+                        Some(p.source),
+                        key_range,
+                        b"duplicate schema config key `depth`",
+                    );
+                    return Err(bun_core::err!("SyntaxError"));
+                }
+                caps.depth = match val {
+                    CfgVal::Num(n) if n >= 0.0 && n.fract() == 0.0 => Some(Some(n)),
+                    CfgVal::Ident(s) if s == b"unbounded" => Some(None),
+                    _ => {
+                        p.log().add_range_error(
+                            Some(p.source),
+                            key_range,
+                            b"schema depth must be a non-negative integer literal or `unbounded`",
+                        );
+                        return Err(bun_core::err!("SyntaxError"));
+                    }
+                };
+            }
+        } else if p.lexer.token != T::TIdentifier || p.lexer.has_newline_before {
+            return Ok(None);
+        }
+
+        Ok(Some(Self::parse_model_stmt(p, kw_loc, is_export, caps)?))
+    }
+
     pub(crate) fn parse_model_stmt(
         p: &mut Self,
         model_loc: js_ast::Loc,
         is_export: bool,
+        caps: SchemaCaps,
     ) -> SResult<Stmt> {
         let name = p.lexer.identifier;
         let name_loc = p.lexer.loc();
@@ -189,8 +321,43 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             } else {
                 b"__paraSchemaIngest"
             };
-            let args = [url, name_arg, schema_expr];
-            let call = p.call_runtime(model_loc, helper, ExprNodeList::from_slice(&args));
+            // Capability bits ride as a 4th argument only when declared
+            // (plan §2.2): `{ cyclic: true|x, depth: n|"unbounded" }`.
+            let arg_list = if caps.is_empty() {
+                let args = [url, name_arg, schema_expr];
+                ExprNodeList::from_slice(&args)
+            } else {
+                let mut cap_props: bun_alloc::ArenaVec<'_, G::Property> =
+                    bun_alloc::ArenaVec::new_in(p.arena);
+                if let Some(cy) = caps.cyclic {
+                    let key = p.sx_str(b"cyclic", model_loc);
+                    let val = match cy {
+                        Some(x) => p.sx_num(x, model_loc),
+                        None => p.new_expr(E::Boolean { value: true }, model_loc),
+                    };
+                    cap_props.push(G::Property {
+                        key: Some(key),
+                        value: Some(val),
+                        ..Default::default()
+                    });
+                }
+                if let Some(d) = caps.depth {
+                    let key = p.sx_str(b"depth", model_loc);
+                    let val = match d {
+                        Some(n) => p.sx_num(n, model_loc),
+                        None => p.sx_str(b"unbounded", model_loc),
+                    };
+                    cap_props.push(G::Property {
+                        key: Some(key),
+                        value: Some(val),
+                        ..Default::default()
+                    });
+                }
+                let caps_obj = p.sx_obj(cap_props, model_loc);
+                let args = [url, name_arg, schema_expr, caps_obj];
+                ExprNodeList::from_slice(&args)
+            };
+            let call = p.call_runtime(model_loc, helper, arg_list);
             let binding = p.b(B::Identifier { r#ref: name_ref }, name_loc);
             let decl = G::Decl {
                 binding,
@@ -205,6 +372,18 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 },
                 model_loc,
             ));
+        }
+
+        // The DSL braces form has no registry lowering yet, so capability
+        // modifiers have nowhere to land — reject rather than silently drop
+        // (plan grammar only defines them for the `=`/`from` forms anyway).
+        if !caps.is_empty() {
+            p.log().add_range_error(
+                Some(p.source),
+                crate::lexer::range_of_identifier(p.source, model_loc),
+                b"cyclic/config modifiers require the `schema NAME = ...` or `schema NAME from ...` form",
+            );
+            return Err(bun_core::err!("SyntaxError"));
         }
 
         p.lexer.expect(T::TOpenBrace)?;
