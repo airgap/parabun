@@ -1051,6 +1051,19 @@ export var __paraSchemaRegister = (baseUrl, name, model) => {
   return model;
 };
 
+// Parabun: `schema NAME = ts<import('./x').T>` — TS-extraction directive.
+// para-extract substitutes the site with the extracted JSON body at build
+// time; if this ever executes, the substitution step was skipped.
+export var __paraTsSchema = (specifier, typeName) => {
+  throw new Error(
+    "ts<import('" +
+      specifier +
+      "')." +
+      typeName +
+      "> was not substituted — run `bun para-extract <file>` to inline the extracted schema body (para-ts-extractor-plan.md)",
+  );
+};
+
 // Parabun: `schema NAME from <expr>` desugars to
 //   `const NAME = __paraSchemaIngest(import.meta.url, "NAME", <expr>[, caps])`.
 // Same registration + decoration as __paraSchemaDecl today; kept as a

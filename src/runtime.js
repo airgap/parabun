@@ -595,6 +595,16 @@ export var __paraSchemaDecl = (baseUrl, name, schema) => {
 };
 export var __paraSchemaIngest = (baseUrl, name, schema) => __paraSchemaDecl(baseUrl, name, schema);
 export var __paraSchemaRegister = (baseUrl, name, model) => __paraSchemaDecl(baseUrl, name, model);
+// `schema NAME = ts<import('./x').T>` — unsubstituted TS-extraction site.
+export var __paraTsSchema = (specifier, typeName) => {
+  throw new Error(
+    "ts<import('" +
+      specifier +
+      "')." +
+      typeName +
+      "> was not substituted — run `bun para-extract <file>` to inline the extracted schema body",
+  );
+};
 export var __parabunMemo = (fn, arity) => {
   if (arity === 0) {
     var __has = false,

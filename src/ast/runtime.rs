@@ -185,10 +185,11 @@ pub struct Imports {
     pub __paraSchemaDecl: Option<Ref>,
     pub __paraSchemaIngest: Option<Ref>,
     pub __paraSchemaRegister: Option<Ref>,
+    pub __paraTsSchema: Option<Ref>,
 }
 
 impl Imports {
-    pub const ALL: [&'static [u8]; 35] = [
+    pub const ALL: [&'static [u8]; 36] = [
         b"__name",
         b"__require",
         b"__export",
@@ -224,12 +225,13 @@ impl Imports {
         b"__paraSchemaDecl",
         b"__paraSchemaIngest",
         b"__paraSchemaRegister",
+        b"__paraTsSchema",
     ];
 
     /// Zig computed this at comptime via `std.sort.pdq`. Rust stable cannot sort in
     /// `const`; precomputed here and verified by `tests::all_sorted_matches_zig_comptime`.
     #[cfg_attr(not(test), allow(dead_code))]
-    const ALL_SORTED: [&'static [u8]; 35] = [
+    const ALL_SORTED: [&'static [u8]; 36] = [
         b"$$typeof",
         b"__callDispose",
         b"__decorateElement",
@@ -249,6 +251,7 @@ impl Imports {
         b"__paraSchemaDecl",
         b"__paraSchemaIngest",
         b"__paraSchemaRegister",
+        b"__paraTsSchema",
         b"__parabunAsyncDefer0",
         b"__parabunDefer0",
         b"__parabunMemo",
@@ -269,42 +272,43 @@ impl Imports {
 
     /// When generating the list of runtime imports, we sort it for determinism.
     /// This is a lookup table so we don't need to resort the strings each time
-    pub const ALL_SORTED_INDEX: [usize; 35] = [
+    pub const ALL_SORTED_INDEX: [usize; 36] = [
         13, // __name
-        32, // __require
+        33, // __require
         5,  // __export
-        31, // __reExport
+        32, // __reExport
         7,  // __exportValue
         6,  // __exportDefault
         12, // __merge
         9,  // __legacyDecorateClassTS
         10, // __legacyDecorateParamTS
         11, // __legacyMetadataTS
-        30, // __publicField
-        26, // __privateIn
-        25, // __privateGet
-        24, // __privateAdd
-        28, // __privateSet
-        27, // __privateMethod
+        31, // __publicField
+        27, // __privateIn
+        26, // __privateGet
+        25, // __privateAdd
+        29, // __privateSet
+        28, // __privateMethod
         4,  // __decoratorStart
         3,  // __decoratorMetadata
-        33, // __runInitializers
+        34, // __runInitializers
         2,  // __decorateElement
         0,  // $$typeof
-        34, // __using
+        35, // __using
         1,  // __callDispose
         8,  // __jsonParse
-        29, // __promiseAll
-        21, // __parabunMemo
-        22, // __parabunRange
-        23, // __parabunRangeInclusive
+        30, // __promiseAll
+        22, // __parabunMemo
+        23, // __parabunRange
+        24, // __parabunRangeInclusive
         15, // __paraFromSchema
         14, // __paraDec
-        19, // __parabunAsyncDefer0
-        20, // __parabunDefer0
+        20, // __parabunAsyncDefer0
+        21, // __parabunDefer0
         16, // __paraSchemaDecl
         17, // __paraSchemaIngest
         18, // __paraSchemaRegister
+        19, // __paraTsSchema
     ];
 
     pub const NAME: &'static [u8] = b"bun:wrap";
@@ -348,6 +352,7 @@ impl Imports {
             32 => self.__paraSchemaDecl,
             33 => self.__paraSchemaIngest,
             34 => self.__paraSchemaRegister,
+            35 => self.__paraTsSchema,
             _ => None,
         }
     }
@@ -390,6 +395,7 @@ impl Imports {
             32 => Some(&mut self.__paraSchemaDecl),
             33 => Some(&mut self.__paraSchemaIngest),
             34 => Some(&mut self.__paraSchemaRegister),
+            35 => Some(&mut self.__paraTsSchema),
             _ => None,
         }
     }

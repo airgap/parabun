@@ -178,6 +178,70 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             || self.runtime_imports.__paraFromSchema == Some(r)
     }
 
+    /// `ts<import('./x').T>` — TS-extraction directive at schema `=` body
+    /// position (para-ts-extractor-plan.md §0). Closed form only: `ts`,
+    /// `<`, `import ( stringLiteral )`, `.`, TypeName, `>` — no generic
+    /// nesting, so no bracket-depth machinery and no `ts < x` comparison
+    /// ambiguity. Lowers to `__paraTsSchema("<spec>", "<TypeName>")`,
+    /// which throws with substitution instructions if the site was never
+    /// run through para-extract. Returns Ok(None) (lexer restored) when
+    /// the shape doesn't match — `ts` stays a plain identifier.
+    fn parse_ts_extract_expr(p: &mut Self) -> SResult<Option<Expr>> {
+        let snapshot = p.lexer.snapshot();
+        let ts_loc = p.lexer.loc();
+        p.lexer.next()?; // consume `ts`
+        if p.lexer.token != T::TLessThan {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        if p.lexer.token != T::TImport {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        if p.lexer.token != T::TOpenParen {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        if p.lexer.token != T::TStringLiteral {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        let spec = p.lexer.to_e_string()?;
+        let spec_expr = p.new_expr(spec, ts_loc);
+        p.lexer.next()?;
+        if p.lexer.token != T::TCloseParen {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        if p.lexer.token != T::TDot {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        if p.lexer.token != T::TIdentifier {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        let type_name = p.lexer.identifier;
+        p.lexer.next()?;
+        if p.lexer.token != T::TGreaterThan {
+            p.lexer.restore(&snapshot);
+            return Ok(None);
+        }
+        p.lexer.next()?;
+        let name_expr = p.sx_str(type_name, ts_loc);
+        let args = [spec_expr, name_expr];
+        Ok(Some(p.call_runtime(
+            ts_loc,
+            b"__paraTsSchema",
+            ExprNodeList::from_slice(&args),
+        )))
+    }
+
     // ── entry: `schema NAME …` ──────────────────────────────────────────────
 
     /// After the `schema` keyword has been consumed: parse the optional
@@ -334,7 +398,16 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let is_eq = p.lexer.token == T::TEquals;
         if is_from || is_eq {
             p.lexer.next()?;
-            let schema_expr = p.parse_expr(js_ast::op::Level::Lowest)?;
+            // `= ts<import('./x').T>` — TS-extraction directive; falls back
+            // to a plain expression when the closed form doesn't match.
+            let mut schema_expr: Option<Expr> = None;
+            if is_eq && p.lexer.token == T::TIdentifier && p.lexer.raw() == b"ts" {
+                schema_expr = Self::parse_ts_extract_expr(p)?;
+            }
+            let schema_expr = match schema_expr {
+                Some(e) => e,
+                None => p.parse_expr(js_ast::op::Level::Lowest)?,
+            };
 
             p.para_schema_symbols.insert(name_ref, ());
             p.has_import_meta = true;
