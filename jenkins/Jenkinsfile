@@ -350,10 +350,16 @@ pipeline {
                     export DOPPLER_TOKEN=$(grep DOPPLER_TOKEN_CI_DEPLOY /etc/default/jenkins-doppler | cut -d= -f2)
                     TEMP_HOME=$(mktemp -d)
                     DO_TOKEN=$(HOME=$TEMP_HOME doppler secrets get DIGITALOCEAN_ACCESS_TOKEN --plain --project ci-deploy --config prd)
-                    # Optional GitHub PAT (write:packages) for the public GHCR mirror. If the
-                    # secret is absent the mirror is skipped and the DOCR push is unaffected,
-                    # so this stays a no-op until GHCR_PUBLISH_TOKEN is set in Doppler.
-                    GHCR_TOKEN=$(HOME=$TEMP_HOME doppler secrets get GHCR_PUBLISH_TOKEN --plain --project ci-deploy --config prd 2>/dev/null || true)
+                    # Optional GitHub PAT (write:packages) for the public GHCR mirror. Lives in
+                    # the parabun-workplace ci/prd config, read via its own service token
+                    # (DOPPLER_TOKEN_PARABUN_CI). If the token or secret is absent the mirror is
+                    # skipped and the DOCR push is unaffected, so this stays a no-op until both
+                    # DOPPLER_TOKEN_PARABUN_CI (host) and GHCR_PUBLISH_TOKEN (Doppler) are set.
+                    PARABUN_CI_TOKEN=$(grep DOPPLER_TOKEN_PARABUN_CI /etc/default/jenkins-doppler | cut -d= -f2 || true)
+                    GHCR_TOKEN=""
+                    if [ -n "$PARABUN_CI_TOKEN" ]; then
+                        GHCR_TOKEN=$(HOME=$TEMP_HOME DOPPLER_TOKEN="$PARABUN_CI_TOKEN" doppler secrets get GHCR_PUBLISH_TOKEN --plain --project ci --config prd 2>/dev/null || true)
+                    fi
                     rm -rf "$TEMP_HOME"
                     echo "$DO_TOKEN" | docker login registry.digitalocean.com -u do --password-stdin
 
