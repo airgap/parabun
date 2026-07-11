@@ -332,8 +332,7 @@ pipeline {
             }
             // Runs on the Jenkins controller, which already has docker (it
             // builds the ci-linux dockerfile agent) and mounts
-            // /etc/default/jenkins-doppler. Mirrors the lyku workers pipeline's
-            // Doppler → DIGITALOCEAN_ACCESS_TOKEN path.
+            // /etc/default/jenkins-doppler for the Doppler → GHCR_PUBLISH_TOKEN path.
             agent { label 'built-in' }
             steps {
                 script {
