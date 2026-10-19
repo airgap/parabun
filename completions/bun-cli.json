@@ -3861,6 +3861,28 @@
       "multiple": false
     },
     {
+      "name": "localstorage-file",
+      "description": "Enable the Web Storage API and persist localStorage to the SQLite file at this path",
+      "hasValue": true,
+      "valueType": "val",
+      "required": false,
+      "multiple": false
+    },
+    {
+      "name": "experimental-webstorage",
+      "description": "Enable the Web Storage API: Storage and an in-memory sessionStorage. localStorage also needs --localstorage-file",
+      "hasValue": false,
+      "required": false,
+      "multiple": false
+    },
+    {
+      "name": "no-experimental-webstorage",
+      "description": "Disable the Web Storage API even when --experimental-webstorage or --localstorage-file is given",
+      "hasValue": false,
+      "required": false,
+      "multiple": false
+    },
+    {
       "name": "silent",
       "description": "Don't print the script command",
       "hasValue": false,

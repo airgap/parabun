@@ -2888,6 +2888,76 @@ JSValue GlobalObject_getGlobalThis(VM& vm, JSObject* globalObject)
     return uncheckedDowncast<Zig::GlobalObject>(globalObject)->globalThis();
 }
 
+// Web Storage (`Storage`, `sessionStorage`, `localStorage`) is opt-in through
+// --experimental-webstorage / --localstorage-file. The names are installed as
+// custom accessors at global object creation rather than as ZigGlobalObject.lut.txt
+// entries because a static lut entry exists unconditionally: `'localStorage' in
+// globalThis` would be true with the flags off, and that `in` probe is how Vitest,
+// global-jsdom and happy-dom decide whether to install their own DOM storage.
+// The accessor keeps src/js/internal/webstorage.ts unloaded until the first read,
+// then replaces itself with a plain data property, the same self-replacing trick
+// as BUN_DEFINE_LAZY_GLOBAL_BUILTIN_GETTER above. Nothing here may be DontDelete or
+// ReadOnly: populateGlobal and GlobalRegistrator defineProperty over these names
+// and throw TypeError on a non-configurable one.
+//
+// Mode: 0 off, 1 Storage + sessionStorage, 2 also localStorage, 3 forced off.
+extern "C" uint8_t Bun__WebStorage__mode();
+extern "C" bool Bun__WebStorage__localStorageFile(BunString* out);
+
+// Storage is DontEnum to match Node's descriptor; the two instances are enumerable.
+static unsigned webStorageGlobalAttributes(PropertyName name)
+{
+    return name == "Storage" ? static_cast<unsigned>(PropertyAttribute::DontEnum) : 0;
+}
+
+JSC_DEFINE_CUSTOM_GETTER(webStorageGlobalGetter,
+    (JSC::JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue,
+        JSC::PropertyName name))
+{
+    auto& vm = JSC::getVM(lexicalGlobalObject);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    // A CustomValue getter receives the object holding the property, so this is the
+    // global that owns the accessor and the InternalModuleRegistry (and therefore the
+    // sessionStorage instance) that goes with it, even when read from another realm.
+    auto* globalObject = uncheckedDowncast<Zig::GlobalObject>(JSValue::decode(thisValue));
+
+    JSValue webstorage = globalObject->internalModuleRegistry()->requireId(globalObject, vm, InternalModuleRegistry::InternalWebstorage);
+    RETURN_IF_EXCEPTION(scope, {});
+    JSValue value = webstorage.getObject()->get(globalObject, name);
+    RETURN_IF_EXCEPTION(scope, {});
+
+    if (name != "Storage") {
+        // sessionStorage() and localStorage(path) are factories so that reading the
+        // global never opens SQLite; the module defers that to the first operation.
+        MarkedArgumentBuffer args;
+        if (name == "localStorage") {
+            BunString path;
+            bool hasFile = Bun__WebStorage__localStorageFile(&path);
+            RELEASE_ASSERT(hasFile);
+            JSValue pathValue = path.transferToJS(globalObject);
+            RETURN_IF_EXCEPTION(scope, {});
+            args.append(pathValue);
+        }
+        value = JSC::call(globalObject, value, args, "webstorage export is not callable"_s);
+        RETURN_IF_EXCEPTION(scope, {});
+    }
+
+    globalObject->putDirect(vm, name, value, webStorageGlobalAttributes(name));
+    RELEASE_AND_RETURN(scope, JSValue::encode(value));
+}
+
+JSC_DEFINE_CUSTOM_SETTER(webStorageGlobalSetter,
+    (JSC::JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue,
+        JSC::EncodedJSValue encodedValue, JSC::PropertyName name))
+{
+    auto& vm = JSC::getVM(lexicalGlobalObject);
+    // Assignment before the first read replaces the accessor outright, as it would a
+    // plain data property, without loading the module.
+    auto* globalObject = uncheckedDowncast<Zig::GlobalObject>(JSValue::decode(thisValue));
+    globalObject->putDirect(vm, name, JSValue::decode(encodedValue), webStorageGlobalAttributes(name));
+    return true;
+}
+
 // This is like `putDirectBuiltinFunction` but for the global static list.
 #define globalBuiltinFunction(vm, globalObject, identifier, function, attributes) JSC::JSGlobalObject::GlobalPropertyInfo(identifier, JSFunction::create(vm, function, globalObject), attributes)
 
@@ -3030,6 +3100,16 @@ void GlobalObject::addBuiltinGlobals(JSC::VM& vm)
     consoleObject->putDirectCustomAccessor(vm, Identifier::fromString(vm, "Console"_s), CustomGetterSetter::create(vm, getConsoleConstructor, nullptr), PropertyAttribute::CustomValue | 0);
     consoleObject->putDirectCustomAccessor(vm, Identifier::fromString(vm, "_stdout"_s), CustomGetterSetter::create(vm, getConsoleStdout, nullptr), PropertyAttribute::DontEnum | PropertyAttribute::CustomValue | 0);
     consoleObject->putDirectCustomAccessor(vm, Identifier::fromString(vm, "_stderr"_s), CustomGetterSetter::create(vm, getConsoleStderr, nullptr), PropertyAttribute::DontEnum | PropertyAttribute::CustomValue | 0);
+
+    // ----- Web Storage (flag-gated, see webStorageGlobalGetter) -----
+
+    uint8_t webStorageMode = Bun__WebStorage__mode();
+    if (webStorageMode == 1 || webStorageMode == 2) {
+        putDirectCustomAccessor(vm, Identifier::fromString(vm, "Storage"_s), CustomGetterSetter::create(vm, webStorageGlobalGetter, webStorageGlobalSetter), PropertyAttribute::DontEnum | 0);
+        putDirectCustomAccessor(vm, Identifier::fromString(vm, "sessionStorage"_s), CustomGetterSetter::create(vm, webStorageGlobalGetter, webStorageGlobalSetter), 0);
+        if (webStorageMode == 2)
+            putDirectCustomAccessor(vm, Identifier::fromString(vm, "localStorage"_s), CustomGetterSetter::create(vm, webStorageGlobalGetter, webStorageGlobalSetter), 0);
+    }
 }
 
 // ===================== start conditional builtin globals =====================

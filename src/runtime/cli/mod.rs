@@ -423,6 +423,43 @@ pub(crate) fn start_time() -> i128 {
 pub(crate) static Bun__Node__ProcessTitle: bun_threading::Guarded<Option<Box<[u8]>>> =
     bun_threading::Guarded::new(None);
 
+/// Web Storage exposure, written once by `Arguments::parse`: 0 off, 1 Storage +
+/// sessionStorage, 2 adds a file-backed localStorage, 3 forced off by
+/// `--no-experimental-webstorage`. Process-global rather than a VM field
+/// because `web_worker.rs` copies only TransformOptions into a Worker, and
+/// every `Zig::GlobalObject` must see the same answer.
+pub(crate) static WEBSTORAGE_MODE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
+/// Absolute `--localstorage-file` path; `Some` exactly when `WEBSTORAGE_MODE`
+/// is 2. Same storage shape as `Bun__Node__ProcessTitle` so the C++ side reads
+/// it through one `BunString` out-param.
+pub(crate) static WEBSTORAGE_LOCALSTORAGE_FILE: bun_threading::Guarded<Option<Box<[u8]>>> =
+    bun_threading::Guarded::new(None);
+
+#[unsafe(export_name = "Bun__WebStorage__mode")]
+pub(crate) extern "C" fn webstorage_mode() -> u8 {
+    WEBSTORAGE_MODE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Writes the absolute localStorage path into `out` and returns true when the
+/// mode is 2; otherwise leaves `out` untouched and returns false.
+#[unsafe(export_name = "Bun__WebStorage__localStorageFile")]
+pub(crate) extern "C" fn webstorage_local_storage_file(out: *mut bun_core::String) -> bool {
+    if WEBSTORAGE_MODE.load(core::sync::atomic::Ordering::Relaxed) != 2 {
+        return false;
+    }
+    let guard = WEBSTORAGE_LOCALSTORAGE_FILE.lock();
+    let path = guard
+        .as_deref()
+        .expect("--localstorage-file path is stored whenever the mode is 2");
+    // SAFETY: `out` is a valid out-param provided by the C++ caller.
+    unsafe {
+        *out = bun_core::String::clone_utf8(path);
+    }
+    true
+}
+
 /// Backing storage for [`cli_arena`]. Written exactly once in [`Cli::start`]
 /// during single-threaded process startup (before `Command::start`, hence
 /// before any `cli_arena()` / `cli_dupe` caller), then read freely — same

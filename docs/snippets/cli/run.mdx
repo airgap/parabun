@@ -99,6 +99,21 @@ bun run <file or script>
   Set the default depth for <code>console.log</code> object inspection (default: 2)
 </ParamField>
 
+<ParamField path="--localstorage-file" type="string">
+  Enable the Web Storage API and persist <code>localStorage</code> to the SQLite file at the given path. A relative path
+  resolves against the working directory (after <code>--cwd</code>)
+</ParamField>
+
+<ParamField path="--experimental-webstorage" type="boolean">
+  Enable the Web Storage API: <code>Storage</code> and an in-memory <code>sessionStorage</code>.{" "}
+  <code>localStorage</code> also needs <code>--localstorage-file</code>
+</ParamField>
+
+<ParamField path="--no-experimental-webstorage" type="boolean">
+  Disable the Web Storage API even when <code>--experimental-webstorage</code> or <code>--localstorage-file</code> is
+  given
+</ParamField>
+
 ### Development Workflow
 
 <ParamField path="--watch" type="boolean">

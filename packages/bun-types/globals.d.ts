@@ -1591,6 +1591,53 @@ declare var BroadcastChannel: Bun.__internal.UseLibDomIfAvailable<
   typeof import("node:worker_threads").BroadcastChannel
 >;
 
+/**
+ * The **`Storage`** interface of the Web Storage API provides access to a key/value store of strings.
+ *
+ * Only defined when Bun is started with `--localstorage-file <path>` or `--experimental-webstorage`.
+ * Without either flag `Storage`, `localStorage` and `sessionStorage` are absent from `globalThis` at
+ * runtime, so guard with `typeof Storage !== "undefined"` in code that may run without them.
+ * Calling or constructing `Storage` throws a `TypeError`.
+ *
+ * Keys are kept in insertion order. The store holds at most 10 MiB, counted as two bytes per UTF-16
+ * code unit of every key and value; `setItem` beyond that throws a `DOMException` named `QuotaExceededError`.
+ *
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/Storage)
+ */
+interface Storage {
+  /** The number of key/value pairs in the store. */
+  readonly length: number;
+  /** Removes every key/value pair. */
+  clear(): void;
+  /** The value for `key`, or `null` when the key is absent. */
+  getItem(key: string): string | null;
+  /** The name of the `index`th key in insertion order, or `null` when out of range. */
+  key(index: number): string | null;
+  /** Removes `key` and its value. A later `setItem` of the same key appends it at the end. */
+  removeItem(key: string): void;
+  /** Adds or overwrites `key`. Overwriting keeps the key's position. */
+  setItem(key: string, value: string): void;
+}
+declare var Storage: Bun.__internal.UseLibDomIfAvailable<"Storage", { prototype: Storage; new (): Storage }>;
+
+/**
+ * Persistent storage backed by the SQLite file given to `--localstorage-file <path>`.
+ *
+ * Absent unless that flag is set; `--experimental-webstorage` alone does not define it. The file is
+ * opened on the first `Storage` operation, not when this global is read, and an unopenable path
+ * throws `ERR_INVALID_STATE` from that first operation. Workers and other processes started with the
+ * same path share the data.
+ */
+declare var localStorage: Bun.__internal.UseLibDomIfAvailable<"localStorage", Storage>;
+
+/**
+ * In-memory storage scoped to the current global object: the main thread and each Worker get their own.
+ *
+ * Defined by `--experimental-webstorage` or `--localstorage-file <path>`. Unlike Node.js it is not
+ * available without a flag.
+ */
+declare var sessionStorage: Bun.__internal.UseLibDomIfAvailable<"sessionStorage", Storage>;
+
 declare var URL: Bun.__internal.UseLibDomIfAvailable<
   "URL",
   {

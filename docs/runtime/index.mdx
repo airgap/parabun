@@ -197,6 +197,30 @@ console.log(nested);
 // With --console-depth 4: { a: { b: { c: { d: 'deep' } } } }
 ```
 
+## `bun run --localstorage-file`
+
+The Web Storage API (`Storage`, `localStorage` and `sessionStorage`) is off by default: none of the three names exists on `globalThis`, so DOM test setups such as jsdom or happy-dom install their own. Two flags turn it on.
+
+```bash terminal icon="terminal"
+# Storage, sessionStorage and a persistent localStorage
+bun --localstorage-file=./storage.sqlite run index.tsx
+
+# Storage and an in-memory sessionStorage only
+bun --experimental-webstorage run index.tsx
+```
+
+`--localstorage-file <path>` enables all three and persists `localStorage` in a SQLite file at `path`. The file is opened on the first storage operation, not at startup, so a path that cannot be opened throws `ERR_INVALID_STATE` from that operation. A relative path resolves against the working directory (after `--cwd`), and the directory must already exist: SQLite does not create it. A value that is empty, or that begins or ends with whitespace, is rejected at startup with exit code 1, because `bun:sqlite` would trim the whitespace and open a different file. Processes and Workers given the same file share its data. `sessionStorage` is in memory, one store per global object: the main thread, each Worker, and each test file under `bun test --isolate` (without `--isolate` the files of one run share it). `--experimental-webstorage` enables `Storage` and `sessionStorage` without a file; `localStorage` is absent from `globalThis`, so a bare reference throws a `ReferenceError`. `--no-experimental-webstorage` turns all three off and wins over both other flags. Each flag is also accepted through `BUN_OPTIONS`.
+
+```ts storage.ts icon="/icons/typescript.svg"
+localStorage.setItem("theme", "dark");
+localStorage.getItem("theme"); // "dark", also from another process using the same file
+sessionStorage.setItem("tab", "1"); // in memory, one store per global object
+```
+
+Each store holds 10 MiB, counted as two bytes per UTF-16 code unit of every key and value. Writing past that throws a `DOMException` named `QuotaExceededError` and leaves the previous value in place.
+
+Node.js differs in three ways. `sessionStorage` is gated behind the same flags instead of always existing; keys stay in insertion order (`key(i)`, `Object.keys()` and `for...in`) instead of being sorted; and `new Storage()` throws a `TypeError`, as in browsers, instead of a plain `Error`. Do not pass these flags to test runs that rely on jsdom or happy-dom storage. Vitest's jsdom environment keeps a `localStorage` that already exists and swaps only `Storage`, so `localStorage instanceof Storage` becomes false. `@happy-dom/global-registrator` under `bun test --preload` redefines all three names, so its storage wins and `instanceof` holds.
+
 ## `bun run --smol`
 
 In memory-constrained environments, use the `--smol` flag to reduce memory usage at a cost to performance.

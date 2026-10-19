@@ -287,6 +287,15 @@ pub(crate) const RUNTIME_PARAMS_: &[ParamType] = &[
     ),
     parse_param!("--title <STR>                     Set the process title"),
     parse_param!(
+        "--localstorage-file <STR>         Enable Web Storage and persist localStorage in this SQLite file"
+    ),
+    parse_param!(
+        "--experimental-webstorage         Enable Web Storage (Storage and an in-memory sessionStorage)"
+    ),
+    parse_param!(
+        "--no-experimental-webstorage      Disable Web Storage, even if --localstorage-file is given"
+    ),
+    parse_param!(
         "--zero-fill-buffers                Boolean to force Buffer.allocUnsafe(size) to be zero-filled."
     ),
     parse_param!(
@@ -1279,6 +1288,46 @@ pub fn parse(cmd: CommandTag, ctx: Context<'_>) -> Result<api::TransformOptions,
             // front (Zig: `CLI.Bun__Node__ProcessTitle = title;`).
             *cli::Bun__Node__ProcessTitle.lock() = Some(title.into());
         }
+        let localstorage_file = args.option(b"--localstorage-file");
+        if localstorage_file.is_some_and(<[u8]>::is_empty) {
+            Output::err_generic(
+                "Invalid value for --localstorage-file: \"\". Must be a file path\n",
+                (),
+            );
+            Global::exit(1);
+        }
+        // bun:sqlite trims the filename it is given, so a path with surrounding
+        // whitespace would silently open a different file than the one on the
+        // command line.
+        if localstorage_file.is_some_and(|p| {
+            p.first().is_some_and(u8::is_ascii_whitespace)
+                || p.last().is_some_and(u8::is_ascii_whitespace)
+        }) {
+            Output::err_generic(
+                "Invalid value for --localstorage-file: must not begin or end with whitespace\n",
+                (),
+            );
+            Global::exit(1);
+        }
+        // Off wins over both enabling flags: clap exposes flags, not argv
+        // order, so Node's last-wins rule has nothing to work from.
+        let webstorage_mode: u8 = if args.flag(b"--no-experimental-webstorage") {
+            3
+        } else if let Some(path) = localstorage_file {
+            // `--cwd` already chdir'd and stored the result, so a relative
+            // path lands where the script sees its own cwd.
+            let abs = resolve_path::join_abs::<platform::Auto>(
+                ctx.args.absolute_working_dir.as_deref().unwrap(),
+                path,
+            );
+            *cli::WEBSTORAGE_LOCALSTORAGE_FILE.lock() = Some(abs.into());
+            2
+        } else if args.flag(b"--experimental-webstorage") {
+            1
+        } else {
+            0
+        };
+        cli::WEBSTORAGE_MODE.store(webstorage_mode, core::sync::atomic::Ordering::Relaxed);
         if args.flag(b"--zero-fill-buffers") {
             Bun__Node__ZeroFillBuffers.store(true, core::sync::atomic::Ordering::Relaxed);
         }
