@@ -1565,6 +1565,7 @@ impl Diff {
                                 || bun_sys::exists(binding_gyp.as_bytes());
                             let (mut builder, fields) = from_lockfile.string_builder_split();
                             workspace_pkg.scripts.count(script_buf, &mut builder);
+                            workspace_pkg.meta.count(script_buf, &mut builder);
                             let bin_strings = workspace_pkg.bin.count(
                                 script_buf,
                                 &to_lockfile.buffers.extern_strings,
@@ -1587,8 +1588,10 @@ impl Diff {
                                 );
                             fields.packages.items_scripts_mut()[package_id as usize] =
                                 workspace_pkg.scripts.clone_into(script_buf, &mut builder);
-                            let mut meta = workspace_pkg.meta;
-                            meta.id = package_id;
+                            let mut meta =
+                                workspace_pkg
+                                    .meta
+                                    .clone_into(package_id, script_buf, &mut builder);
                             meta.set_has_install_script(has_scripts);
                             fields.packages.items_meta_mut()[package_id as usize] = meta;
                             builder.clamp();
