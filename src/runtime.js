@@ -581,7 +581,7 @@ export var __parabunRangeInclusive = (a, b) => {
 };
 // Parabun: `schema { ... }` → __paraFromSchema({ ... }, import.meta.url).
 // Bundled output keeps schemas as plain objects (no runtime validator).
-export var __paraFromSchema = (schema) => schema;
+export var __paraFromSchema = schema => schema;
 // Parabun: `schema NAME = <body>` / `schema NAME from <expr>` /
 // `schema NAME { field: type }` →
 // __paraSchemaDecl/__paraSchemaIngest/__paraSchemaRegister(

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { bunEnv, bunExe, tempDir } from "harness";
-import path from "node:path";
 
 async function runFixture(prefix, files) {
   using dir = tempDir(prefix, files);

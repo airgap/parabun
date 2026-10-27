@@ -18,7 +18,7 @@
 
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 type Platform = {
   artifact: string; // filename under --artifacts

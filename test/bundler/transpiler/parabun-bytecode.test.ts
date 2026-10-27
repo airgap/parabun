@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, tempDirWithFiles, tempDir } from "harness";
-import { readFileSync, readdirSync, statSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { bunEnv, bunExe, tempDir, tempDirWithFiles } from "harness";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 describe("parabun bytecode cache", () => {

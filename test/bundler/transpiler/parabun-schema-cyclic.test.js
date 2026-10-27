@@ -123,21 +123,19 @@ describe("cyclic modifier + schema config list", () => {
   });
 
   test("`cyclic(0)` is a compile error with the omit-cyclic diagnostic", () => {
-    expect(() =>
-      transpile(`cyclic(0) schema Node = { type: "object", properties: {}, required: [] };`),
-    ).toThrow(/omit the cyclic modifier/);
+    expect(() => transpile(`cyclic(0) schema Node = { type: "object", properties: {}, required: [] };`)).toThrow(
+      /omit the cyclic modifier/,
+    );
   });
 
   test("non-integer cyclic length is a compile error", () => {
-    expect(() =>
-      transpile(`cyclic(1.5) schema Node = { type: "object", properties: {}, required: [] };`),
-    ).toThrow(/positive integer literal/);
+    expect(() => transpile(`cyclic(1.5) schema Node = { type: "object", properties: {}, required: [] };`)).toThrow(
+      /positive integer literal/,
+    );
   });
 
   test("unknown config key is a compile error (namespace reserved)", () => {
-    expect(() => transpile(`schema(weird: 1) X = { type: "string" };`)).toThrow(
-      /unknown schema config key/,
-    );
+    expect(() => transpile(`schema(weird: 1) X = { type: "string" };`)).toThrow(/unknown schema config key/);
   });
 
   test("duplicate config key is a compile error", () => {
@@ -192,9 +190,9 @@ describe("cyclic modifier + schema config list", () => {
     expect(() => transpile(`schema(identity: nah) X = { type: "string" };`)).toThrow(
       /schema identity must be `preserve`/,
     );
-    expect(() =>
-      transpile(`schema(identity: preserve, identity: preserve) X = { type: "string" };`),
-    ).toThrow(/duplicate schema config key `identity`/);
+    expect(() => transpile(`schema(identity: preserve, identity: preserve) X = { type: "string" };`)).toThrow(
+      /duplicate schema config key `identity`/,
+    );
   });
 
   test("cyclic applies to `from` declarations too", async () => {

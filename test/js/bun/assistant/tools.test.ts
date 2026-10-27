@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { bunExe } from "harness";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { bunExe } from "harness";
 
 // parabun:assistant tool dispatch + MCP integration (LYK-734).
 //

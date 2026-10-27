@@ -4,12 +4,12 @@
 
 What's still in here:
 
-| Specifier | Why it's here |
-|---|---|
-| `bun:wrap` | Runtime helpers for the wrap macro that `.pts` desugarings emit (`__parabunMemo` / `__parabunDefer0` / `__parabunRange`). Will move into `@lyku/para-transpile`'s runtime when the standalone compiler ships. |
-| `parabun:gpu` | CPU + WebGPU backend. Until `@lyku/para-gpu` (the WebGPU/CPU normalizer) ships, this is the cross-runtime path for code that imports `parabun:gpu`. |
-| `parabun:llm` | Throw-stub with a clear "no browser backend wired yet" message. Will move into `@lyku/para-llm` (the WebGPU/Wasm normalizer) when ready. |
-| `parabun-browser-shims/quant` | Pure-JS dequantizers for Q4_K / Q6_K / Q8_0. Used by the `parabun:gpu` shim's `holdQ4K` / `holdQ6K`; also exported standalone. |
+| Specifier                     | Why it's here                                                                                                                                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun:wrap`                    | Runtime helpers for the wrap macro that `.pts` desugarings emit (`__parabunMemo` / `__parabunDefer0` / `__parabunRange`). Will move into `@lyku/para-transpile`'s runtime when the standalone compiler ships. |
+| `parabun:gpu`                 | CPU + WebGPU backend. Until `@lyku/para-gpu` (the WebGPU/CPU normalizer) ships, this is the cross-runtime path for code that imports `parabun:gpu`.                                                           |
+| `parabun:llm`                 | Throw-stub with a clear "no browser backend wired yet" message. Will move into `@lyku/para-llm` (the WebGPU/Wasm normalizer) when ready.                                                                      |
+| `parabun-browser-shims/quant` | Pure-JS dequantizers for Q4_K / Q6_K / Q8_0. Used by the `parabun:gpu` shim's `holdQ4K` / `holdQ6K`; also exported standalone.                                                                                |
 
 For everything else, use the per-module packages:
 

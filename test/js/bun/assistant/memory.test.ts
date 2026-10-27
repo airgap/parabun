@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { tempDir } from "harness";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { tempDir } from "harness";
 
 // Persistent memory for parabun:assistant (LYK-760 step 4).
 //

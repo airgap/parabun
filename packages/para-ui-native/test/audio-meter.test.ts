@@ -1,7 +1,7 @@
-import { test, expect } from "bun:test";
-import { audioMeter } from "../src/audio.ts";
-import { lowerPuiReactivity } from "../../para-preprocess/src/index.ts";
+import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { lowerPuiReactivity } from "../../para-preprocess/src/index.ts";
+import { audioMeter } from "../src/audio.ts";
 
 // A fake CaptureStream matching the structural slice the adapter uses.
 function fakeCapture() {

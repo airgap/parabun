@@ -4,8 +4,8 @@
 // script only runs for maintainers editing the WAT source.
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");

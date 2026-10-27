@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
 import sigs from "@lyku/para-signals";
+import { describe, expect, test } from "bun:test";
 
 // @lyku/para-signals.fromInterval — drive a signal from a periodic fn call.
 

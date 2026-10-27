@@ -780,7 +780,9 @@ function fromGGUF(gguf: GGUFLike, opts?: { maxContext?: number }): LlamaModel {
     throw new Error(`parabun:llm: n_head (${cfg.nHead}) not divisible by n_kv_head (${cfg.nKvHead})`);
   }
   if (cfg.ropeDim !== cfg.headDim) {
-    throw new Error(`parabun:llm: rope_dim (${cfg.ropeDim}) != head_dim (${cfg.headDim}) — partial RoPE not implemented`);
+    throw new Error(
+      `parabun:llm: rope_dim (${cfg.ropeDim}) != head_dim (${cfg.headDim}) — partial RoPE not implemented`,
+    );
   }
   if (cfg.headDim % 32 !== 0 || cfg.headDim < 32) {
     // Device attention kernels use warp-reduce over headDim threads.
