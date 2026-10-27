@@ -1815,9 +1815,8 @@ impl<'a> Transpiler<'a> {
                                     path_buf2[n..][..BYTECODE_EXT.len()]
                                         .copy_from_slice(BYTECODE_EXT);
                                     let total = n + BYTECODE_EXT.len();
-                                    // PathBuffer is zero-initialized so
-                                    // `path_buf2[total] == 0` already; safe to
-                                    // borrow as a NUL-terminated ZStr.
+                                    // The uninitialized buffer does not provide a trailing NUL.
+                                    path_buf2[total] = 0;
                                     let zpath = bun_core::ZStr::from_buf(&path_buf2[..], total);
                                     // PORT NOTE: spec calls
                                     // `bun.sys.File.toSourceAt(...)` which is
