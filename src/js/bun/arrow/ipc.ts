@@ -1428,7 +1428,8 @@ export function fromIPC(bytes: Uint8Array): TableLike {
   if (looksLikeFileFormat(bytes)) {
     return fromIPCFile(bytes);
   }
-  const { RecordBatch, Table } = getTypes();
+  // Preserve registry getter evaluation when loading the Arrow constructors.
+  const { RecordBatch, Table, Column: _Column } = getTypes();
 
   let cursor = 0;
   let schema: Schema | null = null;
