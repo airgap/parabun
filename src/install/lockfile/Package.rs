@@ -988,6 +988,7 @@ pub struct DiffSummary {
     pub add: u32,
     pub remove: u32,
     pub update: u32,
+    pub script_updates: u32,
     pub overrides_changed: bool,
     pub catalogs_changed: bool,
 
@@ -1001,6 +1002,11 @@ pub struct DiffSummary {
 impl DiffSummary {
     #[inline]
     pub(crate) fn has_diffs(&self) -> bool {
+        self.has_dependency_diffs() || self.script_updates > 0
+    }
+
+    #[inline]
+    fn has_dependency_diffs(&self) -> bool {
         self.add > 0
             || self.remove > 0
             || self.update > 0
@@ -1545,7 +1551,30 @@ impl Diff {
                             );
                         }
 
-                        !diff.has_diffs()
+                        if diff.has_dependency_diffs() {
+                            false
+                        } else {
+                            // Text lockfiles omit workspace lifecycle scripts. Refresh them
+                            // without resolving unchanged dependency declarations again.
+                            let script_buf = to_lockfile.buffers.string_bytes.as_slice();
+                            let binding_gyp = resolve_path::join_abs_string_z::<path::platform::Auto>(
+                                path::dirname(package_json_path.slice()).unwrap_or(b""),
+                                &[b"binding.gyp" as &[u8]],
+                            );
+                            let has_scripts = workspace_pkg.scripts.has_any()
+                                || bun_sys::exists(binding_gyp.as_bytes());
+                            let (mut builder, fields) = from_lockfile.string_builder_split();
+                            workspace_pkg.scripts.count(script_buf, &mut builder);
+                            builder.allocate()?;
+                            let package_id = from_resolutions[i] as usize;
+                            fields.packages.items_scripts_mut()[package_id] =
+                                workspace_pkg.scripts.clone_into(script_buf, &mut builder);
+                            fields.packages.items_meta_mut()[package_id]
+                                .set_has_install_script(has_scripts);
+                            builder.clamp();
+                            summary.script_updates += diff.script_updates;
+                            true
+                        }
                     };
 
                     if update_mapping {
@@ -1621,7 +1650,7 @@ impl Diff {
                     from_lockfile.buffers.string_bytes.as_slice(),
                 ) {
                     // We found a changed life-cycle script
-                    summary.update += 1;
+                    summary.script_updates += 1;
                 }
             }
         }
