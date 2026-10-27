@@ -31,15 +31,25 @@ function latestRegistry() {
   return { registry, requests, integrity };
 }
 
-for (const scenario of ["workspace", "root", "prepare-only", "dependency-edit"] as const) {
+for (const scenario of [
+  "workspace",
+  "root",
+  "workspace-external-peer",
+  "root-external-peer",
+  "prepare-only",
+  "dependency-edit",
+] as const) {
   test(`frozen text lockfile retains locked versions except for genuine dependency edits: ${scenario}`, async () => {
     const { registry, requests, integrity } = latestRegistry();
     try {
-      const duplicateAtRoot = scenario === "root";
+      const duplicateAtRoot = scenario === "root" || scenario === "root-external-peer";
+      const externalPeer = scenario === "workspace-external-peer" || scenario === "root-external-peer";
       const edited = scenario === "dependency-edit";
       const declarations = {
         devDependencies: { b: "workspace:*", floating: "latest" },
-        ...(["workspace", "root"].includes(scenario) ? { peerDependencies: { b: "workspace:*" } } : {}),
+        ...(["workspace", "root"].includes(scenario) || externalPeer
+          ? { peerDependencies: { b: externalPeer ? "^2.0.0" : "workspace:*" } }
+          : {}),
       };
       const currentDeclarations = {
         ...declarations,
