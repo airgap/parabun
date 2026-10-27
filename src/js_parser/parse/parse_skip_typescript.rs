@@ -1437,10 +1437,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         self.lexer.expect(T::TOpenBrace)?;
         let mut fields: std::vec::Vec<crate::p::ParaTsTypeField<'a>> = std::vec::Vec::new();
         while self.lexer.token != T::TCloseBrace {
-            if matches!(
-                self.lexer.token,
-                T::TPlus | T::TMinus | T::TOpenBracket
-            ) {
+            if matches!(self.lexer.token, T::TPlus | T::TMinus | T::TOpenBracket) {
                 return Ok(None);
             }
             if self.lexer.token != T::TIdentifier && self.lexer.token != T::TStringLiteral {

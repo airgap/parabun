@@ -30,3 +30,21 @@ docs/bundler/minifier.mdx
 # `_`/`*` differently every pass), so autofix.ci ping-pongs commits forever.
 # Not authored by hand; no value in normalizing it.
 docs/.rust-rewrite-verified-claims.md
+
+# Test runners overwrite these observed outputs; preserve their exact bytes.
+packages/para-svelte/packages/svelte/tests/parser-legacy/samples/**/_actual.json
+packages/para-svelte/packages/svelte/tests/parser-modern/samples/**/_actual.json
+packages/para-svelte/packages/svelte/tests/preprocess/samples/**/_actual.html
+
+# The Svelte type generator writes these forwarding declarations verbatim.
+packages/para-svelte/packages/svelte/action.d.ts
+packages/para-svelte/packages/svelte/animate.d.ts
+packages/para-svelte/packages/svelte/compiler.d.ts
+packages/para-svelte/packages/svelte/easing.d.ts
+packages/para-svelte/packages/svelte/index.d.ts
+packages/para-svelte/packages/svelte/legacy.d.ts
+packages/para-svelte/packages/svelte/motion.d.ts
+packages/para-svelte/packages/svelte/store.d.ts
+packages/para-svelte/packages/svelte/transition.d.ts
+packages/para-svelte/packages/svelte/types/compiler/interfaces.d.ts
+packages/para-svelte/packages/svelte/types/compiler/preprocess.d.ts

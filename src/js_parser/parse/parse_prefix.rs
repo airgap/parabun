@@ -198,7 +198,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             op_loc
         } else {
             bun_ast::Loc {
-                start: if dot_loc.start > 0 { dot_loc.start - 1 } else { 0 },
+                start: if dot_loc.start > 0 {
+                    dot_loc.start - 1
+                } else {
+                    0
+                },
             }
         };
 
@@ -217,7 +221,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.pop_scope(); // FunctionBody
         p.pop_scope(); // FunctionArgs
 
-        let ret_stmt = p.s(S::Return { value: Some(body_expr) }, dot_loc);
+        let ret_stmt = p.s(
+            S::Return {
+                value: Some(body_expr),
+            },
+            dot_loc,
+        );
         let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret_stmt]);
 
         let arg_binding = p.b(B::Identifier { r#ref: param_ref }, dot_loc);
@@ -268,7 +277,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             range_loc,
         );
         let args = [body_expr, url];
-        Ok(p.call_runtime(range_loc, b"__paraFromSchema", ExprNodeList::from_slice(&args)))
+        Ok(p.call_runtime(
+            range_loc,
+            b"__paraFromSchema",
+            ExprNodeList::from_slice(&args),
+        ))
     }
 
     // Parabun: `parallel { k0: v0, k1: v1 }` →
@@ -397,7 +410,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             );
         }
 
-        let ret = p.s(S::Return { value: Some(obj_expr) }, body_loc);
+        let ret = p.s(
+            S::Return {
+                value: Some(obj_expr),
+            },
+            body_loc,
+        );
         let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
         let arrow = p.new_expr(
             E::Arrow {
@@ -987,7 +1005,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             p.lexer.next()?;
         }
         if p.lexer.token != T::TIdentifier
-            || !p.lexer.raw().first().is_some_and(|c| c.is_ascii_uppercase())
+            || !p
+                .lexer
+                .raw()
+                .first()
+                .is_some_and(|c| c.is_ascii_uppercase())
         {
             return Ok(None);
         }
@@ -1198,11 +1220,25 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             ExprData::EBinary(b) => {
                 let left = Self::match_substitute_ident(p, b.left, name, replacement)?;
                 let right = Self::match_substitute_ident(p, b.right, name, replacement)?;
-                p.new_expr(E::Binary { op: b.op, left, right }, loc)
+                p.new_expr(
+                    E::Binary {
+                        op: b.op,
+                        left,
+                        right,
+                    },
+                    loc,
+                )
             }
             ExprData::EUnary(u) => {
                 let value = Self::match_substitute_ident(p, u.value, name, replacement)?;
-                p.new_expr(E::Unary { op: u.op, value, flags: u.flags }, loc)
+                p.new_expr(
+                    E::Unary {
+                        op: u.op,
+                        value,
+                        flags: u.flags,
+                    },
+                    loc,
+                )
             }
             ExprData::EDot(d) => {
                 let target = Self::match_substitute_ident(p, d.target, name, replacement)?;
@@ -1266,7 +1302,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let mut cases = bun_alloc::ArenaVec::<js_ast::Case>::new_in(p.arena);
         for arm in arms {
             if arm.is_wildcard {
-                let ret = p.s(S::Return { value: Some(arm.result) }, body_loc);
+                let ret = p.s(
+                    S::Return {
+                        value: Some(arm.result),
+                    },
+                    body_loc,
+                );
                 let body: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
                 cases.push(js_ast::Case {
                     loc: body_loc,
@@ -1285,7 +1326,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         body: bun_ast::StoreSlice::EMPTY,
                     });
                 } else {
-                    let ret = p.s(S::Return { value: Some(arm.result) }, body_loc);
+                    let ret = p.s(
+                        S::Return {
+                            value: Some(arm.result),
+                        },
+                        body_loc,
+                    );
                     let body: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
                     cases.push(js_ast::Case {
                         loc: body_loc,
@@ -1315,7 +1361,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     ) -> Stmt {
         let mut cases = bun_alloc::ArenaVec::<js_ast::Case>::new_in(p.arena);
         for arm in arms {
-            let ret = p.s(S::Return { value: Some(arm.result) }, body_loc);
+            let ret = p.s(
+                S::Return {
+                    value: Some(arm.result),
+                },
+                body_loc,
+            );
             let body: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
             let value = if arm.is_wildcard {
                 None

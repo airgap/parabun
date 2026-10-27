@@ -1460,8 +1460,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                             let js_ast::b::B::BIdentifier(bind) = &arg.binding.data else {
                                 continue;
                             };
-                            let binding =
-                                p.b(js_ast::b::Identifier { r#ref: bind.r#ref }, src_loc);
+                            let binding = p.b(js_ast::b::Identifier { r#ref: bind.r#ref }, src_loc);
                             let decl = js_ast::G::Decl {
                                 binding,
                                 value: Some(call_args[i]),

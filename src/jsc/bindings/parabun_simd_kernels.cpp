@@ -55,7 +55,8 @@ float SumF32Impl(const float* HWY_RESTRICT a, size_t n)
         vacc = hn::Add(vacc, hn::LoadU(d, a + i));
     }
     float s = hn::ReduceSum(d, vacc);
-    for (; i < n; ++i) s += a[i];
+    for (; i < n; ++i)
+        s += a[i];
     return s;
 }
 
@@ -72,7 +73,8 @@ double SumF64Impl(const double* HWY_RESTRICT a, size_t n)
         vacc = hn::Add(vacc, hn::LoadU(d, a + i));
     }
     double s = hn::ReduceSum(d, vacc);
-    for (; i < n; ++i) s += a[i];
+    for (; i < n; ++i)
+        s += a[i];
     return s;
 }
 
@@ -91,7 +93,8 @@ float DotF32Impl(const float* HWY_RESTRICT a, const float* HWY_RESTRICT b, size_
         vacc = hn::MulAdd(hn::LoadU(d, a + i), hn::LoadU(d, b + i), vacc);
     }
     float s = hn::ReduceSum(d, vacc);
-    for (; i < n; ++i) s += a[i] * b[i];
+    for (; i < n; ++i)
+        s += a[i] * b[i];
     return s;
 }
 
@@ -108,7 +111,8 @@ double DotF64Impl(const double* HWY_RESTRICT a, const double* HWY_RESTRICT b, si
         vacc = hn::MulAdd(hn::LoadU(d, a + i), hn::LoadU(d, b + i), vacc);
     }
     double s = hn::ReduceSum(d, vacc);
-    for (; i < n; ++i) s += a[i] * b[i];
+    for (; i < n; ++i)
+        s += a[i] * b[i];
     return s;
 }
 

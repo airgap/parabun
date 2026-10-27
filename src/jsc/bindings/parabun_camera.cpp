@@ -86,11 +86,16 @@ uint32_t fourccFromString(const std::string& s)
 const char* stringFromFourcc(uint32_t fcc)
 {
     switch (fcc) {
-        case V4L2_PIX_FMT_YUYV: return "yuyv";
-        case V4L2_PIX_FMT_MJPEG: return "mjpg";
-        case V4L2_PIX_FMT_NV12: return "nv12";
-        case V4L2_PIX_FMT_RGB24: return "rgb24";
-        default: return nullptr;
+    case V4L2_PIX_FMT_YUYV:
+        return "yuyv";
+    case V4L2_PIX_FMT_MJPEG:
+        return "mjpg";
+    case V4L2_PIX_FMT_NV12:
+        return "nv12";
+    case V4L2_PIX_FMT_RGB24:
+        return "rgb24";
+    default:
+        return nullptr;
     }
 }
 
@@ -146,7 +151,8 @@ std::string slurp(const char* path)
     ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
     ::close(fd);
     if (n <= 0) return {};
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == ' ')) n--;
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == ' '))
+        n--;
     buf[n] = 0;
     return std::string(buf, static_cast<size_t>(n));
 }

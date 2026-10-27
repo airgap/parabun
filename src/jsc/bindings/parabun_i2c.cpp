@@ -91,7 +91,8 @@ std::string readBusName(const char* devName)
     if (n <= 0) return {};
     buf[n] = '\0';
     // Strip trailing newline.
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        buf[--n] = '\0';
     return std::string(buf);
 }
 
@@ -121,7 +122,10 @@ JSC_DEFINE_HOST_FUNCTION(functionListBuses,
         if (*tail == '\0') continue;
         bool allDigits = true;
         for (const char* p = tail; *p; ++p) {
-            if (*p < '0' || *p > '9') { allDigits = false; break; }
+            if (*p < '0' || *p > '9') {
+                allDigits = false;
+                break;
+            }
         }
         if (!allDigits) continue;
         std::string path = std::string("/dev/") + n;
@@ -276,7 +280,8 @@ JSC_DEFINE_HOST_FUNCTION(functionRead,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "read")) return {};
     if (callFrame->argumentCount() < 3) {
         throwTypeError(globalObject, scope, "read(fd, addr, length) requires 3 arguments"_s);
@@ -324,7 +329,8 @@ JSC_DEFINE_HOST_FUNCTION(functionWrite,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "write")) return {};
     if (callFrame->argumentCount() < 3) {
         throwTypeError(globalObject, scope, "write(fd, addr, bytes) requires 3 arguments"_s);
@@ -379,7 +385,8 @@ JSC_DEFINE_HOST_FUNCTION(functionTransact,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "transact")) return {};
     if (callFrame->argumentCount() < 3) {
         throwTypeError(globalObject, scope, "transact(fd, addr, segments) requires 3 arguments"_s);
@@ -506,7 +513,8 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusQuick,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusQuick")) return {};
     bool write = callFrame->argument(2).toBoolean(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
@@ -534,13 +542,14 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadByte,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusReadByte")) return {};
     uint32_t cmd = callFrame->argument(2).toUInt32(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
     union i2c_smbus_data data;
     if (!smbusXfer(fd, addr, I2C_SMBUS_READ, static_cast<uint8_t>(cmd),
-                   I2C_SMBUS_BYTE_DATA, &data)) {
+            I2C_SMBUS_BYTE_DATA, &data)) {
         throwErrno(globalObject, scope, "smbusReadByte");
         return {};
     }
@@ -559,13 +568,14 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadWord,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusReadWord")) return {};
     uint32_t cmd = callFrame->argument(2).toUInt32(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
     union i2c_smbus_data data;
     if (!smbusXfer(fd, addr, I2C_SMBUS_READ, static_cast<uint8_t>(cmd),
-                   I2C_SMBUS_WORD_DATA, &data)) {
+            I2C_SMBUS_WORD_DATA, &data)) {
         throwErrno(globalObject, scope, "smbusReadWord");
         return {};
     }
@@ -584,7 +594,8 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteByte,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusWriteByte")) return {};
     if (callFrame->argumentCount() < 4) {
         throwTypeError(globalObject, scope, "smbusWriteByte(fd, addr, cmd, value) requires 4 arguments"_s);
@@ -597,7 +608,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteByte,
     union i2c_smbus_data data;
     data.byte = static_cast<uint8_t>(value);
     if (!smbusXfer(fd, addr, I2C_SMBUS_WRITE, static_cast<uint8_t>(cmd),
-                   I2C_SMBUS_BYTE_DATA, &data)) {
+            I2C_SMBUS_BYTE_DATA, &data)) {
         throwErrno(globalObject, scope, "smbusWriteByte");
         return {};
     }
@@ -616,7 +627,8 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteWord,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusWriteWord")) return {};
     if (callFrame->argumentCount() < 4) {
         throwTypeError(globalObject, scope, "smbusWriteWord(fd, addr, cmd, value) requires 4 arguments"_s);
@@ -629,7 +641,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteWord,
     union i2c_smbus_data data;
     data.word = static_cast<uint16_t>(value);
     if (!smbusXfer(fd, addr, I2C_SMBUS_WRITE, static_cast<uint8_t>(cmd),
-                   I2C_SMBUS_WORD_DATA, &data)) {
+            I2C_SMBUS_WORD_DATA, &data)) {
         throwErrno(globalObject, scope, "smbusWriteWord");
         return {};
     }
@@ -649,13 +661,14 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusReadBlock,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusReadBlock")) return {};
     uint32_t cmd = callFrame->argument(2).toUInt32(globalObject);
     RETURN_IF_EXCEPTION(scope, {});
     union i2c_smbus_data data;
     if (!smbusXfer(fd, addr, I2C_SMBUS_READ, static_cast<uint8_t>(cmd),
-                   I2C_SMBUS_BLOCK_DATA, &data)) {
+            I2C_SMBUS_BLOCK_DATA, &data)) {
         throwErrno(globalObject, scope, "smbusReadBlock");
         return {};
     }
@@ -682,7 +695,8 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteBlock,
     throwTypeError(globalObject, scope, "parabun:i2c not yet implemented on this platform"_s);
     return {};
 #else
-    int fd; uint16_t addr;
+    int fd;
+    uint16_t addr;
     if (!extractFdAddr(globalObject, scope, callFrame, fd, addr, "smbusWriteBlock")) return {};
     if (callFrame->argumentCount() < 4) {
         throwTypeError(globalObject, scope, "smbusWriteBlock(fd, addr, cmd, bytes) requires 4 arguments"_s);
@@ -706,7 +720,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSmbusWriteBlock,
     data.block[0] = static_cast<uint8_t>(blockLen);
     std::memcpy(&data.block[1], u8->vector(), blockLen);
     if (!smbusXfer(fd, addr, I2C_SMBUS_WRITE, static_cast<uint8_t>(cmd),
-                   I2C_SMBUS_BLOCK_DATA, &data)) {
+            I2C_SMBUS_BLOCK_DATA, &data)) {
         throwErrno(globalObject, scope, "smbusWriteBlock");
         return {};
     }
