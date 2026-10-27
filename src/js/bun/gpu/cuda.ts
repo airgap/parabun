@@ -128,7 +128,6 @@ type CublasSymbols = {
 };
 
 const CUBLAS_OP_N = 0;
-const CUBLAS_OP_T = 1;
 
 let cublasLib: { symbols: CublasSymbols; close: () => void } | null = null;
 let cublasHandle: bigint = 0n;
@@ -1137,8 +1136,6 @@ function launchMatmulF32(
       }
     }
 
-    const pABuf = new BigUint64Array([dA]);
-    const pBBuf = new BigUint64Array([dB]);
     if (cublasLib !== null) {
       // cuBLAS path: dispatch through cublasSgemm. cuBLAS uses column-major,
       // but our row-major layout maps cleanly via the standard transpose

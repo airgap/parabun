@@ -37,10 +37,6 @@
 
 const NOT_IMPLEMENTED_MSG = "parabun:video is scaffolded — libavcodec native binding lands with hardware bring-up";
 
-function todo(): never {
-  throw new Error(NOT_IMPLEMENTED_MSG);
-}
-
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /**
@@ -393,13 +389,11 @@ async function probeMp4(bytes: Uint8Array): Promise<ProbeInfo> {
   const moov = findMp4Box(bytes, 0, bytes.length, "moov");
   if (!moov) throw new Error("parabun:video.probe: MP4 has no moov box (truncated or moov-at-end?)");
 
-  // Movie header (mvhd) — fallback timescale when a track's mdhd is missing.
+  // The movie duration is the fallback when a track has no usable timescale.
   const mvhd = findMp4Box(bytes, moov.start, moov.end, "mvhd");
-  let movieTimescale = 1000;
   let movieDuration = 0n;
   if (mvhd) {
     const m = parseMp4Mdhd(bytes, mvhd); // mvhd has the same prefix layout as mdhd
-    movieTimescale = m.timescale;
     movieDuration = m.duration;
   }
 

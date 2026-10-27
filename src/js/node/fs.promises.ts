@@ -590,7 +590,7 @@ function asyncWrap(fn: any, name: string) {
       throw new Error("BUN TODO FileHandle.kTransferList");
     }
 
-    [kDeserialize](_) {
+    [kDeserialize](_data) {
       throw new Error("BUN TODO FileHandle.kDeserialize");
     }
 

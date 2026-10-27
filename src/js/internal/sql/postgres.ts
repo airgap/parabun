@@ -531,7 +531,7 @@ class PooledPostgresConnection {
   /// queryCount is used to indicate the number of queries using the connection, if a connection is reserved or if its a transaction queryCount will be 1 independently of the number of queries
   queryCount: number = 0;
 
-  #onConnected(err, _) {
+  #onConnected(err, _connection) {
     if (err) {
       err = wrapPostgresError(err);
     }

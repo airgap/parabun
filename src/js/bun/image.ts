@@ -19,13 +19,6 @@
 
 const native = $cpp("parabun_image_codecs.cpp", "createParabunImageCodecs");
 
-const NOT_IMPLEMENTED_MSG =
-  "parabun:image is scaffolded but not yet implemented — see https://linear.app/lyku/issue/LYK-723";
-
-function todo(): never {
-  throw new Error(NOT_IMPLEMENTED_MSG);
-}
-
 type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "heic" | "jxl";
 type DecodedImage = {
   data: Uint8Array;

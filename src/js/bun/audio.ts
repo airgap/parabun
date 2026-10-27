@@ -1739,7 +1739,6 @@ type LimiterOptions = {
 
 class Limiter {
   #ceiling: number;
-  #attackCoeff: number;
   #releaseCoeff: number;
   #envelope: number = 0;
 
@@ -1756,7 +1755,7 @@ class Limiter {
       throw new RangeError(`parabun:audio.Limiter: ceilingDb must be <= 0 (sub-fullscale); got ${ceilDb}`);
     }
     this.#ceiling = Math.pow(10, ceilDb / 20);
-    this.#attackCoeff = timeConstantToCoeff(opts.attackMs ?? 0.5, sr);
+    timeConstantToCoeff(opts.attackMs ?? 0.5, sr);
     this.#releaseCoeff = timeConstantToCoeff(opts.releaseMs ?? 50, sr);
   }
 
@@ -2151,7 +2150,6 @@ class PlaybackStreamImpl implements PlaybackStream {
   device: string;
   #queuedMs: WritableSignal<number>;
   #alive: WritableSignal<boolean>;
-  #lastEmitMs: number = 0;
   #pollTimer: ReturnType<typeof setInterval> | null = null;
   #boundEffects: Array<() => void> = [];
 

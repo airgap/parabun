@@ -794,21 +794,6 @@ function layerNormInPlace(
   }
 }
 
-// Y[i, r] = sum_c W[r*inDim + c] * X[i, c]. Matches bert.ts convention:
-// W stored as [outDim, inDim], row-major.
-function matMul(X: Float32Array, W: Float32Array, N: number, inDim: number, outDim: number, out: Float32Array): void {
-  for (let i = 0; i < N; i++) {
-    const xBase = i * inDim;
-    const yBase = i * outDim;
-    for (let r = 0; r < outDim; r++) {
-      const wBase = r * inDim;
-      let s = 0;
-      for (let c = 0; c < inDim; c++) s += W[wBase + c] * X[xBase + c];
-      out[yBase + r] = s;
-    }
-  }
-}
-
 function addBias(Y: Float32Array, N: number, dim: number, b: Float32Array): void {
   for (let i = 0; i < N; i++) {
     const base = i * dim;
@@ -858,18 +843,6 @@ function conv1dGpu(
   const out = gpu.matmul(tile, Wt as Float32Array, Tout, KC, Cout) as Float32Array;
   addBias(out, Tout, Cout, B);
   return { out, Tout };
-}
-
-function softmaxInPlace(logits: Float32Array): void {
-  let max = -Infinity;
-  for (let i = 0; i < logits.length; i++) if (logits[i] > max) max = logits[i];
-  let sum = 0;
-  for (let i = 0; i < logits.length; i++) {
-    logits[i] = Math.exp(logits[i] - max);
-    sum += logits[i];
-  }
-  const inv = 1 / sum;
-  for (let i = 0; i < logits.length; i++) logits[i] *= inv;
 }
 
 // Sinusoidal positional embedding — Whisper uses these for the encoder.
@@ -1121,7 +1094,7 @@ interface EncoderBlock {
 // device-resident copy. The cross_attn K and V weights are special: they
 // project the encoder output once per audio in `prepareState`, where
 // the work is matrix-matrix and stays on CPU; we keep them as plain
-// Float32Array so the existing `matMul()` call works without unwrap.
+// Float32Array so the projection can consume them without unwrapping.
 type GpuMat = Float32Array | { readonly __bunGpuHandle?: true; readonly view?: Float32Array };
 
 interface DecoderBlock {
@@ -1978,7 +1951,6 @@ function mapWeights(bin: BinModel): WhisperWeights {
   }
 
   const decBlocks: DecoderBlock[] = [];
-  const dimText = bin.hparams.nTextState;
   // Pre-pack [Q | K | V] weights as one [3*dimText, dimText] block per
   // decoder layer. matVec consumes a single contiguous matrix; the slot
   // layout matches the projection order so we can slice the output back
@@ -2063,8 +2035,7 @@ function mapWeights(bin: BinModel): WhisperWeights {
 
 // ─── Transformer block runners ────────────────────────────────────────────
 
-// gpu.matmul shim with the same semantics as my CPU matMul (X @ W^T) but
-// expecting the W weight pre-transposed. Returns a fresh [N, outDim] array.
+// The projection uses a pre-transposed W and returns a fresh [N, outDim] array.
 function gpuMatmul(X: Float32Array, Wt: GpuMat, N: number, inDim: number, outDim: number): Float32Array {
   return gpu.matmul(X, Wt as Float32Array, N, inDim, outDim) as Float32Array;
 }
@@ -2165,102 +2136,17 @@ function scaledDotProductAttention(
   return out;
 }
 
-// GPU-batched scaled-dot-product attention. Same semantics as
-// `scaledDotProductAttention` but offloads the per-head Q@K^T and
-// attn@V matmuls to parabun:gpu. Used by the encoder where N=1500 makes the
-// CPU triple-loop the dominant cost.
-//
-// Layout convention: Q, K, V are [N, dim=nHead*headDim] interleaved-by-
-// head as in the rest of this file. We:
-//   1. Reshape into head-major contiguous [nHead, N, headDim].
-//   2. Per head: matmul(Q_h, K_h_T, N, headDim, N) → scores [N, N].
-//   3. Scale by 1/sqrt(headDim), softmax (CPU; the [N, N] tile is the
-//      working set the softmax needs and it's already in host memory
-//      after matmul).
-//   4. Per head: matmul(scores, V_h, N, N, headDim) → out [N, headDim].
-//   5. Reshape head-major back to interleaved-by-head [N, dim].
-function gpuScaledDotProductAttention(
-  Q: Float32Array,
-  K: Float32Array,
-  V: Float32Array,
-  N: number,
-  nHead: number,
-  headDim: number,
-): Float32Array {
-  const dim = nHead * headDim;
-  // Head-major reshape with K transposed in the head axis: K_h_T is
-  // shape [headDim, N] so we can matmul Q_h [N, headDim] × K_h_T → [N, N].
-  // V_h stays in [N, headDim] for the second matmul.
-  const Qh = new Float32Array(N * dim); // [nHead, N, headDim]
-  const KhT = new Float32Array(N * dim); // [nHead, headDim, N]
-  const Vh = new Float32Array(N * dim); // [nHead, N, headDim]
-  for (let i = 0; i < N; i++) {
-    for (let h = 0; h < nHead; h++) {
-      const srcBase = i * dim + h * headDim;
-      const dstQVBase = h * (N * headDim) + i * headDim;
-      for (let d = 0; d < headDim; d++) {
-        Qh[dstQVBase + d] = Q[srcBase + d];
-        Vh[dstQVBase + d] = V[srcBase + d];
-        KhT[h * (N * headDim) + d * N + i] = K[srcBase + d];
-      }
-    }
-  }
-
-  const invSqrtHead = 1.0 / Math.sqrt(headDim);
-  const out = new Float32Array(N * dim);
-  const headStride = N * headDim;
-  for (let h = 0; h < nHead; h++) {
-    // scores [N, N] = Q_h @ K_h_T
-    const Q_h = Qh.subarray(h * headStride, (h + 1) * headStride);
-    const KT_h = KhT.subarray(h * headStride, (h + 1) * headStride);
-    const scores = gpu.matmul(Q_h, KT_h, N, headDim, N) as Float32Array;
-
-    // Scale + softmax row-wise.
-    for (let i = 0; i < N; i++) {
-      const rowBase = i * N;
-      let max = -Infinity;
-      for (let j = 0; j < N; j++) {
-        const v = scores[rowBase + j] * invSqrtHead;
-        scores[rowBase + j] = v;
-        if (v > max) max = v;
-      }
-      let sum = 0;
-      for (let j = 0; j < N; j++) {
-        const e = Math.exp(scores[rowBase + j] - max);
-        scores[rowBase + j] = e;
-        sum += e;
-      }
-      const inv = sum > 0 ? 1.0 / sum : 0;
-      for (let j = 0; j < N; j++) scores[rowBase + j] *= inv;
-    }
-
-    // out_h = scores @ V_h
-    const V_h = Vh.subarray(h * headStride, (h + 1) * headStride);
-    const out_h = gpu.matmul(scores, V_h, N, N, headDim) as Float32Array;
-
-    // Place out_h back into the interleaved layout.
-    for (let i = 0; i < N; i++) {
-      const dstBase = i * dim + h * headDim;
-      const srcBase = i * headDim;
-      for (let d = 0; d < headDim; d++) {
-        out[dstBase + d] = out_h[srcBase + d];
-      }
-    }
-  }
-  return out;
-}
-
 export {
   WhisperModel,
   WhisperTokenizer,
-  readBinModel,
-  // Exposed for the matVec-correctness test suite (LYK-755). The
-  // quantization helpers operate on raw GGML block bytes and are
-  // independently useful for callers dequantizing v1 .bin / .gguf files.
-  quantMatVec,
   matVecQ4_0,
   matVecQ5_0,
   matVecQ5_1,
   matVecQ8_0,
+  // Exposed for the matVec-correctness test suite (LYK-755). The
+  // quantization helpers operate on raw GGML block bytes and are
+  // independently useful for callers dequantizing v1 .bin / .gguf files.
+  quantMatVec,
+  readBinModel,
 };
 export type { QuantTensor };

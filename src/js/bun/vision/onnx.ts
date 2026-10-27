@@ -39,7 +39,6 @@ const ORT_API_VERSION = 16;
 
 // ONNXTensorElementDataType (subset — only what the JS surface exposes).
 const TENSOR_FLOAT = 1; // float32
-const TENSOR_INT64 = 7;
 
 // OrtAllocatorType + OrtMemType (only the values we need).
 const ORT_ALLOCATOR_TYPE_DEVICE = 1; // OrtArenaAllocator
@@ -275,11 +274,6 @@ function readCString(ptr: bigint): string {
   if (ptr === 0n) return "";
   return String(new ffi.CString(Number(ptr)));
 }
-
-type CreateOpts = {
-  /** Override the .so/.dylib path. Falls through to PARABUN_ONNX_LIB env, then platform defaults. */
-  libPath?: string;
-};
 
 type SessionInputInfo = {
   name: string;

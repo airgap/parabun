@@ -106,7 +106,7 @@ var access = function access(path, mode, callback) {
     try {
       fs.exists.$apply(fs, [path]).then(
         existed => callback(existed),
-        _ => callback(false),
+        _error => callback(false),
       );
     } catch {
       callback(false);

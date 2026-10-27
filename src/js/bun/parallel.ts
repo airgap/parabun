@@ -794,6 +794,8 @@ async function dispatchReduceTypedWorkers(
 
   results.sort((a, b) => a.id - b.id);
 
+  // Reconstruct the same serialized reducer used by the worker partitions.
+  // eslint-disable-next-line no-eval
   const fn = (0, eval)("(" + fnSrc + ")") as (acc: number, val: number, idx: number) => number;
   let acc = results[0].acc;
   for (let i = 1; i < results.length; i++) {
@@ -1845,7 +1847,6 @@ async function parallelRadixSortU32(
   const histSab = borrowSab(P * 256 * 4);
   const offsetsSab = borrowSab(P * 256 * 4);
   const viewA = new Uint32Array(sabA);
-  const viewB = new Uint32Array(sabB);
   const hist = new Uint32Array(histSab);
   const offs = new Uint32Array(offsetsSab);
 

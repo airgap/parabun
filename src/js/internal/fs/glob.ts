@@ -104,6 +104,6 @@ function mapOptions(options: GlobOptions): GlobScanOptions & { exclude: GlobOpti
 }
 
 // `var` avoids TDZ checks.
-var no = _ => false;
+var no = _path => false;
 
 export default { glob, globSync };
