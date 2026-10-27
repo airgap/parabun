@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { bunEnv, bunExe, tempDirWithFiles } from "harness";
 import { join } from "path";
-import { unlinkSync } from "fs";
+import { chmodSync, unlinkSync } from "fs";
 
 function latestRegistry() {
   const requests: string[] = [];
@@ -146,6 +146,71 @@ test("frozen text lockfile refreshes workspace prepare scripts without bypassing
     unlinkSync(marker);
     await install("--frozen-lockfile", "--ignore-scripts");
     expect(await Bun.file(marker).exists()).toBe(false);
+    expect(requests).toEqual([]);
+  } finally {
+    registry.stop(true);
+  }
+});
+
+test("frozen text lockfile refreshes workspace bins when prepare scripts change", async () => {
+  const { registry, requests } = latestRegistry();
+  try {
+    const workspace = {
+      name: "a",
+      version: "1.0.0",
+      devDependencies: { b: "workspace:*" },
+      bin: { "test-cli": "old-cli.js", "aux-cli": "old-cli.js" },
+      scripts: { prepare: `${JSON.stringify(bunExe())} prepare.js first` },
+    };
+    const dir = tempDirWithFiles("frozen-workspace-bin", {
+      "package.json": JSON.stringify({
+        name: "root",
+        workspaces: ["packages/*"],
+        dependencies: { a: "workspace:*" },
+        trustedDependencies: ["a"],
+      }),
+      "packages/a/package.json": JSON.stringify(workspace),
+      "packages/a/prepare.js": 'require("fs").writeFileSync("prepared.txt", process.argv[2]);',
+      "packages/a/old-cli.js": '#!/usr/bin/env bun\nconsole.log("old");',
+      "packages/a/new-cli.js": '#!/usr/bin/env bun\nconsole.log("new");',
+      "packages/b/package.json": JSON.stringify({ name: "b", version: "1.0.0" }),
+    });
+    chmodSync(join(dir, "packages/a/old-cli.js"), 0o755);
+    chmodSync(join(dir, "packages/a/new-cli.js"), 0o755);
+    async function command(...args: string[]) {
+      const proc = Bun.spawn({
+        cmd: [bunExe(), ...args],
+        cwd: dir,
+        env: { ...bunEnv, BUN_INSTALL_CACHE_DIR: join(dir, ".cache") },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      return { stdout, stderr, exitCode };
+    }
+    const seed = await command("install", "--ignore-scripts", `--registry=${registry.url}`);
+    expect(seed.stdout, seed.stderr).toContain("bun install");
+    expect(seed.exitCode).toBe(0);
+    const original = await command("run", "--bun", "test-cli");
+    expect(original.stdout.trim(), original.stderr).toBe("old");
+    expect(original.exitCode).toBe(0);
+    workspace.bin["test-cli"] = "new-cli.js";
+    workspace.scripts.prepare = `${JSON.stringify(bunExe())} prepare.js second`;
+    await Bun.write(join(dir, "packages/a/package.json"), JSON.stringify(workspace));
+    const changed = await command("install", "--frozen-lockfile", `--registry=${registry.url}`);
+    expect(changed.stdout, changed.stderr).toContain("bun install");
+    expect(changed.exitCode).toBe(0);
+    expect(await Bun.file(join(dir, "packages/a/prepared.txt")).text()).toBe("second");
+    const updated = await command("run", "--bun", "test-cli");
+    expect(updated.stdout.trim(), updated.stderr).toBe("new");
+    expect(updated.exitCode).toBe(0);
+    const unchanged = await command("run", "--bun", "aux-cli");
+    expect(unchanged.stdout.trim(), unchanged.stderr).toBe("old");
+    expect(unchanged.exitCode).toBe(0);
     expect(requests).toEqual([]);
   } finally {
     registry.stop(true);

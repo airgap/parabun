@@ -1554,8 +1554,8 @@ impl Diff {
                         if diff.has_dependency_diffs() {
                             false
                         } else {
-                            // Text lockfiles omit workspace lifecycle scripts. Refresh them
-                            // without resolving unchanged dependency declarations again.
+                            // Text lockfiles omit workspace lifecycle scripts. Refresh local
+                            // metadata without resolving unchanged dependency declarations again.
                             let script_buf = to_lockfile.buffers.string_bytes.as_slice();
                             let binding_gyp = resolve_path::join_abs_string_z::<path::platform::Auto>(
                                 path::dirname(package_json_path.slice()).unwrap_or(b""),
@@ -1565,12 +1565,32 @@ impl Diff {
                                 || bun_sys::exists(binding_gyp.as_bytes());
                             let (mut builder, fields) = from_lockfile.string_builder_split();
                             workspace_pkg.scripts.count(script_buf, &mut builder);
+                            let bin_strings = workspace_pkg.bin.count(
+                                script_buf,
+                                &to_lockfile.buffers.extern_strings,
+                                &mut builder,
+                            );
                             builder.allocate()?;
-                            let package_id = from_resolutions[i] as usize;
-                            fields.packages.items_scripts_mut()[package_id] =
+                            let package_id = from_resolutions[i];
+                            let extern_start = fields.extern_strings.len();
+                            bun_core::vec::grow_default(
+                                fields.extern_strings,
+                                bin_strings as usize,
+                            );
+                            fields.packages.items_bin_mut()[package_id as usize] =
+                                workspace_pkg.bin.clone_with_buffers(
+                                    script_buf,
+                                    &to_lockfile.buffers.extern_strings,
+                                    extern_start as u32,
+                                    &mut fields.extern_strings[extern_start..],
+                                    &mut builder,
+                                );
+                            fields.packages.items_scripts_mut()[package_id as usize] =
                                 workspace_pkg.scripts.clone_into(script_buf, &mut builder);
-                            fields.packages.items_meta_mut()[package_id]
-                                .set_has_install_script(has_scripts);
+                            let mut meta = workspace_pkg.meta;
+                            meta.id = package_id;
+                            meta.set_has_install_script(has_scripts);
+                            fields.packages.items_meta_mut()[package_id as usize] = meta;
                             builder.clamp();
                             summary.script_updates += diff.script_updates;
                             true
