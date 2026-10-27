@@ -2846,7 +2846,15 @@ pub fn parse_into_binary_lockfile(
                         .get_or_put(dep.name.slice(string_buf))?
                         .found_existing
                 {
-                    resolutions[dep_id as usize] = res_id;
+                    // Repeated declarations still need their workspace version normalized.
+                    map_dep_to_pkg(
+                        dep,
+                        dep_id,
+                        res_id,
+                        resolutions,
+                        lockfile_version,
+                        pkg_resolutions,
+                    );
                     continue;
                 }
 
@@ -2917,7 +2925,14 @@ pub fn parse_into_binary_lockfile(
                     };
 
                     if seen_deps.get_or_put(dep_name)?.found_existing {
-                        resolutions[dep_id as usize] = res_id;
+                        map_dep_to_pkg(
+                            dep,
+                            dep_id,
+                            res_id,
+                            resolutions,
+                            lockfile_version,
+                            pkg_resolutions,
+                        );
                         continue;
                     }
 

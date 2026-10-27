@@ -2,6 +2,88 @@ import { expect, test } from "bun:test";
 import { bunEnv, bunExe, tempDirWithFiles } from "harness";
 import { join } from "path";
 
+for (const duplicateAtRoot of [false, true]) {
+  test(`frozen text lockfile preserves latest dependencies with repeated ${duplicateAtRoot ? "root" : "workspace"} dev and peer dependencies`, async () => {
+    const requests: string[] = [];
+    const integrity = `sha512-${Buffer.alloc(64).toString("base64")}`;
+    const registry = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        requests.push(path);
+        if (path !== "/floating") return new Response("Unexpected registry request", { status: 404 });
+        return Response.json({
+          name: "floating",
+          "dist-tags": { latest: "2.0.0" },
+          versions: Object.fromEntries(
+            ["1.0.0", "2.0.0"].map(version => [
+              version,
+              {
+                name: "floating",
+                version,
+                dist: { tarball: `${registry.url}floating/-/floating-${version}.tgz`, integrity },
+              },
+            ]),
+          ),
+        });
+      },
+    });
+    try {
+      const declarations = {
+        devDependencies: { b: "workspace:*", floating: "latest" },
+        peerDependencies: { b: "workspace:*" },
+      };
+      const root = { name: "root", workspaces: ["packages/*"], ...(duplicateAtRoot ? declarations : {}) };
+      const workspace = { name: "a", version: "1.0.0", ...(!duplicateAtRoot ? declarations : {}) };
+      const dir = tempDirWithFiles("frozen-workspace-dev-peer", {
+        "package.json": JSON.stringify(root),
+        "packages/a/package.json": JSON.stringify(workspace),
+        "packages/b/package.json": JSON.stringify({ name: "b", version: "1.0.0" }),
+        "bun.lock": JSON.stringify({
+          lockfileVersion: 2,
+          configVersion: 1,
+          workspaces: {
+            "": { name: "root", ...(duplicateAtRoot ? declarations : {}) },
+            "packages/a": workspace,
+            "packages/b": { name: "b", version: "1.0.0" },
+          },
+          packages: {
+            a: ["a@workspace:packages/a"],
+            b: ["b@workspace:packages/b"],
+            floating: ["floating@1.0.0", "", {}, integrity],
+          },
+        }),
+      });
+      const proc = Bun.spawn({
+        cmd: [
+          bunExe(),
+          "install",
+          "--frozen-lockfile",
+          "--lockfile-only",
+          "--ignore-scripts",
+          `--registry=${registry.url}`,
+        ],
+        cwd: dir,
+        env: { ...bunEnv, BUN_INSTALL_CACHE_DIR: join(dir, ".cache") },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(stdout, stderr).toContain("Saved bun.lock");
+      expect(requests).toEqual([]);
+      expect(exitCode).toBe(0);
+      const lock = Bun.JSONC.parse(await Bun.file(join(dir, "bun.lock")).text());
+      expect(lock.packages.floating[0]).toBe("floating@1.0.0");
+    } finally {
+      registry.stop(true);
+    }
+  });
+}
+
 test("workspace devDependencies should take priority over peerDependencies for resolution", async () => {
   const dir = tempDirWithFiles("dev-peer-priority", {
     "package.json": JSON.stringify({
