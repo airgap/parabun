@@ -58,8 +58,8 @@ for await (const row of csv.parseCsv("./big.csv", { headers: true })) {
 Options (shared across `parseCsv`, `parseColumns`, `parseBatches`, `reduceColumns` unless noted):
 
 | Option            | Default         | What it does                                                                                                          |
-| ----------------- | --------------- | --------------------------------------------------------------------------------------------------------------------- | --- |
-| `delimiter`       | `","`           | Field delimiter. `"\t"` for TSV. Pass `""` to auto-detect from the first non-comment line (`,` `\t` `;` `             | `). |
+| ----------------- | --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `delimiter`       | `","`           | Field delimiter. `"\t"` for TSV. Pass `""` to auto-detect from the first non-comment line (`,` `\t` `;` `\|`).        |
 | `quote`           | `'"'`           | Quote character.                                                                                                      |
 | `escape`          | same as `quote` | RFC 4180 doubled-quote by default. Set to `"\\"` for backslash-escape dialects.                                       |
 | `comment`         | `""` (off)      | If set, lines starting with this character are skipped before any field opens.                                        |

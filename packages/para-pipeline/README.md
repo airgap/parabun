@@ -75,8 +75,8 @@ const out = await p.collect(p.take(10)(p.filter(even)(p.map(double)(source))));
 **Conveniences**
 
 |                                   |                                                                                                                                               |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| `pipe(source, ...stages)`         | Plain function composition for callers without `                                                                                              | >`. |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pipe(source, ...stages)`         | Plain function composition for callers without `\|>`.                                                                                         |
 | `pipeParallel(source, ...stages)` | Same surface; identifies parallelizable map / reduce segments and dispatches via `@lyku/para-parallel`. Falls back to serial below 256 items. |
 
 ## Fusion
