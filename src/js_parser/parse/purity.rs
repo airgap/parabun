@@ -23,9 +23,8 @@
 //!     functions get a pass — the identifier may be an import / forward ref /
 //!     ambient global).
 
-use std::collections::HashSet;
-
-use crate::p::P;
+use crate::p::{P, ParaNameSet};
+use bstr::BStr;
 use bun_ast as js_ast;
 use bun_collections::VecExt;
 use js_ast::b::B as BData;
@@ -114,11 +113,11 @@ const PURE_SAFE_GLOBALS: &[&[u8]] = &[
 ];
 
 fn is_impure_global(n: &[u8]) -> bool {
-    IMPURE_GLOBALS.iter().any(|g| *g == n)
+    IMPURE_GLOBALS.contains(&n)
 }
 
 fn is_pure_safe_global(n: &[u8]) -> bool {
-    PURE_SAFE_GLOBALS.iter().any(|g| *g == n)
+    PURE_SAFE_GLOBALS.contains(&n)
 }
 
 fn is_impure_member(obj: &[u8], prop: &[u8]) -> bool {
@@ -128,11 +127,11 @@ fn is_impure_member(obj: &[u8], prop: &[u8]) -> bool {
 /// Immutable analysis context shared across the recursive walk.
 struct Ctx<'a> {
     /// Parameter names protected against mutation (incl. destructured).
-    params: HashSet<&'a [u8]>,
+    params: ParaNameSet<'a>,
     /// Every name bound anywhere in the body subtree (params + locals + nested
     /// declarations). Over-approximated on purpose: a superset only ever makes
     /// the free-variable check *more* permissive, never spuriously rejecting.
-    bound: HashSet<&'a [u8]>,
+    bound: ParaNameSet<'a>,
     /// True when the pure function is lexically nested inside another function.
     is_nested: bool,
 }
@@ -180,7 +179,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     pub(crate) fn enforce_purity_on_stmt(&mut self, mut stmt: Stmt) -> PurityResult<Stmt> {
         let is_nested = self.purity_is_nested();
         if let StmtData::SFunction(f) = &mut stmt.data {
-            let name = f.func.name.and_then(|n| n.ref_).map(|r| self.load_name_from_ref(r));
+            let name = f
+                .func
+                .name
+                .and_then(|n| n.ref_)
+                .map(|r| self.load_name_from_ref(r));
             let args = f.func.args;
             let body = f.func.body.stmts;
             self.enforce_purity(args.slice(), body.slice(), name, is_nested)?;
@@ -242,8 +245,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 a.is_pure = true;
             }
             ExprData::EFunction(f) => {
-                let name =
-                    f.func.name.and_then(|n| n.ref_).map(|r| self.load_name_from_ref(r));
+                let name = f
+                    .func
+                    .name
+                    .and_then(|n| n.ref_)
+                    .map(|r| self.load_name_from_ref(r));
                 let args = f.func.args;
                 let body = f.func.body.stmts;
                 self.enforce_purity(args.slice(), body.slice(), name, is_nested)?;
@@ -262,12 +268,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         fn_name: Option<&'a [u8]>,
         is_nested: bool,
     ) -> PurityResult<()> {
-        let mut params: HashSet<&'a [u8]> = HashSet::new();
+        let mut params: ParaNameSet<'a> = ParaNameSet::default();
         for arg in args {
             self.collect_binding_names(&arg.binding, &mut params);
         }
 
-        let mut bound: HashSet<&'a [u8]> = params.clone();
+        let mut bound: ParaNameSet<'a> = params.clone();
         if let Some(n) = fn_name {
             bound.insert(n);
         }
@@ -275,7 +281,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             self.collect_stmt_bindings(stmt, &mut bound);
         }
 
-        let ctx = Ctx { params, bound, is_nested };
+        let ctx = Ctx {
+            params,
+            bound,
+            is_nested,
+        };
         let mut err = false;
         for stmt in body {
             self.purity_walk_stmt(stmt, &ctx, &mut err);
@@ -295,7 +305,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
     // ── binding collection (over-approximate; recurses everywhere) ──────────
 
-    fn collect_binding_names(&self, b: &Binding, out: &mut HashSet<&'a [u8]>) {
+    fn collect_binding_names(&self, b: &Binding, out: &mut ParaNameSet<'a>) {
         match &b.data {
             BData::BIdentifier(id) => {
                 out.insert(self.load_name_from_ref(id.r#ref));
@@ -314,7 +324,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
     }
 
-    fn collect_stmt_bindings(&self, s: &Stmt, out: &mut HashSet<&'a [u8]>) {
+    fn collect_stmt_bindings(&self, s: &Stmt, out: &mut ParaNameSet<'a>) {
         match &s.data {
             StmtData::SLocal(l) => {
                 for decl in l.decls.iter() {
@@ -407,7 +417,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
     /// Collect binding names introduced *inside* an expression (arrow / function
     /// expression params + names). Over-approximation only.
-    fn collect_expr_bindings(&self, e: &Expr, out: &mut HashSet<&'a [u8]>) {
+    fn collect_expr_bindings(&self, e: &Expr, out: &mut ParaNameSet<'a>) {
         match &e.data {
             ExprData::EArrow(a) => {
                 for arg in a.args.slice() {
@@ -507,7 +517,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     fn check_param_mutation(&self, target: &Expr, ctx: &Ctx<'a>, err: &mut bool) {
         if let Some(root) = self.assign_root_name(target) {
             if ctx.params.contains(root) {
-                let name = String::from_utf8_lossy(root);
+                let name = BStr::new(root);
                 self.purity_err(
                     target.loc,
                     format_args!("Cannot mutate parameter \"{name}\" inside a pure function"),
@@ -527,7 +537,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             return;
         }
         if is_impure_global(name) && !ctx.bound.contains(name) {
-            let n = String::from_utf8_lossy(name);
+            let n = BStr::new(name);
             self.purity_err(
                 loc,
                 format_args!("Cannot reference impure global \"{n}\" inside a pure function"),
@@ -540,7 +550,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             && !is_pure_safe_global(name)
             && !self.name_in_enclosing_scope(name)
         {
-            let n = String::from_utf8_lossy(name);
+            let n = BStr::new(name);
             self.purity_err(
                 loc,
                 format_args!("Cannot reference free variable \"{n}\" inside a pure function"),
@@ -666,10 +676,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         format_args!("Cannot use \"delete\" inside a pure function"),
                         err,
                     ),
-                    OpCode::UnPreInc
-                    | OpCode::UnPreDec
-                    | OpCode::UnPostInc
-                    | OpCode::UnPostDec => self.check_param_mutation(&u.value, ctx, err),
+                    OpCode::UnPreInc | OpCode::UnPreDec | OpCode::UnPostInc | OpCode::UnPostDec => {
+                        self.check_param_mutation(&u.value, ctx, err)
+                    }
                     _ => {}
                 }
                 self.purity_walk_expr(&u.value, ctx, err);
@@ -685,8 +694,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 if let Some(obj) = self.ident_name(&d.target) {
                     let prop = d.name.slice();
                     if is_impure_member(obj, prop) {
-                        let o = String::from_utf8_lossy(obj);
-                        let p = String::from_utf8_lossy(prop);
+                        let o = BStr::new(obj);
+                        let p = BStr::new(prop);
                         self.purity_err(
                             e.loc,
                             format_args!(
@@ -724,7 +733,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
             ExprData::ENew(n) => {
                 if let Some(t) = self.ident_name(&n.target) {
-                    if t == b"Date" && n.args.slice().is_empty() && !ctx.bound.contains(&b"Date"[..])
+                    if t == b"Date"
+                        && n.args.slice().is_empty()
+                        && !ctx.bound.contains(&b"Date"[..])
                     {
                         self.purity_err(
                             e.loc,

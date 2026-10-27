@@ -50,6 +50,8 @@ type BumpVec<'a, T> = bun_alloc::ArenaVec<'a, T>;
 type List<'a, T> = BumpVec<'a, T>;
 type ListManaged<'a, T> = BumpVec<'a, T>;
 type Map<K, V> = HashMap<K, V>;
+pub(crate) type ParaNameSet<'a> =
+    bun_collections::hashbrown::HashSet<&'a [u8], core::hash::BuildHasherDefault<Wyhash>>;
 
 /// Erases `P<'a, TS, SCAN>`'s const-generics so helpers like `JSXTag::parse`
 /// (which Zig wrote as `comptime P: type`) can take any instantiation. Only the
@@ -275,14 +277,14 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// Parabun: names declared via `signal`/`derived` (by source text). Used at
     /// parse time to decide whether a `signal NAME = RHS` initializer references
     /// another signal and should therefore be promoted to a `derived(() => …)`.
-    pub signal_bound_names: std::collections::HashSet<&'a [u8]>,
+    pub signal_bound_names: ParaNameSet<'a>,
     /// Parabun: `pure function NAME(x){return e}` / `const NAME = pure (x)=>e`
     /// registered for pipeline inline fusion. The `|>` desugar inlines the body
     /// at call sites (`src |> NAME` → substituted body).
     pub pure_inline_fns: Vec<crate::PureInlineInfo<'a>>,
     /// Parabun: names of `pure_inline_fns` actually consumed by fusion. The
     /// import/decl scanner can DCE such a decl when no other reference survives.
-    pub pure_fusion_consumed_names: std::collections::HashSet<&'a [u8]>,
+    pub pure_fusion_consumed_names: ParaNameSet<'a>,
     /// Set while visiting the identifier target of an allowlisted signal method
     /// (`x.get()`/`.set()`/…) so the e_identifier read-rewrite does not turn the
     /// already-spelled cell access into `x.get().get()`.
@@ -298,13 +300,13 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
     /// TS `interface`/`type` shapes captured during type-skipping, so a
     /// `(arg:: Iface)` marker can emit inline typeof checks instead of
     /// `Iface.parse(arg)` (no runtime model exists for a TS-only type).
-    pub para_ts_type_registry: std::collections::HashMap<&'a [u8], ParaTsTypeShape<'a>>,
+    pub para_ts_type_registry: HashMap<&'a [u8], ParaTsTypeShape<'a>>,
     /// Symbols declared by `schema NAME = …` / `schema NAME from …` in this
     /// file. At visit time, a bare reference to one of these in a schema-value
     /// position (object property value / array element inside a schema body)
     /// lowers to a registry reference `{ $ref: "#NAME" }` instead of a live
     /// object reference — see para-schema-recursion-plan.md §1.7/§2.1.
-    pub para_schema_symbols: std::collections::HashMap<js_ast::base::Ref, ()>,
+    pub para_schema_symbols: HashMap<js_ast::base::Ref, ()>,
     /// > 0 while visiting the body argument of a parser-generated
     /// `__paraSchemaDecl` / `__paraFromSchema` call (schema-body context for
     /// the `$ref` rewrite). Counter, not bool: schema literals can nest.
@@ -9287,14 +9289,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             allow_in: true,
             in_chain_op_arrow_rhs: false,
             signal_bound_refs: RefMap::default(),
-            signal_bound_names: std::collections::HashSet::new(),
+            signal_bound_names: ParaNameSet::default(),
             pure_inline_fns: Vec::new(),
-            pure_fusion_consumed_names: std::collections::HashSet::new(),
+            pure_fusion_consumed_names: ParaNameSet::default(),
             signal_suppress_get_rewrite: false,
             strict_signals_pragma: None,
             para_arg_validations: std::vec::Vec::new(),
-            para_ts_type_registry: std::collections::HashMap::new(),
-            para_schema_symbols: std::collections::HashMap::new(),
+            para_ts_type_registry: HashMap::new(),
+            para_schema_symbols: HashMap::new(),
             para_schema_body_depth: 0,
 
             call_target: null_expr_data(),

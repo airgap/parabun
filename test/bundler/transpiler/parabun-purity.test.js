@@ -5,6 +5,17 @@ describe("Parabun Purity Validator", () => {
     loader: "pts",
   });
 
+  it.each(["x", "π", "未声明"])("keeps message and string rendering consistent for %s", name => {
+    let error;
+    try {
+      transpiler.transformSync(`pure function increment(${name}) { ${name} += 1; return ${name}; }`);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.message).toBe(`Cannot mutate parameter "${name}" inside a pure function`);
+    expect(String(error)).toBe(`BuildMessage: Cannot mutate parameter "${name}" inside a pure function`);
+  });
+
   describe("this restriction in pure functions", () => {
     it("rejects this in pure function declaration", () => {
       expect(() => transpiler.transformSync("pure function foo() { return this.x; }")).toThrow(
@@ -284,6 +295,12 @@ describe("Parabun Purity Validator", () => {
   });
 
   describe("parameter mutation rejected in pure functions", () => {
+    it("preserves Unicode parameter names in mutation diagnostics", () => {
+      expect(() => transpiler.transformSync("pure function increment(π) { π += 1; return π; }")).toThrow(
+        /Cannot mutate parameter "π" inside a pure function/,
+      );
+    });
+
     it("rejects parameter reassignment with =", () => {
       expect(() => transpiler.transformSync("pure function foo(x) { x = 5; return x; }")).toThrow(
         /Cannot mutate parameter "x"/,
@@ -488,6 +505,12 @@ describe("Parabun Purity Validator", () => {
   });
 
   describe("free variable detection in pure functions", () => {
+    it("preserves Unicode names in nested free-variable diagnostics", () => {
+      expect(() => transpiler.transformSync("function outer() { pure function inner() { return 未声明; } }")).toThrow(
+        /Cannot reference free variable "未声明" inside a pure function/,
+      );
+    });
+
     it("allows reference to outer const variable", () => {
       const out = transpiler.transformSync("const x = 10; pure function foo() { return x; }");
       expect(out).toContain("return x");
