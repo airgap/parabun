@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { chmodSync, unlinkSync } from "fs";
 import { bunEnv, bunExe, tempDirWithFiles } from "harness";
 import { join } from "path";
-import { chmodSync, unlinkSync } from "fs";
 
 function latestRegistry() {
   const requests: string[] = [];
