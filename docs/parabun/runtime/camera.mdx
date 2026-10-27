@@ -82,10 +82,12 @@ V4L2 frames are usually NOT packed RGBA. Pipe through `parabun:vision.frames()` 
 
 ```ts
 import vision from "parabun:vision";
-import image  from "parabun:image";
+import image from "parabun:image";
 
 const rgba = vision.frames(cam.frames(), { decodeMjpg: image.decode });
-for await (const frame of rgba) { /* frame.data is RGBA8 */ }
+for await (const frame of rgba) {
+  /* frame.data is RGBA8 */
+}
 ```
 
 The `decodeMjpg` callback is required for MJPEG cameras (cross-builtin imports between `bun:*` modules don't work in the bundler, so the dependency is injected).

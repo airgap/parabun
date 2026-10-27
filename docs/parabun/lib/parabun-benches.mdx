@@ -7,17 +7,17 @@ All benches live in [`bench/`](https://github.com/airgap/parabun/tree/main/bench
 
 ## Headline benches
 
-| Bench | Primitive proved | Speedup |
-|---|---|---:|
-| [vector-search](https://github.com/airgap/parabun/tree/main/bench/parabun-vector-search) | layered diagnosis: SIMD + SAB + pmap | 2.03× |
-| [rag-retrieval](https://github.com/airgap/parabun/tree/main/bench/parabun-rag-retrieval) | drop-in vs real LangChain `VectorStore` | 2.83× |
-| [monte-carlo](https://github.com/airgap/parabun/tree/main/bench/parabun-monte-carlo) | `@lyku/para-parallel.pmap` alone (no SIMD/SAB) | 5.56× |
-| [streaming-etl](https://github.com/airgap/parabun/tree/main/bench/parabun-streaming-etl) | `@lyku/para-pipeline` fusion (affine → SIMD) | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
-| [image-convolution](https://github.com/airgap/parabun/tree/main/bench/parabun-image-convolution) | `pmap + SAB` on `Uint8Array` (light kernel) | 4.75× |
-| [image-sobel](https://github.com/airgap/parabun/tree/main/bench/parabun-image-sobel) | `pmap + SAB` on `Uint8Array` (heavier CV kernel) | 5.94× |
-| [optical-flow](https://github.com/airgap/parabun/tree/main/bench/parabun-optical-flow) | two-frame temporal: both frames in SAB | 2.63× |
-| [sqlite](https://github.com/airgap/parabun/tree/main/bench/parabun-sqlite) | end-to-end analytical + zero-overhead `.pjs` | 2.71× analytical (10% end-to-end) |
-| [psort-radix](https://github.com/airgap/parabun/tree/main/bench/parabun-psort-radix) | typed-array radix vs native `.sort()` | 2.0–4.5× kind+N dependent |
+| Bench                                                                                            | Primitive proved                                 |                                         Speedup |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------ | ----------------------------------------------: |
+| [vector-search](https://github.com/airgap/parabun/tree/main/bench/parabun-vector-search)         | layered diagnosis: SIMD + SAB + pmap             |                                           2.03× |
+| [rag-retrieval](https://github.com/airgap/parabun/tree/main/bench/parabun-rag-retrieval)         | drop-in vs real LangChain `VectorStore`          |                                           2.83× |
+| [monte-carlo](https://github.com/airgap/parabun/tree/main/bench/parabun-monte-carlo)             | `@lyku/para-parallel.pmap` alone (no SIMD/SAB)   |                                           5.56× |
+| [streaming-etl](https://github.com/airgap/parabun/tree/main/bench/parabun-streaming-etl)         | `@lyku/para-pipeline` fusion (affine → SIMD)     | 50× vs `.map` chain (1.24× vs hand-rolled loop) |
+| [image-convolution](https://github.com/airgap/parabun/tree/main/bench/parabun-image-convolution) | `pmap + SAB` on `Uint8Array` (light kernel)      |                                           4.75× |
+| [image-sobel](https://github.com/airgap/parabun/tree/main/bench/parabun-image-sobel)             | `pmap + SAB` on `Uint8Array` (heavier CV kernel) |                                           5.94× |
+| [optical-flow](https://github.com/airgap/parabun/tree/main/bench/parabun-optical-flow)           | two-frame temporal: both frames in SAB           |                                           2.63× |
+| [sqlite](https://github.com/airgap/parabun/tree/main/bench/parabun-sqlite)                       | end-to-end analytical + zero-overhead `.pjs`     |               2.71× analytical (10% end-to-end) |
+| [psort-radix](https://github.com/airgap/parabun/tree/main/bench/parabun-psort-radix)             | typed-array radix vs native `.sort()`            |                       2.0–4.5× kind+N dependent |
 
 All numbers are best-of-N (N ∈ {3, 5}) on release builds. Each bench verifies numeric equivalence with its reference variant: bit-identical outputs where feasible (image hash, top-K indices), tolerances inside MC noise elsewhere.
 
@@ -27,11 +27,11 @@ Honest section.
 
 ### csv-parallel
 
-| Input size | Single-thread | Parallel | Speedup |
-|---|---|---|---|
-| 5 MB | baseline | 1.18× | small win |
-| 50 MB | baseline | 0.95× | small loss |
-| 200 MB | baseline | 0.93× | bigger loss |
+| Input size | Single-thread | Parallel | Speedup     |
+| ---------- | ------------- | -------- | ----------- |
+| 5 MB       | baseline      | 1.18×    | small win   |
+| 50 MB      | baseline      | 0.95×    | small loss  |
+| 200 MB     | baseline      | 0.93×    | bigger loss |
 
 Parallel mode helps a little at small inputs and gets WORSE as files grow — bandwidth-bound work doesn't scale. Pitched as "off-the-main-thread", not "faster".
 

@@ -1546,7 +1546,9 @@ export function fromIPC(bytes: Uint8Array): TableLike {
       // Find the field that uses this dict id to determine the logical type.
       const owner = parsedFields.find(f => f.dictId === db.id);
       if (!owner) {
-        throw new Error(`@lyku/para-arrow.fromIPC: DictionaryBatch id ${db.id} arrived but no schema field references it`);
+        throw new Error(
+          `@lyku/para-arrow.fromIPC: DictionaryBatch id ${db.id} arrived but no schema field references it`,
+        );
       }
       const innerNode = db.inner.nodes[0];
       const { column } = reconstructColumn(
@@ -1622,7 +1624,9 @@ function decodeRecordBatchAt(
     bodyLength > 0 ? new Uint8Array(bytes.buffer, bytes.byteOffset + bodyStart, bodyLength) : new Uint8Array(0);
 
   if (headerType !== MESSAGE_HEADER_RECORD_BATCH || headerPos === undefined) {
-    throw new Error(`@lyku/para-arrow.fromIPC: expected RecordBatch at offset ${msgStart}, got header type ${headerType}`);
+    throw new Error(
+      `@lyku/para-arrow.fromIPC: expected RecordBatch at offset ${msgStart}, got header type ${headerType}`,
+    );
   }
   const rb = parseRecordBatchHeader(fbr, headerPos);
   const cols: ColumnLike[] = [];

@@ -7,9 +7,9 @@ import rtp from "@lyku/para-rtp";
 
 // Sender — wrap an Opus packet
 const wire = rtp.pack({
-  payloadType: 111,    // Opus default in many SDP setups
+  payloadType: 111, // Opus default in many SDP setups
   sequence: 1234,
-  timestamp: 96000,    // tick at sample rate (48 kHz × ms)
+  timestamp: 96000, // tick at sample rate (48 kHz × ms)
   ssrc: 0xdeadbeef,
   marker: false,
   payload: opusPacket,

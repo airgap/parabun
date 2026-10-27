@@ -29,9 +29,9 @@ Two transports:
 ## What the server exposes
 
 ```ts
-console.log(conn.tools);     // ToolDescriptor[]
+console.log(conn.tools); // ToolDescriptor[]
 console.log(conn.resources); // ResourceDescriptor[]
-console.log(conn.prompts);   // PromptDescriptor[]
+console.log(conn.prompts); // PromptDescriptor[]
 ```
 
 Populated during `connect()` by sending the relevant `list` JSON-RPC requests. Auto-refreshed when the server pushes `notifications/{tools,resources,prompts}/list_changed`. Force a re-fetch with `conn.refreshTools()` / `refreshResources()` / `refreshPrompts()`.

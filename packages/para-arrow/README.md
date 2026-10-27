@@ -7,7 +7,7 @@ import { Table, fromRows, toParquet, fromParquet } from "@lyku/para-arrow";
 
 const rows = [
   { id: 1, name: "alice", age: 30 },
-  { id: 2, name: "bob",   age: 25 },
+  { id: 2, name: "bob", age: 25 },
 ];
 
 const table = fromRows(rows);

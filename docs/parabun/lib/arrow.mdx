@@ -9,7 +9,7 @@ import arrow from "@lyku/para-arrow";
 // Build a Table from rows
 const table = arrow.fromRows([
   { id: 1, name: "alpha", score: 97.3 },
-  { id: 2, name: "beta",  score: 88.1 },
+  { id: 2, name: "beta", score: 88.1 },
 ]);
 
 // Write Parquet (default: snappy)
@@ -36,13 +36,24 @@ new arrow.Column(type, length, values, validity?, child?, children?)
 
 ```ts
 type DataType =
-  | { kind: "int32" | "int64" | "float32" | "float64" | "bool" | "utf8"
-       | "date32" | "timestamp_millis" | "timestamp_micros" | "timestamp_nanos" }
-  | { kind: "decimal128", precision, scale }
-  | { kind: "fixed_size_binary", width }
-  | { kind: "list", child: DataType }
-  | { kind: "struct", fields: { name, type, nullable }[] }
-  | { kind: "map", keyType, valueType, valueNullable }
+  | {
+      kind:
+        | "int32"
+        | "int64"
+        | "float32"
+        | "float64"
+        | "bool"
+        | "utf8"
+        | "date32"
+        | "timestamp_millis"
+        | "timestamp_micros"
+        | "timestamp_nanos";
+    }
+  | { kind: "decimal128"; precision; scale }
+  | { kind: "fixed_size_binary"; width }
+  | { kind: "list"; child: DataType }
+  | { kind: "struct"; fields: { name; type; nullable }[] }
+  | { kind: "map"; keyType; valueType; valueNullable };
 ```
 
 ### IPC (Arrow's binary format)
@@ -74,14 +85,14 @@ arrow.readBloomFilters(bytes): Array<Map<colName, BloomFilter>>
 
 #### Supported physical types
 
-| Type | Decode | Encode |
-|---|---|---|
-| BOOLEAN | ✓ | ✓ |
-| INT32 / INT64 | ✓ | ✓ |
-| INT96 (nanosecond timestamp) | ✓ | ✓ |
-| FLOAT / DOUBLE | ✓ | ✓ |
-| BYTE_ARRAY (utf8) | ✓ | ✓ |
-| FIXED_LEN_BYTE_ARRAY | ✓ | ✓ |
+| Type                         | Decode | Encode |
+| ---------------------------- | ------ | ------ |
+| BOOLEAN                      | ✓      | ✓      |
+| INT32 / INT64                | ✓      | ✓      |
+| INT96 (nanosecond timestamp) | ✓      | ✓      |
+| FLOAT / DOUBLE               | ✓      | ✓      |
+| BYTE_ARRAY (utf8)            | ✓      | ✓      |
+| FIXED_LEN_BYTE_ARRAY         | ✓      | ✓      |
 
 #### Supported logical types
 
@@ -134,11 +145,11 @@ Default is single-row-group (legacy behaviour).
 ### Computes
 
 ```ts
-arrow.sum(col), arrow.mean(col), arrow.min(col), arrow.max(col);
-arrow.argMin(col), arrow.argMax(col);
+(arrow.sum(col), arrow.mean(col), arrow.min(col), arrow.max(col));
+(arrow.argMin(col), arrow.argMax(col));
 arrow.count(col);
-arrow.variance(col), arrow.stddev(col);
-arrow.quantile(col, q), arrow.median(col);
+(arrow.variance(col), arrow.stddev(col));
+(arrow.quantile(col, q), arrow.median(col));
 arrow.distinct(col);
 arrow.filter(table, predicate);
 arrow.groupBy(table, keys, aggs);

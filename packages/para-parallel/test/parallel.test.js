@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { createPool, pmap, preduce, run, disposeWorkers } from "../src/index.js";
+import { createPool, disposeWorkers, pmap, preduce, run } from "../src/index.js";
 
 // Each describe creates its own pool and disposes after the block.
 // Bun's `afterEach` runs across describe boundaries too.

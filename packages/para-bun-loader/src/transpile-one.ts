@@ -9,7 +9,7 @@
 // transpile time is single-digit seconds.
 
 import { existsSync, statSync } from "node:fs";
-import { dirname, resolve, isAbsolute, extname } from "node:path";
+import { dirname, extname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Path to the runtime helpers (`__paraFromSchema`, `__parabunRange`,

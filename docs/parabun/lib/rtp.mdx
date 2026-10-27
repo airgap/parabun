@@ -15,12 +15,12 @@ npm install @lyku/para-rtp
 import rtp from "@lyku/para-rtp";
 
 const wire = rtp.pack({
-  payloadType: 111,         // Opus default in many SDP configurations
+  payloadType: 111, // Opus default in many SDP configurations
   sequence: 1234,
-  timestamp: 96000,         // tick at the codec sample rate
+  timestamp: 96000, // tick at the codec sample rate
   ssrc: 0xdeadbeef,
   marker: false,
-  payload: opusPacket,      // Uint8Array
+  payload: opusPacket, // Uint8Array
 });
 
 const { sequence, timestamp, payload, marker, ssrc } = rtp.parse(wire);
@@ -34,20 +34,20 @@ const { sequence, timestamp, payload, marker, ssrc } = rtp.parse(wire);
 import rtp from "@lyku/para-rtp";
 
 const jb = new rtp.JitterBuffer({ depth: 8 });
-jb.push(packet);            // out-of-order is fine
-const next = jb.pop();      // returns the next in-sequence packet, or undefined
+jb.push(packet); // out-of-order is fine
+const next = jb.pop(); // returns the next in-sequence packet, or undefined
 ```
 
 A bounded reorder window. `depth` is the maximum lag (in sequence numbers) the buffer will wait before treating a packet as lost.
 
-| Method / property | What |
-|---|---|
-| `push(packet)` | Insert a parsed packet (out-of-order tolerated) |
-| `pop()` | Pull the next in-sequence packet, or `undefined` |
-| `pending()` | Count of buffered packets not yet popped |
-| `nextSequence()` | The sequence number `pop()` is waiting for |
-| `lossCount()` | Total packets given up on as lost |
-| `maxLag` | Same value as the constructor's `depth` |
+| Method / property | What                                             |
+| ----------------- | ------------------------------------------------ |
+| `push(packet)`    | Insert a parsed packet (out-of-order tolerated)  |
+| `pop()`           | Pull the next in-sequence packet, or `undefined` |
+| `pending()`       | Count of buffered packets not yet popped         |
+| `nextSequence()`  | The sequence number `pop()` is waiting for       |
+| `lossCount()`     | Total packets given up on as lost                |
+| `maxLag`          | Same value as the constructor's `depth`          |
 
 ## Reactive signals
 

@@ -8,10 +8,10 @@ import { add, mulScalar, sum, dot, simdMap } from "@lyku/para-simd";
 const a = new Float32Array([1, 2, 3, 4]);
 const b = new Float32Array([5, 6, 7, 8]);
 
-add(a, b);          // Float32Array([6, 8, 10, 12])
-mulScalar(a, 3);    // Float32Array([3, 6, 9, 12])
-sum(a);             // 10
-dot(a, b);          // 70
+add(a, b); // Float32Array([6, 8, 10, 12])
+mulScalar(a, 3); // Float32Array([3, 6, 9, 12])
+sum(a); // 10
+dot(a, b); // 70
 simdMap(x => x * x, a); // Float32Array([1, 4, 9, 16])
 ```
 

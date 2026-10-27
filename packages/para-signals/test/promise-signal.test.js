@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { promiseSignal } from "../src/index.js";
 
 const tick = () => new Promise(r => setTimeout(r, 0));

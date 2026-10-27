@@ -16,10 +16,10 @@ for await (const tok of model.chat([{ role: "user", content: "Say hi" }])) {
 
 `parabun:llm` reads GGUF quantized weights — the same format llama.cpp uses. Quantizations supported: Q4_0, Q4_K_M, Q5_0, Q5_1, Q6_K, Q8_0, F16, F32. CUDA matVec kernels run at parity with ollama on Q4_K and Q6_K (1-warp-per-row, 4-warps-per-block design).
 
-| Class | Examples |
-|---|---|
-| Llama | Llama 3.1 / 3.2 / 3.3 |
-| Mistral | Mistral 7B, Mixtral 8x7B |
+| Class   | Examples                                         |
+| ------- | ------------------------------------------------ |
+| Llama   | Llama 3.1 / 3.2 / 3.3                            |
+| Mistral | Mistral 7B, Mixtral 8x7B                         |
 | Whisper | tiny.en, base.en, small.en (encoder-decoder STT) |
 
 ## API
@@ -56,6 +56,7 @@ const transcript = await whisper.transcribe({
 Loads whisper.cpp `ggml-*.bin` checkpoints (F32 / F16 / Q4_0 / Q5_0 / Q5_1 / Q8_0). CUDA-accelerated: encoder im2col conv + matmuls + per-head batched attention; decoder per-token matVecs + LM head. Per-process model cache.
 
 JFK sample timings (release CUDA build):
+
 - tiny.en: 1.6 s for 11 s of audio
 - base.en: 3.07 s for 11 s of audio
 
@@ -75,11 +76,11 @@ Endpoints: `/v1/models`, `/v1/chat/completions` (sync + SSE), `/v1/completions`,
 
 ## Hardware
 
-| Backend | When |
-|---|---|
-| CUDA | Linux + NVIDIA GPU (compute capability ≥ 6.1) |
-| Metal | macOS Apple Silicon |
-| CPU | Fallback; matMul kernels use AVX2 / NEON SIMD |
+| Backend | When                                          |
+| ------- | --------------------------------------------- |
+| CUDA    | Linux + NVIDIA GPU (compute capability ≥ 6.1) |
+| Metal   | macOS Apple Silicon                           |
+| CPU     | Fallback; matMul kernels use AVX2 / NEON SIMD |
 
 ## See also
 

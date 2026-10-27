@@ -7,7 +7,7 @@ description: Exact-decimal arithmetic. Backs the Para language's `0.1d` literal.
 import { Decimal } from "para:decimal";
 
 const price = new Decimal("0.1").add("0.2");
-console.log(price.toString());     // "0.3" — not "0.30000000000000004"
+console.log(price.toString()); // "0.3" — not "0.30000000000000004"
 ```
 
 In Para code, the `d` suffix is the literal form:

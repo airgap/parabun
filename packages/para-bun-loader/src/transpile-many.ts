@@ -13,7 +13,7 @@
 // Each output file is written verbatim. On per-file error, prints
 // "[err] <path>: <message>" to stderr and continues.
 import { existsSync, statSync, writeFileSync } from "node:fs";
-import { dirname, resolve, isAbsolute, extname } from "node:path";
+import { dirname, extname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const RUNTIME_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "runtime.js");

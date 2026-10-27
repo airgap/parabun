@@ -9,8 +9,8 @@
 // looking for `parabun` in PATH.
 
 import { plugin, spawn } from "bun";
-import { resolve, dirname, isAbsolute, extname } from "node:path";
 import { existsSync, statSync } from "node:fs";
+import { dirname, extname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Resolve which parabun binary to use. Priority:

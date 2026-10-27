@@ -6,7 +6,7 @@ description: Frame normalization + motion detection + YOLO object detection + Te
 ```ts
 import vision from "parabun:vision";
 import camera from "parabun:camera";
-import image  from "parabun:image";
+import image from "parabun:image";
 
 await using cam = await camera.open("/dev/video0", { format: "mjpg", width: 1280, height: 720 });
 const frames = vision.frames(cam.frames(), { decodeMjpg: image.decode });

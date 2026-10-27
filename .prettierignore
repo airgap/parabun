@@ -14,6 +14,11 @@ bun.lock
 # Generated Svelte fixtures include deliberately invalid HTML for repair tests.
 packages/para-svelte/packages/svelte/tests/**/_output/**
 
+# Preserve imported CPU measurements, generated reference text and the minified compiler bundle.
+packages/para-svelte/benchmarking/.profiles/**
+packages/para-svelte/packages/svelte/.generated-docs/**
+packages/para-svelte/packages/svelte/compiler/index.js
+
 # vendored, generated bundle of github.com/jarred-sumner/xmac (see its header)
 scripts/build/xmac.mjs
 

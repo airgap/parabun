@@ -26,7 +26,7 @@ const fused = pipeline.compile([
   ["mulScalar", 2],
   ["addScalar", 5],
 ]);
-const out = fused(data);   // single pass equivalent to: addScalar(mulScalar(data, 2), 5)
+const out = fused(data); // single pass equivalent to: addScalar(mulScalar(data, 2), 5)
 ```
 
 For most workloads you won't need the explicit `compile` — the runtime handles individual `simd.*` calls efficiently and the JS engine inlines the obvious cases.

@@ -14,8 +14,8 @@
 //
 // Exit code 1 if any errors found.
 
-import { readFileSync, statSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve, dirname, join, relative, isAbsolute } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { transformParabunToTS } from "./transform-ts";
 
 // Lazy-load typescript so the CLI doesn't crash when run from outside

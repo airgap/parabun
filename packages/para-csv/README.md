@@ -57,21 +57,21 @@ for await (const row of csv.parseCsv("./big.csv", { headers: true })) {
 
 Options (shared across `parseCsv`, `parseColumns`, `parseBatches`, `reduceColumns` unless noted):
 
-| Option | Default | What it does |
-| --- | --- | --- |
-| `delimiter` | `","` | Field delimiter. `"\t"` for TSV. Pass `""` to auto-detect from the first non-comment line (`,` `\t` `;` `|`). |
-| `quote` | `'"'` | Quote character. |
-| `escape` | same as `quote` | RFC 4180 doubled-quote by default. Set to `"\\"` for backslash-escape dialects. |
-| `comment` | `""` (off) | If set, lines starting with this character are skipped before any field opens. |
-| `trim` | `false` | Strip whitespace around each cell. Quoted cells stay verbatim. |
-| `skipEmptyLines` | `true` | Drop wholly-blank rows. |
-| `headers` | `true` | First row is headers (object output). `false` for arrays. `string[]` to pass explicit headers. |
-| `transformHeader` | none | `(header, index) => string`. Normalize header casing / spacing before object keys are built or schema lookup happens. |
-| `transform` | none | `(value, column) => string`. `parseCsv` only — map each cell value before type inference. |
-| `maxRows` | `Infinity` | Cap on data rows yielded; the header row doesn't count. Trivial preview support. |
-| `typeInference` | `true` | `parseCsv` only — auto-coerce numeric / boolean / null. |
-| `skipLines` | `0` | Skip leading rows before header detection. |
-| `parallel` | `false` | Off-main-thread parse via `@lyku/para-parallel`. See below. |
+| Option            | Default         | What it does                                                                                                          |
+| ----------------- | --------------- | --------------------------------------------------------------------------------------------------------------------- | --- |
+| `delimiter`       | `","`           | Field delimiter. `"\t"` for TSV. Pass `""` to auto-detect from the first non-comment line (`,` `\t` `;` `             | `). |
+| `quote`           | `'"'`           | Quote character.                                                                                                      |
+| `escape`          | same as `quote` | RFC 4180 doubled-quote by default. Set to `"\\"` for backslash-escape dialects.                                       |
+| `comment`         | `""` (off)      | If set, lines starting with this character are skipped before any field opens.                                        |
+| `trim`            | `false`         | Strip whitespace around each cell. Quoted cells stay verbatim.                                                        |
+| `skipEmptyLines`  | `true`          | Drop wholly-blank rows.                                                                                               |
+| `headers`         | `true`          | First row is headers (object output). `false` for arrays. `string[]` to pass explicit headers.                        |
+| `transformHeader` | none            | `(header, index) => string`. Normalize header casing / spacing before object keys are built or schema lookup happens. |
+| `transform`       | none            | `(value, column) => string`. `parseCsv` only — map each cell value before type inference.                             |
+| `maxRows`         | `Infinity`      | Cap on data rows yielded; the header row doesn't count. Trivial preview support.                                      |
+| `typeInference`   | `true`          | `parseCsv` only — auto-coerce numeric / boolean / null.                                                               |
+| `skipLines`       | `0`             | Skip leading rows before header detection.                                                                            |
+| `parallel`        | `false`         | Off-main-thread parse via `@lyku/para-parallel`. See below.                                                           |
 
 A leading UTF-8 BOM is stripped from the first chunk automatically.
 

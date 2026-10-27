@@ -6,11 +6,11 @@ description: GPU compute primitives — matVec / matmul / conv2D / scan / reduce
 ```ts
 import gpu from "parabun:gpu";
 
-console.log(gpu.activeBackend());     // "cuda" / "metal" / "cpu"
+console.log(gpu.activeBackend()); // "cuda" / "metal" / "cpu"
 
 const a = new Float32Array([1, 2, 3, 4]);
 const b = new Float32Array([5, 6, 7, 8]);
-const dot = gpu.reduce(a, "sum") * 1;       // example primitive
+const dot = gpu.reduce(a, "sum") * 1; // example primitive
 ```
 
 Auto-selects the best backend at startup. Set `BUN_GPU_BACKEND=metal|cuda|cpu` to override.
@@ -108,24 +108,28 @@ const kernel = gpu.compile({
       if (i < n) x[i] *= k;
     }`,
 });
-await kernel.run({ args: [buffer, 2.0, buffer.length], grid: [Math.ceil(buffer.length / 256), 1, 1], block: [256, 1, 1] });
+await kernel.run({
+  args: [buffer, 2.0, buffer.length],
+  grid: [Math.ceil(buffer.length / 256), 1, 1],
+  block: [256, 1, 1],
+});
 ```
 
 ## Diagnostic signals
 
 ```ts
-gpu.activeBackendSignal       // Signal<"cuda" | "metal" | "cpu">
-gpu.availableSignal           // Signal<readonly Backend[]>  — what the runtime can use
-gpu.setBackend("cpu");        // force a backend
+gpu.activeBackendSignal; // Signal<"cuda" | "metal" | "cpu">
+gpu.availableSignal; // Signal<readonly Backend[]>  — what the runtime can use
+gpu.setBackend("cpu"); // force a backend
 ```
 
 ## Hardware
 
-| Backend | When |
-|---|---|
-| CUDA | Linux + NVIDIA (compute capability ≥ 6.1) |
-| Metal | macOS Apple Silicon |
-| CPU | Fallback (still SIMD-accelerated where applicable) |
+| Backend | When                                               |
+| ------- | -------------------------------------------------- |
+| CUDA    | Linux + NVIDIA (compute capability ≥ 6.1)          |
+| Metal   | macOS Apple Silicon                                |
+| CPU     | Fallback (still SIMD-accelerated where applicable) |
 
 ## See also
 

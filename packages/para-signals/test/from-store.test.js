@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { fromStore } from "../src/index.js";
 
 // Minimal Svelte writable-store contract: subscribe fires the current

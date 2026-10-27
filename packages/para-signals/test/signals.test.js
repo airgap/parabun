@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
-  signal,
+  batch,
+  debounced,
   derived,
   effect,
-  batch,
-  untrack,
-  resource,
   fromAsyncIter,
-  fromStream,
   fromEventTarget,
+  fromStream,
+  resource,
+  signal,
   throttled,
-  debounced,
+  untrack,
 } from "../src/index.js";
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
