@@ -19,7 +19,7 @@
 // walk through balanced parens and stop at statement-level delimiters
 // (`;`, top-level `,`, `)`, `]`, `}`, EOL).
 
-import { scanRegions } from "../lex";
+import { scanRegions } from "../lex.js";
 
 export function transformBindings(src: string): string {
   // Operate on the full source : LHS / RHS can span template literals,

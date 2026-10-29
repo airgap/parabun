@@ -3,7 +3,7 @@
 // Output goes to stdout. Exit code 1 on error.
 
 import { readFileSync } from "node:fs";
-import { transpile } from "./index";
+import { transpile } from "./index.js";
 
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {

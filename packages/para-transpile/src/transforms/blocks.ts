@@ -18,7 +18,7 @@
 // findMatchingBrace so braces inside strings/comments/regex don't confuse
 // the matcher.
 
-import { findMatchingBrace, scanRegions } from "../lex";
+import { findMatchingBrace, scanRegions } from "../lex.js";
 
 export function transformBlocks(src: string): string {
   let out = src;

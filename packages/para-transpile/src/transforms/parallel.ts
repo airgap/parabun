@@ -29,8 +29,8 @@
 // In Form A, the body is an OBJECT LITERAL : keys are identifier or string,
 // values are expressions. NOT a block of statements.
 
-import { findMatchingBrace, scanRegions } from "../lex";
-import { transformErrorChain } from "./error-chain";
+import { findMatchingBrace, scanRegions } from "../lex.js";
+import { transformErrorChain } from "./error-chain.js";
 
 export function transformParallel(src: string): string {
   // Statement form must run BEFORE expression form: a `parallel let …` line

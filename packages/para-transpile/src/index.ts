@@ -8,22 +8,22 @@
 // requires real scope tracking and lands in v0.2; until then user code
 // must call `.get()` / `.set()` explicitly.
 
-import { transformBareRead } from "./transforms/bare-read";
-import { transformBindings } from "./transforms/bindings";
-import { transformBlocks } from "./transforms/blocks";
-import { transformDecimal } from "./transforms/decimal";
-import { transformDefer } from "./transforms/defer";
-import { transformErrorChain } from "./transforms/error-chain";
-import { transformFun } from "./transforms/fun";
-import { injectUsingHelpers } from "./transforms/inject-helpers";
-import { transformIs } from "./transforms/is";
-import { transformMemo } from "./transforms/memo";
-import { transformParallel } from "./transforms/parallel";
-import { transformPipeline } from "./transforms/pipeline";
-import { transformPure } from "./transforms/pure";
-import { transformRanges } from "./transforms/ranges";
-import { transformUsingPolyfill } from "./transforms/using-polyfill";
-import { injectWrapImports } from "./transforms/wrap-imports";
+import { transformBareRead } from "./transforms/bare-read.js";
+import { transformBindings } from "./transforms/bindings.js";
+import { transformBlocks } from "./transforms/blocks.js";
+import { transformDecimal } from "./transforms/decimal.js";
+import { transformDefer } from "./transforms/defer.js";
+import { transformErrorChain } from "./transforms/error-chain.js";
+import { transformFun } from "./transforms/fun.js";
+import { injectUsingHelpers } from "./transforms/inject-helpers.js";
+import { transformIs } from "./transforms/is.js";
+import { transformMemo } from "./transforms/memo.js";
+import { transformParallel } from "./transforms/parallel.js";
+import { transformPipeline } from "./transforms/pipeline.js";
+import { transformPure } from "./transforms/pure.js";
+import { transformRanges } from "./transforms/ranges.js";
+import { transformUsingPolyfill } from "./transforms/using-polyfill.js";
+import { injectWrapImports } from "./transforms/wrap-imports.js";
 
 export type TranspileOptions = {
   /** Source filename : used in error messages only. Default `"<input>"`. */

@@ -8,7 +8,7 @@
 // trailing space). This keeps column positions in source maps aligned with
 // the original : important if the transpiler later emits source maps.
 
-import { rewriteCodeRegions } from "../lex";
+import { rewriteCodeRegions } from "../lex.js";
 
 export function transformPure(src: string): string {
   return rewriteCodeRegions(src, code => {
