@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { lowerPuiReactivity } from "../src/index.ts";
 
 const lower = (s: string) => lowerPuiReactivity(s, "@lyku/para-ui", false, false);

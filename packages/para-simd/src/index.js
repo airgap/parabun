@@ -317,21 +317,21 @@ const hasUnifiedMemoryGPU = () => false;
 const hasDiscreteGPU = () => false;
 
 export {
-  mulScalar,
-  addScalar,
   add,
-  mul,
-  sum,
-  dot,
-  matVec,
-  topK,
-  simdMap,
+  addScalar,
   alloc,
+  dot,
+  hasDiscreteGPU,
+  hasUnifiedMemoryGPU,
   isWasmAvailable,
   isWasmBacked,
+  matVec,
+  mul,
+  mulScalar,
+  simdMap,
+  sum,
+  topK,
   wasmWinsForSize,
-  hasUnifiedMemoryGPU,
-  hasDiscreteGPU,
 };
 export default {
   mulScalar,

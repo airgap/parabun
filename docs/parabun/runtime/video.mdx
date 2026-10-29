@@ -16,10 +16,10 @@ await dec.close();
 
 ## Backends
 
-| Path | When |
-|---|---|
+| Path                   | When                                                       |
+| ---------------------- | ---------------------------------------------------------- |
 | MJPEG-in-MP4 (pure JS) | Caller passes `decodeMjpg` (image.decode); zero subprocess |
-| ffmpeg subprocess | Everything else; auto when MJPEG path doesn't apply |
+| ffmpeg subprocess      | Everything else; auto when MJPEG path doesn't apply        |
 
 ## API
 
@@ -101,13 +101,13 @@ MP4 + Matroska use a pure-JS box walker; everything else (MOV / AVI / FLV / MPEG
 
 ## Hardware acceleration matrix
 
-| Platform | Path | Note |
-|---|---|---|
-| Linux + NVIDIA | `cuda` | Needs ffmpeg built with `--enable-cuvid --enable-nvdec` |
-| Jetson | `cuda` | Same; install ffmpeg manually (JetPack ships gstreamer-only) |
-| Pi 4 | `v4l2m2m` | h264_v4l2m2m for H.264 1080p |
-| Pi 5 | — | BCM2712 dropped the dedicated codec block; software only |
-| Intel | `qsv` / `vaapi` | qsv preferred when available |
+| Platform       | Path            | Note                                                         |
+| -------------- | --------------- | ------------------------------------------------------------ |
+| Linux + NVIDIA | `cuda`          | Needs ffmpeg built with `--enable-cuvid --enable-nvdec`      |
+| Jetson         | `cuda`          | Same; install ffmpeg manually (JetPack ships gstreamer-only) |
+| Pi 4           | `v4l2m2m`       | h264_v4l2m2m for H.264 1080p                                 |
+| Pi 5           | —               | BCM2712 dropped the dedicated codec block; software only     |
+| Intel          | `qsv` / `vaapi` | qsv preferred when available                                 |
 
 Decoder reports the `accelUsed` field so callers can confirm which path actually ran.
 

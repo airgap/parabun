@@ -4,10 +4,10 @@ JSON Schema 2020-12 with 1:1 TypeScript brand-type parity.
 
 ## Two variants, one package
 
-| Audience                     | Resolves to               | What you get                                                |
-| ---------------------------- | ------------------------- | ----------------------------------------------------------- |
-| `.pts` / Para projects       | `src/index.ts`            | Full constraint brands (`StringOf<{ minLength: 3 }>`, etc.) |
-| Vanilla TS / Node consumers  | `src/index.standard.ts`   | Same names, all collapse to base primitives (`string`, `number`, …) |
+| Audience                    | Resolves to             | What you get                                                        |
+| --------------------------- | ----------------------- | ------------------------------------------------------------------- |
+| `.pts` / Para projects      | `src/index.ts`          | Full constraint brands (`StringOf<{ minLength: 3 }>`, etc.)         |
+| Vanilla TS / Node consumers | `src/index.standard.ts` | Same names, all collapse to base primitives (`string`, `number`, …) |
 
 The split is implemented via the `parabun` package-export condition:
 
@@ -16,8 +16,8 @@ The split is implemented via the `parabun` package-export condition:
 {
   "compilerOptions": {
     "moduleResolution": "bundler",
-    "customConditions": ["parabun"]
-  }
+    "customConditions": ["parabun"],
+  },
 }
 ```
 
@@ -32,9 +32,19 @@ constraint expressivity changes.
 ```ts
 import type {
   // Brands
-  StringOf, NumberOf, BigIntOf, BooleanOf, ArrayOf, ObjectOf, Brand,
+  StringOf,
+  NumberOf,
+  BigIntOf,
+  BooleanOf,
+  ArrayOf,
+  ObjectOf,
+  Brand,
   // Schema runtime types
-  SchemaValue, Schema, Infer, InferFromSchema, Result,
+  SchemaValue,
+  Schema,
+  Infer,
+  InferFromSchema,
+  Result,
   // Helpers
   Handles,
 } from "@lyku/para-schema";
@@ -43,11 +53,15 @@ import type {
 ### Constraint brands
 
 ```ts
-type Username   = StringOf<{ minLength: 3; maxLength: 32; pattern: "^[A-Za-z0-9_]+$" }>;
-type Email      = StringOf<{ format: "email" }>;
-type Age        = NumberOf<{ integer: true; minimum: 0; maximum: 150 }>;
-type Snowflake  = BigIntOf<{ minimum: 0n }>;
-type Tags       = ArrayOf<string, { minItems: 1; maxItems: 10 }>;
+type Username = StringOf<{
+  minLength: 3;
+  maxLength: 32;
+  pattern: "^[A-Za-z0-9_]+$";
+}>;
+type Email = StringOf<{ format: "email" }>;
+type Age = NumberOf<{ integer: true; minimum: 0; maximum: 150 }>;
+type Snowflake = BigIntOf<{ minimum: 0n }>;
+type Tags = ArrayOf<string, { minItems: 1; maxItems: 10 }>;
 ```
 
 In the extended variant these are structurally distinct from their base

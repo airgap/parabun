@@ -1,5 +1,5 @@
-import { test, expect } from "bun:test";
 import { signal } from "@lyku/para-signals";
+import { expect, test } from "bun:test";
 import { lowerPuiReactivity } from "../../para-preprocess/src/index.ts";
 
 // LYK-897 (A3): native modules expose status as bare para `Signal<T>`

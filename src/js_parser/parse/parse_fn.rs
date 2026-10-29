@@ -314,8 +314,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                                 && !Self::is_js_builtin_type_name(vtype)
                             {
                                 if let js_ast::b::B::BIdentifier(id) = &arg.data {
-                                    p.para_arg_validations
-                                        .push((id.r#ref, text, vtype, vloc));
+                                    p.para_arg_validations.push((id.r#ref, text, vtype, vloc));
                                 }
                             }
                         }
@@ -461,7 +460,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 });
                 if let Some(fields) = ts_fields {
                     Self::append_ts_shape_validator(
-                        p, &mut prelude, arg_ref, arg_name, type_name, &fields, vloc,
+                        p,
+                        &mut prelude,
+                        arg_ref,
+                        arg_name,
+                        type_name,
+                        &fields,
+                        vloc,
                     );
                     continue;
                 }
@@ -469,7 +474,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 let check_name: &'a [u8] = bun_alloc::arena_format!(in p.arena, "__paraCheck_{}", std::str::from_utf8(arg_name).unwrap_or(""))
                     .into_bump_str()
                     .as_bytes();
-                let check_ref = p.declare_symbol(js_ast::symbol::Kind::Hoisted, vloc, check_name)?;
+                let check_ref =
+                    p.declare_symbol(js_ast::symbol::Kind::Hoisted, vloc, check_name)?;
                 let type_ref = p.store_name_in_ref(type_name)?;
                 let type_id = p.new_expr(E::Identifier::init(type_ref), vloc);
                 let parse_dot = p.new_expr(

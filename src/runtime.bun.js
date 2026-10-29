@@ -448,15 +448,7 @@ var __paraValidateDeclInCtx = (decl, v, viaRef, ctx, walk) => {
     // A reference cycle just closed through this declaration.
     var cy = decl.$cyclic;
     if (cy === undefined) {
-      return (
-        "cycle detected in acyclic type '" +
-        name +
-        "' (path: " +
-        ctx.path.join(" → ") +
-        " → " +
-        name +
-        ")"
-      );
+      return "cycle detected in acyclic type '" + name + "' (path: " + ctx.path.join(" → ") + " → " + name + ")";
     }
     if (cy !== true) {
       var k = ctx.pathDepth - m.get(id);
@@ -991,7 +983,10 @@ var __paraDecDecl = (r, decl, ctx, viaRef) => {
   var b = r.peek();
   var entry2 = null;
   var shell = null;
-  if (refTracking && (((b & 0xf0) === 0x80 || b === 0xde || b === 0xdf) || ((b & 0xf0) === 0x90 || b === 0xdc || b === 0xdd))) {
+  if (
+    refTracking &&
+    ((b & 0xf0) === 0x80 || b === 0xde || b === 0xdf || (b & 0xf0) === 0x90 || b === 0xdc || b === 0xdd)
+  ) {
     // Shell-first: allocate + register before filling, so backrefs can
     // land on this object while it is still mid-construction.
     shell = (b & 0xf0) === 0x90 || b === 0xdc || b === 0xdd ? [] : {};
@@ -1070,8 +1065,7 @@ export var __paraTsSchema = (specifier, typeName) => {
 // separate entry point so ingestion-time checks (escape-node,
 // shell-constructibility — plan §1.5) can land here without touching
 // the literal-declaration path.
-export var __paraSchemaIngest = (baseUrl, name, schema, caps) =>
-  __paraSchemaDecl(baseUrl, name, schema, caps);
+export var __paraSchemaIngest = (baseUrl, name, schema, caps) => __paraSchemaDecl(baseUrl, name, schema, caps);
 
 // Takes a JSON Schema 2020-12 object and returns `{ parse, schema }`.
 // Runtime-interpreted (slower than a parse-time inline validator, but

@@ -1082,8 +1082,7 @@ const DEFAULT_LOADER_EXT: &[&[u8]] = &[
     b".jsx", b".json", b".js", b".mjs", b".cjs", b".css",
     // https://devblogs.microsoft.com/typescript/announcing-typescript-4-5-beta/#new-file-extensions
     b".ts", b".tsx", b".mts", b".cts", b".toml", b".yaml", b".yml", b".wasm", b".txt", b".text",
-    b".jsonc", b".json5",
-    // Parabun source extensions.
+    b".jsonc", b".json5", // Parabun source extensions.
     b".pts", b".pjs", b".ptsx", b".pjsx",
 ];
 

@@ -59,13 +59,13 @@ Useful for adaptive code paths in cross-runtime libraries — see [`@lyku/para-p
 
 ## Backends
 
-| Runtime | Backend | Vector width |
-|---|---|---|
-| Parabun (x86_64 with AVX2) | Highway native | 256-bit |
-| Parabun (ARM64 NEON, Apple Silicon) | Highway native | 128-bit |
-| Modern browser | WebAssembly 128-bit SIMD | 128-bit |
-| Node / Deno | npm `@lyku/para-simd-wasm` | varies |
-| Fallback | scalar loop | scalar |
+| Runtime                             | Backend                    | Vector width |
+| ----------------------------------- | -------------------------- | ------------ |
+| Parabun (x86_64 with AVX2)          | Highway native             | 256-bit      |
+| Parabun (ARM64 NEON, Apple Silicon) | Highway native             | 128-bit      |
+| Modern browser                      | WebAssembly 128-bit SIMD   | 128-bit      |
+| Node / Deno                         | npm `@lyku/para-simd-wasm` | varies       |
+| Fallback                            | scalar loop                | scalar       |
 
 Throughput is typically 4-8× scalar Float32 on the native backends. See the [streaming-etl demo](https://github.com/airgap/parabun/blob/main/demos/streaming-etl.ts) for a measured 5.8× speedup over `.map().reduce()`.
 

@@ -16,12 +16,13 @@ import { Pool } from "@lyku/para-arena";
 
 const buf = new Pool(Float32Array, 1024, { prewarm: 4 });
 
-const a = buf.acquire();   // recycled if free, else allocated
+const a = buf.acquire(); // recycled if free, else allocated
 // ... use a ...
-buf.release(a);            // back to the free list
+buf.release(a); // back to the free list
 ```
 
 `Pool(TypedArray, size, opts?)`:
+
 - `prewarm` — number of buffers to allocate up front
 - `limit` — cap on the free-list size; over-released buffers are dropped to GC
 - `clear: true` — zero recycled buffers before handing them out (security-sensitive callers)

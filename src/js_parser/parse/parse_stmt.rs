@@ -354,9 +354,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     || Self::expr_uses_signal(p, &f.yes)
                     || Self::expr_uses_signal(p, &f.no)
             }
-            ExprData::ETemplate(t) => {
-                t.parts.slice().iter().any(|part| Self::expr_uses_signal(p, &part.value))
-            }
+            ExprData::ETemplate(t) => t
+                .parts
+                .slice()
+                .iter()
+                .any(|part| Self::expr_uses_signal(p, &part.value)),
             ExprData::EArray(a) => a.items.iter().any(|it| Self::expr_uses_signal(p, it)),
             ExprData::ENew(n) => {
                 Self::expr_uses_signal(p, &n.target)
@@ -380,16 +382,16 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             return v;
         }
         const NEEDLE: &[u8] = b"@parabun-strict-signals";
-        let found = p
-            .source
-            .contents
-            .windows(NEEDLE.len())
-            .any(|w| w == NEEDLE);
+        let found = p.source.contents.windows(NEEDLE.len()).any(|w| w == NEEDLE);
         p.strict_signals_pragma = Some(found);
         found
     }
 
-    fn t_signal(p: &mut Self, opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+    fn t_signal(
+        p: &mut Self,
+        opts: &mut ParseStatementOptions<'a>,
+        loc: bun_ast::Loc,
+    ) -> Result<Stmt> {
         let mut decls = p.parse_and_declare_decls(js_ast::symbol::Kind::Constant, opts)?;
 
         // `signal X = EXPR every MS` → `signalEvery(() => EXPR, MS)`. Applies to
@@ -409,7 +411,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 // `every` wraps the RHS in an interval-driven cell.
                 if i == last {
                     if let Some(ms) = every_ms {
-                        let body_loc = bun_ast::Loc { start: vloc.start + 1 };
+                        let body_loc = bun_ast::Loc {
+                            start: vloc.start + 1,
+                        };
                         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, vloc)?;
                         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
                         let thunk = Self::zero_arg_thunk_expr(p, vloc, body_loc, value, false);
@@ -423,7 +427,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         )?);
                         if let js_ast::b::B::BIdentifier(ident) = decl.binding.data {
                             p.signal_bound_refs.insert(ident.r#ref, ());
-                            p.signal_bound_names.insert(p.load_name_from_ref(ident.r#ref));
+                            p.signal_bound_names
+                                .insert(p.load_name_from_ref(ident.r#ref));
                         }
                         continue;
                     }
@@ -434,7 +439,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     // scopes), so this is only sound when the RHS introduced no
                     // nested scope of its own — true for the signal-reading
                     // expressions auto-derive targets (a + b, `…${x}…`, etc.).
-                    let body_loc = bun_ast::Loc { start: vloc.start + 1 };
+                    let body_loc = bun_ast::Loc {
+                        start: vloc.start + 1,
+                    };
                     p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, vloc)?;
                     p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
                     let thunk = Self::zero_arg_thunk_expr(p, vloc, body_loc, value, false);
@@ -447,7 +454,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
             if let js_ast::b::B::BIdentifier(ident) = decl.binding.data {
                 p.signal_bound_refs.insert(ident.r#ref, ());
-                p.signal_bound_names.insert(p.load_name_from_ref(ident.r#ref));
+                p.signal_bound_names
+                    .insert(p.load_name_from_ref(ident.r#ref));
             }
         }
         p.lexer.expect_or_insert_semicolon()?;
@@ -464,7 +472,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // Parabun: `derived NAME = RHS [, …]` → `const NAME = require(
     // "@lyku/para-signals").derived(() => RHS)`. The thunk scopes bracket the
     // RHS parse so an arrow RHS (`derived f = () => 7`) nests correctly.
-    fn t_derived(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+    fn t_derived(
+        p: &mut Self,
+        _opts: &mut ParseStatementOptions<'a>,
+        loc: bun_ast::Loc,
+    ) -> Result<Stmt> {
         let mut decls: smallvec::SmallVec<[G::Decl; 4]> = smallvec::SmallVec::new();
         loop {
             if p.lexer.token != T::TIdentifier {
@@ -480,7 +492,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 p.skip_type_script_type(Level::Lowest)?;
             }
             p.lexer.expect(T::TEquals)?;
-            let body_loc = bun_ast::Loc { start: name_loc.start + 1 };
+            let body_loc = bun_ast::Loc {
+                start: name_loc.start + 1,
+            };
             p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, name_loc)?;
             p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
             let rhs = p.parse_expr(Level::Comma)?;
@@ -531,8 +545,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // Parabun: `effect { … }` / `effect EXPR;` → `require(
     // "@lyku/para-signals").effect(() => …)`. Signal reads inside become
     // `.get()` / `.set()` via the visit pass.
-    fn t_effect(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
-        let body_loc = bun_ast::Loc { start: loc.start + 1 };
+    fn t_effect(
+        p: &mut Self,
+        _opts: &mut ParseStatementOptions<'a>,
+        loc: bun_ast::Loc,
+    ) -> Result<Stmt> {
+        let body_loc = bun_ast::Loc {
+            start: loc.start + 1,
+        };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let thunk = if p.lexer.token == T::TOpenBrace {
@@ -557,14 +577,20 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
     // Parabun: `when COND { … }` / `when not COND { … }` → `require(
     // "@lyku/para-signals").when(() => COND, () => { … })`.
-    fn t_when(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+    fn t_when(
+        p: &mut Self,
+        _opts: &mut ParseStatementOptions<'a>,
+        loc: bun_ast::Loc,
+    ) -> Result<Stmt> {
         let negate = p.lexer.token == T::TIdentifier && p.lexer.raw() == b"not";
         if negate {
             p.lexer.next()?;
         }
         // Condition thunk: () => COND. Keep the raw (pre-negation) predicate so
         // a paired `when stop { … }` arm can clone + flip it.
-        let cond_body_loc = bun_ast::Loc { start: loc.start + 1 };
+        let cond_body_loc = bun_ast::Loc {
+            start: loc.start + 1,
+        };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, cond_body_loc)?;
         let raw_cond = p.parse_expr(Level::Lowest)?;
@@ -636,8 +662,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     p.push_scope_for_parse_pass(scope::Kind::FunctionBody, second_cond_body_loc)?;
                     p.pop_scope();
                     p.pop_scope();
-                    let second_cond_thunk =
-                        Self::zero_arg_thunk_expr(p, second_loc, second_cond_body_loc, second_pred, false);
+                    let second_cond_thunk = Self::zero_arg_thunk_expr(
+                        p,
+                        second_loc,
+                        second_cond_body_loc,
+                        second_pred,
+                        false,
+                    );
 
                     let second_brace_loc = p.lexer.loc();
                     let second_body_fnbody_loc = bun_ast::Loc {
@@ -695,8 +726,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     }
 
     // Parabun: `arena { … }` → `require("@lyku/para-arena").scope(() => { … })`.
-    fn t_arena(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
-        let body_loc = bun_ast::Loc { start: loc.start + 1 };
+    fn t_arena(
+        p: &mut Self,
+        _opts: &mut ParseStatementOptions<'a>,
+        loc: bun_ast::Loc,
+    ) -> Result<Stmt> {
+        let body_loc = bun_ast::Loc {
+            start: loc.start + 1,
+        };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let stmts = Self::parse_thunk_block_stmts(p)?;
@@ -748,7 +785,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     // EXPR);`. The disposer fires at scope exit via the ES `using` protocol.
     // The binding name `__paraDefer<n>` matches the parity gensym pattern so it
     // renames structurally; the helper call names are bare globals.
-    fn t_defer(p: &mut Self, _opts: &mut ParseStatementOptions<'a>, loc: bun_ast::Loc) -> Result<Stmt> {
+    fn t_defer(
+        p: &mut Self,
+        _opts: &mut ParseStatementOptions<'a>,
+        loc: bun_ast::Loc,
+    ) -> Result<Stmt> {
         let is_async = p.lexer.is_contextual_keyword(b"await");
         if is_async {
             // `defer await` is only valid inside an async function.
@@ -768,7 +809,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 .as_bytes();
         let binding_ref = p.declare_symbol(symbol::Kind::Constant, loc, gensym)?;
 
-        let body_loc = bun_ast::Loc { start: loc.start + 1 };
+        let body_loc = bun_ast::Loc {
+            start: loc.start + 1,
+        };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let expr = p.parse_expr(Level::Lowest)?;
@@ -2421,7 +2464,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     p.log().add_error(
                         Some(p.source),
                         kw_loc,
-                        b"`memo` already declares a function - drop the `function` keyword" as &[u8],
+                        b"`memo` already declares a function - drop the `function` keyword"
+                            as &[u8],
                     );
                     return Err(err!("SyntaxError"));
                 }

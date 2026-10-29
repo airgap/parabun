@@ -1,6 +1,6 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
+import { hmrSignal, signal } from "../../para-signals/src/index.js";
 import { lowerPuiReactivity } from "../src/index.ts";
-import { signal, hmrSignal } from "../../para-signals/src/index.js";
 
 // `count` is exported → it escapes the component, so it keeps the para
 // bridge (and thus the HMR registry form). LYK-886 only inlines provably

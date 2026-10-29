@@ -55,8 +55,11 @@ interface Bus {
 ### Device scan
 
 ```ts
-const present = await bus.scan();    // returns array of 7-bit addresses with ACKs
-console.log("devices:", present.map(a => "0x" + a.toString(16)));
+const present = await bus.scan(); // returns array of 7-bit addresses with ACKs
+console.log(
+  "devices:",
+  present.map(a => "0x" + a.toString(16)),
+);
 ```
 
 ## Common patterns
@@ -72,7 +75,7 @@ const temp = ((raw[0] << 12) | (raw[1] << 4) | (raw[2] >> 4)) * 0.01;
 **Write a config register pair:**
 
 ```ts
-await bus.writeWord(0x40, 0x06, 0x8000);   // INA219 config: bus reset
+await bus.writeWord(0x40, 0x06, 0x8000); // INA219 config: bus reset
 ```
 
 ## See also

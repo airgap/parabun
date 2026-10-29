@@ -1,6 +1,6 @@
-import { test, expect } from "bun:test";
-import { lowerPuiReactivity, splitDeclarators, parseDeclarator } from "../src/index.ts";
+import { expect, test } from "bun:test";
 import { _puiLoweredCode } from "../../../editors/lsp/pui-transform.ts";
+import { lowerPuiReactivity, parseDeclarator, splitDeclarators } from "../src/index.ts";
 
 const lower = (s: string) => lowerPuiReactivity(s, "@lyku/para-ui", false, false);
 

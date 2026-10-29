@@ -1,9 +1,57 @@
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, tempDirWithFiles, tempDir } from "harness";
-import { readFileSync, readdirSync, statSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { bunEnv, bunExe, isLinux, tempDir, tempDirWithFiles } from "harness";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 describe("parabun bytecode cache", () => {
+  test.if(isLinux)("near-PATH_MAX source executes with an optional bytecode sidecar", async () => {
+    using dir = tempDir("bc-path-limit", {
+      "package.json": `{}`,
+      "entry.js": `console.log("path boundary");`,
+    });
+    const build = await Bun.build({
+      entrypoints: [join(String(dir), "entry.js")],
+      outdir: join(String(dir), "out"),
+      target: "bun",
+      format: "cjs",
+      bytecode: true,
+    });
+    expect(build.success).toBe(true);
+    const entry = build.outputs.find(output => output.kind === "entry-point")!;
+    const bytecode = build.outputs.find(output => output.kind === "bytecode")!;
+    const source = readFileSync(entry.path);
+    const cached = readFileSync(bytecode.path);
+
+    for (const sourceByteLength of [4091, 4092]) {
+      let directory = String(dir);
+      const directoryByteLength = sourceByteLength - "/entry.js".length;
+      while (Buffer.byteLength(directory) < directoryByteLength) {
+        const remaining = directoryByteLength - Buffer.byteLength(directory);
+        let componentLength = Math.min(240, remaining - 1);
+        if (remaining - componentLength - 1 === 1) componentLength--;
+        directory = join(directory, Buffer.alloc(componentLength, "d").toString());
+      }
+      mkdirSync(directory, { recursive: true });
+      const sourcePath = join(directory, "entry.js");
+      expect(Buffer.byteLength(sourcePath)).toBe(sourceByteLength);
+      writeFileSync(sourcePath, source);
+      if (sourceByteLength === 4091) {
+        writeFileSync(sourcePath + ".jsc", cached);
+        expect(statSync(sourcePath + ".jsc").size).toBeGreaterThan(0);
+      }
+
+      await using proc = Bun.spawn({
+        cmd: [bunExe(), sourcePath],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect(stdout.trim(), stderr).toBe("path boundary");
+      expect(exitCode).toBe(0);
+    }
+  });
+
   test(".pts source compiles to bytecode and the .jsc sidecar runs", async () => {
     const dir = tempDirWithFiles("parabun-bytecode-pts", {
       "package.json": `{}`,

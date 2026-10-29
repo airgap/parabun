@@ -24,15 +24,15 @@ import { libpng } from "./libpng.ts";
 import { libspng } from "./libspng.ts";
 import { libuv } from "./libuv.ts";
 import { libwebp } from "./libwebp.ts";
-import { minimp3 } from "./minimp3.ts";
-import { rnnoise } from "./rnnoise.ts";
 import { lolhtml } from "./lolhtml.ts";
 import { lshpack } from "./lshpack.ts";
 import { lsqpack } from "./lsqpack.ts";
 import { lsquic } from "./lsquic.ts";
 import { mimalloc } from "./mimalloc.ts";
+import { minimp3 } from "./minimp3.ts";
 import { nodejsHeaders } from "./nodejs-headers.ts";
 import { picohttpparser } from "./picohttpparser.ts";
+import { rnnoise } from "./rnnoise.ts";
 import { sqlite } from "./sqlite.ts";
 import { tinycc } from "./tinycc.ts";
 import { webkit } from "./webkit.ts";
@@ -102,15 +102,15 @@ export {
   libspng,
   libuv,
   libwebp,
-  minimp3,
-  rnnoise,
   lolhtml,
   lshpack,
   lsqpack,
   lsquic,
   mimalloc,
+  minimp3,
   nodejsHeaders,
   picohttpparser,
+  rnnoise,
   sqlite,
   tinycc,
   webkit,

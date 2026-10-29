@@ -443,8 +443,10 @@ JSC_DEFINE_HOST_FUNCTION(functionPlaybackWrite,
     std::vector<int16_t> scratch(totalSamples);
     for (size_t i = 0; i < totalSamples; i++) {
         float v = src[i];
-        if (v > 1.0f) v = 1.0f;
-        else if (v < -1.0f) v = -1.0f;
+        if (v > 1.0f)
+            v = 1.0f;
+        else if (v < -1.0f)
+            v = -1.0f;
         scratch[i] = static_cast<int16_t>(v * 32767.0f);
     }
 

@@ -100,7 +100,10 @@ JSC_DEFINE_HOST_FUNCTION(functionListChips,
         if (*tail == '\0') continue;
         bool allDigits = true;
         for (const char* p = tail; *p; ++p) {
-            if (*p < '0' || *p > '9') { allDigits = false; break; }
+            if (*p < '0' || *p > '9') {
+                allDigits = false;
+                break;
+            }
         }
         if (!allDigits) continue;
         std::string path = std::string("/dev/") + n;
@@ -264,13 +267,19 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLine,
     } else {
         flags |= GPIO_V2_LINE_FLAG_INPUT;
     }
-    if (pull == 1) flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
-    else if (pull == 2) flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN;
-    else if (pull == 0 && mode == 0) flags |= GPIO_V2_LINE_FLAG_BIAS_DISABLED;
+    if (pull == 1)
+        flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
+    else if (pull == 2)
+        flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN;
+    else if (pull == 0 && mode == 0)
+        flags |= GPIO_V2_LINE_FLAG_BIAS_DISABLED;
 
-    if (edge == 1) flags |= GPIO_V2_LINE_FLAG_EDGE_RISING;
-    else if (edge == 2) flags |= GPIO_V2_LINE_FLAG_EDGE_FALLING;
-    else if (edge == 3) flags |= (GPIO_V2_LINE_FLAG_EDGE_RISING | GPIO_V2_LINE_FLAG_EDGE_FALLING);
+    if (edge == 1)
+        flags |= GPIO_V2_LINE_FLAG_EDGE_RISING;
+    else if (edge == 2)
+        flags |= GPIO_V2_LINE_FLAG_EDGE_FALLING;
+    else if (edge == 3)
+        flags |= (GPIO_V2_LINE_FLAG_EDGE_RISING | GPIO_V2_LINE_FLAG_EDGE_FALLING);
 
     req.config.flags = flags;
     // Initial output value goes into a per-line attribute when output.
@@ -479,18 +488,27 @@ JSC_DEFINE_HOST_FUNCTION(functionRequestLines,
     std::memset(&req, 0, sizeof(req));
     req.num_lines = static_cast<__u32>(n);
     const uint32_t* offsetsData = static_cast<const uint32_t*>(offsetsArr->vector());
-    for (size_t i = 0; i < n; i++) req.offsets[i] = offsetsData[i];
+    for (size_t i = 0; i < n; i++)
+        req.offsets[i] = offsetsData[i];
     std::strncpy(req.consumer, "parabun", sizeof(req.consumer) - 1);
 
     uint64_t flags = 0;
-    if (mode == 1) flags |= GPIO_V2_LINE_FLAG_OUTPUT;
-    else flags |= GPIO_V2_LINE_FLAG_INPUT;
-    if (pull == 1) flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
-    else if (pull == 2) flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN;
-    else if (pull == 0 && mode == 0) flags |= GPIO_V2_LINE_FLAG_BIAS_DISABLED;
-    if (edge == 1) flags |= GPIO_V2_LINE_FLAG_EDGE_RISING;
-    else if (edge == 2) flags |= GPIO_V2_LINE_FLAG_EDGE_FALLING;
-    else if (edge == 3) flags |= (GPIO_V2_LINE_FLAG_EDGE_RISING | GPIO_V2_LINE_FLAG_EDGE_FALLING);
+    if (mode == 1)
+        flags |= GPIO_V2_LINE_FLAG_OUTPUT;
+    else
+        flags |= GPIO_V2_LINE_FLAG_INPUT;
+    if (pull == 1)
+        flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_UP;
+    else if (pull == 2)
+        flags |= GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN;
+    else if (pull == 0 && mode == 0)
+        flags |= GPIO_V2_LINE_FLAG_BIAS_DISABLED;
+    if (edge == 1)
+        flags |= GPIO_V2_LINE_FLAG_EDGE_RISING;
+    else if (edge == 2)
+        flags |= GPIO_V2_LINE_FLAG_EDGE_FALLING;
+    else if (edge == 3)
+        flags |= (GPIO_V2_LINE_FLAG_EDGE_RISING | GPIO_V2_LINE_FLAG_EDGE_FALLING);
     req.config.flags = flags;
 
     // The "all lines" mask is the low n bits set.

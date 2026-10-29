@@ -852,8 +852,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         let url = p.sx_dot(import_meta, b"url", model_loc);
         let name_arg = p.sx_str(name, name_loc);
         let reg_args = [url, name_arg, model_obj];
-        let registered =
-            p.call_runtime(model_loc, b"__paraSchemaRegister", ExprNodeList::from_slice(&reg_args));
+        let registered = p.call_runtime(
+            model_loc,
+            b"__paraSchemaRegister",
+            ExprNodeList::from_slice(&reg_args),
+        );
 
         let fn_binding = p.b(B::Identifier { r#ref: fn_ref }, name_loc);
         let name_binding = p.b(B::Identifier { r#ref: name_ref }, name_loc);

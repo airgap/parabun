@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
 import sigs from "@lyku/para-signals";
+import { describe, expect, test } from "bun:test";
 
 // @lyku/para-signals.when(src, fn) — fires fn once per false→true transition of
 // src. Initial state is treated as already-observed. The falling edge is

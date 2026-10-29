@@ -6,14 +6,11 @@ Persistent Worker pool — `pmap` / `preduce` for data-parallel work, `run` for 
 import { pmap, preduce, run, createPool } from "@lyku/para-parallel";
 
 const rows = Array.from({ length: 1_000_000 }, (_, i) => `record-${i}`);
-const scores = await pmap(
-  row => {
-    let h = 0;
-    for (let i = 0; i < row.length; i++) h = (h * 31 + row.charCodeAt(i)) | 0;
-    return h * h;
-  },
-  rows,
-);
+const scores = await pmap(row => {
+  let h = 0;
+  for (let i = 0; i < row.length; i++) h = (h * 31 + row.charCodeAt(i)) | 0;
+  return h * h;
+}, rows);
 const sum = await preduce((acc, x) => acc + x, scores, 0);
 ```
 
@@ -39,12 +36,12 @@ const sum = await preduce((acc, x) => acc + x, scores, 0);
 
 Every `pmap` / `preduce` / `run` call accepts:
 
-| Option | Description |
-| --- | --- |
-| `signal` | An `AbortSignal`. Aborting before the call: rejects immediately with `AbortError`. Aborting mid-flight: terminates the worker holding the task, replaces it, and rejects the call. Future tasks reuse the replacement worker — the pool stays usable. |
-| `timeout` | Milliseconds. Same forceful termination as `signal` if the worker exceeds it; rejects with `TimeoutError`. |
-| `concurrency` | (`pmap` / `preduce` only) Maximum slots used for this call. Capped to the pool's configured concurrency. |
-| `transfer` | (`run` only) `Transferable[]` to send zero-copy alongside `args`. Use this when `args` includes an `ArrayBuffer` you don't need on the calling side anymore. |
+| Option        | Description                                                                                                                                                                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signal`      | An `AbortSignal`. Aborting before the call: rejects immediately with `AbortError`. Aborting mid-flight: terminates the worker holding the task, replaces it, and rejects the call. Future tasks reuse the replacement worker — the pool stays usable. |
+| `timeout`     | Milliseconds. Same forceful termination as `signal` if the worker exceeds it; rejects with `TimeoutError`.                                                                                                                                            |
+| `concurrency` | (`pmap` / `preduce` only) Maximum slots used for this call. Capped to the pool's configured concurrency.                                                                                                                                              |
+| `transfer`    | (`run` only) `Transferable[]` to send zero-copy alongside `args`. Use this when `args` includes an `ArrayBuffer` you don't need on the calling side anymore.                                                                                          |
 
 `pmap` / `preduce` already auto-transfer the chunk-slice buffer for `TypedArray` inputs — a 100 MB `Float32Array` splits into N transferred chunks rather than N copies.
 

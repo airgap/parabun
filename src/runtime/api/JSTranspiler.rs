@@ -1279,8 +1279,7 @@ impl JSTranspiler {
         macro_js_ctx: MacroJSCtx,
     ) -> Option<ParseResult<'static>> {
         let config = self.config.get();
-        let (eff_loader, eff_para) =
-            loader.unwrap_or((config.default_loader, config.default_para));
+        let (eff_loader, eff_para) = loader.unwrap_or((config.default_loader, config.default_para));
         // The interactive REPL always speaks para.
         let eff_para = eff_para || config.repl_mode;
         let name = if eff_para {

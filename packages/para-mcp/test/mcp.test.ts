@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import mcp from "../src/index";
 
 const fixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "echo-server.ts");

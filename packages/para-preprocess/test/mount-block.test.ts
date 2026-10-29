@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { lowerPuiReactivity } from "../src/index.ts";
 
 test("mount { } lowers to onMount(() => { }) and injects the onMount import", () => {
@@ -66,7 +66,9 @@ using r = makeResource();
 test("mount with top-level await → onMount(async () => {…})", () => {
   const out = lowerPuiReactivity(
     `<script lang="ts">\nmount {\n  const r = await fetch(u);\n  data = await r.json();\n}\n</script>`,
-    "@lyku/para-ui", false, false,
+    "@lyku/para-ui",
+    false,
+    false,
   );
   expect(out).toContain("onMount(async () => {");
   expect(out).toContain("const r = await fetch(u);");
@@ -75,7 +77,9 @@ test("mount with top-level await → onMount(async () => {…})", () => {
 test("mount with await only inside a nested handler stays sync (preserves cleanup)", () => {
   const out = lowerPuiReactivity(
     `<script lang="ts">\nmount {\n  el.addEventListener("x", async () => { await y(); });\n  return () => el.removeEventListener("x");\n}\n</script>`,
-    "@lyku/para-ui", false, false,
+    "@lyku/para-ui",
+    false,
+    false,
   );
   expect(out).toContain("onMount(() => {");
   expect(out).not.toContain("onMount(async");
@@ -85,7 +89,9 @@ test("mount with await only inside a nested handler stays sync (preserves cleanu
 test("plain sync mount unchanged", () => {
   const out = lowerPuiReactivity(
     `<script lang="ts">\nmount { console.log("up"); }\n</script>`,
-    "@lyku/para-ui", false, false,
+    "@lyku/para-ui",
+    false,
+    false,
   );
   expect(out).toContain("onMount(() => {");
   expect(out).not.toContain("async");

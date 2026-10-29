@@ -235,25 +235,25 @@ declare module "parabun:assistant" {
   };
   export default _default;
   export {
-    create,
     Assistant,
-    parseCron,
-    cronMatches,
-    chunkText,
-    KnowledgeStore,
     AssistantOptions,
     AssistantState,
     AssistantTool,
+    Encoder,
     InlineTool,
+    KnowledgeHit,
+    KnowledgeOptions,
+    KnowledgeStore,
     MCPLike,
     Message,
+    ScheduledPrompt,
+    Signal,
     Turn,
     WakeWordConfig,
-    ScheduledPrompt,
-    Encoder,
-    KnowledgeOptions,
-    KnowledgeHit,
-    Signal,
+    chunkText,
+    create,
+    cronMatches,
+    parseCron,
   };
 }
 
@@ -404,7 +404,10 @@ declare module "parabun:llm" {
   }
 
   /** OpenAI-compatible HTTP server over an LLM (or compatible chat/embed surface). */
-  function serve(model: LLM | { chat?: any; generate?: any; embed?: any }, opts?: { port?: number; host?: string }): unknown;
+  function serve(
+    model: LLM | { chat?: any; generate?: any; embed?: any },
+    opts?: { port?: number; host?: string },
+  ): unknown;
 
   const GGML_TYPE_F32: number;
   const GGML_TYPE_F16: number;
@@ -458,41 +461,41 @@ declare module "parabun:llm" {
   };
   export default _default;
   export {
-    LLM,
-    loadGGUF,
-    GGML_TYPE_F32,
+    BertModel,
+    BertTokenizer,
+    ChatMessage,
+    Encoder,
     GGML_TYPE_F16,
-    GGML_TYPE_Q8_0,
+    GGML_TYPE_F32,
     GGML_TYPE_Q2_K,
     GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_K,
     GGML_TYPE_Q5_K,
     GGML_TYPE_Q6_K,
-    LlamaModel,
-    KVCache,
-    llamaFromGGUF,
-    argmax,
-    Sampler,
-    sample,
-    LlamaTokenizer,
-    tokenizerFromGGUF,
-    parseGBNF,
-    compileSchema,
+    GGML_TYPE_Q8_0,
+    GGUFFile,
+    GenerateOptions,
     Grammar,
+    KVCache,
+    LLM,
+    LlamaModel,
+    LlamaTokenizer,
     PrefixCache,
-    Encoder,
-    BertModel,
-    BertTokenizer,
-    bertFromGGUF,
-    bertTokenizerFromGGUF,
-    serve,
+    Sampler,
+    Signal,
     WhisperModel,
     WhisperTokenizer,
+    argmax,
+    bertFromGGUF,
+    bertTokenizerFromGGUF,
+    compileSchema,
+    llamaFromGGUF,
+    loadGGUF,
+    parseGBNF,
     quantMatVec,
-    Signal,
-    ChatMessage,
-    GenerateOptions,
-    GGUFFile,
+    sample,
+    serve,
+    tokenizerFromGGUF,
   };
 }
 
@@ -554,24 +557,42 @@ declare module "parabun:gpu" {
     b: Float32Array | Float64Array | GpuHandle | GpuFloat32Array,
   ): number;
 
-  function matVec(matrix: Float32Array | GpuHandle | GpuFloat32Array, vector: Float32Array, nRows: number, nCols: number): Float32Array;
+  function matVec(
+    matrix: Float32Array | GpuHandle | GpuFloat32Array,
+    vector: Float32Array,
+    nRows: number,
+    nCols: number,
+  ): Float32Array;
   function matVec(matrix: Float64Array | GpuHandle, vector: Float64Array, nRows: number, nCols: number): Float64Array;
 
   function matmul(
     a: Float32Array | GpuHandle | GpuFloat32Array,
     b: Float32Array | GpuHandle | GpuFloat32Array,
-    m: number, k: number, n: number, out?: Float32Array,
+    m: number,
+    k: number,
+    n: number,
+    out?: Float32Array,
   ): Float32Array;
   function matmul(
-    a: Float64Array | GpuHandle, b: Float64Array | GpuHandle,
-    m: number, k: number, n: number, out?: Float64Array,
+    a: Float64Array | GpuHandle,
+    b: Float64Array | GpuHandle,
+    m: number,
+    k: number,
+    n: number,
+    out?: Float64Array,
   ): Float64Array;
 
   function matmulBatched(
     a: Float32Array | GpuHandle | GpuFloat32Array,
     b: Float32Array | GpuHandle | GpuFloat32Array,
-    batchCount: number, m: number, k: number, n: number,
-    strideA: number, strideB: number, strideC: number, out?: Float32Array,
+    batchCount: number,
+    m: number,
+    k: number,
+    n: number,
+    strideA: number,
+    strideB: number,
+    strideC: number,
+    out?: Float32Array,
   ): Float32Array;
 
   /** Multi-head SDPA. Q/K/V are [N, nHead*headDim] row-major. */
@@ -579,7 +600,10 @@ declare module "parabun:gpu" {
     Q: Float32Array | GpuHandle | GpuFloat32Array,
     K: Float32Array | GpuHandle | GpuFloat32Array,
     V: Float32Array | GpuHandle | GpuFloat32Array,
-    N: number, nHead: number, headDim: number, out?: Float32Array,
+    N: number,
+    nHead: number,
+    headDim: number,
+    out?: Float32Array,
   ): Float32Array;
 
   /** Single-query SDPA — one Q row against `kvLen` cached KV rows. */
@@ -587,7 +611,10 @@ declare module "parabun:gpu" {
     Q: Float32Array | GpuHandle | GpuFloat32Array,
     K: Float32Array | GpuHandle | GpuFloat32Array,
     V: Float32Array | GpuHandle | GpuFloat32Array,
-    kvLen: number, nHead: number, headDim: number, out?: Float32Array,
+    kvLen: number,
+    nHead: number,
+    headDim: number,
+    out?: Float32Array,
   ): Float32Array;
 
   /** Element-wise map. */
@@ -600,7 +627,10 @@ declare module "parabun:gpu" {
   function conv2D(
     input: Float32Array | GpuHandle | GpuFloat32Array,
     kernel: Float32Array | GpuHandle | GpuFloat32Array,
-    iW: number, iH: number, kW: number, kH: number,
+    iW: number,
+    iH: number,
+    kW: number,
+    kH: number,
   ): Float32Array;
 
   /** Inclusive prefix sum. */
@@ -609,10 +639,7 @@ declare module "parabun:gpu" {
   function scan(input: GpuHandle | GpuFloat32Array): Float32Array;
 
   /** Reduction. Empty: `sum=0`, `min=+Infinity`, `max=-Infinity`. */
-  function reduce(
-    input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array,
-    op: "sum" | "min" | "max",
-  ): number;
+  function reduce(input: Float32Array | Uint32Array | GpuHandle | GpuFloat32Array, op: "sum" | "min" | "max"): number;
 
   /** Bin-counting histogram. */
   function histogram(
@@ -704,14 +731,50 @@ declare module "parabun:gpu" {
   };
   export default _default;
   export {
-    dot, matVec, matmul, matmulBatched, sdpaSelf, sdpaSingleQuery,
-    conv2D, scan, reduce, argMin, argMax, histogram, median, quantile,
-    variance, stddev, imageBlurRGBA, simdMap, alloc, isAligned, hold,
-    holdQ4K, holdQ6K, release, releasePinned, GpuFloat32Array, GpuHandleArray,
-    activeBackend, hasBackend, setBackend, winsForSize, calibrate, dispose,
-    describe, activeBackendSignal, availableSignal, getDevOps,
-    BackendName, BackendChoice, OpKind, GpuHandle, CalibrationResult,
-    VarianceOptions, Signal,
+    BackendChoice,
+    BackendName,
+    CalibrationResult,
+    GpuFloat32Array,
+    GpuHandle,
+    GpuHandleArray,
+    OpKind,
+    Signal,
+    VarianceOptions,
+    activeBackend,
+    activeBackendSignal,
+    alloc,
+    argMax,
+    argMin,
+    availableSignal,
+    calibrate,
+    conv2D,
+    describe,
+    dispose,
+    dot,
+    getDevOps,
+    hasBackend,
+    histogram,
+    hold,
+    holdQ4K,
+    holdQ6K,
+    imageBlurRGBA,
+    isAligned,
+    matVec,
+    matmul,
+    matmulBatched,
+    median,
+    quantile,
+    reduce,
+    release,
+    releasePinned,
+    scan,
+    sdpaSelf,
+    sdpaSingleQuery,
+    setBackend,
+    simdMap,
+    stddev,
+    variance,
+    winsForSize,
   };
 }
 
@@ -1081,17 +1144,66 @@ declare module "parabun:audio" {
   };
   export default _default;
   export {
-    fft, ifft, readWav, writeWav, lowpass, highpass, bandpass, notch,
-    mix, normalize, peak, rms, envelope, i16ToF32, f32ToI16, interleave,
-    deinterleave, resample, spectrogram, melSpectrogram, detectVoice,
-    decodeMp3, decodeFile, encodeFile, probe, OpusEncoder, OpusDecoder,
-    Denoiser, Gain, Compressor, Limiter, devices, capture, play,
-    Signal, WavData, WriteWavOptions, FilterOptions, BandFilterOptions,
-    SpectrogramOptions, MelOptions, MelSpectrogram, VadOptions, VadResult,
-    OpusEncoderOptions, OpusDecoderOptions, ResampleOptions, MixOptions,
-    EnvelopeOptions, NormalizeOptions, GainOptions, CompressorOptions,
-    LimiterOptions, AudioDevice, DeviceList, CaptureOptions, PlaybackOptions,
-    CaptureFrame, CaptureStream, PlaybackStream,
+    AudioDevice,
+    BandFilterOptions,
+    CaptureFrame,
+    CaptureOptions,
+    CaptureStream,
+    Compressor,
+    CompressorOptions,
+    Denoiser,
+    DeviceList,
+    EnvelopeOptions,
+    FilterOptions,
+    Gain,
+    GainOptions,
+    Limiter,
+    LimiterOptions,
+    MelOptions,
+    MelSpectrogram,
+    MixOptions,
+    NormalizeOptions,
+    OpusDecoder,
+    OpusDecoderOptions,
+    OpusEncoder,
+    OpusEncoderOptions,
+    PlaybackOptions,
+    PlaybackStream,
+    ResampleOptions,
+    Signal,
+    SpectrogramOptions,
+    VadOptions,
+    VadResult,
+    WavData,
+    WriteWavOptions,
+    bandpass,
+    capture,
+    decodeFile,
+    decodeMp3,
+    deinterleave,
+    detectVoice,
+    devices,
+    encodeFile,
+    envelope,
+    f32ToI16,
+    fft,
+    highpass,
+    i16ToF32,
+    ifft,
+    interleave,
+    lowpass,
+    melSpectrogram,
+    mix,
+    normalize,
+    notch,
+    peak,
+    play,
+    probe,
+    readWav,
+    resample,
+    rms,
+    spectrogram,
+    writeWav,
   };
 }
 
@@ -1152,10 +1264,7 @@ declare module "parabun:speech" {
     language?: string;
   }
 
-  function transcribe(
-    utterance: Utterance | { samples: Float32Array },
-    opts: TranscribeOptions,
-  ): Promise<string>;
+  function transcribe(utterance: Utterance | { samples: Float32Array }, opts: TranscribeOptions): Promise<string>;
 
   interface SpeakOptions {
     engine: "piper";
@@ -1224,10 +1333,25 @@ declare module "parabun:speech" {
   };
   export default _default;
   export {
-    listen, transcribe, speak, say, closePiperSessions, wakeWord, matchWakePhrase,
-    AudioChunk, ListenOptions, Utterance, ListenStream, TranscribeOptions,
-    SpeakOptions, SpokenAudio, WakeMatchStrategy, WakeOptions, WakeTrigger,
-    WakeStream, Signal,
+    AudioChunk,
+    ListenOptions,
+    ListenStream,
+    Signal,
+    SpeakOptions,
+    SpokenAudio,
+    TranscribeOptions,
+    Utterance,
+    WakeMatchStrategy,
+    WakeOptions,
+    WakeStream,
+    WakeTrigger,
+    closePiperSessions,
+    listen,
+    matchWakePhrase,
+    say,
+    speak,
+    transcribe,
+    wakeWord,
   };
 }
 
@@ -1331,7 +1455,9 @@ declare module "parabun:vision" {
   }
 
   interface OnnxSession extends Disposable {
-    run(input: Record<string, { data: Uint8Array | Float32Array; shape: number[] }>): Record<string, { data: Uint8Array | Float32Array; shape: number[] }>;
+    run(
+      input: Record<string, { data: Uint8Array | Float32Array; shape: number[] }>,
+    ): Record<string, { data: Uint8Array | Float32Array; shape: number[] }>;
     dispose(): void;
     [Symbol.dispose](): void;
   }
@@ -1355,10 +1481,26 @@ declare module "parabun:vision" {
   };
   export default _default;
   export {
-    frames, detectMotion, detect, recognize, onnx, onnxIsAvailable,
-    Signal, RawFrame, RgbaFrame, RawPixelFormat, FramesOptions, MotionFrame,
-    MotionOptions, MotionRegion, RegionsOptions, MotionStream, DetectOptions,
-    RecognizeOptions, Detection, OnnxSession,
+    DetectOptions,
+    Detection,
+    FramesOptions,
+    MotionFrame,
+    MotionOptions,
+    MotionRegion,
+    MotionStream,
+    OnnxSession,
+    RawFrame,
+    RawPixelFormat,
+    RecognizeOptions,
+    RegionsOptions,
+    RgbaFrame,
+    Signal,
+    detect,
+    detectMotion,
+    frames,
+    onnx,
+    onnxIsAvailable,
+    recognize,
   };
 }
 
@@ -1516,13 +1658,41 @@ declare module "parabun:image" {
   };
   export default _default;
   export {
-    decode, decodeFrames, encode, resize, blur, boxBlur, sharpen, edgeDetect,
-    rotate, flip, crop, toGrayscale, adjust, hueShift, histogram, composite,
-    invert, threshold, pipeline, Pipeline,
-    DecodedImage, EncodeOptions, ResizeOptions, BlurOptions, BoxBlurOptions,
-    ThresholdOptions, CompositeOptions, AdjustOptions, CropOptions,
-    RotateOptions, FlipOptions, SharpenOptions, DecodedFrames, EncodeOutOptions,
+    AdjustOptions,
+    BlurOptions,
+    BoxBlurOptions,
+    CompositeOptions,
+    CropOptions,
+    DecodedFrames,
+    DecodedImage,
+    EncodeOptions,
+    EncodeOutOptions,
+    FlipOptions,
     ImageFormat,
+    Pipeline,
+    ResizeOptions,
+    RotateOptions,
+    SharpenOptions,
+    ThresholdOptions,
+    adjust,
+    blur,
+    boxBlur,
+    composite,
+    crop,
+    decode,
+    decodeFrames,
+    edgeDetect,
+    encode,
+    flip,
+    histogram,
+    hueShift,
+    invert,
+    pipeline,
+    resize,
+    rotate,
+    sharpen,
+    threshold,
+    toGrayscale,
   };
 }
 
@@ -1558,7 +1728,7 @@ declare module "parabun:csv" {
 
   const _default: { parseCsv: typeof parseCsv };
   export default _default;
-  export { parseCsv, ParseOptions, CsvSource };
+  export { CsvSource, ParseOptions, parseCsv };
 }
 
 declare module "parabun:camera" {
@@ -1646,9 +1816,19 @@ declare module "parabun:camera" {
   };
   export default _default;
   export {
-    devices, formats, open, toRgba,
-    Camera, RawFrame, CameraFormat, DeviceInfo, DevicesSignal,
-    FormatDescriptor, OpenOptions, PixelFormat, Signal,
+    Camera,
+    CameraFormat,
+    DeviceInfo,
+    DevicesSignal,
+    FormatDescriptor,
+    OpenOptions,
+    PixelFormat,
+    RawFrame,
+    Signal,
+    devices,
+    formats,
+    open,
+    toRgba,
   };
 }
 
@@ -1734,9 +1914,19 @@ declare module "parabun:gpio" {
   };
   export default _default;
   export {
-    chips, open, openDefaultChip,
-    Signal, LineMode, LinePull, LineEdge, LineOptions, EdgeEvent, ChipInfo,
-    Line, LineBank, Chip,
+    Chip,
+    ChipInfo,
+    EdgeEvent,
+    Line,
+    LineBank,
+    LineEdge,
+    LineMode,
+    LineOptions,
+    LinePull,
+    Signal,
+    chips,
+    open,
+    openDefaultChip,
   };
 }
 
@@ -1788,7 +1978,7 @@ declare module "parabun:spi" {
 
   const _default: { devices: typeof devices; open: typeof open };
   export default _default;
-  export { devices, open, Device, DeviceInfo, DeviceOptions, TransactSegment, Signal };
+  export { Device, DeviceInfo, DeviceOptions, Signal, TransactSegment, devices, open };
 }
 
 declare module "parabun:i2c" {
@@ -1862,7 +2052,7 @@ declare module "parabun:i2c" {
     ads1115: typeof ads1115;
   };
   export default _default;
-  export { buses, open, ads1115, Bus, Device, BusInfo, Ads1115, Ads1115Options, TransactSegment, Signal };
+  export { Ads1115, Ads1115Options, Bus, BusInfo, Device, Signal, TransactSegment, ads1115, buses, open };
 }
 
 declare module "parabun:video" {
@@ -1983,10 +2173,23 @@ declare module "parabun:video" {
   };
   export default _default;
   export {
-    probe, decode, encode, decodeAll, thumbnail, extractAudio,
-    Codec, Container, AccelMode, DecodedPixelFormat,
-    ProbeInfo, ProbeStreamVideo, ProbeStreamAudio,
-    DecodeOptions, DecodedFrame, VideoDecoder,
-    EncodeOptions, VideoEncoder,
+    AccelMode,
+    Codec,
+    Container,
+    DecodeOptions,
+    DecodedFrame,
+    DecodedPixelFormat,
+    EncodeOptions,
+    ProbeInfo,
+    ProbeStreamAudio,
+    ProbeStreamVideo,
+    VideoDecoder,
+    VideoEncoder,
+    decode,
+    decodeAll,
+    encode,
+    extractAudio,
+    probe,
+    thumbnail,
   };
 }

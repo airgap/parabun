@@ -62,17 +62,17 @@ interface SpiSegment {
 
 ```ts
 await bus.transferAll([
-  { tx: new Uint8Array([0x36]), csHold: true, delayUs: 10 },     // command byte
-  { tx: pixelData, csHold: false },                               // data pixels
+  { tx: new Uint8Array([0x36]), csHold: true, delayUs: 10 }, // command byte
+  { tx: pixelData, csHold: false }, // data pixels
 ]);
 ```
 
 ## Speed limits
 
-| Board | Max speed |
-|---|---|
-| Pi 5 | ~125 MHz on bus 0 |
-| Pi 4 | ~62.5 MHz |
+| Board            | Max speed                   |
+| ---------------- | --------------------------- |
+| Pi 5             | ~125 MHz on bus 0           |
+| Pi 4             | ~62.5 MHz                   |
 | Jetson Orin Nano | per pinmux; commonly 50 MHz |
 
 The kernel clamps `speedHz` to the closest divider it can synthesize, so you get the best-effort rate at or below your request.

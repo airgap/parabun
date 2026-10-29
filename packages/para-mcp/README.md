@@ -14,9 +14,9 @@ await using conn = await mcp.connect("stdio", "node", {
   args: ["./my-mcp-server.js"],
 });
 
-console.log(conn.tools);     // ToolDescriptor[]
+console.log(conn.tools); // ToolDescriptor[]
 console.log(conn.resources); // ResourceDescriptor[]
-console.log(conn.prompts);   // PromptDescriptor[]
+console.log(conn.prompts); // PromptDescriptor[]
 
 // Tools
 const r = await conn.call("read_file", { path: "/etc/hostname" });
@@ -74,7 +74,13 @@ server.resource(
   "weather://current",
   { name: "current", mimeType: "application/json" },
   async uri => ({
-    contents: [{ uri, mimeType: "application/json", text: JSON.stringify({ tempF: 72 }) }],
+    contents: [
+      {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify({ tempF: 72 }),
+      },
+    ],
   }),
 );
 
@@ -85,7 +91,12 @@ server.prompt(
     arguments: [{ name: "location", required: true }],
   },
   async ({ location }) => ({
-    messages: [{ role: "user", content: { type: "text", text: `Write a forecast for ${location}` } }],
+    messages: [
+      {
+        role: "user",
+        content: { type: "text", text: `Write a forecast for ${location}` },
+      },
+    ],
   }),
 );
 

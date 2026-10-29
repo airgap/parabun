@@ -70,13 +70,21 @@ For long-running work where the implicit pmap pool's lifecycle isn't a fit. Work
 ### Mutex + Semaphore (LYK-728)
 
 ```ts
-const m = new parallel.Mutex();      // SharedArrayBuffer-backed
+const m = new parallel.Mutex(); // SharedArrayBuffer-backed
 await m.lock();
-try { /* critical section */ } finally { m.unlock(); }
+try {
+  /* critical section */
+} finally {
+  m.unlock();
+}
 
 const s = new parallel.Semaphore(3); // 3 permits
 await s.acquire();
-try { /* up to 3 concurrent */ } finally { s.release(); }
+try {
+  /* up to 3 concurrent */
+} finally {
+  s.release();
+}
 ```
 
 Cross-worker safe via Atomics.waitAsync. Permits-out-of-band: `s.tryAcquire()` for non-blocking poll.
@@ -84,7 +92,7 @@ Cross-worker safe via Atomics.waitAsync. Permits-out-of-band: `s.tryAcquire()` f
 ### `disposeWorkers()`
 
 ```ts
-await parallel.disposeWorkers();    // terminate the implicit pmap pool
+await parallel.disposeWorkers(); // terminate the implicit pmap pool
 ```
 
 Use in tests / scripts to let the event loop exit cleanly. `pool()` instances need their own `.close()`.

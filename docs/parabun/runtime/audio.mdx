@@ -18,12 +18,12 @@ await Bun.write("filtered.wav", wav);
 
 ## Codec coverage
 
-| Format | Decode | Encode | Path | Native? |
-|---|---|---|---|---|
-| WAV | ✓ | ✓ | `readWav` / `writeWav` | Pure JS |
-| MP3 | ✓ | ✓ | `decodeMp3` (in) / `encodeFile` (out via ffmpeg) | minimp3 native (decode) |
-| Opus | ✓ | ✓ | `OpusDecoder` / `OpusEncoder` | libopus FFI |
-| FLAC / AAC / OGG / M4A | ✓ | ✓ | `decodeFile` / `encodeFile` | ffmpeg subprocess |
+| Format                 | Decode | Encode | Path                                             | Native?                 |
+| ---------------------- | ------ | ------ | ------------------------------------------------ | ----------------------- |
+| WAV                    | ✓      | ✓      | `readWav` / `writeWav`                           | Pure JS                 |
+| MP3                    | ✓      | ✓      | `decodeMp3` (in) / `encodeFile` (out via ffmpeg) | minimp3 native (decode) |
+| Opus                   | ✓      | ✓      | `OpusDecoder` / `OpusEncoder`                    | libopus FFI             |
+| FLAC / AAC / OGG / M4A | ✓      | ✓      | `decodeFile` / `encodeFile`                      | ffmpeg subprocess       |
 
 `decodeFile` / `encodeFile` are the catch-all for everything ffmpeg knows. The WAV / MP3 / Opus native paths win when the format is known statically (no subprocess overhead).
 
@@ -102,7 +102,9 @@ audio.mix(...sources): Float32Array;
 ```ts
 const devices = await audio.devices();
 await using mic = await audio.capture({ sampleRate: 16000, channels: 1 });
-for await (const chunk of mic.frames()) { /* chunk.samples */ }
+for await (const chunk of mic.frames()) {
+  /* chunk.samples */
+}
 
 await using spk = await audio.play({ sampleRate: 16000, channels: 1 });
 await spk.write(samples);

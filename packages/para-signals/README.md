@@ -18,13 +18,13 @@ count.update(n => n + 1); // logs: 2, 4
 
 ## Core primitives
 
-| | |
-| --- | --- |
-| `signal(initial)` | Writable cell. Reads inside an effect register a dep; writes mark subscribers dirty and schedule a flush. |
-| `derived(fn)` | Lazy memoized computation. Re-runs when its deps change. Re-subscribes to its dynamic dep set on each evaluation. |
-| `effect(fn)` | Imperative subscriber. Returns a disposer. The fn may return a cleanup function that runs before each re-execution and on dispose. |
-| `batch(fn)` | Coalesce writes inside `fn` into a single flush. |
-| `untrack(fn)` | Read inside a tracked context without registering a dep. |
+|                   |                                                                                                                                    |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `signal(initial)` | Writable cell. Reads inside an effect register a dep; writes mark subscribers dirty and schedule a flush.                          |
+| `derived(fn)`     | Lazy memoized computation. Re-runs when its deps change. Re-subscribes to its dynamic dep set on each evaluation.                  |
+| `effect(fn)`      | Imperative subscriber. Returns a disposer. The fn may return a cleanup function that runs before each re-execution and on dispose. |
+| `batch(fn)`       | Coalesce writes inside `fn` into a single flush.                                                                                   |
+| `untrack(fn)`     | Read inside a tracked context without registering a dep.                                                                           |
 
 Effects are drained synchronously via a re-entrant guard, so `signal.set()` inside an effect appends to the queue rather than recursing.
 
@@ -62,32 +62,32 @@ The handle layers `alive` / `dispose` / `[Symbol.dispose]` / `[Symbol.asyncDispo
 
 Hardware emits streams (audio frames, sensor data, video frames). These adapters lift them into resource-tied signals — no manual pump loop in user code:
 
-| | |
-| --- | --- |
-| `fromAsyncIter(asyncIterable, initial?)` | Pumps each yielded value into `result.value`. Disposing calls the iterator's `return()`. |
-| `fromStream(readableStream, initial?)` | Same for `ReadableStream<T>`. Cancels the reader on dispose. |
-| `fromEventTarget(target, eventName, { initial?, map? })` | Listens for events; signal updates with `map(event)`. Removes the listener on dispose. |
+|                                                          |                                                                                          |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `fromAsyncIter(asyncIterable, initial?)`                 | Pumps each yielded value into `result.value`. Disposing calls the iterator's `return()`. |
+| `fromStream(readableStream, initial?)`                   | Same for `ReadableStream<T>`. Cancels the reader on dispose.                             |
+| `fromEventTarget(target, eventName, { initial?, map? })` | Listens for events; signal updates with `map(event)`. Removes the listener on dispose.   |
 
 ```js
 const live = fromStream(audioFrames, null);
 effect(() => process(live.value.get()));
 // later:
-live.dispose();  // reader cancelled, stream gracefully released
+live.dispose(); // reader cancelled, stream gracefully released
 ```
 
 ## Rate-limit operators
 
 Hardware emits faster than UI consumers want. These operators wrap a source signal and emit at controlled cadence:
 
-| | |
-| --- | --- |
+|                         |                                                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `throttled(source, ms)` | Leading-edge: first change emits immediately; subsequent changes within `ms` coalesce into a trailing emit at window end. |
-| `debounced(source, ms)` | Emits only after `ms` of silence following the last change. |
+| `debounced(source, ms)` | Emits only after `ms` of silence following the last change.                                                               |
 
 Both return resources: `result.value` is the rate-limited signal, `result.dispose()` releases the underlying effect and clears any pending timer.
 
 ```js
-const peakSlow = throttled(mic.peak, 33);   // 30fps view of a 1000hz source
+const peakSlow = throttled(mic.peak, 33); // 30fps view of a 1000hz source
 effect(() => render(peakSlow.value.get()));
 ```
 

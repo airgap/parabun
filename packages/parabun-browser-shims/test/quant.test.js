@@ -7,16 +7,16 @@
 // and verify our decode matches. A future commit can wire that up by
 // shipping a few pre-encoded bytes captured from a real GGUF file.
 
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import gpu from "../src/gpu.js";
 import {
   dequantizeQ4KBlock,
-  dequantizeQ80Block,
   dequantizeQ6KBlock,
+  dequantizeQ80Block,
   fp16ToFp32,
   Q4_K_BLOCK_SIZE,
-  Q8_0_BLOCK_SIZE,
   Q6_K_BLOCK_SIZE,
+  Q8_0_BLOCK_SIZE,
 } from "../src/quant.js";
 
 test("fp16ToFp32 round-trips standard half-float bit patterns", () => {

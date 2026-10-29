@@ -416,9 +416,11 @@ JSC_DEFINE_HOST_FUNCTION(functionDenoise,
     // rnnoise operates on int16-scaled floats (range ±32768). Many callers
     // arrive with normalized [-1, 1] f32, so we scale up before processing
     // and scale back after — same buffer, in-place.
-    for (uint32_t i = 0; i < RNNOISE_FRAME_SIZE; i++) samples[i] *= 32768.0f;
+    for (uint32_t i = 0; i < RNNOISE_FRAME_SIZE; i++)
+        samples[i] *= 32768.0f;
     const float voiceProb = rnnoise_process_frame(st, samples, samples);
-    for (uint32_t i = 0; i < RNNOISE_FRAME_SIZE; i++) samples[i] *= (1.0f / 32768.0f);
+    for (uint32_t i = 0; i < RNNOISE_FRAME_SIZE; i++)
+        samples[i] *= (1.0f / 32768.0f);
 
     return JSValue::encode(jsNumber(voiceProb));
 }

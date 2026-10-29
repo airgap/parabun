@@ -87,8 +87,8 @@ int numWorkerThreads()
             if (v > 0 && v <= 64) return v;
         }
         unsigned hc = std::thread::hardware_concurrency();
-        if (hc == 0) hc = 4;          // hardware_concurrency() can return 0
-        if (hc > 16) hc = 16;         // diminishing returns past 16
+        if (hc == 0) hc = 4; // hardware_concurrency() can return 0
+        if (hc > 16) hc = 16; // diminishing returns past 16
         return static_cast<int>(hc);
     }();
     return cached;
@@ -96,7 +96,7 @@ int numWorkerThreads()
 
 // Run fn(rowStart, rowEnd) for [0, totalRows), splitting across worker
 // threads when there's enough work to justify the spawn-and-join cost.
-template <typename Fn>
+template<typename Fn>
 void parallelRows(uint32_t totalRows, size_t totalWorkUnits, Fn&& fn)
 {
     // Below this threshold, serial wins because thread spawn cost
@@ -121,7 +121,8 @@ void parallelRows(uint32_t totalRows, size_t totalWorkUnits, Fn&& fn)
     // Run the first chunk on the calling thread — saves one thread
     // spawn and keeps the work balanced.
     fn(0u, std::min(chunk, totalRows));
-    for (auto& th : pool) th.join();
+    for (auto& th : pool)
+        th.join();
 }
 } // anonymous namespace
 
@@ -307,7 +308,8 @@ bool decodePngBytes(
     outData.resize(rowBytes * h);
 
     rowPtrs.resize(h);
-    for (uint32_t y = 0; y < h; y++) rowPtrs[y] = outData.data() + y * rowBytes;
+    for (uint32_t y = 0; y < h; y++)
+        rowPtrs[y] = outData.data() + y * rowBytes;
     png_read_image(png, rowPtrs.data());
     png_read_end(png, info);
 
@@ -458,7 +460,8 @@ bool encodeWebPBytes(
             ? WebPEncodeLosslessRGBA(pixels, width, height, stride, &out)
             : WebPEncodeLosslessRGB(pixels, width, height, stride, &out);
     } else {
-        const float q = static_cast<float>(quality < 1 ? 1 : quality > 100 ? 100 : quality);
+        const float q = static_cast<float>(quality < 1 ? 1 : quality > 100 ? 100
+                                                                           : quality);
         outSize = (channels == 4)
             ? WebPEncodeRGBA(pixels, width, height, stride, q, &out)
             : WebPEncodeRGB(pixels, width, height, stride, q, &out);
@@ -507,9 +510,9 @@ struct LanczosTaps {
     int a;
     int outW;
     std::vector<int> firstSource; // outW entries — first source col for each output col
-    std::vector<int> tapCount;    // outW entries — how many sources contribute
-    std::vector<int> tapOffset;   // outW entries — prefix-sum of tapCount; weights[tapOffset[i]..] is row i's slice
-    std::vector<float> weights;   // flattened, sum(tapCount) entries
+    std::vector<int> tapCount; // outW entries — how many sources contribute
+    std::vector<int> tapOffset; // outW entries — prefix-sum of tapCount; weights[tapOffset[i]..] is row i's slice
+    std::vector<float> weights; // flattened, sum(tapCount) entries
 };
 
 LanczosTaps buildLanczosTaps(uint32_t inLen, uint32_t outLen, int radius)
@@ -545,13 +548,15 @@ LanczosTaps buildLanczosTaps(uint32_t inLen, uint32_t outLen, int radius)
         }
         // Normalize so the kernel has unit DC gain — keeps brightness stable.
         if (sum != 0) {
-            for (int i = 0; i < n; i++) ws[i] /= sum;
+            for (int i = 0; i < n; i++)
+                ws[i] /= sum;
         }
 
         t.firstSource[o] = first;
         t.tapCount[o] = n;
         t.tapOffset[o] = static_cast<int>(t.weights.size());
-        for (int i = 0; i < n; i++) t.weights.push_back(ws[i]);
+        for (int i = 0; i < n; i++)
+            t.weights.push_back(ws[i]);
     }
     return t;
 }
@@ -641,7 +646,8 @@ void buildGaussianKernel1D(int radius, std::vector<float>& kernel)
     }
     // Normalize to unit DC gain — output brightness matches input.
     const float invSum = 1.0f / sum;
-    for (int i = 0; i < size; i++) kernel[i] *= invSum;
+    for (int i = 0; i < size; i++)
+        kernel[i] *= invSum;
 }
 
 } // anonymous namespace
@@ -859,7 +865,7 @@ void gaussianBlur(
                         // into the bottom 64 bits — yields linear 8-byte sequence.
                         __m256i perm = _mm256_permute4x64_epi64(p8, 0b00001000);
                         _mm_storel_epi64(reinterpret_cast<__m128i*>(dstRow + off),
-                                         _mm256_castsi256_si128(perm));
+                            _mm256_castsi256_si128(perm));
                     }
                     // Tail (w odd): one last pixel via SSE.
                     for (; x < w; x++) {
@@ -1058,7 +1064,8 @@ void fillRect(
     for (int32_t y = startY; y < endY; y++) {
         uint8_t* row = dst + (static_cast<size_t>(y) * w + startX) * channels;
         for (int32_t x = startX; x < endX; x++) {
-            for (uint32_t c = 0; c < channels; c++) row[c] = color[c];
+            for (uint32_t c = 0; c < channels; c++)
+                row[c] = color[c];
             row += channels;
         }
     }
@@ -1189,7 +1196,8 @@ void thresholdImage(
         parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
             for (uint32_t y = y0; y < y1; y++) {
                 const size_t base = static_cast<size_t>(y) * w;
-                for (uint32_t x = 0; x < w; x++) dst[base + x] = src[base + x] > value ? 255 : 0;
+                for (uint32_t x = 0; x < w; x++)
+                    dst[base + x] = src[base + x] > value ? 255 : 0;
             }
         });
         return;
@@ -1266,32 +1274,41 @@ void hueShiftCpu(
 
     const size_t cost = static_cast<size_t>(w) * h * channels;
     parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
-    for (uint32_t y = y0; y < y1; y++) {
-    for (uint32_t x = 0; x < w; x++) {
-        const size_t i = static_cast<size_t>(y) * w + x;
-        const size_t base = i * channels;
-        if (channels == 1) {
-            // Grayscale has no hue — pass through.
-            dst[base] = src[base];
-            continue;
+        for (uint32_t y = y0; y < y1; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                const size_t i = static_cast<size_t>(y) * w + x;
+                const size_t base = i * channels;
+                if (channels == 1) {
+                    // Grayscale has no hue — pass through.
+                    dst[base] = src[base];
+                    continue;
+                }
+                const float r = static_cast<float>(src[base + 0]);
+                const float g = static_cast<float>(src[base + 1]);
+                const float b = static_cast<float>(src[base + 2]);
+                float R = r * m00 + g * m01 + b * m02;
+                float G = r * m10 + g * m11 + b * m12;
+                float B = r * m20 + g * m21 + b * m22;
+                if (R < 0)
+                    R = 0;
+                else if (R > 255)
+                    R = 255;
+                if (G < 0)
+                    G = 0;
+                else if (G > 255)
+                    G = 255;
+                if (B < 0)
+                    B = 0;
+                else if (B > 255)
+                    B = 255;
+                dst[base + 0] = static_cast<uint8_t>(R + 0.5f);
+                dst[base + 1] = static_cast<uint8_t>(G + 0.5f);
+                dst[base + 2] = static_cast<uint8_t>(B + 0.5f);
+                if (channels == 4) {
+                    dst[base + 3] = src[base + 3]; // alpha passthrough
+                }
+            }
         }
-        const float r = static_cast<float>(src[base + 0]);
-        const float g = static_cast<float>(src[base + 1]);
-        const float b = static_cast<float>(src[base + 2]);
-        float R = r * m00 + g * m01 + b * m02;
-        float G = r * m10 + g * m11 + b * m12;
-        float B = r * m20 + g * m21 + b * m22;
-        if (R < 0) R = 0; else if (R > 255) R = 255;
-        if (G < 0) G = 0; else if (G > 255) G = 255;
-        if (B < 0) B = 0; else if (B > 255) B = 255;
-        dst[base + 0] = static_cast<uint8_t>(R + 0.5f);
-        dst[base + 1] = static_cast<uint8_t>(G + 0.5f);
-        dst[base + 2] = static_cast<uint8_t>(B + 0.5f);
-        if (channels == 4) {
-            dst[base + 3] = src[base + 3]; // alpha passthrough
-        }
-    }
-    }
     });
 }
 
@@ -1319,54 +1336,62 @@ void adjustToneCpu(
     const size_t cost = static_cast<size_t>(w) * h * channels;
 
     parallelRows(h, cost, [&](uint32_t y0, uint32_t y1) {
-    for (uint32_t y = y0; y < y1; y++) {
-    for (uint32_t x = 0; x < w; x++) {
-        const size_t i = static_cast<size_t>(y) * w + x;
-        const size_t base = i * channels;
-        // 1- and 3-channel inputs share most of the code; the 4-channel
-        // case adds an alpha passthrough at the end.
-        if (channels == 1) {
-            float v = static_cast<float>(src[base]);
-            v = (v - 128.0f) * contrastMul + 128.0f;
-            v += brightnessAdd;
-            // Saturation has no meaning on a single channel — skip the lerp.
-            if (v < 0) v = 0;
-            else if (v > 255) v = 255;
-            dst[base] = static_cast<uint8_t>(v + 0.5f);
-            continue;
-        }
+        for (uint32_t y = y0; y < y1; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                const size_t i = static_cast<size_t>(y) * w + x;
+                const size_t base = i * channels;
+                // 1- and 3-channel inputs share most of the code; the 4-channel
+                // case adds an alpha passthrough at the end.
+                if (channels == 1) {
+                    float v = static_cast<float>(src[base]);
+                    v = (v - 128.0f) * contrastMul + 128.0f;
+                    v += brightnessAdd;
+                    // Saturation has no meaning on a single channel — skip the lerp.
+                    if (v < 0)
+                        v = 0;
+                    else if (v > 255)
+                        v = 255;
+                    dst[base] = static_cast<uint8_t>(v + 0.5f);
+                    continue;
+                }
 
-        float r = static_cast<float>(src[base + 0]);
-        float g = static_cast<float>(src[base + 1]);
-        float b = static_cast<float>(src[base + 2]);
-        // Step 1+2: contrast around 128, then brightness offset.
-        r = (r - 128.0f) * contrastMul + 128.0f + brightnessAdd;
-        g = (g - 128.0f) * contrastMul + 128.0f + brightnessAdd;
-        b = (b - 128.0f) * contrastMul + 128.0f + brightnessAdd;
-        // Step 3: saturation as a lerp between luma and the RGB triple.
-        // Done AFTER brightness/contrast so the post-tone-mapped color
-        // space is what gets desaturated; doing it before would cause
-        // negative-brightness regions to bleed odd hues.
-        if (satMul != 1.0f) {
-            const float L = 0.299f * r + 0.587f * g + 0.114f * b;
-            r = L + (r - L) * satMul;
-            g = L + (g - L) * satMul;
-            b = L + (b - L) * satMul;
+                float r = static_cast<float>(src[base + 0]);
+                float g = static_cast<float>(src[base + 1]);
+                float b = static_cast<float>(src[base + 2]);
+                // Step 1+2: contrast around 128, then brightness offset.
+                r = (r - 128.0f) * contrastMul + 128.0f + brightnessAdd;
+                g = (g - 128.0f) * contrastMul + 128.0f + brightnessAdd;
+                b = (b - 128.0f) * contrastMul + 128.0f + brightnessAdd;
+                // Step 3: saturation as a lerp between luma and the RGB triple.
+                // Done AFTER brightness/contrast so the post-tone-mapped color
+                // space is what gets desaturated; doing it before would cause
+                // negative-brightness regions to bleed odd hues.
+                if (satMul != 1.0f) {
+                    const float L = 0.299f * r + 0.587f * g + 0.114f * b;
+                    r = L + (r - L) * satMul;
+                    g = L + (g - L) * satMul;
+                    b = L + (b - L) * satMul;
+                }
+                if (r < 0)
+                    r = 0;
+                else if (r > 255)
+                    r = 255;
+                if (g < 0)
+                    g = 0;
+                else if (g > 255)
+                    g = 255;
+                if (b < 0)
+                    b = 0;
+                else if (b > 255)
+                    b = 255;
+                dst[base + 0] = static_cast<uint8_t>(r + 0.5f);
+                dst[base + 1] = static_cast<uint8_t>(g + 0.5f);
+                dst[base + 2] = static_cast<uint8_t>(b + 0.5f);
+                if (channels == 4) {
+                    dst[base + 3] = src[base + 3]; // alpha passthrough
+                }
+            }
         }
-        if (r < 0) r = 0;
-        else if (r > 255) r = 255;
-        if (g < 0) g = 0;
-        else if (g > 255) g = 255;
-        if (b < 0) b = 0;
-        else if (b > 255) b = 255;
-        dst[base + 0] = static_cast<uint8_t>(r + 0.5f);
-        dst[base + 1] = static_cast<uint8_t>(g + 0.5f);
-        dst[base + 2] = static_cast<uint8_t>(b + 0.5f);
-        if (channels == 4) {
-            dst[base + 3] = src[base + 3]; // alpha passthrough
-        }
-    }
-    }
     });
 }
 
@@ -1476,7 +1501,8 @@ void rotate90Clockwise(
             const uint32_t sy = sh - 1 - x;
             const uint8_t* srcPx = src + static_cast<size_t>(sy) * sw * channels + static_cast<size_t>(sx) * channels;
             uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
-            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+            for (uint32_t c = 0; c < channels; c++)
+                dstPx[c] = srcPx[c];
         }
     }
 }
@@ -1491,7 +1517,8 @@ void rotate180(
         for (uint32_t x = 0; x < sw; x++) {
             const uint8_t* srcPx = srcRow + static_cast<size_t>(sw - 1 - x) * channels;
             uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
-            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+            for (uint32_t c = 0; c < channels; c++)
+                dstPx[c] = srcPx[c];
         }
     }
 }
@@ -1509,7 +1536,8 @@ void rotate270Clockwise(
             const uint32_t sy = x;
             const uint8_t* srcPx = src + static_cast<size_t>(sy) * sw * channels + static_cast<size_t>(sx) * channels;
             uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
-            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+            for (uint32_t c = 0; c < channels; c++)
+                dstPx[c] = srcPx[c];
         }
     }
 }
@@ -1524,7 +1552,8 @@ void flipHorizontal(
         for (uint32_t x = 0; x < sw; x++) {
             const uint8_t* srcPx = srcRow + static_cast<size_t>(sw - 1 - x) * channels;
             uint8_t* dstPx = dstRow + static_cast<size_t>(x) * channels;
-            for (uint32_t c = 0; c < channels; c++) dstPx[c] = srcPx[c];
+            for (uint32_t c = 0; c < channels; c++)
+                dstPx[c] = srcPx[c];
         }
     }
 }
@@ -1582,47 +1611,53 @@ void resizeBilinear(
     const float yRatio = static_cast<float>(sh) / static_cast<float>(dh);
     const size_t cost = static_cast<size_t>(dw) * dh * channels * 4;
     parallelRows(dh, cost, [&](uint32_t y0, uint32_t y1) {
-    for (uint32_t oy = y0; oy < y1; oy++) {
-        const float syf = (static_cast<float>(oy) + 0.5f) * yRatio - 0.5f;
-        int sy0 = static_cast<int>(std::floor(syf));
-        int sy1 = sy0 + 1;
-        float ty = syf - static_cast<float>(sy0);
-        if (sy0 < 0) { sy0 = 0; ty = 0.0f; }
-        if (sy1 >= static_cast<int>(sh)) sy1 = static_cast<int>(sh) - 1;
-        if (sy0 >= static_cast<int>(sh)) sy0 = static_cast<int>(sh) - 1;
+        for (uint32_t oy = y0; oy < y1; oy++) {
+            const float syf = (static_cast<float>(oy) + 0.5f) * yRatio - 0.5f;
+            int sy0 = static_cast<int>(std::floor(syf));
+            int sy1 = sy0 + 1;
+            float ty = syf - static_cast<float>(sy0);
+            if (sy0 < 0) {
+                sy0 = 0;
+                ty = 0.0f;
+            }
+            if (sy1 >= static_cast<int>(sh)) sy1 = static_cast<int>(sh) - 1;
+            if (sy0 >= static_cast<int>(sh)) sy0 = static_cast<int>(sh) - 1;
 
-        for (uint32_t ox = 0; ox < dw; ox++) {
-            const float sxf = (static_cast<float>(ox) + 0.5f) * xRatio - 0.5f;
-            int sx0 = static_cast<int>(std::floor(sxf));
-            int sx1 = sx0 + 1;
-            float tx = sxf - static_cast<float>(sx0);
-            if (sx0 < 0) { sx0 = 0; tx = 0.0f; }
-            if (sx1 >= static_cast<int>(sw)) sx1 = static_cast<int>(sw) - 1;
-            if (sx0 >= static_cast<int>(sw)) sx0 = static_cast<int>(sw) - 1;
+            for (uint32_t ox = 0; ox < dw; ox++) {
+                const float sxf = (static_cast<float>(ox) + 0.5f) * xRatio - 0.5f;
+                int sx0 = static_cast<int>(std::floor(sxf));
+                int sx1 = sx0 + 1;
+                float tx = sxf - static_cast<float>(sx0);
+                if (sx0 < 0) {
+                    sx0 = 0;
+                    tx = 0.0f;
+                }
+                if (sx1 >= static_cast<int>(sw)) sx1 = static_cast<int>(sw) - 1;
+                if (sx0 >= static_cast<int>(sw)) sx0 = static_cast<int>(sw) - 1;
 
-            const size_t rowStride = static_cast<size_t>(sw) * channels;
-            const uint8_t* p00 = src + static_cast<size_t>(sy0) * rowStride + static_cast<size_t>(sx0) * channels;
-            const uint8_t* p01 = src + static_cast<size_t>(sy0) * rowStride + static_cast<size_t>(sx1) * channels;
-            const uint8_t* p10 = src + static_cast<size_t>(sy1) * rowStride + static_cast<size_t>(sx0) * channels;
-            const uint8_t* p11 = src + static_cast<size_t>(sy1) * rowStride + static_cast<size_t>(sx1) * channels;
+                const size_t rowStride = static_cast<size_t>(sw) * channels;
+                const uint8_t* p00 = src + static_cast<size_t>(sy0) * rowStride + static_cast<size_t>(sx0) * channels;
+                const uint8_t* p01 = src + static_cast<size_t>(sy0) * rowStride + static_cast<size_t>(sx1) * channels;
+                const uint8_t* p10 = src + static_cast<size_t>(sy1) * rowStride + static_cast<size_t>(sx0) * channels;
+                const uint8_t* p11 = src + static_cast<size_t>(sy1) * rowStride + static_cast<size_t>(sx1) * channels;
 
-            uint8_t* out = dst + static_cast<size_t>(oy) * dw * channels + static_cast<size_t>(ox) * channels;
-            const float w00 = (1.0f - tx) * (1.0f - ty);
-            const float w01 = tx * (1.0f - ty);
-            const float w10 = (1.0f - tx) * ty;
-            const float w11 = tx * ty;
-            for (uint32_t c = 0; c < channels; c++) {
-                const float v = static_cast<float>(p00[c]) * w00
-                              + static_cast<float>(p01[c]) * w01
-                              + static_cast<float>(p10[c]) * w10
-                              + static_cast<float>(p11[c]) * w11;
-                int rounded = static_cast<int>(v + 0.5f);
-                if (rounded < 0) rounded = 0;
-                if (rounded > 255) rounded = 255;
-                out[c] = static_cast<uint8_t>(rounded);
+                uint8_t* out = dst + static_cast<size_t>(oy) * dw * channels + static_cast<size_t>(ox) * channels;
+                const float w00 = (1.0f - tx) * (1.0f - ty);
+                const float w01 = tx * (1.0f - ty);
+                const float w10 = (1.0f - tx) * ty;
+                const float w11 = tx * ty;
+                for (uint32_t c = 0; c < channels; c++) {
+                    const float v = static_cast<float>(p00[c]) * w00
+                        + static_cast<float>(p01[c]) * w01
+                        + static_cast<float>(p10[c]) * w10
+                        + static_cast<float>(p11[c]) * w11;
+                    int rounded = static_cast<int>(v + 0.5f);
+                    if (rounded < 0) rounded = 0;
+                    if (rounded > 255) rounded = 255;
+                    out[c] = static_cast<uint8_t>(rounded);
+                }
             }
         }
-    }
     });
 }
 
@@ -3097,13 +3132,14 @@ namespace {
 struct PipelineState {
     std::vector<uint8_t> a;
     std::vector<uint8_t> b;
-    bool useA;          // true → `a` is the active buffer, `b` is scratch
+    bool useA; // true → `a` is the active buffer, `b` is scratch
     uint32_t w;
     uint32_t h;
     uint32_t channels;
 
     uint8_t* current() { return useA ? a.data() : b.data(); }
-    uint8_t* scratch(size_t needBytes) {
+    uint8_t* scratch(size_t needBytes)
+    {
         auto& dst = useA ? b : a;
         if (dst.size() < needBytes) dst.resize(needBytes);
         return dst.data();
@@ -3218,9 +3254,12 @@ bool applyPipelineOp(
         const uint32_t newW = (deg == 180) ? s.w : s.h;
         const uint32_t newH = (deg == 180) ? s.h : s.w;
         uint8_t* dst = s.scratch(static_cast<size_t>(newW) * newH * s.channels);
-        if (deg == 90) rotate90Clockwise(s.current(), s.w, s.h, s.channels, dst);
-        else if (deg == 180) rotate180(s.current(), s.w, s.h, s.channels, dst);
-        else rotate270Clockwise(s.current(), s.w, s.h, s.channels, dst);
+        if (deg == 90)
+            rotate90Clockwise(s.current(), s.w, s.h, s.channels, dst);
+        else if (deg == 180)
+            rotate180(s.current(), s.w, s.h, s.channels, dst);
+        else
+            rotate270Clockwise(s.current(), s.w, s.h, s.channels, dst);
         s.swap();
         s.w = newW;
         s.h = newH;
@@ -3236,8 +3275,10 @@ bool applyPipelineOp(
             return false;
         }
         uint8_t* dst = s.scratch(s.currentSize());
-        if (horiz) flipHorizontal(s.current(), s.w, s.h, s.channels, dst);
-        else flipVertical(s.current(), s.w, s.h, s.channels, dst);
+        if (horiz)
+            flipHorizontal(s.current(), s.w, s.h, s.channels, dst);
+        else
+            flipVertical(s.current(), s.w, s.h, s.channels, dst);
         s.swap();
         return true;
     }

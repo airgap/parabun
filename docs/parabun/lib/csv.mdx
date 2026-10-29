@@ -51,11 +51,11 @@ await writer.close();
 
 `parallel: true` runs the parser off-the-main-thread. Honest perf data (5950X release):
 
-| Input size | Single-thread | Parallel | Speedup |
-|---|---|---|---|
-| 5 MB | baseline | 1.18× | small win |
-| 50 MB | baseline | 0.95× | small loss |
-| 200 MB | baseline | 0.93× | bigger loss |
+| Input size | Single-thread | Parallel | Speedup     |
+| ---------- | ------------- | -------- | ----------- |
+| 5 MB       | baseline      | 1.18×    | small win   |
+| 50 MB      | baseline      | 0.95×    | small loss  |
+| 200 MB     | baseline      | 0.93×    | bigger loss |
 
 So the option is best framed as "off-the-main-thread", not "faster" — useful when you want the main thread free, not when you want raw throughput. See [csv-parallel bench](/parabun/lib/parabun-benches#csv-parallel) for the full sweep.
 

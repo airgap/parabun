@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { join } from "node:path";
 import { bunExe } from "harness";
+import { join } from "node:path";
 
 // @lyku/para-mcp client coverage (LYK-733).
 //

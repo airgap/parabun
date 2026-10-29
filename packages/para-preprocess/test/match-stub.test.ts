@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { matchTypeStubSpans } from "../src/index.ts";
 
 // `matchTypeStubSpans` is the single source for `.pui` (pui-transform)

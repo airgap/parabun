@@ -17,15 +17,15 @@ await Bun.write("out.webp", out);
 
 ## Format support
 
-| Format | Decode | Encode | Backend |
-|---|---|---|---|
-| JPEG | ✓ | ✓ | libjpeg-turbo (native) |
-| PNG | ✓ | ✓ | libpng (native) |
-| WebP | ✓ | ✓ | libwebp (native) |
-| AVIF | ✓ | ✓ | libavif via FFI (`apt install libavif16` / `brew install libavif`) |
-| HEIC / HEIF | ✓ | — | libheif via FFI (`apt install libheif1` / `brew install libheif`) |
-| JPEG XL | ✓ | — | libjxl via FFI (`apt install libjxl0.7` / `brew install jpeg-xl`) |
-| Animated GIF / WebP / APNG | ✓ | — | ffmpeg subprocess (`apt install ffmpeg`) |
+| Format                     | Decode | Encode | Backend                                                            |
+| -------------------------- | ------ | ------ | ------------------------------------------------------------------ |
+| JPEG                       | ✓      | ✓      | libjpeg-turbo (native)                                             |
+| PNG                        | ✓      | ✓      | libpng (native)                                                    |
+| WebP                       | ✓      | ✓      | libwebp (native)                                                   |
+| AVIF                       | ✓      | ✓      | libavif via FFI (`apt install libavif16` / `brew install libavif`) |
+| HEIC / HEIF                | ✓      | —      | libheif via FFI (`apt install libheif1` / `brew install libheif`)  |
+| JPEG XL                    | ✓      | —      | libjxl via FFI (`apt install libjxl0.7` / `brew install jpeg-xl`)  |
+| Animated GIF / WebP / APNG | ✓      | —      | ffmpeg subprocess (`apt install ffmpeg`)                           |
 
 `image.decode` auto-routes by magic byte. AVIF / HEIF / JPEG XL throw a clear "install libXXX" error when the system library isn't present.
 
@@ -88,7 +88,8 @@ image.threshold(img, { value? });
 ### `pipeline(bytes)` — chained transforms
 
 ```ts
-const out = await image.pipeline(bytes)
+const out = await image
+  .pipeline(bytes)
   .resize({ width: 400, height: 400, kernel: "lanczos" })
   .blur({ radius: 1 })
   .encode({ format: "webp", quality: 80 });

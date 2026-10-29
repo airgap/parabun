@@ -1,19 +1,8 @@
 // Type-level tests for @lyku/para-schema. These don't run any code — every
 // assertion is encoded in the type system. The test passes if `bun test`
 // can typecheck this file and the runtime expectations all evaluate true.
-import { describe, test, expect } from "bun:test";
-import type {
-  StringOf,
-  NumberOf,
-  BigIntOf,
-  ArrayOf,
-  Brand,
-  Schema,
-  SchemaValue,
-  Infer,
-  InferFromSchema,
-  Handles,
-} from "../src/types.ts";
+import { describe, expect, test } from "bun:test";
+import type { ArrayOf, Handles, Infer, InferFromSchema, SchemaValue, StringOf } from "../src/types.ts";
 
 // `Equal<A, B>` resolves to `true` only if A and B are mutually
 // assignable (covariant invariant — the standard ts-toolbelt trick).

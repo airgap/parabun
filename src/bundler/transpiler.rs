@@ -1809,15 +1809,18 @@ impl<'a> Transpiler<'a> {
                                     // (bun.zig:3502) — no Rust const re-export
                                     // in `bun_core` yet, so inline the literal.
                                     const BYTECODE_EXT: &[u8] = b".jsc";
-                                    let mut path_buf2 = bun_paths::PathBuffer::uninit();
                                     let n = path.text.len();
+                                    // A valid source path can leave no room for the optional sidecar.
+                                    if n > bun_paths::MAX_PATH_BYTES - BYTECODE_EXT.len() - 1 {
+                                        break 'brk default_value;
+                                    }
+                                    let mut path_buf2 = bun_paths::PathBuffer::uninit();
                                     path_buf2[..n].copy_from_slice(path.text);
                                     path_buf2[n..][..BYTECODE_EXT.len()]
                                         .copy_from_slice(BYTECODE_EXT);
                                     let total = n + BYTECODE_EXT.len();
-                                    // PathBuffer is zero-initialized so
-                                    // `path_buf2[total] == 0` already; safe to
-                                    // borrow as a NUL-terminated ZStr.
+                                    // The uninitialized buffer does not provide a trailing NUL.
+                                    path_buf2[total] = 0;
                                     let zpath = bun_core::ZStr::from_buf(&path_buf2[..], total);
                                     // PORT NOTE: spec calls
                                     // `bun.sys.File.toSourceAt(...)` which is

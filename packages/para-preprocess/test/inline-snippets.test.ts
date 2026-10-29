@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { lowerInlineSnippets } from "../src/index.ts";
 
 test("bare markup attribute lifts to a zero-arg snippet", () => {

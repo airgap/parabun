@@ -10,10 +10,10 @@
 // The whole package is slated for removal in 0.4.x once those four
 // either move to their own @lyku/para-* packages or get retired.
 
-export * as wrap from "./wrap.js";
 export * as gpu from "./gpu.js";
 export * as llm from "./llm.js";
 export * as quant from "./quant.js";
+export * as wrap from "./wrap.js";
 
 // Bundler-agnostic alias map for the specifiers that still resolve
 // here. Cross-runtime Lib modules (@lyku/para-signals / @lyku/para-parallel /
