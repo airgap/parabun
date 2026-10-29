@@ -12,8 +12,6 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { transpile } from "../../src/index";
-import { normalize } from "./normalize";
 
 const PARABUN = process.env.PARABUN ?? "parabun";
 const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -34,10 +32,6 @@ function transpileViaParabun(fixturePath: string): string {
   // itself only writes the transpiled source, but Parabun's debug build
   // sometimes prints a banner before user code runs).
   return result.stdout.replace(/^WARNING: ASAN[^\n]*\n/gm, "");
-}
-
-function transpileViaStandalone(src: string): string {
-  return transpile(src);
 }
 
 function diffLines(a: string, b: string): string {
@@ -96,8 +90,12 @@ for (const f of fixtures) {
   let canonical: string;
   let standalone: string;
   try {
-    canonical = normalize(transpileViaParabun(path));
-    standalone = normalize(transpileViaStandalone(src));
+    const canonicalOutput = transpileViaParabun(path);
+    // Driver failures should not pay for Babel initialization.
+    const { transpile } = await import("../../src/index");
+    const { normalize } = await import("./normalize");
+    canonical = normalize(canonicalOutput);
+    standalone = normalize(transpile(src));
   } catch (e) {
     console.error(`✗ ${f}: ${e instanceof Error ? e.message : e}`);
     failed++;
