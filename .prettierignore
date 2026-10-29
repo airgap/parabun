@@ -11,6 +11,9 @@ test/js/node/test
 test/napi/node-napi-tests
 bun.lock
 
+# Generated Svelte fixtures include deliberately invalid HTML for repair tests.
+packages/para-svelte/packages/svelte/tests/**/_output/**
+
 # vendored, generated bundle of github.com/jarred-sumner/xmac (see its header)
 scripts/build/xmac.mjs
 

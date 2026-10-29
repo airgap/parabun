@@ -456,7 +456,6 @@ const PQ_CT_TIMESTAMP_MICROS = 10;
 
 // PageType
 const PQ_PAGE_DATA_PAGE = 0;
-const PQ_PAGE_INDEX_PAGE = 1;
 const PQ_PAGE_DICTIONARY_PAGE = 2;
 const PQ_PAGE_DATA_PAGE_V2 = 3;
 
@@ -464,10 +463,6 @@ const PQ_PAGE_DATA_PAGE_V2 = 3;
 const PQ_ENC_PLAIN = 0;
 const PQ_ENC_PLAIN_DICTIONARY = 2;
 const PQ_ENC_RLE = 3;
-const PQ_ENC_BIT_PACKED = 4;
-const PQ_ENC_DELTA_BINARY_PACKED = 5;
-const PQ_ENC_DELTA_LENGTH_BYTE_ARRAY = 6;
-const PQ_ENC_DELTA_BYTE_ARRAY = 7;
 const PQ_ENC_RLE_DICTIONARY = 8;
 
 interface SchemaElement {
@@ -2805,19 +2800,6 @@ function encodePlainTyped(values: any, count: number, type: number, typeLength?:
   return w.finish();
 }
 
-// Encode an array of {0,1} definition levels as a single RLE run wrapped
-// in the i32-length-prefixed RLE/bit-pack hybrid expected for V1 pages
-// when the def level is at most 1.
-function encodeDefLevelsAllOne(count: number): Uint8Array {
-  // bitWidth=1 (max level=1). Two cases:
-  //   - All 1s (no nulls) → single RLE run of `count` × 1.
-  //   - Mixed → bit-packed group(s).
-  // For simplicity emit a single RLE run; callers that need null handling
-  // use encodeDefLevelsRle below.
-  void count;
-  throw new Error("internal: use encodeDefLevelsRle");
-}
-
 function encodeDefLevelsRle(defLevels: Uint8Array, count: number): Uint8Array {
   // Hybrid format: varint header + body. For a run, header = (runLen << 1) | 0,
   // body = bitWidth-bytes value (1 byte for bitWidth=1).
@@ -3077,14 +3059,6 @@ function computeColumnStats(
     }
   }
   return undefined;
-}
-
-function cmpBytesLex(a: Uint8Array, b: Uint8Array): number {
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return a.length - b.length;
 }
 
 // Writes a Statistics struct using the v5/v6 (max_value/min_value)

@@ -838,7 +838,6 @@ class Assistant {
   #spk: any | null = null; // parabun:audio PlaybackStream
   #ttsModel: string | null = null;
   #ttsBinPath: string | undefined;
-  #micOpts: AssistantOptions["mic"];
   #speakerOpts: AssistantOptions["speaker"];
   #chatOpts: AssistantOptions["chatOpts"];
 
@@ -1000,7 +999,8 @@ class Assistant {
     this.#interrupted = signalsMod.signal(false);
     this.#alive = signalsMod.signal(true);
     this.#toolsActive = signalsMod.signal<Set<string>>(new Set());
-    this.#micOpts = opts.mic;
+    // Preserve the constructor's option getter before model initialization.
+    void opts.mic;
     this.#speakerOpts = opts.speaker;
     this.#chatOpts = opts.chatOpts;
     this.#ttsModel = opts.tts ?? null;

@@ -29,7 +29,7 @@
 // fed to the same compiler don't collide. The returned root rule is always
 // literally "root".
 
-const grammarModule = require("./grammar.ts");
+require("./grammar.ts");
 
 // Local aliases for the AST types grammar.ts exports. We don't import them
 // across the module boundary (the bundler forbids ESM `import` statements in

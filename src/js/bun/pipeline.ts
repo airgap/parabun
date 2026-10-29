@@ -428,6 +428,8 @@ function parallel(): any {
 function composeFnSources(fns: Array<(x: any, i: number) => any>): (x: any, i: number) => any {
   if (fns.length === 1) return fns[0];
   const sources = fns.map(f => f.toString());
+  // Serialized stage expressions intentionally compile in the global scope.
+  // eslint-disable-next-line no-eval
   return (0, eval)(
     "(function(x,i){var __f=[" + sources.join(",") + "],v=x;for(var j=0;j<__f.length;j++)v=__f[j](v,i);return v})",
   );

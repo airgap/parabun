@@ -115,32 +115,32 @@ $toClass(PerformanceResourceTiming, "PerformanceResourceTiming", PerformanceEntr
 
 export default {
   performance: {
-    mark(_) {
+    mark(_name) {
       return performance.mark(...arguments);
     },
-    measure(_) {
+    measure(_name) {
       return performance.measure(...arguments);
     },
-    clearMarks(_) {
+    clearMarks(_name) {
       return performance.clearMarks(...arguments);
     },
-    clearMeasures(_) {
+    clearMeasures(_name) {
       return performance.clearMeasures(...arguments);
     },
-    getEntries(_) {
+    getEntries(_options) {
       return performance.getEntries(...arguments);
     },
-    getEntriesByName(_) {
+    getEntriesByName(_name) {
       return performance.getEntriesByName(...arguments);
     },
-    getEntriesByType(_) {
+    getEntriesByType(_type) {
       return performance.getEntriesByType(...arguments);
     },
-    setResourceTimingBufferSize(_) {
+    setResourceTimingBufferSize(_size) {
       return performance.setResourceTimingBufferSize(...arguments);
     },
     timeOrigin: performance.timeOrigin,
-    toJSON(_) {
+    toJSON(_options) {
       return performance.toJSON(...arguments);
     },
     onresourcetimingbufferfull: performance.onresourcetimingbufferfull,

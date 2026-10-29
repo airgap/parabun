@@ -3982,8 +3982,6 @@ function launchScanMetalF32(input: Float32Array): Float32Array | null {
   if (!probe()) return null;
   const n = input.length;
   if (n === 0) return new Float32Array(0);
-  const ptr = ffiPtr!;
-
   const bytes = BigInt(n * 4);
   const dOut = msgSend_4_u64_u64!(device, sel("newBufferWithLength:options:"), bytes, BigInt(MTL_STORAGE_MODE_SHARED));
   if (dOut === 0n) throw new Error("parabun:gpu metal: newBufferWithLength(scan out) failed");

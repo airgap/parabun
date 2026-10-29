@@ -78,7 +78,6 @@ function getTypes(): ArrowTypes {
 
 // ─── Type IDs from the Arrow Schema FlatBuffer ───────────────────────────
 // (Schema.fbs Type union, in declaration order.)
-const TYPE_NULL = 1;
 const TYPE_INT = 2;
 const TYPE_FLOATINGPOINT = 3;
 const TYPE_BOOL = 6;
@@ -102,10 +101,6 @@ const MESSAGE_HEADER_NONE = 0;
 const MESSAGE_HEADER_SCHEMA = 1;
 const MESSAGE_HEADER_DICTIONARY_BATCH = 2;
 const MESSAGE_HEADER_RECORD_BATCH = 3;
-const MESSAGE_HEADER_TENSOR = 4;
-const MESSAGE_HEADER_SPARSE_TENSOR = 5;
-
-const FB_PRECISION_HALF = 0;
 const FB_PRECISION_SINGLE = 1;
 const FB_PRECISION_DOUBLE = 2;
 
@@ -1433,7 +1428,8 @@ export function fromIPC(bytes: Uint8Array): TableLike {
   if (looksLikeFileFormat(bytes)) {
     return fromIPCFile(bytes);
   }
-  const { RecordBatch, Table, Column } = getTypes();
+  // Preserve registry getter evaluation when loading the Arrow constructors.
+  const { RecordBatch, Table, Column: _Column } = getTypes();
 
   let cursor = 0;
   let schema: Schema | null = null;
@@ -1546,7 +1542,9 @@ export function fromIPC(bytes: Uint8Array): TableLike {
       // Find the field that uses this dict id to determine the logical type.
       const owner = parsedFields.find(f => f.dictId === db.id);
       if (!owner) {
-        throw new Error(`@lyku/para-arrow.fromIPC: DictionaryBatch id ${db.id} arrived but no schema field references it`);
+        throw new Error(
+          `@lyku/para-arrow.fromIPC: DictionaryBatch id ${db.id} arrived but no schema field references it`,
+        );
       }
       const innerNode = db.inner.nodes[0];
       const { column } = reconstructColumn(
@@ -1622,7 +1620,9 @@ function decodeRecordBatchAt(
     bodyLength > 0 ? new Uint8Array(bytes.buffer, bytes.byteOffset + bodyStart, bodyLength) : new Uint8Array(0);
 
   if (headerType !== MESSAGE_HEADER_RECORD_BATCH || headerPos === undefined) {
-    throw new Error(`@lyku/para-arrow.fromIPC: expected RecordBatch at offset ${msgStart}, got header type ${headerType}`);
+    throw new Error(
+      `@lyku/para-arrow.fromIPC: expected RecordBatch at offset ${msgStart}, got header type ${headerType}`,
+    );
   }
   const rb = parseRecordBatchHeader(fbr, headerPos);
   const cols: ColumnLike[] = [];

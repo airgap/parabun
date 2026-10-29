@@ -77,7 +77,8 @@ while (true) {
   // Execute script
   let exit_code = 0;
   try {
-    // Use indirect eval to execute in global scope
+    // Fuzzer payloads require indirect eval's global declaration semantics.
+    // eslint-disable-next-line no-eval
     (0, eval)(script);
   } catch (_e) {
     // Print uncaught exception like workerd does

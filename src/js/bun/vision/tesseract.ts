@@ -29,11 +29,7 @@ const SO_NAME =
 // Tesseract page-iterator level enum values (from publictypes.h).
 // Stable across the 4.x / 5.x line — these underpin the C ABI we link
 // against, so they aren't going to drift.
-const RIL_BLOCK = 0;
-const RIL_PARA = 1;
-const RIL_TEXTLINE = 2;
 const RIL_WORD = 3;
-const RIL_SYMBOL = 4;
 
 type TesseractSymbols = {
   TessBaseAPICreate: () => bigint;

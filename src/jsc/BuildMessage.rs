@@ -193,7 +193,7 @@ impl BuildMessage {
 
     #[crate::host_fn(getter)]
     pub fn get_message(&self, global: &JSGlobalObject) -> JsResult<JSValue> {
-        Ok(ZigString::init(&self.msg.data.text).to_js(global))
+        Ok(ZigString::from_utf8(&self.msg.data.text).to_js(global))
     }
 
     #[crate::host_fn(getter)]

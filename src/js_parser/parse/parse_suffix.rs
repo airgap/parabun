@@ -2115,7 +2115,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             for step_info in &step_bodies {
                 match step_info.kind {
                     StreamStepKind::Map => {
-                        let new_v = Self::eval_const(p, step_info.body.unwrap(), step_info.name, v)?;
+                        let new_v =
+                            Self::eval_const(p, step_info.body.unwrap(), step_info.name, v)?;
                         v = new_v;
                     }
                     StreamStepKind::Filter => {
@@ -2413,12 +2414,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         )
     }
 
-    fn build_let(
-        p: &mut Self,
-        r#ref: bun_ast::base::Ref,
-        value: Expr,
-        loc: bun_ast::Loc,
-    ) -> Stmt {
+    fn build_let(p: &mut Self, r#ref: bun_ast::base::Ref, value: Expr, loc: bun_ast::Loc) -> Stmt {
         let binding = p.b(bun_ast::b::Identifier { r#ref }, loc);
         let decl = G::Decl {
             binding,
@@ -2483,8 +2479,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
         }
 
-        if p
-            .push_scope_for_parse_pass(scope::Kind::FunctionArgs, args_loc)
+        if p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, args_loc)
             .is_err()
         {
             return false;
@@ -2523,8 +2518,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             Ref::NONE
         };
 
-        if p
-            .push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)
+        if p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)
             .is_err()
         {
             return false;
@@ -2553,14 +2547,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
         }
 
-        if p
-            .push_scope_for_parse_pass(scope::Kind::Block, for_outer_loc)
+        if p.push_scope_for_parse_pass(scope::Kind::Block, for_outer_loc)
             .is_err()
         {
             return false;
         }
-        if p
-            .push_scope_for_parse_pass(scope::Kind::Block, for_body_loc)
+        if p.push_scope_for_parse_pass(scope::Kind::Block, for_body_loc)
             .is_err()
         {
             return false;
@@ -2587,7 +2579,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             StreamTerminal::FindIndex(_) => p.new_expr(E::Number { value: -1.0 }, body_loc),
             StreamTerminal::Some(_) => p.new_expr(E::Boolean { value: false }, body_loc),
             StreamTerminal::Every(_) => p.new_expr(E::Boolean { value: true }, body_loc),
-            StreamTerminal::Min => p.new_expr(E::Number { value: f64::INFINITY }, body_loc),
+            StreamTerminal::Min => p.new_expr(
+                E::Number {
+                    value: f64::INFINITY,
+                },
+                body_loc,
+            ),
             StreamTerminal::Max => p.new_expr(
                 E::Number {
                     value: f64::NEG_INFINITY,
@@ -2654,7 +2651,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 },
                 body_loc,
             );
-            loop_stmts.push(p.s(S::SExpr { value: assign, ..Default::default() }, body_loc));
+            loop_stmts.push(p.s(
+                S::SExpr {
+                    value: assign,
+                    ..Default::default()
+                },
+                body_loc,
+            ));
         }
 
         // Per-step lowering.
@@ -2663,21 +2666,21 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             match step.kind {
                 StreamStepKind::Map => {
                     let arg_expr = p.new_expr(E::Identifier::init(val_ref), body_loc);
-                    let call_or_inline: Expr =
-                        if let Some(inlined) = Self::try_inline_fn_call(p, step.fn_or_pred, arg_expr)
-                        {
-                            inlined
-                        } else {
-                            let ca = p.new_expr(E::Identifier::init(val_ref), body_loc);
-                            p.new_expr(
-                                E::Call {
-                                    target: step.fn_or_pred,
-                                    args: ExprNodeList::init_one(ca),
-                                    ..Default::default()
-                                },
-                                body_loc,
-                            )
-                        };
+                    let call_or_inline: Expr = if let Some(inlined) =
+                        Self::try_inline_fn_call(p, step.fn_or_pred, arg_expr)
+                    {
+                        inlined
+                    } else {
+                        let ca = p.new_expr(E::Identifier::init(val_ref), body_loc);
+                        p.new_expr(
+                            E::Call {
+                                target: step.fn_or_pred,
+                                args: ExprNodeList::init_one(ca),
+                                ..Default::default()
+                            },
+                            body_loc,
+                        )
+                    };
                     let lhs = p.new_expr(E::Identifier::init(val_ref), body_loc);
                     let assign = p.new_expr(
                         E::Binary {
@@ -2687,25 +2690,31 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         },
                         body_loc,
                     );
-                    loop_stmts.push(p.s(S::SExpr { value: assign, ..Default::default() }, body_loc));
+                    loop_stmts.push(p.s(
+                        S::SExpr {
+                            value: assign,
+                            ..Default::default()
+                        },
+                        body_loc,
+                    ));
                 }
                 StreamStepKind::Filter => {
                     let arg_expr = p.new_expr(E::Identifier::init(val_ref), body_loc);
-                    let call_or_inline: Expr =
-                        if let Some(inlined) = Self::try_inline_fn_call(p, step.fn_or_pred, arg_expr)
-                        {
-                            inlined
-                        } else {
-                            let ca = p.new_expr(E::Identifier::init(val_ref), body_loc);
-                            p.new_expr(
-                                E::Call {
-                                    target: step.fn_or_pred,
-                                    args: ExprNodeList::init_one(ca),
-                                    ..Default::default()
-                                },
-                                body_loc,
-                            )
-                        };
+                    let call_or_inline: Expr = if let Some(inlined) =
+                        Self::try_inline_fn_call(p, step.fn_or_pred, arg_expr)
+                    {
+                        inlined
+                    } else {
+                        let ca = p.new_expr(E::Identifier::init(val_ref), body_loc);
+                        p.new_expr(
+                            E::Call {
+                                target: step.fn_or_pred,
+                                args: ExprNodeList::init_one(ca),
+                                ..Default::default()
+                            },
+                            body_loc,
+                        )
+                    };
                     let not_expr = p.new_expr(
                         E::Unary {
                             op: OpCode::UnNot,
@@ -2754,7 +2763,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         },
                         body_loc,
                     );
-                    loop_stmts.push(p.s(S::SExpr { value: inc_expr, ..Default::default() }, body_loc));
+                    loop_stmts.push(p.s(
+                        S::SExpr {
+                            value: inc_expr,
+                            ..Default::default()
+                        },
+                        body_loc,
+                    ));
                 }
             }
         }
@@ -2764,24 +2779,58 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             StreamTerminal::Sum => {
                 let l = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let r = p.new_expr(E::Identifier::init(val_ref), body_loc);
-                let add = p.new_expr(E::Binary { op: OpCode::BinAdd, left: l, right: r }, body_loc);
-                let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
-                let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: add },
+                let add = p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinAdd,
+                        left: l,
+                        right: r,
+                    },
                     body_loc,
                 );
-                loop_stmts.push(p.s(S::SExpr { value: assign, ..Default::default() }, body_loc));
+                let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
+                let assign = p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: add,
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Count => {
                 let l = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let one = p.new_expr(E::Number { value: 1.0 }, body_loc);
-                let add = p.new_expr(E::Binary { op: OpCode::BinAdd, left: l, right: one }, body_loc);
-                let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
-                let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: add },
+                let add = p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinAdd,
+                        left: l,
+                        right: one,
+                    },
                     body_loc,
                 );
-                loop_stmts.push(p.s(S::SExpr { value: assign, ..Default::default() }, body_loc));
+                let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
+                let assign = p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: add,
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::ReduceCall { fold, .. } => {
                 let a0 = p.new_expr(E::Identifier::init(acc_ref), body_loc);
@@ -2796,10 +2845,20 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 );
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: fold_call },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: fold_call,
+                    },
                     body_loc,
                 );
-                loop_stmts.push(p.s(S::SExpr { value: assign, ..Default::default() }, body_loc));
+                loop_stmts.push(p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::ForEach(fn_expr) => {
                 let a0 = p.new_expr(E::Identifier::init(val_ref), body_loc);
@@ -2811,7 +2870,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     },
                     body_loc,
                 );
-                loop_stmts.push(p.s(S::SExpr { value: fe_call, ..Default::default() }, body_loc));
+                loop_stmts.push(p.s(
+                    S::SExpr {
+                        value: fe_call,
+                        ..Default::default()
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Collect => {
                 let acc_id = p.new_expr(E::Identifier::init(acc_ref), body_loc);
@@ -2833,7 +2898,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     },
                     body_loc,
                 );
-                loop_stmts.push(p.s(S::SExpr { value: push_call, ..Default::default() }, body_loc));
+                loop_stmts.push(p.s(
+                    S::SExpr {
+                        value: push_call,
+                        ..Default::default()
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Find(pred) => {
                 let t1 = Self::inlined_or_call(p, pred, val_ref, body_loc);
@@ -2841,13 +2912,37 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let rhs = p.new_expr(E::Identifier::init(val_ref), body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: rhs },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: rhs,
+                    },
                     body_loc,
                 );
-                let yes1 = p.s(S::SExpr { value: assign, ..Default::default() }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t1, yes: yes1, no: None }, body_loc));
+                let yes1 = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t1,
+                        yes: yes1,
+                        no: None,
+                    },
+                    body_loc,
+                ));
                 let brk = p.s(S::Break { label: None }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t2, yes: brk, no: None }, body_loc));
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t2,
+                        yes: brk,
+                        no: None,
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::FindIndex(pred) => {
                 let t1 = Self::inlined_or_call(p, pred, val_ref, body_loc);
@@ -2855,13 +2950,37 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let rhs = p.new_expr(E::Identifier::init(i_ref), body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: rhs },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: rhs,
+                    },
                     body_loc,
                 );
-                let yes1 = p.s(S::SExpr { value: assign, ..Default::default() }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t1, yes: yes1, no: None }, body_loc));
+                let yes1 = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t1,
+                        yes: yes1,
+                        no: None,
+                    },
+                    body_loc,
+                ));
                 let brk = p.s(S::Break { label: None }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t2, yes: brk, no: None }, body_loc));
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t2,
+                        yes: brk,
+                        no: None,
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Some(pred) => {
                 let t1 = Self::inlined_or_call(p, pred, val_ref, body_loc);
@@ -2869,61 +2988,165 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let rhs = p.new_expr(E::Boolean { value: true }, body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: rhs },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: rhs,
+                    },
                     body_loc,
                 );
-                let yes1 = p.s(S::SExpr { value: assign, ..Default::default() }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t1, yes: yes1, no: None }, body_loc));
+                let yes1 = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t1,
+                        yes: yes1,
+                        no: None,
+                    },
+                    body_loc,
+                ));
                 let brk = p.s(S::Break { label: None }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t2, yes: brk, no: None }, body_loc));
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t2,
+                        yes: brk,
+                        no: None,
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Every(pred) => {
                 let t1_inner = Self::inlined_or_call(p, pred, val_ref, body_loc);
                 let t1 = p.new_expr(
-                    E::Unary { op: OpCode::UnNot, value: t1_inner, flags: Default::default() },
+                    E::Unary {
+                        op: OpCode::UnNot,
+                        value: t1_inner,
+                        flags: Default::default(),
+                    },
                     body_loc,
                 );
                 let t2_inner = Self::inlined_or_call(p, pred, val_ref, body_loc);
                 let t2 = p.new_expr(
-                    E::Unary { op: OpCode::UnNot, value: t2_inner, flags: Default::default() },
+                    E::Unary {
+                        op: OpCode::UnNot,
+                        value: t2_inner,
+                        flags: Default::default(),
+                    },
                     body_loc,
                 );
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let rhs = p.new_expr(E::Boolean { value: false }, body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: rhs },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: rhs,
+                    },
                     body_loc,
                 );
-                let yes1 = p.s(S::SExpr { value: assign, ..Default::default() }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t1, yes: yes1, no: None }, body_loc));
+                let yes1 = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t1,
+                        yes: yes1,
+                        no: None,
+                    },
+                    body_loc,
+                ));
                 let brk = p.s(S::Break { label: None }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: t2, yes: brk, no: None }, body_loc));
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: t2,
+                        yes: brk,
+                        no: None,
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Min => {
                 let vv = p.new_expr(E::Identifier::init(val_ref), body_loc);
                 let av = p.new_expr(E::Identifier::init(acc_ref), body_loc);
-                let cmp = p.new_expr(E::Binary { op: OpCode::BinLt, left: vv, right: av }, body_loc);
+                let cmp = p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinLt,
+                        left: vv,
+                        right: av,
+                    },
+                    body_loc,
+                );
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let rhs = p.new_expr(E::Identifier::init(val_ref), body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: rhs },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: rhs,
+                    },
                     body_loc,
                 );
-                let yes1 = p.s(S::SExpr { value: assign, ..Default::default() }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: cmp, yes: yes1, no: None }, body_loc));
+                let yes1 = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: cmp,
+                        yes: yes1,
+                        no: None,
+                    },
+                    body_loc,
+                ));
             }
             StreamTerminal::Max => {
                 let vv = p.new_expr(E::Identifier::init(val_ref), body_loc);
                 let av = p.new_expr(E::Identifier::init(acc_ref), body_loc);
-                let cmp = p.new_expr(E::Binary { op: OpCode::BinGt, left: vv, right: av }, body_loc);
+                let cmp = p.new_expr(
+                    E::Binary {
+                        op: OpCode::BinGt,
+                        left: vv,
+                        right: av,
+                    },
+                    body_loc,
+                );
                 let lhs = p.new_expr(E::Identifier::init(acc_ref), body_loc);
                 let rhs = p.new_expr(E::Identifier::init(val_ref), body_loc);
                 let assign = p.new_expr(
-                    E::Binary { op: OpCode::BinAssign, left: lhs, right: rhs },
+                    E::Binary {
+                        op: OpCode::BinAssign,
+                        left: lhs,
+                        right: rhs,
+                    },
                     body_loc,
                 );
-                let yes1 = p.s(S::SExpr { value: assign, ..Default::default() }, body_loc);
-                loop_stmts.push(p.s(S::If { test_: cmp, yes: yes1, no: None }, body_loc));
+                let yes1 = p.s(
+                    S::SExpr {
+                        value: assign,
+                        ..Default::default()
+                    },
+                    body_loc,
+                );
+                loop_stmts.push(p.s(
+                    S::If {
+                        test_: cmp,
+                        yes: yes1,
+                        no: None,
+                    },
+                    body_loc,
+                ));
             }
         }
 
@@ -2942,15 +3165,36 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                         },
                         body_loc,
                     );
-                    p.new_expr(E::Binary { op: OpCode::BinLt, left: left_expr, right: len }, body_loc)
+                    p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinLt,
+                            left: left_expr,
+                            right: len,
+                        },
+                        body_loc,
+                    )
                 }
                 StreamSource::RangeExcl { .. } => {
                     let hi = p.new_expr(E::Identifier::init(hi_ref), body_loc);
-                    p.new_expr(E::Binary { op: OpCode::BinLt, left: left_expr, right: hi }, body_loc)
+                    p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinLt,
+                            left: left_expr,
+                            right: hi,
+                        },
+                        body_loc,
+                    )
                 }
                 StreamSource::RangeIncl { .. } => {
                     let hi = p.new_expr(E::Identifier::init(hi_ref), body_loc);
-                    p.new_expr(E::Binary { op: OpCode::BinLe, left: left_expr, right: hi }, body_loc)
+                    p.new_expr(
+                        E::Binary {
+                            op: OpCode::BinLe,
+                            left: left_expr,
+                            right: hi,
+                        },
+                        body_loc,
+                    )
                 }
             }
         };
@@ -2983,7 +3227,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // return __acc;
         let ret_val = p.new_expr(E::Identifier::init(acc_ref), body_loc);
-        body_stmts.push(p.s(S::Return { value: Some(ret_val) }, body_loc));
+        body_stmts.push(p.s(
+            S::Return {
+                value: Some(ret_val),
+            },
+            body_loc,
+        ));
 
         p.pop_scope(); // for_body block
         p.pop_scope(); // for_outer block
@@ -3018,8 +3267,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
         }
 
-        let arrow_args_slice: &'a mut [G::Arg] =
-            p.arena.alloc_slice_fill_iter(arrow_args.into_iter());
+        let arrow_args_slice: &'a mut [G::Arg] = p.arena.alloc_slice_fill_iter(arrow_args);
         let body_slice: &'a mut [Stmt] = p.arena.alloc_slice_copy(&body_stmts);
         let arrow = p.new_expr(
             E::Arrow {
@@ -3074,13 +3322,15 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                 // for_body_scope.
                 for k in insert_at..scope_order_len_before {
                     if let Some(entry) = p.scopes_in_order[k] {
-                        // SAFETY: arena-backed scope pointer, live for 'a.
                         let scope_ptr = entry.scope;
+                        // SAFETY: this scope is arena-backed and remains live during reparenting.
                         let parent = unsafe { (*scope_ptr).parent };
                         let is_outer = parent
                             .map(|pr| core::ptr::eq(pr.as_ptr(), outer_scope.as_ptr()))
                             .unwrap_or(false);
                         if is_outer {
+                            // SAFETY: the parser owns this scope graph, and the parent read
+                            // above retains no reference into the scope across this write.
                             unsafe {
                                 (*scope_ptr).parent = Some(for_body_scope);
                             }
@@ -3112,7 +3362,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.lexer.next()?;
         let lhs = *left;
         let rhs = p.parse_expr(Level::Shift)?;
-        *left = p.call_runtime(op_loc, b"__parabunRange", ExprNodeList::from_slice(&[lhs, rhs]));
+        *left = p.call_runtime(
+            op_loc,
+            b"__parabunRange",
+            ExprNodeList::from_slice(&[lhs, rhs]),
+        );
         Ok(Continuation::Next)
     }
 
@@ -3125,8 +3379,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.lexer.next()?;
         let lhs = *left;
         let rhs = p.parse_expr(Level::Shift)?;
-        *left =
-            p.call_runtime(op_loc, b"__parabunRangeInclusive", ExprNodeList::from_slice(&[lhs, rhs]));
+        *left = p.call_runtime(
+            op_loc,
+            b"__parabunRangeInclusive",
+            ExprNodeList::from_slice(&[lhs, rhs]),
+        );
         Ok(Continuation::Next)
     }
 
@@ -3325,7 +3582,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             }
             ExprData::ESpread(s) => Self::contains_free_underscore(p, &s.value),
             ExprData::EAwait(a) => Self::contains_free_underscore(p, &a.value),
-            ExprData::EYield(y) => y.value.is_some_and(|v| Self::contains_free_underscore(p, &v)),
+            ExprData::EYield(y) => y
+                .value
+                .is_some_and(|v| Self::contains_free_underscore(p, &v)),
             // Arrow / function literals introduce a new scope — stop.
             _ => false,
         }
@@ -3347,11 +3606,25 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             ExprData::EBinary(b) => {
                 let left = Self::substitute_free_underscore(p, b.left, repl)?;
                 let right = Self::substitute_free_underscore(p, b.right, repl)?;
-                p.new_expr(E::Binary { op: b.op, left, right }, loc)
+                p.new_expr(
+                    E::Binary {
+                        op: b.op,
+                        left,
+                        right,
+                    },
+                    loc,
+                )
             }
             ExprData::EUnary(u) => {
                 let value = Self::substitute_free_underscore(p, u.value, repl)?;
-                p.new_expr(E::Unary { op: u.op, value, flags: u.flags }, loc)
+                p.new_expr(
+                    E::Unary {
+                        op: u.op,
+                        value,
+                        flags: u.flags,
+                    },
+                    loc,
+                )
             }
             ExprData::EDot(d) => {
                 let target = Self::substitute_free_underscore(p, d.target, repl)?;
@@ -3430,7 +3703,13 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                     Some(v) => Some(Self::substitute_free_underscore(p, v, repl)?),
                     None => None,
                 };
-                p.new_expr(E::Yield { value, is_star: y.is_star }, loc)
+                p.new_expr(
+                    E::Yield {
+                        value,
+                        is_star: y.is_star,
+                    },
+                    loc,
+                )
             }
             // Arrow / function bodies aren't ours; leaves have no `_`.
             ExprData::EArrow(_)
@@ -3481,7 +3760,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
     /// Wrap an arg expression containing a free `_` in `(__pu) => <expr>`.
     /// Returns `None` if the wrap can't be built (unsupported shape / scope
     /// conflict), so the caller keeps the original arg.
-    fn try_wrap_underscore_lambda(p: &mut Self, body: Expr, arrow_loc_in: bun_ast::Loc) -> Option<Expr> {
+    fn try_wrap_underscore_lambda(
+        p: &mut Self,
+        body: Expr,
+        arrow_loc_in: bun_ast::Loc,
+    ) -> Option<Expr> {
         // Guarantee strictly-increasing scope locations. If the caller's loc is
         // ≥ body.loc, step back one byte (matches the leading-dot arg trick).
         let arrow_loc = if arrow_loc_in.start < body.loc.start {
@@ -3511,8 +3794,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, arrow_loc)
             .ok()?;
-        if p
-            .push_scope_for_parse_pass(scope::Kind::FunctionBody, body.loc)
+        if p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body.loc)
             .is_err()
         {
             p.pop_scope();
@@ -3534,7 +3816,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         p.pop_scope();
 
         let subst_body = subst?;
-        let ret = p.s(S::Return { value: Some(subst_body) }, body.loc);
+        let ret = p.s(
+            S::Return {
+                value: Some(subst_body),
+            },
+            body.loc,
+        );
         let stmts: &'a mut [Stmt] = p.arena.alloc_slice_copy(&[ret]);
         let binding = p.b(bun_ast::b::Identifier { r#ref: param_ref }, body.loc);
         let arg = G::Arg {
@@ -3559,7 +3846,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
     /// Wrap `arg` in a `_`-lambda when it contains a free `_` and isn't itself
     /// bare `_`. Returns the original arg when there's nothing to do.
-    pub(crate) fn maybe_wrap_underscore_lambda(p: &mut Self, arg: Expr, arrow_loc: bun_ast::Loc) -> Expr {
+    pub(crate) fn maybe_wrap_underscore_lambda(
+        p: &mut Self,
+        arg: Expr,
+        arrow_loc: bun_ast::Loc,
+    ) -> Expr {
         if !p.lexer.is_para {
             return arg;
         }
@@ -3649,7 +3940,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // the RHS. Bracket the RHS parse with the wrapper-arrow scopes so they
         // precede any scope the RHS pushes (matches the visit pass — see comment
         // in build_reactive_effect).
-        let body_loc = bun_ast::Loc { start: op_loc.start + 1 };
+        let body_loc = bun_ast::Loc {
+            start: op_loc.start + 1,
+        };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let rhs = p.parse_expr(Level::Assign)?;
@@ -3727,7 +4020,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         // body_loc sits inside the operator (op_loc+1) so it is strictly
         // between op_loc and the RHS — avoids colliding with an arrow RHS's
         // own scope loc.
-        let body_loc = bun_ast::Loc { start: op_loc.start + 1 };
+        let body_loc = bun_ast::Loc {
+            start: op_loc.start + 1,
+        };
         p.push_scope_for_parse_pass(scope::Kind::FunctionArgs, op_loc)?;
         p.push_scope_for_parse_pass(scope::Kind::FunctionBody, body_loc)?;
         let rhs = p.parse_expr(Level::Assign)?;
