@@ -65,6 +65,19 @@ The CLI source in `src/cli.ts` accepts `transpile FILE` or reads standard
 input when no file is supplied. The `build` script generates the `dist`
 entry points; generated files are not included in this restoration.
 
+Generated entry points use explicit JavaScript extensions so Node can
+resolve the package's ESM imports. The source is checked with TypeScript's
+`NodeNext` module resolution. After building, Node consumers can import
+`@lyku/para-transpile` or its `./syntactic` entry, and run the CLI with
+`node dist/cli.js transpile FILE` from the package directory. Integration
+tests compile a disposable copy and exercise both exports and the CLI
+under Node.
+
+Hosting the compiler under Node does not make every generated program
+portable to Node. Some transforms emit `bun:wrap` imports or references to
+the matching Para runtime packages; executing those programs requires a
+host that provides those helpers.
+
 ## License
 
 MIT

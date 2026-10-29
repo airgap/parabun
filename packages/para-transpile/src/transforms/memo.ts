@@ -26,7 +26,7 @@
 // arity but always land in the multi-arg path at runtime; we don't
 // distinguish rest at the syntactic level.
 
-import { findMatchingBrace, scanRegions } from "../lex";
+import { findMatchingBrace, scanRegions } from "../lex.js";
 
 export function transformMemo(src: string): string {
   if (!src.includes("memo")) return src;

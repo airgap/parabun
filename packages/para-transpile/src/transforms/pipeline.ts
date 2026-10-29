@@ -25,7 +25,7 @@
 // from the real source : brace/`|>` tokens inside strings are
 // neutralised, positions stay aligned.
 
-import { scanRegions } from "../lex";
+import { scanRegions } from "../lex.js";
 
 /** Same-length copy of `src` with string/comment/regex spans blanked
  *  (newlines kept, so length + line structure + offsets are preserved).

@@ -13,10 +13,10 @@
 // Keep this dependency-light: only add exports whose transform file does
 // NOT (transitively) import `@babel/*`.
 
-export { transformDecimal } from "./transforms/decimal";
-export { transformErrorChain } from "./transforms/error-chain";
-export { transformFun } from "./transforms/fun";
-export { transformIs } from "./transforms/is";
-export { transformPipeline } from "./transforms/pipeline";
-export { transformPure } from "./transforms/pure";
-export { transformRanges } from "./transforms/ranges";
+export { transformDecimal } from "./transforms/decimal.js";
+export { transformErrorChain } from "./transforms/error-chain.js";
+export { transformFun } from "./transforms/fun.js";
+export { transformIs } from "./transforms/is.js";
+export { transformPipeline } from "./transforms/pipeline.js";
+export { transformPure } from "./transforms/pure.js";
+export { transformRanges } from "./transforms/ranges.js";

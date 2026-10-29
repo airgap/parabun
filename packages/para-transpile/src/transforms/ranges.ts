@@ -14,7 +14,7 @@
 // range). Conservative: only rewrite when we see a clear digit-or-ident
 // pattern around `..`.
 
-import { rewriteCodeRegions } from "../lex";
+import { rewriteCodeRegions } from "../lex.js";
 
 export function transformRanges(src: string): string {
   return rewriteCodeRegions(src, code => {

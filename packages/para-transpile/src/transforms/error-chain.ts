@@ -14,7 +14,7 @@
 // handler captures everything from after the operator to the next
 // depth-0 chain op or expression terminator.
 
-import { rewriteCodeRegions } from "../lex";
+import { rewriteCodeRegions } from "../lex.js";
 
 type Op = { method: "catch" | "finally" | "then"; len: number };
 

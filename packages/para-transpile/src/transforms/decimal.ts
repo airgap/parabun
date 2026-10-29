@@ -13,7 +13,7 @@
 // that : a number can only start where the previous char is not an
 // identifier character.
 
-import { rewriteCodeRegions } from "../lex";
+import { rewriteCodeRegions } from "../lex.js";
 
 // Numeric literal grammar accepted as a base for the `d` suffix:
 //   - integer: 1, 42, 100

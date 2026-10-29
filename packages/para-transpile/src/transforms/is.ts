@@ -21,7 +21,7 @@
 // does not cover it. Prefer a `schema` guard or avoid `: v is T`
 // predicate signatures in Para sources.
 
-import { rewriteCodeRegions } from "../lex";
+import { rewriteCodeRegions } from "../lex.js";
 
 const LHS = String.raw`[\w$.\[\]()]+`;
 const RHS = String.raw`[A-Z][\w$]*`;

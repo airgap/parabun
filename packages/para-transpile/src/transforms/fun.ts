@@ -15,7 +15,7 @@
 // function-declaration or function-expression head : so a variable named
 // `fun` used as a value (`return fun;`, `fun]`) is untouched.
 
-import { rewriteCodeRegions } from "../lex";
+import { rewriteCodeRegions } from "../lex.js";
 
 export function transformFun(src: string): string {
   return rewriteCodeRegions(src, code =>

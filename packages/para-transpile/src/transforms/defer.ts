@@ -10,7 +10,7 @@
 // The synthesized binding name uses a per-transpile counter to avoid
 // collisions when multiple `defer` statements appear in the same scope.
 
-import { scanRegions } from "../lex";
+import { scanRegions } from "../lex.js";
 
 let counter = 0;
 
