@@ -36,14 +36,13 @@ zero runtime, declarations only.
 
 ## Install
 
-Workspaces / local link:
+Workspaces / local link, in `package.json`:
 
-```jsonc
-// package.json
+```json
 {
   "devDependencies": {
-    "@lyku/para-bun-types": "file:../path/to/parabun/packages/para-bun-types",
-  },
+    "@lyku/para-bun-types": "file:../path/to/parabun/packages/para-bun-types"
+  }
 }
 ```
 
