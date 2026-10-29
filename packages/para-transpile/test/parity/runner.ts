@@ -115,7 +115,7 @@ for (const f of fixtures) {
 
 console.log(`\n${passed} passed, ${failed} failed, ${skipped} skipped (${fixtures.length} fixtures)`);
 
-if (failures.length > 0) {
+if (failed > 0) {
   for (const fail of failures) {
     console.log(`\n──── ${fail.fixture} ────`);
     console.log(diffLines(fail.canonical, fail.standalone));

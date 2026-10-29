@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { bunEnv, bunExe, tempDir } from "../../../test/harness.ts";
 import { transpile } from "../src/index";
 
 // Cross-cutting tests : transforms should compose cleanly when more than
@@ -34,4 +38,23 @@ describe("integration: pure + pipeline", () => {
     expect(out).toContain("     function sq(x) { return x * x; }");
     expect(out).toContain("const r = sq(sq(5));");
   });
+});
+
+test("parity runner fails when the canonical driver cannot start", async () => {
+  using dir = tempDir("para-parity-missing-driver", {});
+  const fixtures = readdirSync(new URL("./parity/fixtures/", import.meta.url)).filter(path => path.endsWith(".pts"));
+  expect(fixtures.length).toBeGreaterThan(0);
+
+  await using proc = Bun.spawn({
+    cmd: [bunExe(), fileURLToPath(new URL("./parity/runner.ts", import.meta.url))],
+    env: { ...bunEnv, PARABUN: join(String(dir), "missing-parabun") },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+
+  expect(stdout).toContain(`0 passed, ${fixtures.length} failed, 0 skipped (${fixtures.length} fixtures)`);
+  expect(stderr).toContain("ENOENT");
+  expect(exitCode).toBe(1);
 });
